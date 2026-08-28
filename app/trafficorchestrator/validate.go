@@ -88,6 +88,26 @@ func ValidatePlan(plan TrafficPlan) error {
 		}
 		selections[selection.ServiceID] = struct{}{}
 	}
+	routes := make(map[string]ServiceRouteKind, len(plan.Routes))
+	for _, route := range plan.Routes {
+		if _, exists := services[route.ServiceID]; !exists {
+			return fmt.Errorf("route references unknown service %q", route.ServiceID)
+		}
+		switch route.Kind {
+		case ServiceRouteDirect, ServiceRouteVPN, ServiceRouteZapret:
+		default:
+			return fmt.Errorf("route for %q uses unsupported kind %q", route.ServiceID, route.Kind)
+		}
+		if _, duplicate := routes[route.ServiceID]; duplicate {
+			return fmt.Errorf("duplicate route for service %q", route.ServiceID)
+		}
+		routes[route.ServiceID] = route.Kind
+	}
+	for serviceID := range selections {
+		if kind, exists := routes[serviceID]; exists && kind != ServiceRouteZapret {
+			return fmt.Errorf("strategy selection for %q requires zapret route, got %q", serviceID, kind)
+		}
+	}
 	return nil
 }
 
@@ -304,6 +324,22 @@ func validateServiceRule(service ServiceRule, strategies map[string]TrafficStrat
 			return fmt.Errorf("invalid host %q", host)
 		}
 	}
+	if len(service.ProcessNames) == 0 {
+		if service.ProcessMatchPolicy != "" {
+			return errors.New("processMatchPolicy requires at least one process name")
+		}
+	} else {
+		switch service.ProcessMatchPolicy {
+		case "", ProcessMatchCorroborate, ProcessMatchIdentity:
+		default:
+			return fmt.Errorf("unsupported processMatchPolicy %q", service.ProcessMatchPolicy)
+		}
+		for _, processName := range service.ProcessNames {
+			if normalizeProcessName(processName) == "" {
+				return fmt.Errorf("invalid process name %q", processName)
+			}
+		}
+	}
 	for _, cidr := range service.IPCIDRs {
 		if _, err := netip.ParsePrefix(strings.TrimSpace(cidr)); err != nil {
 			return fmt.Errorf("invalid CIDR %q: %w", cidr, err)
@@ -330,6 +366,9 @@ func validateServiceRule(service ServiceRule, strategies map[string]TrafficStrat
 	if err := validatePorts(NetworkUDP, service.UDPPorts); err != nil {
 		return err
 	}
+	if err := validateProcessDiscoveryUDPPortRanges(service); err != nil {
+		return err
+	}
 	seenStrategies := make(map[string]struct{}, len(service.CandidateStrategyIDs))
 	for _, id := range service.CandidateStrategyIDs {
 		strategy, exists := strategies[id]
@@ -353,6 +392,29 @@ func validateServiceRule(service ServiceRule, strategies map[string]TrafficStrat
 			return fmt.Errorf("duplicate probe id %q", target.ID)
 		}
 		seenTargets[target.ID] = struct{}{}
+	}
+	return nil
+}
+
+func validateProcessDiscoveryUDPPortRanges(service ServiceRule) error {
+	if len(service.ProcessDiscoveryUDPPortRanges) == 0 {
+		return nil
+	}
+	if service.ProcessMatchPolicy != ProcessMatchIdentity || len(service.ProcessNames) == 0 {
+		return errors.New("process UDP discovery ranges require process identity")
+	}
+	if len(service.ProcessDiscoveryUDPPortRanges) > 8 {
+		return errors.New("too many process UDP discovery ranges")
+	}
+	totalPorts := 0
+	for _, portRange := range service.ProcessDiscoveryUDPPortRanges {
+		if portRange.First < 1 || portRange.Last > 65535 || portRange.First > portRange.Last {
+			return fmt.Errorf("invalid process UDP discovery range %d..%d", portRange.First, portRange.Last)
+		}
+		totalPorts += portRange.Last - portRange.First + 1
+	}
+	if totalPorts > 512 {
+		return errors.New("process UDP discovery ranges exceed 512 ports")
 	}
 	return nil
 }

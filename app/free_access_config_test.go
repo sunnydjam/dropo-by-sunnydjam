@@ -15,6 +15,92 @@ import (
 	"time"
 )
 
+func setTestServiceMethod(t *testing.T, storage *Storage, tag, method string) {
+	t.Helper()
+	settings := storage.GetAppSettings()
+	settings.FreeAccessMethods[tag] = method
+	if err := storage.UpdateAppSettings(settings); err != nil {
+		t.Fatalf("set %s route to %s: %v", tag, method, err)
+	}
+}
+
+func TestHomeRouteServiceVisibilityPersistsWithoutRestartingTraffic(t *testing.T) {
+	storage := NewStorage(t.TempDir())
+	if err := storage.Init(); err != nil {
+		t.Fatalf("storage init failed: %v", err)
+	}
+	app := &App{storage: storage}
+	app.initializedReady.Store(true)
+
+	if result := app.SetHomeRouteServiceVisible("spotify", true); result["success"] != true {
+		t.Fatalf("pin spotify failed: %#v", result)
+	}
+	settings := storage.GetAppSettings()
+	if !HomeRouteServiceVisible(settings, "spotify") {
+		t.Fatal("spotify was not persisted on the home dashboard")
+	}
+	if !HomeRouteServiceVisible(settings, "youtube") {
+		t.Fatal("primary YouTube route must always be visible")
+	}
+	if result := app.SetHomeRouteServiceVisible("spotify", false); result["success"] != true {
+		t.Fatalf("remove spotify failed: %#v", result)
+	}
+	if HomeRouteServiceVisible(storage.GetAppSettings(), "spotify") {
+		t.Fatal("spotify remained pinned after removal")
+	}
+}
+
+func TestPrimaryHomeServicesDoNotCaptureSiblingGroups(t *testing.T) {
+	services := make(map[string]FreeAccessService, len(DefaultFreeAccessServices))
+	for _, service := range DefaultFreeAccessServices {
+		services[service.Tag] = service
+	}
+	if containsStringValue(services["meta"].DomainSuffixes, "facebook.com") {
+		t.Fatal("Instagram route must not capture Facebook domains")
+	}
+	if !containsStringValue(services["meta"].DomainSuffixes, "fna.fbcdn.net") ||
+		!containsStringValue(services["meta"].DomainSuffixes, "static.xx.fbcdn.net") {
+		t.Fatal("Instagram route is missing its scoped shared-CDN media domains")
+	}
+	if containsStringValue(services["meta"].DomainSuffixes, "fbcdn.net") {
+		t.Fatal("Instagram route must not capture the complete shared Facebook CDN")
+	}
+	if !containsStringValue(services["facebook"].DomainSuffixes, "facebook.com") {
+		t.Fatal("Facebook must remain available as a separate optional route")
+	}
+	if containsStringValue(services["openai"].DomainSuffixes, "github.com") {
+		t.Fatal("ChatGPT route must not capture GitHub or other AI services")
+	}
+	if !containsStringValue(services["ai-other"].DomainSuffixes, "github.com") {
+		t.Fatal("other AI services must remain available as an optional route")
+	}
+}
+
+func TestYouTubeQUICFallbackIsEnabledOnlyForExplicitZapret(t *testing.T) {
+	settings := GlobalAppSettings{FreeAccessMethods: DefaultFreeAccessServiceMethodState()}
+	if rules := buildBlockedServiceProtocolFallbackRules(settings); len(rules) != 0 {
+		t.Fatalf("direct YouTube unexpectedly received protocol fallback rules: %#v", rules)
+	}
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodVPN
+	if rules := buildBlockedServiceProtocolFallbackRules(settings); len(rules) != 0 {
+		t.Fatalf("VPN YouTube unexpectedly received protocol fallback rules: %#v", rules)
+	}
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	if rules := buildBlockedServiceProtocolFallbackRules(settings); len(rules) != 1 {
+		t.Fatalf("Zapret YouTube protocol fallback rules = %#v, want one QUIC reject", rules)
+	}
+}
+
+func TestBlockedCatalogCannotOverrideExplicitServiceOnlyRouting(t *testing.T) {
+	builder := &ConfigBuilderForStorage{}
+	if got := builder.blockedCatchAllOutbound(GlobalAppSettings{}, true); got != "direct" {
+		t.Fatalf("blocked catalog outbound with VPN available = %q, want direct", got)
+	}
+	if got := builder.blockedCatchAllOutbound(GlobalAppSettings{}, false); got != "direct" {
+		t.Fatalf("blocked catalog outbound without VPN = %q, want direct", got)
+	}
+}
+
 func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 	basePath := t.TempDir()
 	storage := NewStorage(basePath)
@@ -100,19 +186,19 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 	if containsDNSDomainSuffixServer(config, "telegram.org", "dns-remote") {
 		t.Fatal("generated config without subscription must not force telegram.org through dns-remote")
 	}
-	for _, domain := range []string{"youtubei.googleapis.com", "googlevideo.com", "www.gstatic.com", "linkedin.com", "facetime.apple.com", "viber.com", "snapchat.com", "tiktok.com"} {
+	for _, domain := range []string{"youtubei.googleapis.com", "googlevideo.com", "ytstatic.com", "linkedin.com", "facetime.apple.com", "viber.com", "snapchat.com", "tiktok.com"} {
 		tag := expectedServiceTagForDomain(domain)
 		if tag == "" {
 			t.Fatalf("test fixture has no expected service for %s", domain)
 		}
-		if !containsDomainSuffixRouteRule(config, domain, ServiceBypassGroupTag(tag)) {
-			t.Fatalf("generated config does not route %s through %s", domain, ServiceBypassGroupTag(tag))
+		if !containsDomainSuffixRouteRule(config, domain, "direct") {
+			t.Fatalf("generated config does not route %s directly by default", domain)
 		}
-		if !containsDNSDomainSuffixServer(config, domain, "dns-remote") {
-			t.Fatalf("generated config does not resolve %s through dns-remote", domain)
+		if !containsDNSDomainSuffixServer(config, domain, "dns-direct") {
+			t.Fatalf("generated config does not resolve %s through dns-direct", domain)
 		}
 	}
-	if !containsScopedIPProcessRoute(config, "66.22.192.0/18", "Discord.exe", ServiceBypassGroupTag("discord")) {
+	if !containsScopedIPProcessRoute(config, "66.22.192.0/18", "Discord.exe", "direct") {
 		t.Fatal("generated config must scope the Discord media range to the Discord process")
 	}
 	if !containsProcessRouteRule(config, "Discord.exe", discordRealtimeGroupTag) {
@@ -165,6 +251,29 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 	}
 	if addresses := getTunAddresses(activeConfig); containsIPv6Address(addresses) {
 		t.Fatalf("active TUN config must stay IPv4-only on Windows split routing, got %v", addresses)
+	}
+}
+
+func TestAllTrafficModeDoesNotKeepPerServiceBypassRules(t *testing.T) {
+	route := map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"domain_suffix": []string{"youtube.com"},
+				"action":        "route",
+				"outbound":      ServiceBypassGroupTag("youtube"),
+			},
+		},
+	}
+	builder := &ConfigBuilderForStorage{}
+	builder.applyAllTrafficMode(route)
+	config := map[string]interface{}{"route": route}
+
+	if final, _ := route["final"].(string); final != "proxy" {
+		t.Fatalf("all-traffic final = %q, want proxy", final)
+	}
+	if containsDomainSuffixRouteRule(config, "youtube.com", "direct") ||
+		containsDomainSuffixRouteRule(config, "youtube.com", ServiceBypassGroupTag("youtube")) {
+		t.Fatalf("all-traffic rules retained a YouTube service exception: %#v", route["rules"])
 	}
 }
 
@@ -224,6 +333,16 @@ func TestDefaultBlockedOnlyWithSubscriptionRoutesOnlyBlockedTraffic(t *testing.T
 	}
 
 	builder := NewConfigBuilderForStorage(storage)
+	for _, service := range DefaultFreeAccessServices {
+		settings.FreeAccessMethods[service.Tag] = FreeAccessMethodDirect
+	}
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodZapret
+	settings.FreeAccessMethods["meta"] = FreeAccessMethodVPN
+	settings.FreeAccessMethods["openai"] = FreeAccessMethodVPN
+	if err := storage.UpdateAppSettings(settings); err != nil {
+		t.Fatalf("store explicit service routes: %v", err)
+	}
 	link := "vless://11111111-1111-1111-1111-111111111111@198.51.100.10:443?security=tls&type=ws&path=%2Fws&host=example.com&sni=example.com&fp=chrome#default-contract"
 	if err := builder.BuildConfig(link); err != nil {
 		t.Fatalf("BuildConfig with subscription failed: %v", err)
@@ -243,11 +362,11 @@ func TestDefaultBlockedOnlyWithSubscriptionRoutesOnlyBlockedTraffic(t *testing.T
 	if final := getDNSFinal(config); final != "dns-direct" {
 		t.Fatalf("blocked_only DNS final = %q, want dns-direct", final)
 	}
-	if outbound := routeRuleSetOutbound(config, "refilter-domains"); outbound != SmartBypassGroupTag {
-		t.Fatalf("blocked catalog outbound = %q, want %q", outbound, SmartBypassGroupTag)
+	if outbound := routeRuleSetOutbound(config, "refilter-domains"); outbound != "direct" {
+		t.Fatalf("unselected blocked catalog outbound = %q, want direct", outbound)
 	}
-	if outbound := routeRuleSetOutbound(config, "refilter-ips"); outbound != SmartBypassGroupTag {
-		t.Fatalf("blocked IP catalog outbound = %q, want %q", outbound, SmartBypassGroupTag)
+	if outbound := routeRuleSetOutbound(config, "refilter-ips"); outbound != "direct" {
+		t.Fatalf("unselected blocked IP catalog outbound = %q, want direct", outbound)
 	}
 	if containsRouteRuleSet(config, "discord-ips") {
 		t.Fatal("service-specific Discord IP data must not participate in the global blocked catch-all")
@@ -262,12 +381,8 @@ func TestDefaultBlockedOnlyWithSubscriptionRoutesOnlyBlockedTraffic(t *testing.T
 	smartCandidates := getOutboundCandidates(config, SmartBypassGroupTag)
 	youtubeCandidates := getOutboundCandidates(config, ServiceBypassGroupTag("youtube"))
 	if runtime.GOOS == "windows" {
-		want := []string{"direct", "auto-select"}
-		if !sameStringSet(smartCandidates, want) || len(smartCandidates) != len(want) || smartCandidates[0] != "direct" {
-			t.Fatalf("blocked catalog candidates = %v, want free strategy then VPN fallback", smartCandidates)
-		}
-		if !sameStringSet(youtubeCandidates, want) || len(youtubeCandidates) != len(want) || youtubeCandidates[0] != "direct" {
-			t.Fatalf("YouTube candidates = %v, want free strategy then VPN fallback", youtubeCandidates)
+		if len(youtubeCandidates) != 1 || youtubeCandidates[0] != "direct" {
+			t.Fatalf("YouTube candidates = %v, want strict Zapret direct carrier", youtubeCandidates)
 		}
 	} else if len(smartCandidates) == 0 || smartCandidates[len(smartCandidates)-1] != "auto-select" {
 		t.Fatalf("blocked catalog candidates = %v, want free methods then VPN fallback", smartCandidates)
@@ -582,6 +697,8 @@ func TestLatencySensitiveGameDirectRulesPrecedeBlockedCatalog(t *testing.T) {
 	if processRule["outbound"] != "direct" ||
 		!containsStringValue(interfaceStringSlice(processRule["process_name"]), "steam.exe") ||
 		!containsStringValue(interfaceStringSlice(processRule["process_name"]), "cs2.exe") ||
+		!containsStringValue(interfaceStringSlice(processRule["process_name"]), "MistfallHunter.exe") ||
+		!containsStringValue(interfaceStringSlice(processRule["process_name"]), "MistfallHunter-Win64-Shipping.exe") ||
 		!containsStringValue(interfaceStringSlice(processRule["process_name"]), "League of Legends.exe") ||
 		!containsStringValue(interfaceStringSlice(processRule["process_name"]), "RiotClientServices.exe") {
 		t.Fatalf("latency-sensitive direct process rule = %#v", processRule)
@@ -639,8 +756,8 @@ func TestApplyRouteProbeSelectionsPrefersServiceGroupsWithoutDroppingFallbacks(t
 	}
 
 	smartCandidates := getOutboundCandidates(config, SmartBypassGroupTag)
-	if len(smartCandidates) != 2 || smartCandidates[0] != "byedpi" || smartCandidates[1] != "byedpi-sni" {
-		t.Fatalf("%s candidates = %v, want aggregate winner byedpi first with fallback", SmartBypassGroupTag, smartCandidates)
+	if len(smartCandidates) != 1 || smartCandidates[0] != "direct" {
+		t.Fatalf("%s candidates = %v, want strict direct catch-all", SmartBypassGroupTag, smartCandidates)
 	}
 
 	if candidates := getOutboundCandidates(config, ServiceBypassGroupTag("youtube")); len(candidates) != 0 {
@@ -718,8 +835,8 @@ func TestApplyRouteProbeSelectionsCanPreferVPNOverFreeStrategy(t *testing.T) {
 		t.Fatalf("%s candidates = %v, want VPN first with free fallback preserved", ServiceBypassGroupTag("youtube"), youtubeCandidates)
 	}
 	smartCandidates := getOutboundCandidates(config, SmartBypassGroupTag)
-	if len(smartCandidates) < 3 || smartCandidates[0] != "vless-fast" {
-		t.Fatalf("%s candidates = %v, want aggregate VPN winner first", SmartBypassGroupTag, smartCandidates)
+	if len(smartCandidates) != 1 || smartCandidates[0] != "direct" {
+		t.Fatalf("%s candidates = %v, want strict direct catch-all", SmartBypassGroupTag, smartCandidates)
 	}
 }
 
@@ -791,6 +908,7 @@ func TestApplyStoredFreeAccessStrategiesUsesAutoSelectForVPNRequiredServices(t *
 	}
 
 	app := &App{basePath: basePath, storage: storage}
+	setTestServiceMethod(t, storage, "openai", FreeAccessMethodVPN)
 	changed, err := app.applyStoredFreeAccessStrategiesToConfig(configPath, nil)
 	if err != nil {
 		t.Fatalf("apply stored free access strategies failed: %v", err)
@@ -848,26 +966,22 @@ func TestApplyRouteProbeSelectionsPreservesFallbacksForTransparentMethods(t *tes
 	// Hybrid: a VPN fallback exists, so transparent services become a urltest of
 	// [direct (winws2 desync), VPN] — direct wins when desync works, VPN when not.
 	telegramCandidates := getOutboundCandidates(config, ServiceBypassGroupTag("telegram"))
-	if len(telegramCandidates) != 2 || telegramCandidates[0] != "direct" || telegramCandidates[1] != "auto-select" {
-		t.Fatalf("%s candidates = %v, want direct with VPN fallback only", ServiceBypassGroupTag("telegram"), telegramCandidates)
+	if len(telegramCandidates) != 1 || telegramCandidates[0] != "direct" {
+		t.Fatalf("%s candidates = %v, want strict transparent direct", ServiceBypassGroupTag("telegram"), telegramCandidates)
 	}
 	telegramGroup := getOutbound(config, ServiceBypassGroupTag("telegram"))
-	if telegramGroup["type"] != "urltest" {
+	if telegramGroup["type"] != "selector" {
 		t.Fatalf("%s type = %v, want urltest for hybrid direct↔VPN auto-fallback", ServiceBypassGroupTag("telegram"), telegramGroup["type"])
 	}
-	if _, hasDefault := telegramGroup["default"]; hasDefault {
-		t.Fatalf("%s must not pin a default in hybrid urltest mode", ServiceBypassGroupTag("telegram"))
+	if telegramGroup["default"] != "direct" {
+		t.Fatalf("%s default = %v, want direct", ServiceBypassGroupTag("telegram"), telegramGroup["default"])
 	}
-	if url, _ := telegramGroup["url"].(string); url != "https://telegram.org" {
-		t.Fatalf("%s url = %v, want the service health URL preserved", ServiceBypassGroupTag("telegram"), telegramGroup["url"])
-	}
-
 	// smart-bypass (generic blocked catch-all not covered by per-service winws2)
 	// keeps its built free-proxy + VPN form when a VPN fallback exists, rather
 	// than being pinned to transparent-direct.
 	smartCandidates := getOutboundCandidates(config, SmartBypassGroupTag)
-	if len(smartCandidates) != 2 || smartCandidates[0] != "byedpi" || smartCandidates[1] != "auto-select" {
-		t.Fatalf("%s candidates = %v, want generic free-proxy + VPN fallback preserved", SmartBypassGroupTag, smartCandidates)
+	if len(smartCandidates) != 1 || smartCandidates[0] != "direct" {
+		t.Fatalf("%s candidates = %v, want strict direct catch-all", SmartBypassGroupTag, smartCandidates)
 	}
 }
 
@@ -957,8 +1071,8 @@ func TestApplyCachedRouteProbeToConfigUsesPersistedSelection(t *testing.T) {
 		t.Fatalf("telegram candidates = %v, want cached winner first and VPN fallback preserved", telegramCandidates)
 	}
 	smartCandidates := getOutboundCandidates(updated, SmartBypassGroupTag)
-	if len(smartCandidates) != 3 || smartCandidates[0] != "byedpi" {
-		t.Fatalf("smart-bypass candidates = %v, want aggregate cached winner first", smartCandidates)
+	if len(smartCandidates) != 1 || smartCandidates[0] != "direct" {
+		t.Fatalf("smart-bypass candidates = %v, want strict direct catch-all", smartCandidates)
 	}
 
 	snapshot := app.routeProbeResultsSnapshot()
@@ -1076,6 +1190,7 @@ func TestStoredFreeAccessDefaultsToZapretWithoutByeDPIFallback(t *testing.T) {
 		storage:       storage,
 		trafficEngine: NewNativeTrafficManager(basePath, nil),
 	}
+	setTestServiceMethod(t, storage, "youtube", FreeAccessMethodZapret)
 	changed, err := app.applyStoredFreeAccessStrategiesToConfig(configPath, []string{ByeDPIOutboundTag, "byedpi-sni"})
 	if err != nil {
 		t.Fatalf("apply stored free access strategies failed: %v", err)
@@ -1137,6 +1252,7 @@ func TestStoredProxyStrategyDoesNotOverrideDefaultZapret(t *testing.T) {
 		},
 	}
 	app, configPath := newDeepWindowsTestApp(t, config)
+	setTestServiceMethod(t, app.storage, "discord", FreeAccessMethodZapret)
 
 	strategyFile := freeAccessStrategyFile{
 		Version:   freeAccessStrategyVersion,
@@ -1256,6 +1372,7 @@ func TestStoredVPNStrategyDoesNotOverrideAvailableFreeMethod(t *testing.T) {
 		storage:       storage,
 		trafficEngine: NewNativeTrafficManager(basePath, nil),
 	}
+	setTestServiceMethod(t, storage, "youtube", FreeAccessMethodZapret)
 	changed, err := app.applyStoredFreeAccessStrategiesToConfig(configPath, []string{ByeDPIOutboundTag})
 	if err != nil {
 		t.Fatalf("apply stored free access strategies failed: %v", err)
@@ -1268,8 +1385,8 @@ func TestStoredVPNStrategyDoesNotOverrideAvailableFreeMethod(t *testing.T) {
 		t.Fatalf("read updated config failed: %v", err)
 	}
 	youtubeCandidates := getOutboundCandidates(updated, ServiceBypassGroupTag("youtube"))
-	if len(youtubeCandidates) != 2 || youtubeCandidates[0] != "direct" || youtubeCandidates[1] != "auto-select" {
-		t.Fatalf("youtube candidates = %v, want free transparent direct with VPN fallback", youtubeCandidates)
+	if len(youtubeCandidates) != 1 || youtubeCandidates[0] != "direct" {
+		t.Fatalf("youtube candidates = %v, want strict transparent direct", youtubeCandidates)
 	}
 }
 
@@ -1356,7 +1473,7 @@ func TestApplyServiceFreeFallbackKeepsExplicitZapretOffVPN(t *testing.T) {
 	}
 }
 
-func TestStoredServiceVPNFallbackOverridesDefaultFreeStrategy(t *testing.T) {
+func TestStoredServiceVPNFallbackDoesNotOverrideExplicitZapret(t *testing.T) {
 	app, configPath := newDeepWindowsTestApp(t, map[string]interface{}{
 		"outbounds": []interface{}{
 			map[string]interface{}{"type": "direct", "tag": "direct"},
@@ -1382,6 +1499,7 @@ func TestStoredServiceVPNFallbackOverridesDefaultFreeStrategy(t *testing.T) {
 			},
 		},
 	})
+	setTestServiceMethod(t, app.storage, "youtube", FreeAccessMethodZapret)
 	app.cacheServiceMethod("youtube", FreeAccessMethodVPN, "fallback-vpn")
 
 	changed, err := app.applyStoredFreeAccessStrategiesToConfig(configPath, []string{ByeDPIOutboundTag})
@@ -1396,12 +1514,12 @@ func TestStoredServiceVPNFallbackOverridesDefaultFreeStrategy(t *testing.T) {
 		t.Fatalf("read updated config failed: %v", err)
 	}
 	youtubeCandidates := getOutboundCandidates(updated, ServiceBypassGroupTag("youtube"))
-	if len(youtubeCandidates) == 0 || youtubeCandidates[0] != "auto-select" {
-		t.Fatalf("%s candidates = %v, want cached VPN auto-select before free methods", ServiceBypassGroupTag("youtube"), youtubeCandidates)
+	if len(youtubeCandidates) != 1 || youtubeCandidates[0] != "direct" {
+		t.Fatalf("%s candidates = %v, want strict Zapret direct carrier", ServiceBypassGroupTag("youtube"), youtubeCandidates)
 	}
 	youtubeGroup := getOutbound(updated, ServiceBypassGroupTag("youtube"))
-	if youtubeGroup["default"] != "auto-select" {
-		t.Fatalf("%s default = %v, want auto-select", ServiceBypassGroupTag("youtube"), youtubeGroup["default"])
+	if youtubeGroup["default"] != "direct" {
+		t.Fatalf("%s default = %v, want direct", ServiceBypassGroupTag("youtube"), youtubeGroup["default"])
 	}
 }
 
@@ -1684,7 +1802,7 @@ func TestDefaultZapretStrategyMatchesFlowsealPresetShape(t *testing.T) {
 	}
 }
 
-func TestRouteProbeKeepsTransparentCandidateForIPCIDRService(t *testing.T) {
+func TestRouteProbeSkipsVPNOnlyServiceEvenWithIPCIDR(t *testing.T) {
 	client := &http.Client{}
 	service := FreeAccessService{
 		Tag:         "telegram",
@@ -1698,14 +1816,14 @@ func TestRouteProbeKeepsTransparentCandidateForIPCIDRService(t *testing.T) {
 	}
 
 	filtered := candidatesForRouteProbeService(service, candidates)
-	if len(filtered) != 2 {
-		t.Fatalf("Telegram candidates = %#v, want proxy and transparent candidates", filtered)
+	if len(filtered) != 0 {
+		t.Fatalf("Telegram candidates = %#v, want none for a VPN-only service", filtered)
 	}
 
 	service.IPCIDRs = nil
 	filtered = candidatesForRouteProbeService(service, candidates)
-	if len(filtered) != 2 {
-		t.Fatalf("domain-only candidates = %#v, want transparent candidate included", filtered)
+	if len(filtered) != 0 {
+		t.Fatalf("domain-only Telegram candidates = %#v, want none", filtered)
 	}
 }
 
@@ -1821,6 +1939,34 @@ func TestDisableTunIPv6RemovesStaleIPv6Routes(t *testing.T) {
 	}
 	if _, ok := tun["inet6_address"]; ok {
 		t.Fatal("tun inet6_address was not removed")
+	}
+}
+
+func TestWindowsTunUsesSystemStackForUDPCompatibility(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows TUN compatibility is Windows-only")
+	}
+	config := map[string]interface{}{
+		"inbounds": []interface{}{
+			map[string]interface{}{
+				"type":                     "tun",
+				"tag":                      "tun-in",
+				"stack":                    "mixed",
+				"endpoint_independent_nat": true,
+			},
+		},
+	}
+
+	if !useWindowsSystemTunStack(config) {
+		t.Fatal("expected Windows TUN stack migration")
+	}
+	inbounds, _ := config["inbounds"].([]interface{})
+	tun, _ := inbounds[0].(map[string]interface{})
+	if tun["stack"] != "system" {
+		t.Fatalf("tun stack = %v, want system", tun["stack"])
+	}
+	if _, exists := tun["endpoint_independent_nat"]; exists {
+		t.Fatal("gVisor-only endpoint_independent_nat survived system stack migration")
 	}
 }
 
@@ -2003,6 +2149,11 @@ func TestSmartBypassPrefersFreeAccessWhenSubscriptionExists(t *testing.T) {
 	settings := storage.GetAppSettings()
 	settings.FreeAccessEnabled = true
 	settings.FreeAccessReverse = false
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodZapret
+	for _, serviceTag := range []string{"telegram", "meta", "whatsapp", "openai"} {
+		settings.FreeAccessMethods[serviceTag] = FreeAccessMethodVPN
+	}
 	builder.addFreeAccessOutbounds(template, settings)
 
 	config := map[string]interface{}{"outbounds": template["outbounds"]}
@@ -2035,7 +2186,7 @@ func TestSmartBypassPrefersFreeAccessWhenSubscriptionExists(t *testing.T) {
 	}
 }
 
-func TestDisableFreeAccessUsesVPNOnlyServiceGroups(t *testing.T) {
+func TestDisableFreeAccessDoesNotOverrideExplicitVPNServiceGroups(t *testing.T) {
 	basePath := t.TempDir()
 	storage := NewStorage(basePath)
 	if err := storage.Init(); err != nil {
@@ -2058,6 +2209,9 @@ func TestDisableFreeAccessUsesVPNOnlyServiceGroups(t *testing.T) {
 
 	settings := storage.GetAppSettings()
 	settings.DisableFreeAccess = true
+	for _, serviceTag := range []string{"telegram", "youtube", "openai"} {
+		settings.FreeAccessMethods[serviceTag] = FreeAccessMethodVPN
+	}
 	builder.addFreeAccessOutbounds(template, settings)
 
 	config := map[string]interface{}{"outbounds": template["outbounds"]}
@@ -2189,6 +2343,7 @@ func TestBuildConfigWithVLESSXHTTPUsesXrayBridge(t *testing.T) {
 	}
 
 	link := "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls&type=xhttp&path=%2Fbridge&host=example.com&mode=auto&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D&sni=example.com&fp=chrome&alpn=h2#xhttp-test"
+	setTestServiceMethod(t, storage, "openai", FreeAccessMethodVPN)
 	builder := NewConfigBuilderForStorage(storage)
 	if err := builder.BuildConfig(link); err != nil {
 		t.Fatalf("BuildConfig with xhttp failed: %v", err)

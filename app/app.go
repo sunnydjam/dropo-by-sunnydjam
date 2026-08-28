@@ -85,6 +85,7 @@ type App struct {
 	vpnStopping                 atomic.Bool
 	vpnSourceMonitorMu          sync.Mutex
 	vpnSourceMonitorCancel      context.CancelFunc
+	vpnSourceMonitorGeneration  uint64
 	vpnSourceActive             string
 	vpnSourceManual             string
 	vpnSourceLastSwitch         time.Time

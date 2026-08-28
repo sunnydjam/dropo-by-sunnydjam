@@ -93,6 +93,7 @@ var DirectIPCIDRs = []string{}
 // unless the user explicitly selects the all-traffic mode.
 var DirectProcessNames = []string{
 	"steam.exe", "steamservice.exe", "steamwebhelper.exe", "cs2.exe",
+	"MistfallHunter.exe", "MistfallHunter-Win64-Shipping.exe",
 	"RiotClientServices.exe", "Riot Client.exe",
 	"RiotClientUx.exe", "RiotClientUxRender.exe", "RiotClientUxRenderer.exe",
 	"LeagueClient.exe", "LeagueClientUx.exe", "LeagueClientUxRender.exe", "LeagueClientUxRenderer.exe",

@@ -1,12 +1,34 @@
 {
-  "version": 9,
-  "updated": "2026-08-10",
+  "version": 12,
+  "updated": "2026-08-25",
   "note": "Per-service native DPI-bypass ladders. blockType: 'dpi' uses the local packet engine; 'vpn' uses the ordered VPN-source fallback. Strategy names describe Dropo's typed packet actions; research provenance is kept in THIRD_PARTY_NOTICES.md.",
   "services": {
     "discord": {
-      "source": "Dropo live-media diagnostics plus bounded zapret2/Flowseal 1.10.1 TLS, QUIC, zero and checksum decoy patterns",
+      "source": "All 22 Flowseal zapret-discord-youtube 1.10.2 general profiles plus Dropo live-media diagnostics, adapted to typed bounded actions",
       "blockType": "dpi",
       "methods": [
+        { "tag": "flowseal-1102-discord-alt13", "label": "Flowseal 1.10.2 ALT13 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt13", "seqovl": 681, "pos": 1, "repeats": 7, "quic": "google" },
+        { "tag": "flowseal-1102-discord-general", "label": "Flowseal 1.10.2 General — Discord", "technique": "multisplit", "nativeStrategy": "native-discord-flowseal-1102-general", "seqovl": 681, "pos": 1, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt", "label": "Flowseal 1.10.2 ALT — Discord", "technique": "fakedsplit-ts", "nativeStrategy": "native-discord-flowseal-1102-alt", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt2", "label": "Flowseal 1.10.2 ALT2 — Discord", "technique": "multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt2", "seqovl": 652, "pos": 2, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt3", "label": "Flowseal 1.10.2 ALT3 — Discord", "technique": "multidisorder", "nativeStrategy": "native-discord-flowseal-1102-alt3", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt4", "label": "Flowseal 1.10.2 ALT4 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt4", "pos": 2, "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt5", "label": "Flowseal 1.10.2 ALT5 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt5", "pos": 2, "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt6", "label": "Flowseal 1.10.2 ALT6 — Discord", "technique": "multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt6", "seqovl": 681, "pos": 1, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt7", "label": "Flowseal 1.10.2 ALT7 — Discord", "technique": "multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt7", "seqovl": 679, "pos": 2, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt8", "label": "Flowseal 1.10.2 ALT8 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt8", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt9", "label": "Flowseal 1.10.2 ALT9 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt9", "repeats": 4, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt10", "label": "Flowseal 1.10.2 ALT10 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt10", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt11", "label": "Flowseal 1.10.2 ALT11 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt11", "seqovl": 681, "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-discord-alt12", "label": "Flowseal 1.10.2 ALT12 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt12", "seqovl": 681, "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-discord-exp", "label": "Flowseal 1.10.2 EXP — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-exp", "seqovl": 681, "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-discord-fake-tls-auto", "label": "Flowseal 1.10.2 FAKE TLS AUTO — Discord", "technique": "multidisorder", "nativeStrategy": "native-discord-flowseal-1102-fake-tls-auto", "repeats": 11, "quic": "google" },
+        { "tag": "flowseal-1102-discord-fake-tls-auto-alt", "label": "Flowseal 1.10.2 FAKE TLS AUTO ALT — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-fake-tls-auto-alt", "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-discord-fake-tls-auto-alt2", "label": "Flowseal 1.10.2 FAKE TLS AUTO ALT2 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-fake-tls-auto-alt2", "seqovl": 681, "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-discord-fake-tls-auto-alt3", "label": "Flowseal 1.10.2 FAKE TLS AUTO ALT3 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-fake-tls-auto-alt3", "seqovl": 681, "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-discord-simple-fake", "label": "Flowseal 1.10.2 SIMPLE FAKE — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-simple-fake", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-discord-simple-fake-alt", "label": "Flowseal 1.10.2 SIMPLE FAKE ALT — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-simple-fake-alt", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-discord-simple-fake-alt2", "label": "Flowseal 1.10.2 SIMPLE FAKE ALT2 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-simple-fake-alt2", "repeats": 6, "quic": "google" },
         { "tag": "discord-active-quic-v2", "label": "Discord active QUIC + SNI disorder", "technique": "multidisorder", "nativeStrategy": "native-discord-active-v2", "repeats": 8, "quic": "google" },
         { "tag": "discord-zero-v2", "label": "Discord zero + SNI split", "technique": "fake-multisplit", "nativeStrategy": "native-discord-zero-v2", "seqovl": 681, "pos": 1, "repeats": 6, "quic": "google" },
         { "tag": "discord-invalidsum-v2", "label": "Discord invalid-checksum QUIC", "technique": "fake-multisplit", "nativeStrategy": "native-discord-invalidsum-v2", "seqovl": 681, "pos": 1, "repeats": 6, "quic": "google" },
@@ -14,9 +36,31 @@
       ]
     },
     "youtube": {
-      "source": "Dropo typed equivalents of current zapret2 fake-multidisorder, SNI split/disorder, overlap and QUIC test classes",
+      "source": "All 22 Flowseal zapret-discord-youtube 1.10.2 general profiles plus Dropo typed equivalents; hostfakesplit is represented by a safe service-scoped SNI split adaptation",
       "blockType": "dpi",
       "methods": [
+        { "tag": "flowseal-1102-youtube-alt13", "label": "Flowseal 1.10.2 ALT13 — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt13", "pos": 1, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-general", "label": "Flowseal 1.10.2 General — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-general", "seqovl": 681, "pos": 1, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt", "label": "Flowseal 1.10.2 ALT — YouTube", "technique": "fakedsplit-ts", "nativeStrategy": "native-flowseal-1102-youtube-alt", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt2", "label": "Flowseal 1.10.2 ALT2 — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt2", "seqovl": 652, "pos": 2, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt3", "label": "Flowseal 1.10.2 ALT3 — YouTube", "technique": "multidisorder", "nativeStrategy": "native-flowseal-1102-youtube-alt3", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt4", "label": "Flowseal 1.10.2 ALT4 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt4", "pos": 2, "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt5", "label": "Flowseal 1.10.2 ALT5 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt5", "pos": 2, "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt6", "label": "Flowseal 1.10.2 ALT6 — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt6", "seqovl": 681, "pos": 1, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt7", "label": "Flowseal 1.10.2 ALT7 — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt7", "seqovl": 679, "pos": 2, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt8", "label": "Flowseal 1.10.2 ALT8 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt8", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt9", "label": "Flowseal 1.10.2 ALT9 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt9", "repeats": 4, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt10", "label": "Flowseal 1.10.2 ALT10 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt10", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt11", "label": "Flowseal 1.10.2 ALT11 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt11", "seqovl": 681, "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-alt12", "label": "Flowseal 1.10.2 ALT12 — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt12", "pos": 1, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-exp", "label": "Flowseal 1.10.2 EXP — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-exp", "pos": 1, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-fake-tls-auto", "label": "Flowseal 1.10.2 FAKE TLS AUTO — YouTube", "technique": "multidisorder", "nativeStrategy": "native-flowseal-1102-youtube-fake-tls-auto", "repeats": 11, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-fake-tls-auto-alt", "label": "Flowseal 1.10.2 FAKE TLS AUTO ALT — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-fake-tls-auto-alt", "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-fake-tls-auto-alt2", "label": "Flowseal 1.10.2 FAKE TLS AUTO ALT2 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-fake-tls-auto-alt2", "seqovl": 681, "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-fake-tls-auto-alt3", "label": "Flowseal 1.10.2 FAKE TLS AUTO ALT3 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-fake-tls-auto-alt3", "seqovl": 681, "pos": 1, "repeats": 8, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-simple-fake", "label": "Flowseal 1.10.2 SIMPLE FAKE — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-simple-fake", "pos": 1, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-simple-fake-alt", "label": "Flowseal 1.10.2 SIMPLE FAKE ALT — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-simple-fake-alt", "repeats": 6, "quic": "google" },
+        { "tag": "flowseal-1102-youtube-simple-fake-alt2", "label": "Flowseal 1.10.2 SIMPLE FAKE ALT2 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-simple-fake-alt2", "repeats": 6, "quic": "google" },
         { "tag": "google-z2-fake-multidisorder", "label": "Google fake x11 + SNI multidisorder", "technique": "multidisorder", "nativeStrategy": "native-zapret2-fake-multidisorder", "repeats": 11, "fakeTlsMod": true, "quic": "google" },
         { "tag": "google-z2-fake-sni-split", "label": "Google fake x6 + SNI split", "technique": "fake-multisplit", "nativeStrategy": "native-zapret2-fake-sni-split", "seqovl": 681, "pos": 1, "repeats": 6, "quic": "google" },
         { "tag": "google-z2-sni-disorder", "label": "Google SNI multidisorder", "technique": "multidisorder", "nativeStrategy": "native-zapret2-sni-disorder", "quic": "google" },
@@ -31,6 +75,21 @@
     },
     "meta": {
       "source": "Provider fingerprint — Meta is IP-blocked; no free desync, needs VPN",
+      "blockType": "vpn",
+      "methods": []
+    },
+    "facebook": {
+      "source": "Provider fingerprint - Facebook and Messenger use Meta IP infrastructure and need VPN",
+      "blockType": "vpn",
+      "methods": []
+    },
+    "openai": {
+      "source": "Geo-restricted ChatGPT and OpenAI endpoints use VPN routing",
+      "blockType": "vpn",
+      "methods": []
+    },
+    "ai-other": {
+      "source": "Optional grouped AI services use VPN routing when pinned by the user",
       "blockType": "vpn",
       "methods": []
     },

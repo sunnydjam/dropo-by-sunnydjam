@@ -13,12 +13,21 @@ import (
 )
 
 func TestWindowsExternalVPNProbeDetectsZapretProcess(t *testing.T) {
+	testWindowsExternalVPNProcessFixture(t, "winws2.exe", "DPI bypass process")
+}
+
+func TestWindowsExternalVPNProbeDetectsV2RayTunProcess(t *testing.T) {
+	testWindowsExternalVPNProcessFixture(t, "v2RayTun.exe", "VPN process")
+}
+
+func testWindowsExternalVPNProcessFixture(t *testing.T, executableName, expectedKind string) {
+	t.Helper()
 	powershell, err := exec.LookPath("powershell")
 	if err != nil {
 		t.Skip("PowerShell is unavailable")
 	}
 
-	fixture := filepath.Join(t.TempDir(), "winws2.exe")
+	fixture := filepath.Join(t.TempDir(), executableName)
 	source, err := os.Open(powershell)
 	if err != nil {
 		t.Fatalf("open PowerShell fixture source: %v", err)
@@ -53,12 +62,12 @@ func TestWindowsExternalVPNProbeDetectsZapretProcess(t *testing.T) {
 		conflicts, probeErr := detectExternalVPNConflicts()
 		if probeErr == nil {
 			for _, conflict := range conflicts {
-				if strings.EqualFold(conflict.Name, "winws2.exe") && conflict.Kind == "DPI bypass process" {
+				if strings.EqualFold(conflict.Name, executableName) && conflict.Kind == expectedKind {
 					return
 				}
 			}
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	t.Fatal("external VPN preflight did not report the running winws2 process")
+	t.Fatalf("external VPN preflight did not report the running %s process", executableName)
 }

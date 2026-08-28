@@ -56,6 +56,15 @@ func TestWinDivertFilterDoesNotCaptureBroadGameTraffic(t *testing.T) {
 	}
 }
 
+func TestWinDivertBackendRejectsInvalidCustomFilterBeforeLoadingDLL(t *testing.T) {
+	if _, err := OpenWinDivertBackendWithFilter("missing.dll", "   "); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty filter error = %v", err)
+	}
+	if _, err := OpenWinDivertBackendWithFilter("missing.dll", strings.Repeat("x", maxWinDivertFilterLength+1)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized filter error = %v", err)
+	}
+}
+
 func TestWinDivertCaptureFilterCompilesWithBundledRuntime(t *testing.T) {
 	dllPath, err := filepath.Abs(filepath.Join("..", "..", "dependencies", "WinDivert-2.2.2-A", "x64", "WinDivert.dll"))
 	if err != nil {
@@ -89,5 +98,54 @@ func TestWinDivertCaptureFilterCompilesWithBundledRuntime(t *testing.T) {
 	)
 	if result == 0 {
 		t.Fatalf("WinDivert rejected capture filter at position %d: %v", errorPosition, callErr)
+	}
+}
+
+func TestSelectiveWinDivertFilterCompilesWithBundledRuntime(t *testing.T) {
+	filter, err := BuildSelectiveWinDivertFilter([]ServiceRule{{
+		ID: "discord", ProcessNames: []string{"Discord.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
+		IPCIDRs: []string{"66.22.192.0/18", "2001:4860:4860::/48"}, IPMatchPolicy: IPMatchRequireContext,
+		TCPPorts: []int{80, 443},
+	}}, 32123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compileWinDivertTestFilter(t, filter)
+}
+
+func compileWinDivertTestFilter(t *testing.T, value string) {
+	t.Helper()
+	dllPath, err := filepath.Abs(filepath.Join("..", "..", "dependencies", "WinDivert-2.2.2-A", "x64", "WinDivert.dll"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dllPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			t.Skip("bundled WinDivert cache is absent")
+		}
+		t.Fatal(err)
+	}
+	dll := windows.NewLazyDLL(dllPath)
+	if err := dll.Load(); err != nil {
+		t.Fatal(err)
+	}
+	compile := dll.NewProc("WinDivertHelperCompileFilter")
+	if err := compile.Find(); err != nil {
+		t.Fatal(err)
+	}
+	filter, err := syscall.BytePtrFromString(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object := make([]byte, 16*1024)
+	var errorString uintptr
+	var errorPosition uint32
+	result, _, callErr := compile.Call(
+		uintptr(unsafe.Pointer(filter)), winDivertNetworkLayer,
+		uintptr(unsafe.Pointer(&object[0])), uintptr(len(object)),
+		uintptr(unsafe.Pointer(&errorString)), uintptr(unsafe.Pointer(&errorPosition)),
+	)
+	if result == 0 {
+		t.Fatalf("WinDivert rejected selective filter at position %d: %v", errorPosition, callErr)
 	}
 }

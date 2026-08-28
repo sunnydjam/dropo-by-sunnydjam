@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -74,6 +76,51 @@ func TestValidatePlanAndClassifier(t *testing.T) {
 	wrongPort := classifier.Classify(FlowEvidence{Network: NetworkTCP, Destination: "66.22.200.1", Port: 80, Host: "discord.com"})
 	if wrongPort.Matched {
 		t.Fatalf("wrong-port classification must fail safe: %+v", wrongPort)
+	}
+}
+
+func TestValidatePlanBoundsProcessUDPDiscoveryRanges(t *testing.T) {
+	plan := testPlan()
+	plan.Services[0].ProcessMatchPolicy = ProcessMatchIdentity
+	plan.Services[0].ProcessDiscoveryUDPPortRanges = []PortRange{{First: 50000, Last: 50099}}
+	if err := ValidatePlan(plan); err != nil {
+		t.Fatalf("valid bounded discovery range rejected: %v", err)
+	}
+	plan.Services[0].ProcessDiscoveryUDPPortRanges = []PortRange{{First: 1, Last: 1000}}
+	if err := ValidatePlan(plan); err == nil {
+		t.Fatal("oversized process UDP discovery range accepted")
+	}
+	plan.Services[0].ProcessMatchPolicy = ProcessMatchCorroborate
+	plan.Services[0].ProcessDiscoveryUDPPortRanges = []PortRange{{First: 50000, Last: 50099}}
+	if err := ValidatePlan(plan); err == nil {
+		t.Fatal("process UDP discovery without identity accepted")
+	}
+}
+
+func TestExplicitProcessIdentityClassifiesNamedDesktopService(t *testing.T) {
+	plan := testPlan()
+	plan.Services[0].ProcessMatchPolicy = ProcessMatchIdentity
+	classifier, err := NewClassifier(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := classifier.Classify(FlowEvidence{Network: NetworkTCP, Destination: "203.0.113.10", Port: 443, ProcessName: `C:\Users\u\Discord.exe`})
+	_, hasProcessIdentity := stringSet(got.Evidence, normalizeToken)["process-identity"]
+	if !got.Matched || got.ServiceID != "discord" || !hasProcessIdentity {
+		t.Fatalf("process identity classification = %+v", got)
+	}
+}
+
+func TestProcessIdentityCannotRedirectPrivateDestination(t *testing.T) {
+	plan := testPlan()
+	plan.Services[0].ProcessMatchPolicy = ProcessMatchIdentity
+	classifier, err := NewClassifier(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := classifier.Classify(FlowEvidence{Network: NetworkTCP, Destination: "192.168.1.20", Port: 443, ProcessName: "Discord.exe"})
+	if !got.WorkNetwork || got.Matched || got.WorkNetworkID != "local-private" {
+		t.Fatalf("private process flow = %+v", got)
 	}
 }
 
@@ -201,15 +248,96 @@ func TestProcessorSharedAddressEmulationKeepsUnblockedTLSDirect(t *testing.T) {
 
 func TestDirectProcessWinsBeforeBroadBlockedCIDR(t *testing.T) {
 	plan := testPlan()
-	plan.DirectRules = []DirectRule{{ID: "steam-direct", ProcessNames: []string{"steam.exe", "cs2.exe"}}}
+	plan.DirectRules = []DirectRule{{ID: "game-direct", ProcessNames: []string{"steam.exe", "cs2.exe", "MistfallHunter-Win64-Shipping.exe"}}}
 	plan.Services[0].IPCIDRs = []string{"0.0.0.0/0"}
 	classifier, err := NewClassifier(plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := classifier.Classify(FlowEvidence{Network: NetworkUDP, Destination: "203.0.113.50", Port: 443, ProcessName: `C:\Games\Steam\cs2.exe`, Fingerprints: []string{"quic"}})
-	if !got.Direct || got.Matched || got.DirectRuleID != "steam-direct" {
+	got := classifier.Classify(FlowEvidence{Network: NetworkUDP, Destination: "203.0.113.50", Port: 443, ProcessName: `E:\SteamLibrary\steamapps\common\Mistfall Hunter\MistfallHunter\Binaries\Win64\MistfallHunter-Win64-Shipping.exe`, Fingerprints: []string{"quic"}})
+	if !got.Direct || got.Matched || got.DirectRuleID != "game-direct" {
 		t.Fatalf("classification = %#v, want explicit process direct", got)
+	}
+}
+
+type fixedFlowIdentityResolver struct {
+	name  string
+	tuple FlowTuple
+	calls int
+}
+
+func (resolver *fixedFlowIdentityResolver) ResolveProcessName(tuple FlowTuple) string {
+	resolver.tuple = tuple
+	resolver.calls++
+	return resolver.name
+}
+
+func TestProcessorUsesObservedProcessForDirectPrecedence(t *testing.T) {
+	plan := testPlan()
+	plan.DirectRules = []DirectRule{{ID: "game-direct", ProcessNames: []string{"MistfallHunter-Win64-Shipping.exe"}}}
+	resolver := &fixedFlowIdentityResolver{name: `E:\SteamLibrary\MistfallHunter-Win64-Shipping.exe`}
+	processor, err := NewProcessorWithIdentityResolver(plan, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := testIPv4UDPPacket("66.22.200.1", 443, []byte{0xc0, 0, 0, 0, 1})
+	decision := processor.Process(packet)
+	if decision.Transformed || decision.ServiceID != "" || decision.Reason != "reserved for direct rule game-direct" {
+		t.Fatalf("decision = %+v, want observed game process to pass direct", decision)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("identity resolver calls = %d, want 1", resolver.calls)
+	}
+	if resolver.tuple.Network != NetworkUDP || resolver.tuple.Source.String() != "192.0.2.1" || resolver.tuple.SourcePort != 40000 || resolver.tuple.Destination.String() != "66.22.200.1" || resolver.tuple.DestinationPort != 443 {
+		t.Fatalf("observed tuple = %+v", resolver.tuple)
+	}
+	if string(decision.Packets[0]) != string(packet) {
+		t.Fatal("direct process packet was changed")
+	}
+	flow, ok := processor.LookupFlowDecision(resolver.tuple)
+	if !ok || flow.Disposition != FlowDirect || flow.RuleID != "game-direct" || flow.ProcessName != "mistfallhunter-win64-shipping.exe" {
+		t.Fatalf("cached direct flow = %+v, found=%t", flow, ok)
+	}
+}
+
+func TestProcessorSkipsIdentityLookupWhenPlanDoesNotUseProcesses(t *testing.T) {
+	plan := testPlan()
+	plan.Services[0].ProcessNames = nil
+	resolver := &fixedFlowIdentityResolver{name: "Discord.exe"}
+	processor, err := NewProcessorWithIdentityResolver(plan, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor.Process(testIPv4TCPPacket(t, "discord.com"))
+	if resolver.calls != 0 {
+		t.Fatalf("identity resolver calls = %d, want no unnecessary Windows lookup", resolver.calls)
+	}
+}
+
+func TestUnclassifiedFlowIsRecordedDirectAndInvalidatedByPlanRevision(t *testing.T) {
+	plan := testPlan()
+	plan.Services[0].ProcessNames = nil
+	processor, err := NewProcessor(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := testIPv4TCPPacket(t, "unrelated.example")
+	processor.Process(packet)
+	parsed, err := parsePacket(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tuple := parsed.flowTuple()
+	flow, ok := processor.LookupFlowDecision(tuple)
+	if !ok || flow.Disposition != FlowDirect || flow.RuleID != "" || flow.Reason != "unclassified traffic defaults direct" {
+		t.Fatalf("unknown flow = %+v, found=%t", flow, ok)
+	}
+	plan.Revision++
+	if err := processor.ApplyPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := processor.LookupFlowDecision(tuple); ok {
+		t.Fatal("flow decision survived an immutable plan revision")
 	}
 }
 
@@ -219,6 +347,196 @@ func TestSelectionMustUseServiceCandidate(t *testing.T) {
 	plan.Selections[0].StrategyID = "strong"
 	if err := ValidatePlan(plan); err == nil {
 		t.Fatal("non-candidate service selection was accepted")
+	}
+}
+
+func TestVPNRoutePassesPacketAndPersistsTypedFlowDecision(t *testing.T) {
+	plan := testPlan()
+	plan.Selections = nil
+	plan.Routes = []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteVPN}}
+	processor, err := NewProcessor(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := testIPv4TCPPacket(t, "gateway.discord.com")
+	decision := processor.Process(packet)
+	if decision.Transformed || decision.ServiceID != "discord" || decision.Route != ServiceRouteVPN || decision.Reason != "service requires selective VPN relay" {
+		t.Fatalf("VPN decision = %+v", decision)
+	}
+	parsed, err := parsePacket(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, ok := processor.LookupFlowDecision(parsed.flowTuple())
+	if !ok || flow.Disposition != FlowService || flow.ServiceID != "discord" || flow.Route != ServiceRouteVPN {
+		t.Fatalf("VPN flow = %+v, found=%t", flow, ok)
+	}
+	if string(decision.Packets[0]) != string(packet) {
+		t.Fatal("VPN-marked packet changed before relay activation")
+	}
+}
+
+func TestProcessorReflectsVPNFlowAndRestoresRelayResponse(t *testing.T) {
+	plan := testPlan()
+	plan.Selections = nil
+	plan.Routes = []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteVPN}}
+	registry := NewTCPRedirectRegistry()
+	redirector, err := NewTCPPacketRedirector(registry, 34010)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor, err := NewProcessorWithRuntime(plan, nil, redirector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := testIPv4TCPPacket(t, "gateway.discord.com")
+	// A redirect may only be created from the initial SYN. Capturing a later
+	// ClientHello without its handshake must never splice an established flow.
+	original[33] = 0x02
+	calculateChecksums(original)
+	decision := processor.Process(original)
+	if !decision.Transformed || decision.Dropped || decision.Direction != PacketDirectionInbound || decision.Route != ServiceRouteVPN || len(decision.Packets) != 1 {
+		t.Fatalf("reflected decision = %+v", decision)
+	}
+	reflected, err := parsePacket(decision.Packets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflected.source.String() != "1.1.1.1" || reflected.destination.String() != "10.0.0.1" || reflected.sourcePort != 50000 || reflected.destinationPort != 34010 {
+		t.Fatalf("reflected tuple = %+v", reflected.flowTuple())
+	}
+	local := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 34010}
+	remote := &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 50000}
+	if _, ok := registry.ConsumeAccepted(local, remote); !ok {
+		t.Fatal("reflected flow was not accepted by registry")
+	}
+
+	response := append([]byte(nil), original...)
+	binary.BigEndian.PutUint16(response[20:22], 34010)
+	binary.BigEndian.PutUint16(response[22:24], 50000)
+	calculateChecksums(response)
+	restoredDecision := processor.Process(response)
+	if !restoredDecision.Transformed || restoredDecision.Dropped || restoredDecision.Direction != PacketDirectionInbound || restoredDecision.Reason != "restored selective VPN relay response" {
+		t.Fatalf("restored decision = %+v", restoredDecision)
+	}
+	restored, err := parsePacket(restoredDecision.Packets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.source.String() != "1.1.1.1" || restored.destination.String() != "10.0.0.1" || restored.sourcePort != 443 || restored.destinationPort != 50000 {
+		t.Fatalf("restored tuple = %+v", restored.flowTuple())
+	}
+}
+
+func TestProcessorRedirectsProcessIdentityFromInitialSYN(t *testing.T) {
+	plan := testPlan()
+	plan.Selections = nil
+	plan.Routes = []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteVPN}}
+	plan.Services[0].ProcessMatchPolicy = ProcessMatchIdentity
+	registry := NewTCPRedirectRegistry()
+	redirector, err := NewTCPPacketRedirector(registry, 34010)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fixedFlowIdentityResolver{name: `C:\Users\u\AppData\Local\Discord\Discord.exe`}
+	processor, err := NewProcessorWithRuntime(plan, resolver, redirector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := testIPv4TCPPacket(t, "unrelated.example")
+	original[33] = 0x02
+	calculateChecksums(original)
+	decision := processor.Process(original)
+	if !decision.Transformed || decision.Dropped || decision.ServiceID != "discord" || decision.Route != ServiceRouteVPN {
+		t.Fatalf("process-identity SYN decision = %+v", decision)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("process identity resolver calls = %d, want 1", resolver.calls)
+	}
+}
+
+func TestProcessorDoesNotSpliceMidstreamVPNFlow(t *testing.T) {
+	plan := testPlan()
+	plan.Selections = nil
+	plan.Routes = []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteVPN}}
+	registry := NewTCPRedirectRegistry()
+	redirector, err := NewTCPPacketRedirector(registry, 34010)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor, err := NewProcessorWithRuntime(plan, nil, redirector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := testIPv4TCPPacket(t, "gateway.discord.com")
+	decision := processor.Process(packet)
+	if decision.Dropped || decision.Transformed || !strings.Contains(decision.Reason, "failed safe") || len(decision.Packets) != 1 || string(decision.Packets[0]) != string(packet) {
+		t.Fatalf("midstream VPN decision = %+v", decision)
+	}
+	second := processor.Process(packet)
+	if second.Dropped || second.Transformed || second.Reason != "preserved established direct flow" || len(second.Packets) != 1 || string(second.Packets[0]) != string(packet) {
+		t.Fatalf("preserved midstream decision = %+v", second)
+	}
+	counters := processor.Counters()["discord"]
+	if counters.Errors != 1 || counters.Passed != 1 {
+		t.Fatalf("midstream counters = %+v", counters)
+	}
+}
+
+func TestOrphanRelayResponseIsDropped(t *testing.T) {
+	plan := testPlan()
+	registry := NewTCPRedirectRegistry()
+	redirector, err := NewTCPPacketRedirector(registry, 34010)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor, err := NewProcessorWithRuntime(plan, nil, redirector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := testIPv4TCPPacket(t, "unrelated.example")
+	binary.BigEndian.PutUint16(packet[20:22], 34010)
+	binary.BigEndian.PutUint16(packet[22:24], 50000)
+	calculateChecksums(packet)
+	decision := processor.Process(packet)
+	if !decision.Dropped || len(decision.Packets) != 0 || decision.Route != ServiceRouteVPN {
+		t.Fatalf("orphan relay decision = %+v", decision)
+	}
+}
+
+func TestPacketAddressDirectionUsesWinDivertOutboundBit(t *testing.T) {
+	address := PacketAddress{Flags: winDivertAddressOutboundFlag | 0x1234}
+	address.setDirection(PacketDirectionInbound)
+	if address.Flags&winDivertAddressOutboundFlag != 0 {
+		t.Fatal("inbound direction kept WinDivert outbound bit")
+	}
+	address.setDirection(PacketDirectionOutbound)
+	if address.Flags&winDivertAddressOutboundFlag == 0 {
+		t.Fatal("outbound direction did not set WinDivert outbound bit")
+	}
+}
+
+func TestTrafficPlanRejectsConflictingOrUnknownServiceRoutes(t *testing.T) {
+	plan := testPlan()
+	plan.Routes = []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteVPN}}
+	if err := ValidatePlan(plan); err == nil {
+		t.Fatal("VPN route with a Zapret strategy selection was accepted")
+	}
+	plan = testPlan()
+	plan.Routes = []ServiceRoute{{ServiceID: "missing", Kind: ServiceRouteVPN}}
+	if err := ValidatePlan(plan); err == nil {
+		t.Fatal("route for an unknown service was accepted")
+	}
+	plan = testPlan()
+	plan.Routes = []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteZapret}, {ServiceID: "discord", Kind: ServiceRouteZapret}}
+	if err := ValidatePlan(plan); err == nil {
+		t.Fatal("duplicate service route was accepted")
+	}
+	plan = testPlan()
+	plan.Services[0].ProcessNames = nil
+	plan.Services[0].ProcessMatchPolicy = ProcessMatchIdentity
+	if err := ValidatePlan(plan); err == nil {
+		t.Fatal("process identity policy without process names was accepted")
 	}
 }
 

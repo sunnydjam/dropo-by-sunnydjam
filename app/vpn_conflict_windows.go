@@ -111,10 +111,14 @@ if ($items.Count -eq 0) {
 `
 
 func detectExternalVPNConflicts() ([]ExternalVPNConflict, error) {
-	// Packet-filter competitors are the most important conflict and can be
-	// enumerated without spawning PowerShell or waiting for WMI. Keep the slower
-	// adapter/VPN inspection as an enrichment step.
-	nativeCandidates, nativeErr := detectExternalPacketFilterProcesses()
+	// Active tunnel processes, adapters and packet-filter competitors can be
+	// enumerated without spawning PowerShell or waiting for WMI. Return as soon
+	// as one is found: a single competing default route is already sufficient to
+	// make Dropo's direct policy unreliable.
+	nativeCandidates, nativeErr := detectExternalNetworkCandidates()
+	if nativeConflicts := filterExternalVPNConflicts(nativeCandidates); len(nativeConflicts) > 0 {
+		return nativeConflicts, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -122,15 +126,9 @@ func detectExternalVPNConflicts() ([]ExternalVPNConflict, error) {
 	configureBackgroundCommand(cmd)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		if len(nativeCandidates) > 0 {
-			return filterExternalVPNConflicts(nativeCandidates), nil
-		}
 		return nil, fmt.Errorf("external VPN check timed out")
 	}
 	if err != nil {
-		if len(nativeCandidates) > 0 {
-			return filterExternalVPNConflicts(nativeCandidates), nil
-		}
 		return nil, fmt.Errorf("%w: %s", err, string(output))
 	}
 	candidates, err := parseExternalVPNCandidates(output)
@@ -144,9 +142,16 @@ func detectExternalVPNConflicts() ([]ExternalVPNConflict, error) {
 	return filterExternalVPNConflicts(candidates), nil
 }
 
-func detectExternalPacketFilterProcesses() ([]externalVPNCandidate, error) {
-	known := map[string]struct{}{
-		"winws.exe": {}, "winws2.exe": {}, "nfqws.exe": {}, "nfqws2.exe": {}, "goodbyedpi.exe": {},
+func detectExternalNetworkCandidates() ([]externalVPNCandidate, error) {
+	processes, processErr := detectExternalNetworkProcesses()
+	adapters, adapterErr := detectActiveNetworkAdapters()
+	return append(processes, adapters...), errors.Join(processErr, adapterErr)
+}
+
+func detectExternalNetworkProcesses() ([]externalVPNCandidate, error) {
+	known := map[string]string{
+		"winws.exe": "dpi-process", "winws2.exe": "dpi-process", "nfqws.exe": "dpi-process", "nfqws2.exe": "dpi-process", "goodbyedpi.exe": "dpi-process",
+		"v2raytun.exe": "vpn-process", "v2rayn.exe": "vpn-process", "nekoray.exe": "vpn-process", "hiddify.exe": "vpn-process", "hiddifynext.exe": "vpn-process", "clash.exe": "vpn-process", "mihomo.exe": "vpn-process",
 	}
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
@@ -160,9 +165,9 @@ func detectExternalPacketFilterProcesses() ([]externalVPNCandidate, error) {
 	result := make([]externalVPNCandidate, 0)
 	for {
 		name := strings.ToLower(windows.UTF16ToString(entry.ExeFile[:]))
-		if _, ok := known[name]; ok {
+		if source, ok := known[name]; ok {
 			result = append(result, externalVPNCandidate{
-				Name: name, Detail: fmt.Sprintf("PID %d", entry.ProcessID), Source: "dpi-process", Status: "Running",
+				Name: name, Detail: fmt.Sprintf("PID %d", entry.ProcessID), Source: source, Status: "Running",
 			})
 		}
 		if err := windows.Process32Next(snapshot, &entry); err != nil {
@@ -171,6 +176,32 @@ func detectExternalPacketFilterProcesses() ([]externalVPNCandidate, error) {
 			}
 			return result, err
 		}
+	}
+	return result, nil
+}
+
+func detectActiveNetworkAdapters() ([]externalVPNCandidate, error) {
+	var table *windows.MibIfTable2
+	if err := windows.GetIfTable2Ex(windows.MibIfTableNormalWithoutStatistics, &table); err != nil {
+		return nil, err
+	}
+	if table == nil {
+		return nil, nil
+	}
+	defer windows.FreeMibTable(unsafe.Pointer(table))
+
+	rows := unsafe.Slice(&table.Table[0], table.NumEntries)
+	result := make([]externalVPNCandidate, 0, len(rows))
+	for _, row := range rows {
+		if row.OperStatus != windows.IfOperStatusUp {
+			continue
+		}
+		result = append(result, externalVPNCandidate{
+			Name:   windows.UTF16ToString(row.Alias[:]),
+			Detail: windows.UTF16ToString(row.Description[:]),
+			Source: "netadapter",
+			Status: "Up",
+		})
 	}
 	return result, nil
 }

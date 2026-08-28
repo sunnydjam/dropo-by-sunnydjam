@@ -14,6 +14,13 @@ const (
 	androidRoutePolicyVPN    = "vpn"
 )
 
+var androidPrimaryHomeRouteTags = map[string]bool{
+	"youtube": true,
+	"discord": true,
+	"meta":    true,
+	"openai":  true,
+}
+
 type androidService struct {
 	Tag            string
 	Name           string
@@ -48,7 +55,7 @@ func androidServiceCatalog() []androidService {
 				"ytimg.com", "yt3.ggpht.com", "ggpht.com", "googlevideo.com",
 				"youtube-ui.l.google.com", "wide-youtube.l.google.com",
 				"youtubei.googleapis.com", "youtube.googleapis.com",
-				"ytstatic.com", "www.gstatic.com", "gvt1.com", "gvt2.com",
+				"ytstatic.com",
 			},
 			HealthURL: "https://www.youtube.com",
 			ProbeURLs: []string{
@@ -61,17 +68,29 @@ func androidServiceCatalog() []androidService {
 		},
 		{
 			Tag:  "meta",
-			Name: "Instagram / Facebook",
+			Name: "Instagram",
 			DomainSuffixes: []string{
-				"instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "fb.com", "facebook.net",
-				"messenger.com", "m.me", "threads.net", "connect.facebook.net",
+				"instagram.com", "cdninstagram.com", "threads.net",
 			},
 			IPCIDRs: []string{
 				"31.13.64.0/18", "66.220.144.0/20", "69.63.176.0/20", "69.171.224.0/19",
 				"129.134.0.0/16", "157.240.0.0/16", "173.252.64.0/18", "185.60.216.0/22",
 			},
 			HealthURL: "https://www.instagram.com",
-			ProbeURLs: []string{"https://www.facebook.com", "https://connect.facebook.net"},
+			ProbeURLs: []string{"https://www.instagram.com"},
+		},
+		{
+			Tag:  "facebook",
+			Name: "Facebook / Messenger",
+			DomainSuffixes: []string{
+				"facebook.com", "fbcdn.net", "fb.com", "facebook.net", "messenger.com", "m.me", "connect.facebook.net",
+			},
+			IPCIDRs: []string{
+				"31.13.64.0/18", "66.220.144.0/20", "69.63.176.0/20", "69.171.224.0/19",
+				"129.134.0.0/16", "157.240.0.0/16", "173.252.64.0/18", "185.60.216.0/22",
+			},
+			HealthURL: "https://www.facebook.com",
+			ProbeURLs: []string{"https://connect.facebook.net"},
 		},
 		{
 			Tag:            "twitter",
@@ -291,10 +310,18 @@ func androidServiceCatalog() []androidService {
 		},
 		{
 			Tag:  "openai",
-			Name: "AI services",
+			Name: "ChatGPT",
 			DomainSuffixes: []string{
 				"openai.com", "chatgpt.com", "ws.chatgpt.com", "oaistatic.com", "oaiusercontent.com", "oaistatsig.com",
 				"openaimerge.com", "auth0.openai.com", "workos.com", "workoscdn.com",
+			},
+			HealthURL: "https://chatgpt.com",
+			ProbeURLs: []string{"https://api.openai.com"},
+		},
+		{
+			Tag:  "ai-other",
+			Name: "Другие AI-сервисы",
+			DomainSuffixes: []string{
 				"githubcopilot.com", "copilot-proxy.githubusercontent.com", "origin-tracker.githubusercontent.com",
 				"copilot-telemetry.githubusercontent.com", "default.exp-tas.com", "api.github.com", "github.com",
 				"cursor.com", "cursor.sh", "api2.cursor.sh", "api3.cursor.sh", "repo42.cursor.sh",
@@ -304,8 +331,8 @@ func androidServiceCatalog() []androidService {
 				"notebooklm.google.com", "grok.com", "x.ai", "api.x.ai", "console.x.ai",
 				"meta.ai", "ai.meta.com", "llama.com",
 			},
-			HealthURL: "https://chatgpt.com",
-			ProbeURLs: []string{"https://api.openai.com"},
+			HealthURL: "https://perplexity.ai",
+			ProbeURLs: []string{"https://gemini.google.com"},
 		},
 	}
 }
@@ -406,12 +433,51 @@ func androidServiceRoutesLocked(live bool) []routeInfo {
 			EffectiveMethodLabel: methodLabel,
 			SelectedMethod:       selectedPolicy,
 			RequiresVPN:          effectivePolicy == androidRoutePolicyVPN,
+			HomeVisible:          androidHomeRouteServiceVisibleLocked(service.Tag),
 			DelayMS:              delay + 8 + index%9,
 			DomainSuffixes:       append([]string(nil), service.DomainSuffixes...),
 			IPCidrs:              append([]string(nil), service.IPCIDRs...),
 		})
 	}
 	return routes
+}
+
+func androidHomeRouteServiceVisibleLocked(tag string) bool {
+	if androidPrimaryHomeRouteTags[tag] {
+		return true
+	}
+	for _, existing := range current.HomeRouteServices {
+		if existing == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func setAndroidHomeRouteServiceVisibleLocked(args []interface{}) map[string]interface{} {
+	tag := stringArg(args, 0, "")
+	visible := boolArg(args, 1, true)
+	if _, ok := androidServiceByTag(tag); !ok {
+		return map[string]interface{}{"success": false, "error": "Unknown Android route service: " + tag}
+	}
+	if androidPrimaryHomeRouteTags[tag] {
+		return map[string]interface{}{"success": true, "tag": tag, "visible": true, "primary": true}
+	}
+	next := make([]string, 0, len(current.HomeRouteServices)+1)
+	seen := map[string]bool{}
+	for _, existing := range current.HomeRouteServices {
+		if existing == "" || existing == tag || androidPrimaryHomeRouteTags[existing] || seen[existing] {
+			continue
+		}
+		seen[existing] = true
+		next = append(next, existing)
+	}
+	if visible {
+		next = append(next, tag)
+	}
+	current.HomeRouteServices = next
+	_ = saveLocked()
+	return map[string]interface{}{"success": true, "tag": tag, "visible": visible}
 }
 
 func androidRouteMethodOptions() []map[string]string {

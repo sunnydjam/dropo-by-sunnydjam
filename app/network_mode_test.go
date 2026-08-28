@@ -122,6 +122,22 @@ func TestNormalizeNetworkMode(t *testing.T) {
 	}
 }
 
+func TestSelectiveWindowsSessionIsOnlyUsedForSelectedServices(t *testing.T) {
+	settings := GlobalAppSettings{RoutingMode: RoutingModeBlockedOnly}
+	if !shouldUseSelectiveWindowsSession(settings) {
+		t.Fatal("blocked-only mode did not select the no-TUN session")
+	}
+	settings.RoutingMode = RoutingModeAllTraffic
+	if shouldUseSelectiveWindowsSession(settings) {
+		t.Fatal("all-traffic mode selected the no-TUN session")
+	}
+	settings.RoutingMode = RoutingModeBlockedOnly
+	settings.HideRuTraffic = true
+	if shouldUseSelectiveWindowsSession(settings) {
+		t.Fatal("hide-RU policy selected a route scope that cannot cover all RU traffic")
+	}
+}
+
 func TestDeepWindowsTransparentOnlySkipsTunWithoutSubscription(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Deep Windows engine is Windows-only")
@@ -220,7 +236,7 @@ func TestDeepWindowsFallsBackToTunForAdvancedRoutingSettings(t *testing.T) {
 	}
 }
 
-func TestDeepWindowsProxyFallbackConfigRemovesTunAndEnablesSystemProxy(t *testing.T) {
+func TestDeepWindowsProxyFallbackConfigRemovesTunWithoutEnablingSystemProxy(t *testing.T) {
 	app, configPath := newDeepWindowsTestApp(t, map[string]interface{}{
 		"inbounds": []interface{}{
 			map[string]interface{}{"type": "tun", "tag": "tun-in", "auto_route": true},
@@ -248,14 +264,52 @@ func TestDeepWindowsProxyFallbackConfigRemovesTunAndEnablesSystemProxy(t *testin
 	if mixed["type"] != "mixed" {
 		t.Fatalf("proxy fallback inbound type = %v, want mixed", mixed["type"])
 	}
-	if mixed["set_system_proxy"] != true {
-		t.Fatalf("proxy fallback mixed set_system_proxy = %v, want true", mixed["set_system_proxy"])
+	if mixed["set_system_proxy"] != false {
+		t.Fatalf("proxy fallback mixed set_system_proxy = %v, want false", mixed["set_system_proxy"])
 	}
 	if mixed["listen"] != "127.0.0.1" {
 		t.Fatalf("proxy fallback mixed listen = %v, want 127.0.0.1", mixed["listen"])
 	}
 	if port := mixedInboundPort(mixed["listen_port"]); port != defaultDropoMixedProxyPort {
 		t.Fatalf("proxy fallback mixed listen_port = %v, want %d", mixed["listen_port"], defaultDropoMixedProxyPort)
+	}
+	route, _ := config["route"].(map[string]interface{})
+	rules, _ := route["rules"].([]interface{})
+	if len(rules) == 0 {
+		t.Fatal("proxy fallback route has no selective inbound pin")
+	}
+	pinned, _ := rules[0].(map[string]interface{})
+	mixedTag, _ := mixed["tag"].(string)
+	if !containsStringValue(interfaceStringSlice(pinned["inbound"]), mixedTag) || pinned["outbound"] != "auto-select" {
+		t.Fatalf("selective inbound pin = %#v, mixed=%#v", pinned, mixed)
+	}
+}
+
+func TestSelectiveProxyInboundPinPassesBundledSingBoxCheck(t *testing.T) {
+	matches, err := filepath.Glob(filepath.Join("..", "dependencies", "sing-box-v*", "windows-amd64", "sing-box-*", "sing-box.exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Skip("bundled sing-box cache is absent")
+	}
+	app, configPath := newDeepWindowsTestApp(t, map[string]interface{}{
+		"inbounds": []interface{}{
+			map[string]interface{}{"type": "tun", "tag": "tun-in", "address": []interface{}{"172.19.0.1/30"}, "auto_route": true},
+			map[string]interface{}{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2088},
+		},
+		"outbounds": []interface{}{
+			map[string]interface{}{"type": "direct", "tag": "direct"},
+			map[string]interface{}{"type": "selector", "tag": "auto-select", "outbounds": []interface{}{"direct"}, "default": "direct"},
+		},
+		"route": map[string]interface{}{"rules": []interface{}{}, "final": "direct"},
+	})
+	proxyConfigPath, err := app.writeDeepWindowsProxyFallbackConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := newBackgroundCommand(matches[0], "check", "-c", proxyConfigPath).CombinedOutput(); err != nil {
+		t.Fatalf("sing-box rejected selective proxy config: %v\n%s", err, output)
 	}
 }
 

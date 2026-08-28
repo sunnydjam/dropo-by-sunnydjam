@@ -28,12 +28,12 @@ const (
 	serviceStrategyCacheVersion    = 3
 	serviceHostlistDirName         = "service-hostlists"
 	serviceStrategyProbeRetryDelay = 300 * time.Millisecond
-	// Four candidates are a deliberate middle point in the requested 3-5 range:
-	// enough strategy diversity without turning initial background validation
-	// into a long campaign. A failed batch advances a persistent per-service
-	// cursor, so the next VPN session tests the next four recipes.
+	// Keep subscription-backed discovery short so blocked services return to a
+	// known-good VPN immediately. Without a subscription, firstRunServiceSearch
+	// expands this into a cancellable full-catalog campaign.
 	maxAutomaticServiceStrategies = 4
 	maxNoSubscriptionStrategies   = maxAutomaticServiceStrategies
+	maxCommonAutomaticStrategies  = 4
 )
 
 const backgroundServiceStrategySource = "background-service-strategy"
@@ -426,7 +426,9 @@ func (a *App) resolveServiceSelections(dir string, cache map[string]serviceStrat
 			continue
 		}
 		method := ranked[0]
-		if entry, ok := cache[svc.Tag]; ok {
+		if manual, ok := ZapretManualStrategy(settings, svc.Tag); ok {
+			method = manual
+		} else if entry, ok := cache[svc.Tag]; ok {
 			if m, ok := findServiceBypassMethod(svc.Tag, entry.MethodTag); ok {
 				method = m
 			} else {
@@ -491,7 +493,7 @@ func (a *App) composeAndStartServiceEngine(selections map[string]serviceWinwsSel
 	a.serviceEngineComposeMu.Lock()
 	defer a.serviceEngineComposeMu.Unlock()
 	wireGuardTargets := a.wireGuardCamouflageTargetsForSession()
-	if len(selections) == 0 && len(wireGuardTargets) == 0 {
+	if len(selections) == 0 && len(wireGuardTargets) == 0 && !a.nativeVPNServiceRequested() {
 		a.trafficEngine.Stop()
 		a.writeLog("[FreeAccess] native traffic engine stopped: no service currently uses a local strategy")
 		return nil
@@ -504,6 +506,34 @@ func (a *App) composeAndStartServiceEngine(selections map[string]serviceWinwsSel
 		return fmt.Errorf("build native traffic plan: %w", err)
 	}
 	return a.trafficEngine.StartPlan(plan)
+}
+
+func (a *App) nativeVPNServiceRequested() bool {
+	if a == nil || a.storage == nil {
+		return false
+	}
+	settings := a.storage.GetAppSettings()
+	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
+		return false
+	}
+	cache := a.loadServiceStrategyCache()
+	hasVPN, _ := configHasVPNProbeCandidates(a.storage.ActiveConfigFilePath())
+	for _, service := range DefaultFreeAccessServices {
+		method := FreeAccessServiceMethod(settings, service.Tag)
+		if method == FreeAccessMethodVPN {
+			return true
+		}
+		if method != FreeAccessMethodAuto {
+			continue
+		}
+		if entry, ok := cache[service.Tag]; ok && entry.MethodTag == FreeAccessMethodVPN {
+			return true
+		}
+		if hasVPN && (service.RequiresVPN || !serviceHasFreeBypass(service.Tag) || !FreeMethodsAllowed(settings)) {
+			return true
+		}
+	}
+	return false
 }
 
 // winwsDebugEnabled retains the old Go method name for settings migration. It
@@ -554,7 +584,7 @@ func (a *App) startWindowsUnifiedServiceEngine(_ string) error {
 	}
 	serviceStrategiesAllowed := len(a.backgroundServiceStrategyTags()) > 0
 	if !serviceStrategiesAllowed {
-		a.writeLog("[FreeAccess] per-service methods disabled; evaluating WireGuard camouflage only")
+		a.writeLog("[FreeAccess] transparent methods disabled; evaluating selective VPN routes and WireGuard camouflage")
 		return a.composeAndStartServiceEngine(map[string]serviceWinwsSelection{})
 	}
 	if !a.tryBeginRouteProbeDiscovery() {
@@ -566,23 +596,15 @@ func (a *App) startWindowsUnifiedServiceEngine(_ string) error {
 	dir := a.serviceHostlistDir()
 	cache := a.loadServiceStrategyCache()
 	selections, needSearch := a.resolveServiceSelections(dir, cache)
-	commonFallback, commonErr := a.addCommonBlockedSelection(selections, cache)
-	if commonErr != nil {
-		a.writeLog(fmt.Sprintf("[FreeAccess] bundled blocked catalog unavailable; using VPN/direct fallback: %v", commonErr))
-		commonFallback = a.preferredCommonBlockedFallback()
-	}
 	if len(selections) == 0 {
-		if len(a.wireGuardCamouflageTargetsForSession()) > 0 {
+		if len(a.wireGuardCamouflageTargetsForSession()) > 0 || a.nativeVPNServiceRequested() {
 			if err := a.composeAndStartServiceEngine(selections); err != nil {
-				return fmt.Errorf("start WireGuard camouflage-only traffic plan: %w", err)
+				return fmt.Errorf("start selective VPN/WireGuard traffic plan: %w", err)
 			}
 		} else {
 			a.trafficEngine.Stop()
 		}
 		a.logServiceStrategySummary("all services use a temporary fallback")
-		if commonFallback != "" {
-			a.applyCommonBlockedFallback(commonFallback)
-		}
 		return nil
 	}
 
@@ -599,9 +621,6 @@ func (a *App) startWindowsUnifiedServiceEngine(_ string) error {
 		}
 	}
 
-	if commonFallback != "" {
-		a.applyCommonBlockedFallback(commonFallback)
-	}
 	return nil
 }
 
@@ -649,15 +668,7 @@ func (a *App) validateWindowsUnifiedServiceStrategies(
 	}
 	selections, needSearch := a.resolveServiceSelections(dir, cache)
 	applyServiceStrategyStartIndexes(selections, batch.StartIndexes)
-	commonFallback, commonErr := a.addCommonBlockedSelection(selections, cache)
-	if commonErr != nil {
-		a.writeLog(fmt.Sprintf("[FreeAccess] bundled blocked catalog unavailable during background validation; using VPN/direct fallback: %v", commonErr))
-		commonFallback = a.preferredCommonBlockedFallback()
-	}
 	if len(selections) == 0 {
-		if commonFallback != "" {
-			a.applyCommonBlockedFallback(commonFallback)
-		}
 		a.logServiceStrategySummary("background validation has no transparent services")
 		return nil, nil
 	}
@@ -674,7 +685,8 @@ func (a *App) validateWindowsUnifiedServiceStrategies(
 	}
 	validationTags := make([]string, 0, len(selections))
 	for _, service := range DefaultFreeAccessServices {
-		if _, ok := selections[service.Tag]; ok && (onlyTags == nil || allowed[service.Tag]) {
+		settings := a.storage.GetAppSettings()
+		if _, ok := selections[service.Tag]; ok && ZapretStrategyMode(settings, service.Tag) == ZapretStrategyModeAuto && (onlyTags == nil || allowed[service.Tag]) {
 			validationTags = append(validationTags, service.Tag)
 		}
 	}
@@ -684,28 +696,12 @@ func (a *App) validateWindowsUnifiedServiceStrategies(
 	if err != nil {
 		return failed, fmt.Errorf("background service strategy validation: %w", err)
 	}
-	if onlyTags == nil {
-		if _, selected := selections[commonBlockedServiceTag]; selected {
-			if err := a.selectCommonBlockedStrategy("", selections, session); err != nil {
-				a.writeLog(fmt.Sprintf("[FreeAccess] common blocked strategy selection failed: %v", err))
-				delete(selections, commonBlockedServiceTag)
-				if composeErr := a.composeAndStartServiceEngine(selections); composeErr != nil {
-					return failed, fmt.Errorf("remove failed common blocked strategy: %w", composeErr)
-				}
-				a.applyCommonBlockedFallback(a.preferredCommonBlockedFallback())
-			}
-		} else if commonFallback != "" {
-			a.applyCommonBlockedFallback(commonFallback)
-		}
-	}
 	a.writeLog("[FreeAccess] background service validation completed")
 	return failed, nil
 }
 
 // startWindowsUnifiedServiceValidationAsync keeps first connect responsive.
-// Discord automatic realtime monitoring starts after the fast four-candidate
-// batch. Failed services keep their VPN/direct fallback for this session; the
-// next connection advances to the next persisted batch.
+// Discord automatic realtime monitoring starts after the full web/API ladder.
 func (a *App) startWindowsUnifiedServiceValidationAsync(startDiscordMonitorAfter bool) {
 	session := a.currentRouteStrategySession()
 	go func() {
@@ -715,6 +711,16 @@ func (a *App) startWindowsUnifiedServiceValidationAsync(startDiscordMonitorAfter
 			hasVPN, _ = configHasVPNProbeCandidates(a.storage.ActiveConfigFilePath())
 		}
 		serviceTags := a.backgroundServiceStrategyTags()
+		extendedSearch := !hasVPN
+		if a.storage != nil {
+			settings := a.storage.GetAppSettings()
+			for _, tag := range serviceTags {
+				if FreeAccessServiceMethod(settings, tag) == FreeAccessMethodZapret {
+					extendedSearch = true
+					break
+				}
+			}
+		}
 		a.emitRouteProbe("route-probe-start", map[string]interface{}{
 			"source":          backgroundServiceStrategySource,
 			"reason":          "post-connect",
@@ -722,6 +728,8 @@ func (a *App) startWindowsUnifiedServiceValidationAsync(startDiscordMonitorAfter
 			"services":        backgroundServiceStrategySummaries(serviceTags),
 			"hasSubscription": hasVPN,
 			"cycleTotal":      1,
+			"extendedSearch":  extendedSearch,
+			"warning":         map[bool]string{true: "Полный подбор Zapret проверит весь список стратегий и может занять продолжительное время", false: ""}[extendedSearch],
 		})
 
 		var validationErr error
@@ -739,7 +747,7 @@ func (a *App) startWindowsUnifiedServiceValidationAsync(startDiscordMonitorAfter
 		}
 
 		// Discord uses real bidirectional media evidence after the web/API
-		// precheck. Its monitor owns the remainder of the same four candidates.
+		// precheck. Its monitor can continue through the full catalog using real media evidence.
 		_ = failed
 		if validationErr != nil {
 			a.mu.Lock()
@@ -882,17 +890,8 @@ func (a *App) applyWindowsUnifiedBootstrapRoutesToConfig(configPath string) (boo
 		}
 	}
 
-	commonTarget := "direct"
-	if entry, ok := cache[commonBlockedServiceTag]; ok {
-		if entry.MethodTag == FreeAccessMethodVPN && hasVPN {
-			commonTarget = "auto-select"
-		} else if entry.MethodTag == FreeAccessMethodDirect || !isFreeAccessFallbackTag(entry.MethodTag) {
-			commonTarget = "direct"
-		}
-	} else if hasVPN {
-		commonTarget = "auto-select"
-	}
-	if selectBootstrapOutbound(configOutboundByTag(outbounds, SmartBypassGroupTag), commonTarget) {
+	// The shared blocked-catalog selector is never an implicit VPN/Zapret route.
+	if selectBootstrapOutbound(configOutboundByTag(outbounds, SmartBypassGroupTag), "direct") {
 		changed = true
 	}
 
@@ -1121,7 +1120,7 @@ func (a *App) selectCommonBlockedStrategy(busyID string, selections map[string]s
 }
 
 func commonBlockedSearchLadder(current ServiceBypassMethod) []ServiceBypassMethod {
-	methods := make([]ServiceBypassMethod, 0, maxAutomaticServiceStrategies)
+	methods := make([]ServiceBypassMethod, 0, maxCommonAutomaticStrategies)
 	if current.Tag != "" {
 		methods = append(methods, current)
 	}
@@ -1130,7 +1129,7 @@ func commonBlockedSearchLadder(current ServiceBypassMethod) []ServiceBypassMetho
 			continue
 		}
 		methods = append(methods, method)
-		if len(methods) == maxAutomaticServiceStrategies {
+		if len(methods) == maxCommonAutomaticStrategies {
 			break
 		}
 	}
@@ -1182,11 +1181,12 @@ func (a *App) startComposedTransparentEngine(busyID string) error {
 	}
 	serviceStrategiesRequested := len(a.backgroundServiceStrategyTags()) > 0
 	wireGuardRequested := a.wireGuardCamouflageRequested()
-	if !serviceStrategiesRequested && !wireGuardRequested {
+	selectiveVPNRequested := a.nativeVPNServiceRequested()
+	if !serviceStrategiesRequested && !wireGuardRequested && !selectiveVPNRequested {
 		return nil
 	}
 	if a.trafficEngine == nil || !a.trafficEngine.IsInstalled() {
-		if wireGuardRequested && !serviceStrategiesRequested {
+		if wireGuardRequested && !serviceStrategiesRequested && !selectiveVPNRequested {
 			a.writeLog("[WireGuard] handshake transformation unavailable because the WinDivert runtime is not installed; continuing with native WireGuard")
 			return nil
 		}
@@ -1277,12 +1277,22 @@ func (a *App) firstRunServiceSearch(
 ) ([]string, error) {
 	ladders := make(map[string][]ServiceBypassMethod, len(needSearch))
 	maxRounds := 0
+	extendedCampaign := false
 	for _, tag := range needSearch {
 		startIndex := -1
 		if index, ok := batch.StartIndexes[tag]; ok {
 			startIndex = index
 		}
-		ladder := startupServiceSearchLadder(tag, selections[tag].Method, maxAutomaticServiceStrategies, startIndex)
+		fullCatalog := !batch.HasVPN
+		if a.storage != nil && FreeAccessServiceMethod(a.storage.GetAppSettings(), tag) == FreeAccessMethodZapret {
+			fullCatalog = true
+		}
+		limit := maxAutomaticServiceStrategies
+		if fullCatalog {
+			limit = len(rankedMethodsForService(tag))
+			extendedCampaign = true
+		}
+		ladder := startupServiceSearchLadder(tag, selections[tag].Method, limit, startIndex)
 		ladders[tag] = ladder
 		if n := len(ladder); n > maxRounds {
 			maxRounds = n
@@ -1290,7 +1300,17 @@ func (a *App) firstRunServiceSearch(
 	}
 
 	pending := append([]string{}, needSearch...)
+	campaignDeadline := time.Now().Add(time.Hour)
 	for round := 0; round < maxRounds && len(pending) > 0; round++ {
+		if extendedCampaign && time.Now().After(campaignDeadline) {
+			for _, tag := range pending {
+				a.applyServiceFreeFallback(tag, nextServiceStrategyIndexAfterLadder(tag, ladders[tag]))
+				delete(selections, tag)
+				a.emitBackgroundStrategyService(tag, ServiceBypassMethod{}, false, true, false, "failed", "Автоподбор остановлен через один час: подходящая стратегия не найдена", round, len(ladders[tag]))
+			}
+			pending = nil
+			break
+		}
 		if !a.routeStrategySessionActive(session) {
 			return pending, fmt.Errorf("service strategy search interrupted because VPN is stopping")
 		}
@@ -1351,25 +1371,17 @@ func (a *App) firstRunServiceSearch(
 				if tag == "discord" {
 					a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
 				}
-				if tag == "discord" && !batch.HasVPN {
-					// HTTP/API failure is not authoritative for Discord voice.
-					// Keep the last complete Discord policy active so the realtime
-					// monitor can test actual UDP media within the same four-strategy batch.
-					a.emitBackgroundStrategyService(tag, selections[tag].Method, false, false, true, "voice-check", "Web/API-проверка не прошла; продолжаем по реальному Discord voice", round, len(ladders[tag]))
-					next = append(next, tag)
-					continue
-				}
-				a.writeLog(fmt.Sprintf("[FreeAccess] %s: no transparent method worked in this session batch; using policy fallback", tag))
+				a.writeLog(fmt.Sprintf("[FreeAccess] %s: the complete transparent strategy list was exhausted; using policy fallback", tag))
 				a.applyServiceFreeFallback(tag, nextServiceStrategyIndexAfterLadder(tag, ladders[tag]))
 				delete(selections, tag)
-				if batch.HasVPN {
+				strictZapret := a.storage != nil && FreeAccessServiceMethod(a.storage.GetAppSettings(), tag) == FreeAccessMethodZapret
+				if strictZapret {
+					a.emitBackgroundStrategyService(tag, ServiceBypassMethod{}, false, true, false, "failed", "Проверен весь список: подходящая стратегия Zapret не найдена", round, len(ladders[tag]))
+				} else if batch.HasVPN {
 					method := FreeAccessMethodVPN
-					if a.storage != nil && FreeAccessServiceMethod(a.storage.GetAppSettings(), tag) == FreeAccessMethodZapret {
-						method = FreeAccessMethodDirect
-					}
 					a.emitBackgroundStrategyFallback(tag, method, true)
 				} else {
-					a.emitBackgroundStrategyService(tag, ServiceBypassMethod{}, false, true, false, "failed", "В текущей сессии рабочая стратегия не найдена; следующий запуск продолжит со следующего набора", round, len(ladders[tag]))
+					a.emitBackgroundStrategyService(tag, ServiceBypassMethod{}, false, true, false, "failed", "Проверен весь список: подходящая стратегия не найдена", round, len(ladders[tag]))
 				}
 				next = append(next, tag)
 			}
@@ -1470,7 +1482,9 @@ func startupServiceSearchLadder(serviceTag string, current ServiceBypassMethod, 
 	}
 	limit := maxAutomaticServiceStrategies
 	if len(requestedLimit) > 0 && requestedLimit[0] > 0 {
-		limit = min(requestedLimit[0], maxAutomaticServiceStrategies)
+		// Callers may explicitly request the whole catalog only for the
+		// no-subscription extended campaign. The default remains bounded.
+		limit = requestedLimit[0]
 	}
 	limit = min(limit, len(ranked))
 	startIndex := serviceStrategyIndex(serviceTag, current.Tag)
@@ -1697,6 +1711,9 @@ func (a *App) applyServiceFallbackSelectionToConfig(configPath string, result ro
 func (a *App) retunePerServiceStrategy(serviceTag, reason string) error {
 	if a.trafficEngine == nil || a.trafficEngine.ActiveTag() != composedStrategyTag {
 		return fmt.Errorf("per-service engine is not active")
+	}
+	if a.storage != nil && ZapretStrategyMode(a.storage.GetAppSettings(), serviceTag) == ZapretStrategyModeManual {
+		return fmt.Errorf("service %q uses a manually locked Zapret strategy", serviceTag)
 	}
 	if !a.tryBeginRouteProbeDiscovery() {
 		return fmt.Errorf("route method discovery is already running")

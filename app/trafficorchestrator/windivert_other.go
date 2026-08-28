@@ -10,6 +10,10 @@ func OpenWinDivertBackend(string) (*WinDivertBackend, error) {
 	return nil, errors.New("WinDivert is available only on Windows")
 }
 
+func OpenWinDivertBackendWithFilter(string, string) (*WinDivertBackend, error) {
+	return nil, errors.New("WinDivert is available only on Windows")
+}
+
 func (*WinDivertBackend) Receive([]byte) (int, PacketAddress, error) {
 	return 0, PacketAddress{}, ErrBackendClosed
 }

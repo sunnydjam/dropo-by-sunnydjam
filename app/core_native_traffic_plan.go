@@ -24,6 +24,7 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 			ID:             "latency-sensitive-direct",
 			DomainSuffixes: append([]string(nil), DirectDomainSuffixes...),
 			IPCIDRs:        append([]string(nil), DirectIPCIDRs...),
+			ProcessNames:   append([]string(nil), DirectProcessNames...),
 		}},
 	}
 	if a != nil && a.trafficEngine != nil {
@@ -79,6 +80,7 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 		rule.CandidateStrategyIDs = append([]string(nil), candidateIDs...)
 		plan.Services = append(plan.Services, rule)
 		plan.Selections = append(plan.Selections, traffic.ServiceSelection{ServiceID: service.Tag, StrategyID: strategyID})
+		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: service.Tag, Kind: traffic.ServiceRouteZapret})
 	}
 	if selection, selected := selections[commonBlockedServiceTag]; selected {
 		catalog, err := a.loadBlockedCatalogCached()
@@ -105,12 +107,44 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 		plan.Selections = append(plan.Selections, traffic.ServiceSelection{
 			ServiceID: commonBlockedServiceTag, StrategyID: strategyID,
 		})
+		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: commonBlockedServiceTag, Kind: traffic.ServiceRouteZapret})
 	}
+	a.addNativeVPNServiceRoutes(&plan)
 	a.addNativeWireGuardRules(&plan)
 	if err := traffic.ValidatePlan(plan); err != nil {
 		return traffic.TrafficPlan{}, err
 	}
 	return plan, nil
+}
+
+func (a *App) addNativeVPNServiceRoutes(plan *traffic.TrafficPlan) {
+	if a == nil || a.storage == nil || plan == nil {
+		return
+	}
+	settings := a.storage.GetAppSettings()
+	cache := a.loadServiceStrategyCache()
+	hasVPN, _ := configHasVPNProbeCandidates(a.storage.ActiveConfigFilePath())
+	known := make(map[string]bool, len(plan.Services))
+	for _, rule := range plan.Services {
+		known[rule.ID] = true
+	}
+	for _, service := range DefaultFreeAccessServices {
+		method := FreeAccessServiceMethod(settings, service.Tag)
+		vpnRoute := method == FreeAccessMethodVPN
+		if method == FreeAccessMethodAuto {
+			if entry, ok := cache[service.Tag]; ok && entry.MethodTag == FreeAccessMethodVPN {
+				vpnRoute = true
+			} else if hasVPN && (service.RequiresVPN || !serviceHasFreeBypass(service.Tag) || !FreeMethodsAllowed(settings)) {
+				vpnRoute = true
+			}
+		}
+		if known[service.Tag] || !vpnRoute {
+			continue
+		}
+		plan.Services = append(plan.Services, nativeServiceRule(service, nil))
+		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: service.Tag, Kind: traffic.ServiceRouteVPN})
+		known[service.Tag] = true
+	}
 }
 
 func rotateStringValues(values []string, first string) []string {
@@ -133,19 +167,25 @@ func rotateStringValues(values []string, first string) []string {
 func nativeServiceRule(service FreeAccessService, strategyIDs []string) traffic.ServiceRule {
 	rule := traffic.ServiceRule{
 		ID: service.Tag, DisplayName: service.DisplayName,
+		ExactHosts:           append([]string(nil), service.ExactHosts...),
 		DomainSuffixes:       append([]string(nil), service.DomainSuffixes...),
 		IPCIDRs:              append([]string(nil), service.IPCIDRs...),
+		ProcessNames:         append([]string(nil), service.ProcessNames...),
 		TCPPorts:             []int{80, 443},
 		UDPPorts:             []int{443},
 		CandidateStrategyIDs: append([]string(nil), strategyIDs...),
 		AllowVPNFallback:     true,
 		AllowDirectFallback:  true,
 	}
+	if len(rule.ProcessNames) > 0 {
+		rule.ProcessMatchPolicy = traffic.ProcessMatchIdentity
+	}
 	if len(rule.IPCIDRs) > 0 {
 		rule.IPMatchPolicy = traffic.IPMatchRequireContext
 	}
 	if service.Tag == "discord" {
 		rule.TCPPorts = append(rule.TCPPorts, normalizedDiscordTCPPorts(nil)...)
+		rule.ProcessDiscoveryUDPPortRanges = discordProcessDiscoveryUDPPortRanges()
 		rule.Fingerprints = []string{"stun", "discord-media"}
 	}
 	for index, targetURL := range service.ProbeTargets() {
@@ -163,6 +203,31 @@ func nativeServiceRule(service FreeAccessService, strategyIDs []string) traffic.
 		})
 	}
 	return rule
+}
+
+func discordProcessDiscoveryUDPPortRanges() []traffic.PortRange {
+	return []traffic.PortRange{
+		{First: 19294, Last: 19344},
+		{First: 50000, Last: 50099},
+	}
+}
+
+// nativeSelectiveCaptureCatalog is a stable session superset used only to
+// construct the immutable WinDivert filter. The active TrafficPlan remains the
+// authority for Direct/VPN/Zapret decisions; catalog membership alone never
+// redirects a packet.
+func nativeSelectiveCaptureCatalog() []traffic.ServiceRule {
+	result := make([]traffic.ServiceRule, 0, len(DefaultFreeAccessServices))
+	for _, service := range DefaultFreeAccessServices {
+		rule := nativeServiceRule(service, nil)
+		if service.Tag == "discord" {
+			// Discord voice/media ports are allocated dynamically. The CIDR still
+			// requires Discord.exe identity before the active plan redirects it.
+			rule.UDPPorts = nil
+		}
+		result = append(result, rule)
+	}
+	return result
 }
 
 func (a *App) addNativeWireGuardRules(plan *traffic.TrafficPlan) {
@@ -217,6 +282,7 @@ func (a *App) addNativeWireGuardRules(plan *traffic.TrafficPlan) {
 			AllowDirectFallback:  true,
 		})
 		plan.Selections = append(plan.Selections, traffic.ServiceSelection{ServiceID: id, StrategyID: "native-decoy-split"})
+		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: id, Kind: traffic.ServiceRouteZapret})
 	}
 }
 

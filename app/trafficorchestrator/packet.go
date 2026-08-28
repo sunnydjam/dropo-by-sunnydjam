@@ -173,6 +173,16 @@ func (p parsedPacket) flowEvidence() FlowEvidence {
 	}
 }
 
+func (p parsedPacket) flowTuple() FlowTuple {
+	return FlowTuple{
+		Network:         p.network,
+		Source:          p.source,
+		SourcePort:      uint16(p.sourcePort),
+		Destination:     p.destination,
+		DestinationPort: uint16(p.destinationPort),
+	}
+}
+
 func extractHTTPHost(payload []byte) string {
 	if len(payload) < 16 {
 		return ""

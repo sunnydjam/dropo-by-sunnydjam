@@ -25,6 +25,39 @@ func relaxTunStrictRoute(config map[string]interface{}) bool {
 	return changed
 }
 
+// useWindowsSystemTunStack keeps latency-sensitive UDP on the native Windows
+// network stack. The mixed stack sends UDP through gVisor, which adds a second
+// user-space NAT implementation even when the selected outbound is direct.
+// That can break game server discovery and inflate realtime latency. The
+// system stack is endpoint-independent by default, so the gVisor-only legacy
+// option must not survive imported or previously generated configurations.
+func useWindowsSystemTunStack(config map[string]interface{}) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	inbounds, ok := config["inbounds"].([]interface{})
+	if !ok {
+		return false
+	}
+
+	changed := false
+	for _, inbound := range inbounds {
+		inboundMap, ok := inbound.(map[string]interface{})
+		if !ok || inboundMap["type"] != "tun" {
+			continue
+		}
+		if inboundMap["stack"] != "system" {
+			inboundMap["stack"] = "system"
+			changed = true
+		}
+		if _, exists := inboundMap["endpoint_independent_nat"]; exists {
+			delete(inboundMap, "endpoint_independent_nat")
+			changed = true
+		}
+	}
+	return changed
+}
+
 func disableTunIPv6(config map[string]interface{}) bool {
 	inbounds, ok := config["inbounds"].([]interface{})
 	if !ok {

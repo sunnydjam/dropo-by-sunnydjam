@@ -185,6 +185,12 @@ func (a *App) selectFreeAccessStrategyForService(settings GlobalAppSettings, svc
 		if runtime.GOOS != "windows" || !serviceHasFreeBypass(svc.Tag) {
 			return freeAccessStrategySelection{}
 		}
+		if method, ok := ZapretManualStrategy(settings, svc.Tag); ok {
+			return freeAccessStrategySelection{
+				Tag: svc.Tag, Name: svc.DisplayName, MethodTag: method.Tag,
+				MethodLabel: method.Label, MethodKind: "transparent", Source: "manual-zapret-strategy",
+			}
+		}
 		if cached, ok := serviceFallbackCache[svc.Tag]; ok && !isFreeAccessFallbackTag(cached.MethodTag) {
 			if method, exists := findServiceBypassMethod(svc.Tag, cached.MethodTag); exists {
 				return freeAccessStrategySelection{

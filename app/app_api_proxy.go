@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -455,6 +456,7 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 	}
 
 	_, hasVPNProxy := proxies["auto-select"]
+	serviceFallbackCache := a.loadServiceStrategyCache()
 	services := make([]map[string]interface{}, 0, len(DefaultFreeAccessServices))
 	for _, svc := range DefaultFreeAccessServices {
 		enabled := FreeAccessServiceEnabled(settings, svc.Tag)
@@ -499,15 +501,18 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 				}
 			}
 			services = append(services, map[string]interface{}{
-				"tag":            svc.Tag,
-				"name":           svc.DisplayName,
-				"domainSuffixes": append([]string(nil), svc.DomainSuffixes...),
-				"ipCidrs":        append([]string(nil), svc.IPCIDRs...),
-				"requiresVpn":    svc.RequiresVPN,
-				"group":          groupTag,
-				"method":         method,
-				"outbound":       outbound,
-				"delay":          0,
+				"tag":             svc.Tag,
+				"name":            svc.DisplayName,
+				"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+				"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+				"requiresVpn":     svc.RequiresVPN,
+				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+				"group":           groupTag,
+				"method":          method,
+				"outbound":        outbound,
+				"delay":           0,
 			})
 			continue
 		}
@@ -522,17 +527,24 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 			delay = a.cachedRouteServiceDelay(svc)
 		}
 
-		services = append(services, map[string]interface{}{
-			"tag":            svc.Tag,
-			"name":           svc.DisplayName,
-			"domainSuffixes": append([]string(nil), svc.DomainSuffixes...),
-			"ipCidrs":        append([]string(nil), svc.IPCIDRs...),
-			"requiresVpn":    svc.RequiresVPN,
-			"group":          groupTag,
-			"method":         method,
-			"outbound":       outbound,
-			"delay":          delay,
-		})
+		item := map[string]interface{}{
+			"tag":             svc.Tag,
+			"name":            svc.DisplayName,
+			"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+			"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+			"requiresVpn":     svc.RequiresVPN,
+			"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+			"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+			"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+			"group":           groupTag,
+			"method":          method,
+			"outbound":        outbound,
+			"delay":           delay,
+		}
+		for key, value := range zapretStrategySummary(settings, svc.Tag, serviceFallbackCache) {
+			item[key] = value
+		}
+		services = append(services, item)
 	}
 
 	catchAll := map[string]interface{}{}
@@ -596,17 +608,24 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 			delay = a.cachedRouteServiceDelay(svc)
 		}
 
-		services = append(services, map[string]interface{}{
-			"tag":            svc.Tag,
-			"name":           svc.DisplayName,
-			"domainSuffixes": append([]string(nil), svc.DomainSuffixes...),
-			"ipCidrs":        append([]string(nil), svc.IPCIDRs...),
-			"requiresVpn":    svc.RequiresVPN,
-			"group":          ServiceBypassGroupTag(svc.Tag),
-			"method":         method,
-			"outbound":       outbound,
-			"delay":          delay,
-		})
+		item := map[string]interface{}{
+			"tag":             svc.Tag,
+			"name":            svc.DisplayName,
+			"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+			"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+			"requiresVpn":     svc.RequiresVPN,
+			"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+			"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+			"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+			"group":           ServiceBypassGroupTag(svc.Tag),
+			"method":          method,
+			"outbound":        outbound,
+			"delay":           delay,
+		}
+		for key, value := range zapretStrategySummary(settings, svc.Tag, serviceFallbackCache) {
+			item[key] = value
+		}
+		services = append(services, item)
 	}
 
 	catchAll := map[string]interface{}{}

@@ -306,7 +306,7 @@ func (a *App) GetRoutingMode() map[string]interface{} {
 		"mode":        string(mode),
 		"description": modeDescriptions[string(mode)],
 		"modes": []map[string]string{
-			{"value": string(RoutingModeBlockedOnly), "label": "Только заблокированные", "description": "Через VPN идут только заблокированные сайты (РКН + сервисы, блокирующие РФ). Минимальная нагрузка на VPN."},
+			{"value": string(RoutingModeBlockedOnly), "label": "Выбранные сервисы", "description": "VPN и Zapret работают только для сервисов с явной политикой; остальной трафик идёт напрямую."},
 			{"value": string(RoutingModeAllTraffic), "label": "Весь трафик", "description": "Весь трафик через VPN. Максимальная приватность, высокая нагрузка."},
 		},
 	}
@@ -315,6 +315,8 @@ func (a *App) GetRoutingMode() map[string]interface{} {
 // SetRoutingMode sets routing mode and rebuilds config
 func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
 
 	if a.storage == nil {
 		return map[string]interface{}{
@@ -338,27 +340,51 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 		}
 	}
 
-	// Check if VPN is running
 	a.mu.Lock()
 	isRunning := a.isRunning
+	isStarting := a.isStarting
 	a.mu.Unlock()
-
-	if isRunning {
+	if isStarting {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Дождитесь завершения текущего подключения VPN и повторите смену режима.",
+		}
+	}
+	if isRunning && runtime.GOOS != "windows" {
 		return map[string]interface{}{
 			"success": false,
 			"error":   "Нельзя изменить режим пока VPN активен. Сначала отключите VPN.",
 		}
 	}
 
-	// Update settings
 	settings := a.storage.GetAppSettings()
 	previousSettings := cloneGlobalAppSettings(settings)
+	if NormalizeRoutingMode(settings.RoutingMode) == routingMode {
+		return map[string]interface{}{
+			"success":   true,
+			"message":   "Режим маршрутизации уже выбран",
+			"mode":      string(routingMode),
+			"restarted": false,
+			"unchanged": true,
+		}
+	}
 	settings.RoutingMode = routingMode
 
+	if isRunning {
+		stopResult := a.Stop()
+		if !apiResultSucceeded(stopResult) {
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Не удалось остановить VPN для смены режима: %s", apiResultMessage(stopResult)),
+			}
+		}
+	}
+
 	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		recovery := a.restartAfterServicePolicyFailure(isRunning)
 		return map[string]interface{}{
 			"success": false,
-			"error":   fmt.Sprintf("Ошибка сохранения настроек: %v", err),
+			"error":   fmt.Sprintf("Ошибка сохранения настроек: %v%s", err, recovery),
 		}
 	}
 
@@ -369,22 +395,39 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 
 	// Rebuild config for active profile
 	if err := a.RebuildActiveProfileConfig(); err != nil {
-		_ = a.storage.UpdateAppSettings(previousSettings)
 		if a.configBuilder != nil {
 			a.configBuilder.SetRoutingMode(previousSettings.RoutingMode)
 		}
+		rollbackErr := a.restoreServicePolicy(previousSettings)
+		recovery := a.restartAfterServicePolicyFailure(isRunning)
 		return map[string]interface{}{
 			"success": false,
-			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v", err),
+			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v%s%s", err, rollbackErr, recovery),
+		}
+	}
+	if isRunning {
+		startResult := a.Start()
+		if !apiResultSucceeded(startResult) {
+			startError := apiResultMessage(startResult)
+			if a.configBuilder != nil {
+				a.configBuilder.SetRoutingMode(previousSettings.RoutingMode)
+			}
+			rollbackErr := a.restoreServicePolicy(previousSettings)
+			recovery := a.restartAfterServicePolicyFailure(true)
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Режим сохранён, но VPN не переподключился: %s%s%s", startError, rollbackErr, recovery),
+			}
 		}
 	}
 
 	a.writeLog(fmt.Sprintf("Routing mode changed to: %s", mode))
 
 	return map[string]interface{}{
-		"success": true,
-		"message": "Режим маршрутизации изменён",
-		"mode":    mode,
+		"success":   true,
+		"message":   "Режим маршрутизации изменён",
+		"mode":      string(routingMode),
+		"restarted": isRunning,
 	}
 }
 
@@ -490,7 +533,7 @@ func (a *App) GetFreeAccessConfig() map[string]interface{} {
 				effectiveSource = selectedMethod
 			}
 		}
-		services = append(services, map[string]interface{}{
+		item := map[string]interface{}{
 			"tag":                  svc.Tag,
 			"name":                 svc.DisplayName,
 			"domainSuffixes":       append([]string(nil), svc.DomainSuffixes...),
@@ -498,12 +541,17 @@ func (a *App) GetFreeAccessConfig() map[string]interface{} {
 			"enabled":              enabled,
 			"requiresVpn":          svc.RequiresVPN,
 			"zapretSupported":      runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+			"homeVisible":          HomeRouteServiceVisible(settings, svc.Tag),
 			"selectedMethod":       selectedMethod,
 			"methodLabel":          FreeAccessOutboundLabel(selectedMethod),
 			"effectiveMethod":      effectiveMethod,
 			"effectiveMethodLabel": effectiveMethodLabel,
 			"effectiveSource":      effectiveSource,
-		})
+		}
+		for key, value := range zapretStrategySummary(settings, svc.Tag, serviceFallbackCache) {
+			item[key] = value
+		}
+		services = append(services, item)
 	}
 
 	byeDPIInstalled := false
@@ -527,14 +575,58 @@ func (a *App) GetFreeAccessConfig() map[string]interface{} {
 	}
 }
 
+// SetHomeRouteServiceVisible pins or removes an optional service on the home
+// dashboard. The four primary services are always visible and cannot be removed.
+// This is a UI preference only, so changing it never restarts the traffic stack.
+func (a *App) SetHomeRouteServiceVisible(tag string, visible bool) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	tag = strings.TrimSpace(strings.ToLower(tag))
+	if a.storage == nil {
+		return map[string]interface{}{"success": false, "error": "Хранилище не инициализировано"}
+	}
+	known := false
+	for _, service := range DefaultFreeAccessServices {
+		if service.Tag == tag {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Неизвестный сервис: %s", tag)}
+	}
+	if primaryHomeRouteServiceTags[tag] {
+		return map[string]interface{}{"success": true, "tag": tag, "visible": true, "primary": true}
+	}
+
+	settings := a.storage.GetAppSettings()
+	next := make([]string, 0, len(settings.HomeRouteServices)+1)
+	seen := make(map[string]bool, len(settings.HomeRouteServices)+1)
+	for _, existing := range settings.HomeRouteServices {
+		if existing == "" || existing == tag || primaryHomeRouteServiceTags[existing] || seen[existing] {
+			continue
+		}
+		seen[existing] = true
+		next = append(next, existing)
+	}
+	if visible {
+		next = append(next, tag)
+	}
+	settings.HomeRouteServices = next
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка сохранения главных маршрутов: %v", err)}
+	}
+	return map[string]interface{}{"success": true, "tag": tag, "visible": visible}
+}
+
 // SetFreeAccessEnabled toggles the "Free access" master switch and rebuilds config.
 func (a *App) SetFreeAccessEnabled(enabled bool) map[string]interface{} {
 	return a.SetDisableFreeAccess(!enabled)
 }
 
-// SetDisableFreeAccess toggles the opt-out from automatic free DPI-bypass
-// methods. Auto services use the VPN subscription when present and stay direct
-// when it is absent; an explicit per-service Zapret policy remains authoritative.
+// SetDisableFreeAccess is retained for compatibility with older clients.
+// Explicit Direct/VPN/Zapret service policies remain authoritative.
 func (a *App) SetDisableFreeAccess(disabled bool) map[string]interface{} {
 	a.waitForInit()
 
@@ -595,8 +687,9 @@ func (a *App) SetFreeAccessReverse(reverse bool) map[string]interface{} {
 	}
 }
 
-// ToggleFreeAccessService is the legacy boolean API. The four-policy model maps
-// enabled to Auto and disabled to Direct so it cannot create a hidden route.
+// ToggleFreeAccessService is the legacy boolean API. Both values now map to
+// Direct because only the explicit route-policy API may opt traffic into VPN or
+// Zapret.
 func (a *App) ToggleFreeAccessService(tag string, enabled bool) map[string]interface{} {
 	a.waitForInit()
 	a.settingsPolicyMu.Lock()
@@ -643,9 +736,6 @@ func (a *App) ToggleFreeAccessService(tag string, enabled bool) map[string]inter
 		settings.FreeAccessMethods = DefaultFreeAccessServiceMethodState()
 	}
 	method := FreeAccessMethodDirect
-	if enabled {
-		method = FreeAccessMethodAuto
-	}
 	settings.FreeAccessMethods[tag] = method
 
 	if err := a.storage.UpdateAppSettings(settings); err != nil {
@@ -673,8 +763,8 @@ func (a *App) ToggleFreeAccessService(tag string, enabled bool) map[string]inter
 	}
 }
 
-// SetFreeAccessServiceMethod selects one of the four stable service policies:
-// Auto, Direct, VPN, or the Windows-only strict Zapret ladder. Concrete legacy
+// SetFreeAccessServiceMethod selects one of three explicit service policies:
+// Direct, VPN, or the Windows-only strict Zapret ladder. Concrete legacy
 // strategy tags are migrated and never exposed as extra UI policies.
 func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]interface{} {
 	a.waitForInit()
@@ -713,7 +803,7 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	}
 	requestedMethod := strings.TrimSpace(strings.ToLower(method))
 	if normalized == FreeAccessMethodZapret && !serviceHasFreeBypass(service.Tag) && isKnownLegacyFreeAccessMethod(requestedMethod) {
-		normalized = FreeAccessMethodAuto
+		normalized = FreeAccessMethodDirect
 	}
 	if normalized == FreeAccessMethodZapret {
 		if runtime.GOOS != "windows" {
@@ -725,7 +815,7 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 		if !serviceHasFreeBypass(service.Tag) {
 			return map[string]interface{}{
 				"success": false,
-				"error":   fmt.Sprintf("Для сервиса %s нет безопасной Zapret-стратегии; выберите Авто, Напрямую или Через VPN.", service.DisplayName),
+				"error":   fmt.Sprintf("Для сервиса %s нет безопасной Zapret-стратегии; выберите Напрямую или Через VPN.", service.DisplayName),
 			}
 		}
 	}
@@ -749,17 +839,7 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 
 	settings := a.storage.GetAppSettings()
 	previousSettings := cloneGlobalAppSettings(settings)
-	existing := FreeAccessMethodAuto
-	if settings.FreeAccessMethods != nil {
-		existing = NormalizeFreeAccessServiceMethod(settings.FreeAccessMethods[tag])
-		if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(existing) || IsFreeAccessTransparentMethod(existing)) {
-			if serviceHasFreeBypass(tag) {
-				existing = FreeAccessMethodZapret
-			} else {
-				existing = FreeAccessMethodAuto
-			}
-		}
-	}
+	existing := FreeAccessServiceMethod(settings, tag)
 	if existing == normalized {
 		return map[string]interface{}{
 			"success":   true,
@@ -829,10 +909,138 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	}
 }
 
+// SetZapretServiceStrategy configures the strategy inside an explicit Zapret
+// service route. Auto forgets the network-specific result and starts a fresh
+// bounded search; manual locks one concrete typed strategy until changed.
+func (a *App) SetZapretServiceStrategy(tag string, mode string, strategyTag string) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+
+	tag = strings.TrimSpace(strings.ToLower(tag))
+	mode = NormalizeZapretStrategyMode(mode)
+	strategyTag = strings.TrimSpace(strings.ToLower(strategyTag))
+	service, found := findFreeAccessService(tag)
+	if a.storage == nil {
+		return map[string]interface{}{"success": false, "error": "Хранилище не инициализировано"}
+	}
+	if !found || runtime.GOOS != "windows" || !serviceHasFreeBypass(tag) {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Настройка Zapret недоступна для сервиса %s", tag)}
+	}
+	var selected ServiceBypassMethod
+	if mode == ZapretStrategyModeManual {
+		var ok bool
+		selected, ok = findServiceBypassMethod(tag, strategyTag)
+		if !ok {
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Неизвестная стратегия Zapret для %s: %s", service.DisplayName, strategyTag)}
+		}
+	}
+
+	a.mu.Lock()
+	isRunning, isStarting := a.isRunning, a.isStarting
+	a.mu.Unlock()
+	if isStarting {
+		return map[string]interface{}{"success": false, "error": "Дождитесь завершения текущего подключения и повторите настройку Zapret."}
+	}
+
+	settings := a.storage.GetAppSettings()
+	previousSettings := cloneGlobalAppSettings(settings)
+	if settings.ZapretStrategyModes == nil {
+		settings.ZapretStrategyModes = DefaultZapretStrategyModeState()
+	}
+	if settings.ZapretStrategies == nil {
+		settings.ZapretStrategies = map[string]string{}
+	}
+	settings.ZapretStrategyModes[tag] = mode
+	if mode == ZapretStrategyModeManual {
+		settings.ZapretStrategies[tag] = selected.Tag
+	} else {
+		delete(settings.ZapretStrategies, tag)
+	}
+
+	if isRunning {
+		stopResult := a.Stop()
+		if !apiResultSucceeded(stopResult) {
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Не удалось остановить подключение для смены стратегии Zapret: %s", apiResultMessage(stopResult))}
+		}
+	}
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		recovery := a.restartAfterServicePolicyFailure(isRunning)
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка сохранения стратегии Zapret: %v%s", err, recovery)}
+	}
+	if mode == ZapretStrategyModeAuto {
+		a.removeServiceStrategyCacheEntry(tag)
+	}
+	if err := a.RebuildActiveProfileConfig(); err != nil {
+		rollbackErr := a.restoreServicePolicy(previousSettings)
+		recovery := a.restartAfterServicePolicyFailure(isRunning)
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка применения стратегии Zapret: %v%s%s", err, rollbackErr, recovery)}
+	}
+	if isRunning {
+		startResult := a.Start()
+		if !apiResultSucceeded(startResult) {
+			startError := apiResultMessage(startResult)
+			rollbackErr := a.restoreServicePolicy(previousSettings)
+			recovery := a.restartAfterServicePolicyFailure(true)
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Стратегия сохранена, но подключение не восстановлено: %s%s%s", startError, rollbackErr, recovery)}
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("Zapret strategy for %s: mode=%s strategy=%s", tag, mode, strategyTag))
+	result := map[string]interface{}{
+		"success": true, "tag": tag, "mode": mode, "restarted": isRunning,
+		"searchStarted": mode == ZapretStrategyModeAuto && isRunning,
+	}
+	for key, value := range zapretStrategySummary(settings, tag, a.loadServiceStrategyCache()) {
+		result[key] = value
+	}
+	return result
+}
+
+func zapretStrategySummary(settings GlobalAppSettings, serviceTag string, cache map[string]serviceStrategyCacheEntry) map[string]interface{} {
+	methods := rankedMethodsForService(serviceTag)
+	if len(methods) == 0 {
+		return nil
+	}
+	options := make([]map[string]interface{}, 0, len(methods))
+	for _, method := range methods {
+		options = append(options, map[string]interface{}{"tag": method.Tag, "label": method.Label})
+	}
+	mode := ZapretStrategyMode(settings, serviceTag)
+	selectedTag := ""
+	effectiveTag := ""
+	effectiveLabel := ""
+	source := "auto-pending"
+	notFound := false
+	if method, ok := ZapretManualStrategy(settings, serviceTag); ok {
+		selectedTag, effectiveTag, effectiveLabel, source = method.Tag, method.Tag, method.Label, "manual"
+	} else if entry, ok := cache[serviceTag]; ok && !isFreeAccessFallbackTag(entry.MethodTag) {
+		if method, found := findServiceBypassMethod(serviceTag, entry.MethodTag); found {
+			effectiveTag, effectiveLabel, source = method.Tag, method.Label, "auto-saved"
+		}
+	} else if ok && isFreeAccessFallbackTag(entry.MethodTag) {
+		effectiveLabel, source, notFound = "Подходящая стратегия не найдена", "auto-not-found", true
+	}
+	if effectiveTag == "" && !notFound && len(methods) > 0 {
+		effectiveTag, effectiveLabel = methods[0].Tag, methods[0].Label
+	}
+	return map[string]interface{}{
+		"zapretStrategyMode":           mode,
+		"zapretSelectedStrategy":       selectedTag,
+		"zapretEffectiveStrategy":      effectiveTag,
+		"zapretEffectiveStrategyLabel": effectiveLabel,
+		"zapretStrategySource":         source,
+		"zapretStrategyNotFound":       notFound,
+		"zapretStrategyOptions":        options,
+	}
+}
+
 func normalizeRequestedFreeAccessServiceMethod(method string) (string, bool) {
 	requested := strings.TrimSpace(strings.ToLower(method))
 	switch requested {
-	case "", FreeAccessMethodAuto, FreeAccessMethodDirect, FreeAccessMethodVPN, FreeAccessMethodZapret, "subscription", "auto-select", "proxy", "bypass", "obhod":
+	case "", FreeAccessMethodAuto:
+		return FreeAccessMethodDirect, true
+	case FreeAccessMethodDirect, FreeAccessMethodVPN, FreeAccessMethodZapret, "subscription", "auto-select", "proxy", "bypass", "obhod":
 		return NormalizeFreeAccessServiceMethod(requested), true
 	}
 	if IsFreeAccessProxyMethod(requested) || IsFreeAccessTransparentMethod(requested) || isKnownLegacyFreeAccessMethod(requested) {

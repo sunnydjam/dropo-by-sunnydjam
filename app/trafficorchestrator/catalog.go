@@ -1,7 +1,7 @@
 package trafficorchestrator
 
 // BuiltinCatalogRevision changes whenever packet semantics or ordering changes.
-const BuiltinCatalogRevision = "dropo-native-windows-3"
+const BuiltinCatalogRevision = "dropo-native-windows-5-flowseal-1.10.2-full"
 
 // BuiltinStrategies returns the bounded strategy ladder implemented by the
 // Dropo packet engine. It contains data only: no shell arguments, Lua or
@@ -193,5 +193,104 @@ func BuiltinStrategies() []TrafficStrategy {
 			Cost:        StrategyCost{SyntheticPackets: 7, BufferedBytes: 1024, Risk: 36},
 		},
 	)
+	// Flowseal exposes each general*.bat file as a user-selectable profile.
+	// Keep those profiles distinct even when their typed in-process adaptation
+	// is similar: their fake counts, overlap, ordering and Discord UDP decoys can
+	// differ, and the UI must be able to test the complete upstream list.
+	strategies = append(flowseal1102BuiltinStrategies(common), strategies...)
 	return strategies
+}
+
+type flowseal1102Recipe struct {
+	kind          string
+	repeats       int
+	overlap       int
+	sequenceDelta int
+	position      int
+	sniEnd        bool
+}
+
+type flowseal1102Preset struct {
+	slug, label            string
+	youtube, discord       flowseal1102Recipe
+	youtubeUDP, discordUDP int
+}
+
+func flowseal1102BuiltinStrategies(common StrategyConstraints) []TrafficStrategy {
+	// Ordered with ALT13 first because it is the newest upstream preset, then
+	// the remaining 1.10.2 files in their familiar launcher order.
+	presets := []flowseal1102Preset{
+		{"alt13", "ALT13", flowseal1102Recipe{kind: "hostsplit"}, flowseal1102Recipe{kind: "fake-overlap", repeats: 7, overlap: 681, position: 1}, 11, 5},
+		{"general", "General", flowseal1102Recipe{kind: "overlap", overlap: 681, position: 1}, flowseal1102Recipe{kind: "overlap", overlap: 681, position: 1}, 6, 6},
+		{"alt", "ALT", flowseal1102Recipe{kind: "fake-split", repeats: 6, sequenceDelta: -10000, position: 2}, flowseal1102Recipe{kind: "fake-split", repeats: 6, sequenceDelta: -10000, position: 2}, 6, 6},
+		{"alt2", "ALT2", flowseal1102Recipe{kind: "overlap", overlap: 652, position: 2}, flowseal1102Recipe{kind: "overlap", overlap: 652, position: 2}, 6, 6},
+		{"alt3", "ALT3", flowseal1102Recipe{kind: "fake-disorder", repeats: 6}, flowseal1102Recipe{kind: "fake-disorder", repeats: 6}, 6, 6},
+		{"alt4", "ALT4", flowseal1102Recipe{kind: "fake-split", repeats: 6, sequenceDelta: 1000, position: 2}, flowseal1102Recipe{kind: "fake-split", repeats: 6, sequenceDelta: 1000, position: 2}, 6, 6},
+		{"alt5", "ALT5", flowseal1102Recipe{kind: "fake-split", repeats: 6, sequenceDelta: 1000, position: 2}, flowseal1102Recipe{kind: "fake-split", repeats: 6, sequenceDelta: 1000, position: 2}, 6, 6},
+		{"alt6", "ALT6", flowseal1102Recipe{kind: "overlap", overlap: 681, position: 1}, flowseal1102Recipe{kind: "overlap", overlap: 681, position: 1}, 6, 6},
+		{"alt7", "ALT7", flowseal1102Recipe{kind: "overlap", overlap: 679, position: 2, sniEnd: true}, flowseal1102Recipe{kind: "overlap", overlap: 679, position: 2, sniEnd: true}, 6, 6},
+		{"alt8", "ALT8", flowseal1102Recipe{kind: "fake", repeats: 6, sequenceDelta: 2}, flowseal1102Recipe{kind: "fake", repeats: 6, sequenceDelta: 2}, 6, 6},
+		{"alt9", "ALT9", flowseal1102Recipe{kind: "hostsplit", repeats: 4}, flowseal1102Recipe{kind: "hostsplit", repeats: 4}, 6, 6},
+		{"alt10", "ALT10", flowseal1102Recipe{kind: "fake", repeats: 6}, flowseal1102Recipe{kind: "fake", repeats: 6}, 6, 6},
+		{"alt11", "ALT11", flowseal1102Recipe{kind: "fake-overlap", repeats: 8, overlap: 681, position: 1}, flowseal1102Recipe{kind: "fake-overlap", repeats: 8, overlap: 681, position: 1}, 11, 6},
+		{"alt12", "ALT12", flowseal1102Recipe{kind: "hostsplit"}, flowseal1102Recipe{kind: "fake-overlap", repeats: 8, overlap: 681, position: 1}, 11, 3},
+		{"exp", "EXP", flowseal1102Recipe{kind: "hostsplit"}, flowseal1102Recipe{kind: "fake-overlap", repeats: 8, overlap: 681, position: 1}, 11, 4},
+		{"fake-tls-auto", "FAKE TLS AUTO", flowseal1102Recipe{kind: "fake-disorder", repeats: 11, sequenceDelta: -10000}, flowseal1102Recipe{kind: "fake-disorder", repeats: 11, sequenceDelta: -10000}, 11, 6},
+		{"fake-tls-auto-alt", "FAKE TLS AUTO ALT", flowseal1102Recipe{kind: "fake-split", repeats: 8, sequenceDelta: 2, position: 1}, flowseal1102Recipe{kind: "fake-split", repeats: 8, sequenceDelta: 2, position: 1}, 11, 6},
+		{"fake-tls-auto-alt2", "FAKE TLS AUTO ALT2", flowseal1102Recipe{kind: "fake-overlap", repeats: 8, overlap: 681, sequenceDelta: -65535, position: 1}, flowseal1102Recipe{kind: "fake-overlap", repeats: 8, overlap: 681, sequenceDelta: -65535, position: 1}, 11, 6},
+		{"fake-tls-auto-alt3", "FAKE TLS AUTO ALT3", flowseal1102Recipe{kind: "fake-overlap", repeats: 8, overlap: 681, position: 1}, flowseal1102Recipe{kind: "fake-overlap", repeats: 8, overlap: 681, position: 1}, 11, 6},
+		{"simple-fake", "SIMPLE FAKE", flowseal1102Recipe{kind: "hostsplit"}, flowseal1102Recipe{kind: "fake", repeats: 6}, 6, 6},
+		{"simple-fake-alt", "SIMPLE FAKE ALT", flowseal1102Recipe{kind: "fake", repeats: 6, sequenceDelta: 2}, flowseal1102Recipe{kind: "fake", repeats: 6, sequenceDelta: 2}, 6, 6},
+		{"simple-fake-alt2", "SIMPLE FAKE ALT2", flowseal1102Recipe{kind: "fake", repeats: 6}, flowseal1102Recipe{kind: "fake", repeats: 6}, 6, 6},
+	}
+	result := make([]TrafficStrategy, 0, len(presets)*2)
+	for _, preset := range presets {
+		result = append(result,
+			flowseal1102Strategy("native-flowseal-1102-youtube-"+preset.slug, "Flowseal 1.10.2 "+preset.label+" — YouTube", preset.youtube, "quic_decoy", preset.youtubeUDP, common),
+			flowseal1102Strategy("native-discord-flowseal-1102-"+preset.slug, "Flowseal 1.10.2 "+preset.label+" — Discord", preset.discord, "protocol_decoy", preset.discordUDP, common),
+		)
+	}
+	return result
+}
+
+func flowseal1102Strategy(id, label string, recipe flowseal1102Recipe, udpPayload string, udpRepeats int, common StrategyConstraints) TrafficStrategy {
+	firstByte := PacketPosition{Absolute: 1}
+	sniMiddle := PacketPosition{Anchor: "tls-sni-middle"}
+	positions := []PacketPosition{}
+	if recipe.position > 0 {
+		positions = append(positions, PacketPosition{Absolute: recipe.position})
+	}
+	if recipe.sniEnd {
+		positions = append(positions, PacketPosition{Anchor: "tls-sni-end", Offset: 1})
+	} else if recipe.kind == "hostsplit" || recipe.kind == "fake-disorder" {
+		positions = append(positions, sniMiddle)
+	}
+	if len(positions) == 0 {
+		positions = append(positions, firstByte, sniMiddle)
+	}
+	fake := PacketAction{Kind: ActionFake, Payload: "tls_client_hello", PadTo: 681, Repeats: max(1, recipe.repeats), SequenceDelta: recipe.sequenceDelta}
+	tcp := []PacketAction{}
+	switch recipe.kind {
+	case "fake":
+		tcp = append(tcp, fake)
+	case "fake-split":
+		tcp = append(tcp, fake, PacketAction{Kind: ActionSplit, Positions: positions})
+	case "fake-overlap":
+		tcp = append(tcp, fake, PacketAction{Kind: ActionSequenceOverlap, Overlap: recipe.overlap}, PacketAction{Kind: ActionSplit, Positions: positions})
+	case "fake-disorder":
+		tcp = append(tcp, fake, PacketAction{Kind: ActionDisorder, Positions: positions})
+	case "overlap":
+		tcp = append(tcp, PacketAction{Kind: ActionSequenceOverlap, Overlap: recipe.overlap}, PacketAction{Kind: ActionSplit, Positions: positions})
+	default: // hostfakesplit is represented by a service-scoped SNI split.
+		if recipe.repeats > 0 {
+			tcp = append(tcp, fake)
+		}
+		tcp = append(tcp, PacketAction{Kind: ActionSplit, Positions: positions})
+	}
+	return TrafficStrategy{
+		ID: id, Revision: 1, Label: label, TCP: tcp,
+		UDP:         []PacketAction{{Kind: ActionFake, Payload: udpPayload, Repeats: max(1, udpRepeats)}},
+		Constraints: common,
+		Cost:        StrategyCost{SyntheticPackets: max(1, recipe.repeats) + max(1, udpRepeats) + len(tcp), BufferedBytes: 681, Risk: 20},
+	}
 }

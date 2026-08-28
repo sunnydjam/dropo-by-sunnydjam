@@ -11,10 +11,12 @@ import (
 )
 
 type processorSnapshot struct {
-	plan       TrafficPlan
-	classifier *Classifier
-	strategies map[string]TrafficStrategy
-	selected   map[string]string
+	plan                TrafficPlan
+	classifier          *Classifier
+	strategies          map[string]TrafficStrategy
+	selected            map[string]string
+	routes              map[string]ServiceRouteKind
+	usesProcessIdentity bool
 }
 
 // PacketDecision is the complete result for one captured packet. Packets are
@@ -23,6 +25,9 @@ type PacketDecision struct {
 	PlanRevision uint64
 	ServiceID    string
 	StrategyID   string
+	Route        ServiceRouteKind
+	Direction    PacketDirection
+	Dropped      bool
 	Transformed  bool
 	Packets      [][]byte
 	Reason       string
@@ -38,13 +43,40 @@ type ServiceCounters struct {
 // Processor owns the immutable plan snapshot but no driver handle. It is used
 // by both the real Windows engine and deterministic packet replay tests.
 type Processor struct {
-	snapshot atomic.Pointer[processorSnapshot]
-	statsMu  sync.Mutex
-	stats    map[string]ServiceCounters
+	snapshot      atomic.Pointer[processorSnapshot]
+	identity      FlowIdentityResolver
+	redirector    *TCPPacketRedirector
+	udpRedirector *UDPPacketRedirector
+	fakeIPs       *FakeIPDirectory
+	dnsFake       *DNSFakeResponder
+	flows         *flowDecisionTable
+	statsMu       sync.Mutex
+	stats         map[string]ServiceCounters
 }
 
 func NewProcessor(plan TrafficPlan) (*Processor, error) {
-	processor := &Processor{stats: make(map[string]ServiceCounters)}
+	return NewProcessorWithIdentityResolver(plan, nil)
+}
+
+// NewProcessorWithIdentityResolver enables production process attribution
+// without coupling deterministic packet processing to Windows APIs.
+func NewProcessorWithIdentityResolver(plan TrafficPlan, identity FlowIdentityResolver) (*Processor, error) {
+	return NewProcessorWithRuntime(plan, identity, nil)
+}
+
+func NewProcessorWithRuntime(plan TrafficPlan, identity FlowIdentityResolver, redirector *TCPPacketRedirector) (*Processor, error) {
+	return NewProcessorWithSelectiveRuntime(plan, identity, redirector, nil)
+}
+
+func NewProcessorWithSelectiveRuntime(plan TrafficPlan, identity FlowIdentityResolver, redirector *TCPPacketRedirector, fakeIPs *FakeIPDirectory) (*Processor, error) {
+	return NewProcessorWithFullSelectiveRuntime(plan, identity, redirector, nil, fakeIPs)
+}
+
+func NewProcessorWithFullSelectiveRuntime(plan TrafficPlan, identity FlowIdentityResolver, redirector *TCPPacketRedirector, udpRedirector *UDPPacketRedirector, fakeIPs *FakeIPDirectory) (*Processor, error) {
+	processor := &Processor{identity: identity, redirector: redirector, udpRedirector: udpRedirector, fakeIPs: fakeIPs, flows: newFlowDecisionTable(), stats: make(map[string]ServiceCounters)}
+	if fakeIPs != nil {
+		processor.dnsFake = NewDNSFakeResponder(fakeIPs)
+	}
 	if err := processor.ApplyPlan(plan); err != nil {
 		return nil, err
 	}
@@ -78,6 +110,21 @@ func (p *Processor) ApplyPlan(plan TrafficPlan) error {
 		classifier: classifier,
 		strategies: make(map[string]TrafficStrategy, len(plan.Strategies)),
 		selected:   make(map[string]string, len(plan.Selections)),
+		routes:     make(map[string]ServiceRouteKind, len(plan.Routes)),
+	}
+	for _, service := range plan.Services {
+		if len(service.ProcessNames) > 0 {
+			snapshot.usesProcessIdentity = true
+			break
+		}
+	}
+	if !snapshot.usesProcessIdentity {
+		for _, rule := range plan.DirectRules {
+			if len(rule.ProcessNames) > 0 {
+				snapshot.usesProcessIdentity = true
+				break
+			}
+		}
 	}
 	for _, strategy := range plan.Strategies {
 		snapshot.strategies[strategy.ID] = strategy
@@ -85,7 +132,16 @@ func (p *Processor) ApplyPlan(plan TrafficPlan) error {
 	for _, selection := range plan.Selections {
 		snapshot.selected[selection.ServiceID] = selection.StrategyID
 	}
+	for _, route := range plan.Routes {
+		snapshot.routes[route.ServiceID] = route.Kind
+	}
+	if p.fakeIPs != nil {
+		if err := p.fakeIPs.ApplyPlan(plan); err != nil {
+			return fmt.Errorf("apply fake-IP routing revision: %w", err)
+		}
+	}
 	p.snapshot.Store(snapshot)
+	p.flows.clear()
 	return nil
 }
 
@@ -98,6 +154,9 @@ func sameClassificationPlan(previous, next TrafficPlan) bool {
 }
 
 func validateSelectionRevision(plan TrafficPlan, current *processorSnapshot) error {
+	if err := ValidatePlan(plan); err != nil {
+		return err
+	}
 	seen := make(map[string]struct{}, len(plan.Selections))
 	for _, selection := range plan.Selections {
 		if _, exists := current.strategies[selection.StrategyID]; !exists {
@@ -147,7 +206,84 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 	if err != nil {
 		return passDecision(snapshot.plan.Revision, packet, "unsupported or malformed packet")
 	}
-	classification := snapshot.classifier.Classify(parsed.flowEvidence())
+	tuple := parsed.flowTuple()
+	evidence := parsed.flowEvidence()
+	if p.identity != nil && tuple.valid() && (snapshot.usesProcessIdentity || p.fakeIPs != nil) {
+		evidence.ProcessName = p.identity.ResolveProcessName(tuple)
+	}
+	trustedRuntime := isTrustedSelectiveRuntimeProcess(evidence.ProcessName)
+	if p.dnsFake != nil && !trustedRuntime {
+		response, target, handled, responseErr := p.dnsFake.Respond(parsed)
+		if handled {
+			if responseErr != nil {
+				return passDecision(snapshot.plan.Revision, packet, "fake DNS response failed safe: "+responseErr.Error())
+			}
+			reason := "selected VPN domain mapped to fake IP"
+			route := ServiceRouteVPN
+			if target.ServiceID == "" {
+				reason = "encrypted DNS endpoint denied in selective mode"
+				route = ""
+			} else {
+				p.bump(target.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Transformed++ })
+			}
+			return PacketDecision{
+				PlanRevision: snapshot.plan.Revision, ServiceID: target.ServiceID, Route: route,
+				Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{response}, Reason: reason,
+			}
+		}
+	}
+	if p.redirector != nil {
+		restored, target, recognized, restoreErr := p.redirector.RestoreRelayPacket(parsed)
+		if recognized {
+			if restoreErr != nil {
+				return PacketDecision{PlanRevision: snapshot.plan.Revision, Route: ServiceRouteVPN, Dropped: true, Reason: restoreErr.Error()}
+			}
+			return PacketDecision{
+				PlanRevision: snapshot.plan.Revision, ServiceID: target.ServiceID, Route: ServiceRouteVPN,
+				Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{restored}, Reason: "restored selective VPN relay response",
+			}
+		}
+	}
+	if p.udpRedirector != nil {
+		restored, target, recognized, restoreErr := p.udpRedirector.RestoreRelayPacket(parsed)
+		if recognized {
+			if restoreErr != nil {
+				return PacketDecision{PlanRevision: snapshot.plan.Revision, Route: ServiceRouteVPN, Dropped: true, Reason: restoreErr.Error()}
+			}
+			return PacketDecision{
+				PlanRevision: snapshot.plan.Revision, ServiceID: target.ServiceID, Route: ServiceRouteVPN,
+				Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{restored}, Reason: "restored selective VPN UDP relay response",
+			}
+		}
+	}
+	// The relay hands selected destinations to sing-box over loopback. Any
+	// subsequent sing-box/Xray/WireGuard egress is already on its terminal path
+	// and must never be classified back into the selective redirector.
+	if trustedRuntime {
+		return passDecision(snapshot.plan.Revision, packet, "trusted Dropo runtime egress")
+	}
+	if p.fakeIPs != nil {
+		if target, matched := p.fakeIPs.LookupAddress(parsed.destination); matched {
+			evidence.Host = target.Host
+		}
+	}
+	// Preserve a prior direct disposition for the complete captured flow. This
+	// is especially important when a TCP SYN passed before process/SNI evidence
+	// became available: redirecting its later ClientHello would tear down an
+	// already-established Steam/Electron/native application connection.
+	if previous, ok := p.flows.lookup(tuple, snapshot.plan.Revision); ok && previous.Disposition == FlowDirect {
+		return passDecision(snapshot.plan.Revision, packet, "preserved established direct flow")
+	}
+	classification := snapshot.classifier.Classify(evidence)
+	route := snapshot.routes[classification.ServiceID]
+	if route == "" && classification.Matched {
+		if _, selected := snapshot.selected[classification.ServiceID]; selected {
+			route = ServiceRouteZapret
+		} else {
+			route = ServiceRouteDirect
+		}
+	}
+	p.recordFlowDecision(tuple, snapshot.plan.Revision, evidence.ProcessName, route, classification)
 	if classification.WorkNetwork {
 		return passDecision(snapshot.plan.Revision, packet, "reserved for work network "+classification.WorkNetworkID)
 	}
@@ -157,12 +293,77 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 	if !classification.Matched {
 		return passDecision(snapshot.plan.Revision, packet, "service not classified")
 	}
+	if route == ServiceRouteDirect {
+		p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
+		decision := passDecision(snapshot.plan.Revision, packet, "service explicitly routed direct")
+		decision.ServiceID = classification.ServiceID
+		decision.Route = route
+		return decision
+	}
+	if route == ServiceRouteVPN {
+		if parsed.network == NetworkUDP {
+			if p.udpRedirector == nil {
+				p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++ })
+				return PacketDecision{
+					PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route,
+					Dropped: true, Reason: "selective VPN UDP relay is not active",
+				}
+			}
+			reflected, redirectErr := p.udpRedirector.ReflectClientPacket(parsed, UDPRedirectTarget{
+				Flow: tuple, Host: evidence.Host, ServiceID: classification.ServiceID, Route: route,
+			})
+			if redirectErr != nil {
+				p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++ })
+				return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "selective VPN UDP redirect failed: " + redirectErr.Error()}
+			}
+			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Transformed++ })
+			return PacketDecision{
+				PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route,
+				Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{reflected}, Reason: "reflected to selective VPN UDP relay",
+			}
+		}
+		if parsed.network != NetworkTCP {
+			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "unsupported selective VPN transport"}
+		}
+		if p.redirector == nil {
+			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
+			decision := passDecision(snapshot.plan.Revision, packet, "service requires selective VPN relay")
+			decision.ServiceID = classification.ServiceID
+			decision.Route = route
+			return decision
+		}
+		reflected, redirectErr := p.redirector.ReflectClientPacket(parsed, TCPRedirectTarget{
+			Flow: tuple, Host: evidence.Host, ServiceID: classification.ServiceID, Route: route,
+		})
+		if redirectErr != nil {
+			if !parsed.isInitialTCPSYN() {
+				p.flows.store(tuple, FlowDecision{
+					PlanRevision: snapshot.plan.Revision, Disposition: FlowDirect,
+					ProcessName: normalizeProcessName(evidence.ProcessName),
+					Reason:      "selective VPN redirect declined for established TCP flow",
+				})
+				p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++; value.Passed++ })
+				decision := passDecision(snapshot.plan.Revision, packet, "selective VPN redirect failed safe: "+redirectErr.Error())
+				decision.ServiceID = classification.ServiceID
+				decision.Route = route
+				return decision
+			}
+			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++ })
+			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "selective VPN redirect failed: " + redirectErr.Error()}
+		}
+		p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Transformed++ })
+		return PacketDecision{
+			PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route,
+			Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{reflected}, Reason: "reflected to selective VPN relay",
+		}
+	}
 	strategyID := snapshot.selected[classification.ServiceID]
 	strategy, ok := snapshot.strategies[strategyID]
 	if !ok {
 		p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
 		decision := passDecision(snapshot.plan.Revision, packet, "no selected strategy")
 		decision.ServiceID = classification.ServiceID
+		decision.Route = route
 		return decision
 	}
 	packets, transformed, err := applyStrategy(parsed, strategy)
@@ -171,6 +372,7 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 		decision := passDecision(snapshot.plan.Revision, packet, "strategy failed safe: "+err.Error())
 		decision.ServiceID = classification.ServiceID
 		decision.StrategyID = strategy.ID
+		decision.Route = route
 		return decision
 	}
 	p.bump(classification.ServiceID, func(value *ServiceCounters) {
@@ -185,9 +387,54 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 		PlanRevision: snapshot.plan.Revision,
 		ServiceID:    classification.ServiceID,
 		StrategyID:   strategy.ID,
+		Route:        route,
 		Transformed:  transformed,
 		Packets:      packets,
 	}
+}
+
+func isTrustedSelectiveRuntimeProcess(value string) bool {
+	switch normalizeProcessName(value) {
+	case "dropo.exe", "dropo-ui.exe", "dropo-core.exe", "sing-box.exe", "xray.exe", "tg-ws-proxy.exe", "wireguard.exe", "wg.exe":
+		return true
+	default:
+		return false
+	}
+}
+
+// LookupFlowDecision returns only a non-expired decision made under the active
+// immutable plan. The current packet engine does not route from this table yet.
+func (p *Processor) LookupFlowDecision(tuple FlowTuple) (FlowDecision, bool) {
+	if p == nil {
+		return FlowDecision{}, false
+	}
+	snapshot := p.snapshot.Load()
+	if snapshot == nil {
+		return FlowDecision{}, false
+	}
+	return p.flows.lookup(tuple, snapshot.plan.Revision)
+}
+
+func (p *Processor) recordFlowDecision(tuple FlowTuple, revision uint64, processName string, route ServiceRouteKind, classification Classification) {
+	decision := FlowDecision{PlanRevision: revision, ProcessName: normalizeProcessName(processName), Route: route}
+	switch {
+	case classification.WorkNetwork:
+		decision.Disposition = FlowWorkNetwork
+		decision.RuleID = classification.WorkNetworkID
+		decision.Reason = "work-network evidence"
+	case classification.Direct:
+		decision.Disposition = FlowDirect
+		decision.RuleID = classification.DirectRuleID
+		decision.Reason = "explicit direct evidence"
+	case classification.Matched:
+		decision.Disposition = FlowService
+		decision.ServiceID = classification.ServiceID
+		decision.Reason = "selected-service evidence"
+	default:
+		decision.Disposition = FlowDirect
+		decision.Reason = "unclassified traffic defaults direct"
+	}
+	p.flows.store(tuple, decision)
 }
 
 func (p *Processor) Counters() map[string]ServiceCounters {

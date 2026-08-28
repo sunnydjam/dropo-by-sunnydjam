@@ -24,14 +24,14 @@
 | Проект | Что изучается | Статус в release |
 | --- | --- | --- |
 | [bol-van/zapret2](https://github.com/bol-van/zapret2) | Узкая kernel-side фильтрация, классификация STUN/Discord/WireGuard, порядок и ограничения desync-техник | Процесс, Lua, Cygwin, бинарники и исходники не поставляются. Собственная реализация написана на Go с типизированными bounded actions. Upstream MIT license учитывается при любом будущем переносе существенного кода. |
-| [Flowseal/zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) | Актуальная ALT12-комбинация активных Discord/STUN decoy-пакетов и список прямых исключений Steam | Не поставляется и не вызывается; использована только как проверочная конфигурация для собственной типизированной реализации |
+| [Flowseal/zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) | Все 22 профиля `general*.bat` релиза 1.10.2 для YouTube/Google и Discord media/voice, активные Discord/STUN decoy-пакеты и актуальные hostlist-наборы | Не поставляется и не вызывается; каждый профиль доступен как отдельная сервисная стратегия собственной типизированной реализации. Неподдерживаемый `hostfakesplit` представлен безопасным SNI split, без запуска внешнего `winws`. |
 | [bol-van/zapret](https://github.com/bol-van/zapret) | Исторические описания split/overlap/fake-подходов и blockcheck | Не поставляется и не вызывается |
 | [hufrea/byedpi](https://github.com/hufrea/byedpi) | Сравнение proxy-based обхода с прозрачным packet engine | Не входит в Windows release |
 
 Последние исследованные ревизии на 2026-08-09:
 
 - zapret2: `032651deeb2117a32c67fdf5cec115d5e52a63dd`;
-- Flowseal zapret-discord-youtube: `47da17f80ad36a8424cdd25658153fdebd7eb938` (обновление стратегий от 2026-08-09 проверено; обработка неизвестного или слабо классифицированного игрового payload намеренно не перенесена в fail-safe packet path dropo).
+- Flowseal zapret-discord-youtube 1.10.2: `dfd8e613b099676cf2aa7b474ee5923801514dec` (ALT13 проверена; универсальные/game filters намеренно не перенесены, потому что Dropo применяет Zapret только к выбранным сервисам).
 
 Обновление upstream само по себе не обновляет dropo: сначала выполняются
 license/security review, перевод идеи в типизированную модель, unit/fixture/

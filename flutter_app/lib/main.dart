@@ -161,6 +161,15 @@ abstract class CoreBridge {
     String tag,
     String method,
   );
+  Future<Map<String, dynamic>> setZapretServiceStrategy(
+    String tag,
+    String mode,
+    String strategyTag,
+  );
+  Future<Map<String, dynamic>> setHomeRouteServiceVisible(
+    String tag,
+    bool visible,
+  );
   Future<List<RouteService>> routes({bool live = false});
   Future<List<String>> logs();
   Future<List<BridgeEvent>> events({required int since});
@@ -307,33 +316,39 @@ class HttpCoreBridge implements CoreBridge {
   // _ensureToken reads the bridge token file (written by dropo-core next to its
   // executable) once it is available. It is safe to call repeatedly: it retries
   // until the file exists, then caches the value.
-  Future<void> _ensureToken() async {
+  Future<void> _ensureToken({Duration wait = Duration.zero}) async {
     if (_token != null) {
       return;
     }
-    try {
-      final exeDir = File(Platform.resolvedExecutable).parent;
-      final sep = Platform.pathSeparator;
-      final candidates = <File>[
-        if (Platform.environment['LOCALAPPDATA'] case final local?)
-          File('$local${sep}dropo${sep}bridge-token'),
-        File('${exeDir.path}${sep}bridge-token'),
-        File('${exeDir.path}${sep}resources${sep}bridge-token'),
-        File('${exeDir.path}${sep}resources${sep}app${sep}bridge-token'),
-      ];
-      for (final candidate in candidates) {
-        if (await candidate.exists()) {
-          final value = (await candidate.readAsString()).trim();
-          if (value.isNotEmpty) {
-            _token = value;
-            return;
+    final deadline = DateTime.now().add(wait);
+    do {
+      try {
+        final exeDir = File(Platform.resolvedExecutable).parent;
+        final sep = Platform.pathSeparator;
+        final candidates = <File>[
+          if (Platform.environment['LOCALAPPDATA'] case final local?)
+            File('$local${sep}dropo${sep}bridge-token'),
+          File('${exeDir.path}${sep}bridge-token'),
+          File('${exeDir.path}${sep}resources${sep}bridge-token'),
+          File('${exeDir.path}${sep}resources${sep}app${sep}bridge-token'),
+        ];
+        for (final candidate in candidates) {
+          if (await candidate.exists()) {
+            final value = (await candidate.readAsString()).trim();
+            if (value.isNotEmpty) {
+              _token = value;
+              return;
+            }
           }
         }
+      } catch (_) {
+        // The elevated core may be restoring the hand-off file. Retry below
+        // while the caller's bounded wait remains.
       }
-    } catch (_) {
-      // Token unavailable: POSTs proceed without it. The core treats an empty
-      // expected token as degraded-but-functional, so the UI keeps working.
-    }
+      if (DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    } while (_token == null && DateTime.now().isBefore(deadline));
   }
 
   @override
@@ -454,6 +469,23 @@ class HttpCoreBridge implements CoreBridge {
     String method,
   ) {
     return callMap('SetFreeAccessServiceMethod', args: [tag, method]);
+  }
+
+  @override
+  Future<Map<String, dynamic>> setZapretServiceStrategy(
+    String tag,
+    String mode,
+    String strategyTag,
+  ) {
+    return callMap('SetZapretServiceStrategy', args: [tag, mode, strategyTag]);
+  }
+
+  @override
+  Future<Map<String, dynamic>> setHomeRouteServiceVisible(
+    String tag,
+    bool visible,
+  ) {
+    return callMap('SetHomeRouteServiceVisible', args: [tag, visible]);
   }
 
   @override
@@ -879,7 +911,7 @@ class HttpCoreBridge implements CoreBridge {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
     try {
       for (var attempt = 0; attempt < 2; attempt++) {
-        await _ensureToken();
+        await _ensureToken(wait: const Duration(seconds: 2));
         final request = await client.postUrl(baseUri.replace(path: path));
         request.headers.contentType = ContentType.json;
         if (_token != null) {
@@ -1079,6 +1111,23 @@ class ChannelCoreBridge implements CoreBridge {
     String method,
   ) {
     return callMap('SetFreeAccessServiceMethod', args: [tag, method]);
+  }
+
+  @override
+  Future<Map<String, dynamic>> setZapretServiceStrategy(
+    String tag,
+    String mode,
+    String strategyTag,
+  ) {
+    return callMap('SetZapretServiceStrategy', args: [tag, mode, strategyTag]);
+  }
+
+  @override
+  Future<Map<String, dynamic>> setHomeRouteServiceVisible(
+    String tag,
+    bool visible,
+  ) {
+    return callMap('SetHomeRouteServiceVisible', args: [tag, visible]);
   }
 
   @override
@@ -1529,6 +1578,7 @@ class MockCoreBridge implements CoreBridge {
   bool _connected = false;
   String _subscriptionUrl = '';
   final Map<String, String> _routeMethods = <String, String>{};
+  final Map<String, bool> _homeRouteVisibility = <String, bool>{};
   AppConfig _config = AppConfig.defaults.copyWith(
     autoStart: false,
     autoStartPrompted: true,
@@ -1748,7 +1798,6 @@ class MockCoreBridge implements CoreBridge {
           )
           .toList(growable: false),
       'methodOptions': const [
-        {'tag': 'auto', 'label': 'Авто'},
         {'tag': 'direct', 'label': 'Напрямую'},
         {'tag': 'vpn', 'label': 'Через VPN'},
         {'tag': 'zapret', 'label': 'Обход (Zapret)'},
@@ -1778,10 +1827,37 @@ class MockCoreBridge implements CoreBridge {
       'direct' => 'direct',
       'vpn' => 'vpn',
       'zapret' => 'zapret',
-      _ => 'auto',
+      _ => 'direct',
     };
     _routeMethods[tag] = normalized;
     return {'success': true, 'tag': tag, 'method': normalized};
+  }
+
+  @override
+  Future<Map<String, dynamic>> setZapretServiceStrategy(
+    String tag,
+    String mode,
+    String strategyTag,
+  ) async {
+    return {
+      'success': true,
+      'tag': tag,
+      'mode': mode == 'manual' ? 'manual' : 'auto',
+      'zapretSelectedStrategy': strategyTag,
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> setHomeRouteServiceVisible(
+    String tag,
+    bool visible,
+  ) async {
+    final index = fallbackRoutes.indexWhere((route) => route.tag == tag);
+    if (index < 0) {
+      return {'success': false, 'error': 'Unknown route service: $tag'};
+    }
+    _homeRouteVisibility[tag] = visible;
+    return {'success': true, 'tag': tag, 'visible': visible};
   }
 
   @override
@@ -1791,6 +1867,9 @@ class MockCoreBridge implements CoreBridge {
           .map(
             (route) => route.copyWith(
               selectedMethod: _routeMethods[route.tag] ?? route.selectedMethod,
+              homeVisible:
+                  _homeRouteVisibility[route.tag] ??
+                  isPrimaryHomeRouteService(route.tag),
             ),
           )
           .toList(growable: false);
@@ -1806,6 +1885,9 @@ class MockCoreBridge implements CoreBridge {
             delayMs: _connected ? 24 + route.tag.length : 0,
             domainSuffixes: route.domainSuffixes,
             ipCidrs: route.ipCidrs,
+            homeVisible:
+                _homeRouteVisibility[route.tag] ??
+                isPrimaryHomeRouteService(route.tag),
           ),
         )
         .toList(growable: false);
@@ -2585,6 +2667,43 @@ class AppConfig {
   }
 }
 
+const Set<String> primaryHomeRouteServiceTags = <String>{
+  'youtube',
+  'discord',
+  'meta',
+  'openai',
+};
+
+bool isPrimaryHomeRouteService(String tag) =>
+    primaryHomeRouteServiceTags.contains(tag.trim().toLowerCase());
+
+String _homeRouteName(RouteService service) {
+  switch (service.tag) {
+    case 'meta':
+      return 'Instagram';
+    case 'openai':
+      return 'ChatGPT';
+    default:
+      return service.name;
+  }
+}
+
+String _normalizedHomeRoutePolicy(RouteService service) {
+  switch (service.selectedMethod.trim().toLowerCase()) {
+    case 'auto':
+      return 'auto';
+    case 'vpn':
+      return 'vpn';
+    case 'zapret':
+      return service.zapretSupported ? 'zapret' : 'auto';
+    case 'direct':
+      return 'direct';
+  }
+  return service.requiresVpn || service.method.toLowerCase().contains('vpn')
+      ? 'vpn'
+      : 'direct';
+}
+
 class RouteService {
   const RouteService({
     required this.tag,
@@ -2596,6 +2715,14 @@ class RouteService {
     this.domainSuffixes = const [],
     this.ipCidrs = const [],
     this.zapretSupported = false,
+    this.zapretStrategyMode = 'auto',
+    this.zapretSelectedStrategy = '',
+    this.zapretEffectiveStrategy = '',
+    this.zapretEffectiveStrategyLabel = '',
+    this.zapretStrategySource = '',
+    this.zapretStrategyNotFound = false,
+    this.zapretStrategyOptions = const [],
+    this.homeVisible = false,
   });
 
   final String tag;
@@ -2607,6 +2734,14 @@ class RouteService {
   final List<String> domainSuffixes;
   final List<String> ipCidrs;
   final bool zapretSupported;
+  final String zapretStrategyMode;
+  final String zapretSelectedStrategy;
+  final String zapretEffectiveStrategy;
+  final String zapretEffectiveStrategyLabel;
+  final String zapretStrategySource;
+  final bool zapretStrategyNotFound;
+  final List<ZapretStrategyOption> zapretStrategyOptions;
+  final bool homeVisible;
 
   factory RouteService.fromFreeAccessJson(Map<String, dynamic> json) {
     return RouteService(
@@ -2624,6 +2759,18 @@ class RouteService {
       ),
       ipCidrs: _asStringList(json['ipCidrs'] ?? json['ip_cidrs']),
       zapretSupported: json['zapretSupported'] == true,
+      zapretStrategyMode: json['zapretStrategyMode']?.toString() ?? 'auto',
+      zapretSelectedStrategy: json['zapretSelectedStrategy']?.toString() ?? '',
+      zapretEffectiveStrategy:
+          json['zapretEffectiveStrategy']?.toString() ?? '',
+      zapretEffectiveStrategyLabel:
+          json['zapretEffectiveStrategyLabel']?.toString() ?? '',
+      zapretStrategySource: json['zapretStrategySource']?.toString() ?? '',
+      zapretStrategyNotFound: json['zapretStrategyNotFound'] == true,
+      zapretStrategyOptions: _zapretOptions(json['zapretStrategyOptions']),
+      homeVisible:
+          json['homeVisible'] == true ||
+          isPrimaryHomeRouteService(json['tag']?.toString() ?? ''),
       delayMs: _asInt(json['delay']) == 0
           ? _asInt(
               json['delayMs'] ??
@@ -2654,6 +2801,18 @@ class RouteService {
       ),
       ipCidrs: _asStringList(json['ipCidrs'] ?? json['ip_cidrs']),
       zapretSupported: json['zapretSupported'] == true,
+      zapretStrategyMode: json['zapretStrategyMode']?.toString() ?? 'auto',
+      zapretSelectedStrategy: json['zapretSelectedStrategy']?.toString() ?? '',
+      zapretEffectiveStrategy:
+          json['zapretEffectiveStrategy']?.toString() ?? '',
+      zapretEffectiveStrategyLabel:
+          json['zapretEffectiveStrategyLabel']?.toString() ?? '',
+      zapretStrategySource: json['zapretStrategySource']?.toString() ?? '',
+      zapretStrategyNotFound: json['zapretStrategyNotFound'] == true,
+      zapretStrategyOptions: _zapretOptions(json['zapretStrategyOptions']),
+      homeVisible:
+          json['homeVisible'] == true ||
+          isPrimaryHomeRouteService(json['tag']?.toString() ?? ''),
       delayMs: _asInt(json['delay']) == 0
           ? _asInt(
               json['delayMs'] ??
@@ -2675,6 +2834,14 @@ class RouteService {
     List<String>? domainSuffixes,
     List<String>? ipCidrs,
     bool? zapretSupported,
+    String? zapretStrategyMode,
+    String? zapretSelectedStrategy,
+    String? zapretEffectiveStrategy,
+    String? zapretEffectiveStrategyLabel,
+    String? zapretStrategySource,
+    bool? zapretStrategyNotFound,
+    List<ZapretStrategyOption>? zapretStrategyOptions,
+    bool? homeVisible,
   }) {
     return RouteService(
       tag: tag ?? this.tag,
@@ -2686,8 +2853,42 @@ class RouteService {
       domainSuffixes: domainSuffixes ?? this.domainSuffixes,
       ipCidrs: ipCidrs ?? this.ipCidrs,
       zapretSupported: zapretSupported ?? this.zapretSupported,
+      zapretStrategyMode: zapretStrategyMode ?? this.zapretStrategyMode,
+      zapretSelectedStrategy:
+          zapretSelectedStrategy ?? this.zapretSelectedStrategy,
+      zapretEffectiveStrategy:
+          zapretEffectiveStrategy ?? this.zapretEffectiveStrategy,
+      zapretEffectiveStrategyLabel:
+          zapretEffectiveStrategyLabel ?? this.zapretEffectiveStrategyLabel,
+      zapretStrategySource: zapretStrategySource ?? this.zapretStrategySource,
+      zapretStrategyNotFound:
+          zapretStrategyNotFound ?? this.zapretStrategyNotFound,
+      zapretStrategyOptions:
+          zapretStrategyOptions ?? this.zapretStrategyOptions,
+      homeVisible: homeVisible ?? this.homeVisible,
     );
   }
+}
+
+class ZapretStrategyOption {
+  const ZapretStrategyOption({required this.tag, required this.label});
+
+  final String tag;
+  final String label;
+}
+
+List<ZapretStrategyOption> _zapretOptions(Object? raw) {
+  if (raw is! List) return const [];
+  return raw
+      .map(_asMap)
+      .where((item) => item['tag']?.toString().isNotEmpty == true)
+      .map(
+        (item) => ZapretStrategyOption(
+          tag: item['tag'].toString(),
+          label: item['label']?.toString() ?? item['tag'].toString(),
+        ),
+      )
+      .toList(growable: false);
 }
 
 class RouteProbeProgress {
@@ -3207,6 +3408,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool startupUpdateCheckScheduled = false;
   bool compatibilityNoticeShowing = false;
   double? updateProgressPercent;
+  bool homeRoutesExpanded = false;
 
   bool get connectionBusy {
     return busyTasks.keys.any(isConnectionBlockingBusyTask) ||
@@ -3697,7 +3899,9 @@ class _DropoHomePageState extends State<DropoHomePage>
         connectionHintDanger = false;
         routeProbeExpectedCount = _asInt(event.payload['serviceCount']);
         routeProbeProgress = _routeProbeStartItems(event.payload['services']);
-        routeHint = 'Подбираем рабочие методы обхода для сервисов...';
+        routeHint = event.payload['extendedSearch'] == true
+            ? 'Подбираем Zapret по всему списку. Проверка может занять продолжительное время...'
+            : 'Подбираем рабочие методы обхода для сервисов...';
         break;
       case 'route-probe-service':
         _updateRouteProbeService(event.payload);
@@ -4880,6 +5084,242 @@ class _DropoHomePageState extends State<DropoHomePage>
     ).whenComplete(() => timer?.cancel());
   }
 
+  Future<void> _setHomeRoutePolicy(RouteService service, String policy) async {
+    if (uiBusy || policy == service.selectedMethod) {
+      return;
+    }
+    setState(() {
+      uiBusy = true;
+      statusMessage = 'Сохраняем маршрут для ${_homeRouteName(service)}';
+      connectionHint = '';
+    });
+    try {
+      final result = await widget.bridge.setFreeAccessServiceMethod(
+        service.tag,
+        policy,
+      );
+      if (result['success'] == false) {
+        throw StateError(result['error']?.toString() ?? 'Маршрут не сохранён');
+      }
+      List<RouteService>? refreshed;
+      try {
+        refreshed = await widget.bridge.routes(live: false);
+      } catch (_) {}
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        if (refreshed != null && refreshed.isNotEmpty) {
+          routes = refreshed;
+        } else {
+          routes = routes
+              .map(
+                (route) => route.tag == service.tag
+                    ? route.copyWith(selectedMethod: policy)
+                    : route,
+              )
+              .toList(growable: false);
+        }
+        statusMessage = 'Маршрут для ${_homeRouteName(service)} сохранён';
+        connectionHint = result['restarted'] == true
+            ? 'Соединение автоматически переподключено.'
+            : '';
+        connectionHintDanger = false;
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          statusMessage = 'Не удалось изменить маршрут';
+          connectionHint = _cleanError(error);
+          connectionHintDanger = true;
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => uiBusy = false);
+      }
+    }
+  }
+
+  Future<void> _setHomeZapretStrategy(
+    RouteService service,
+    String mode,
+    String strategyTag,
+  ) async {
+    if (uiBusy) return;
+    setState(() {
+      uiBusy = true;
+      statusMessage = mode == 'auto'
+          ? 'Запускаем автоподбор Zapret для ${_homeRouteName(service)}'
+          : 'Сохраняем стратегию Zapret для ${_homeRouteName(service)}';
+      connectionHint = '';
+    });
+    try {
+      final result = await widget.bridge.setZapretServiceStrategy(
+        service.tag,
+        mode,
+        strategyTag,
+      );
+      if (result['success'] == false) {
+        throw StateError(
+          result['error']?.toString() ?? 'Стратегия Zapret не сохранена',
+        );
+      }
+      final refreshed = await widget.bridge.routes(live: false);
+      if (!mounted) return;
+      setState(() {
+        routes = refreshed;
+        statusMessage = mode == 'auto'
+            ? 'Автоподбор Zapret для ${_homeRouteName(service)} включён'
+            : 'Стратегия Zapret для ${_homeRouteName(service)} сохранена';
+        connectionHint = result['searchStarted'] == true
+            ? 'Проверка стратегий идёт в фоне; рабочий вариант сохранится для текущей сети.'
+            : result['restarted'] == true
+            ? 'Подключение автоматически переподключено.'
+            : mode == 'auto'
+            ? 'Подбор начнётся при следующем подключении.'
+            : '';
+        connectionHintDanger = false;
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          statusMessage = 'Не удалось изменить стратегию Zapret';
+          connectionHint = _cleanError(error);
+          connectionHintDanger = true;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => uiBusy = false);
+    }
+  }
+
+  Future<void> _setHomeRoutingMode(String mode) async {
+    if (uiBusy || mode == appConfig.routingMode) {
+      return;
+    }
+    if (mode == 'all_traffic' && !subscription.hasSubscription) {
+      setState(() {
+        statusMessage = 'Для режима «Всё через VPN» нужна VPN-подписка';
+        connectionHint = 'Добавьте подписку, затем включите общий VPN-режим.';
+        connectionHintDanger = true;
+      });
+      await _openSubscription();
+      return;
+    }
+
+    setState(() {
+      uiBusy = true;
+      statusMessage = mode == 'all_traffic'
+          ? 'Переключаем весь трафик на VPN'
+          : 'Включаем выборочные маршруты';
+      connectionHint = status.connected
+          ? 'VPN будет автоматически переподключён.'
+          : '';
+      connectionHintDanger = false;
+    });
+    try {
+      final result = await widget.bridge.setRoutingMode(mode);
+      if (result['success'] == false) {
+        throw StateError(
+          result['error']?.toString() ?? 'Режим маршрутизации не сохранён',
+        );
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        appConfig = appConfig.copyWith(routingMode: mode);
+        statusMessage = mode == 'all_traffic'
+            ? 'Весь трафик идёт через VPN'
+            : 'Включены маршруты выбранных сервисов';
+        connectionHint = result['restarted'] == true
+            ? 'Соединение автоматически переподключено.'
+            : '';
+        connectionHintDanger = false;
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          statusMessage = 'Не удалось изменить режим маршрутизации';
+          connectionHint = _cleanError(error);
+          connectionHintDanger = true;
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => uiBusy = false);
+      }
+    }
+  }
+
+  Future<void> _setHomeRouteVisibility(
+    RouteService service,
+    bool visible,
+  ) async {
+    if (uiBusy || isPrimaryHomeRouteService(service.tag)) {
+      return;
+    }
+    setState(() => uiBusy = true);
+    try {
+      final result = await widget.bridge.setHomeRouteServiceVisible(
+        service.tag,
+        visible,
+      );
+      if (result['success'] == false) {
+        throw StateError(result['error']?.toString() ?? 'Выбор не сохранён');
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        routes = routes
+            .map(
+              (route) => route.tag == service.tag
+                  ? route.copyWith(homeVisible: visible)
+                  : route,
+            )
+            .toList(growable: false);
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          statusMessage = 'Не удалось изменить список сервисов';
+          connectionHint = _cleanError(error);
+          connectionHintDanger = true;
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => uiBusy = false);
+      }
+    }
+  }
+
+  Future<void> _openAddHomeRouteService() async {
+    final available =
+        routes
+            .where(
+              (route) =>
+                  !route.homeVisible && !isPrimaryHomeRouteService(route.tag),
+            )
+            .toList(growable: false)
+          ..sort((left, right) => left.name.compareTo(right.name));
+    if (available.isEmpty) {
+      return;
+    }
+    final selected = await showModalBottomSheet<RouteService>(
+      context: context,
+      backgroundColor: const Color(0xFF12201D),
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => _AddHomeRouteServiceSheet(services: available),
+    );
+    if (selected != null && mounted) {
+      await _setHomeRouteVisibility(selected, true);
+    }
+  }
+
   String _statusLabel() {
     if (!online) {
       return 'dropo-core offline';
@@ -4972,6 +5412,26 @@ class _DropoHomePageState extends State<DropoHomePage>
           failed: routeProbeFailed,
           expectedCount: routeProbeExpectedCount,
           items: routeProbeProgress.values.toList(growable: false),
+        ),
+        const SizedBox(height: 10),
+        _HomeRouteControls(
+          services: routes
+              .where(
+                (route) =>
+                    route.homeVisible || isPrimaryHomeRouteService(route.tag),
+              )
+              .toList(growable: false),
+          enabled: !controlsDisabled && (!_isMobileShell || !status.connected),
+          expanded: homeRoutesExpanded,
+          routingMode: appConfig.routingMode,
+          hasSubscription: subscription.hasSubscription,
+          onExpandedChanged: (expanded) =>
+              setState(() => homeRoutesExpanded = expanded),
+          onRoutingModeChanged: _setHomeRoutingMode,
+          onPolicyChanged: _setHomeRoutePolicy,
+          onZapretStrategyChanged: _setHomeZapretStrategy,
+          onAdd: controlsDisabled ? null : _openAddHomeRouteService,
+          onRemove: _setHomeRouteVisibility,
         ),
         const SizedBox(height: 12),
         if (updateInfo?.hasUpdate == true) ...[
@@ -5911,6 +6371,482 @@ class _Badges extends StatelessWidget {
           onPressed: onWireGuard,
         ),
       ],
+    );
+  }
+}
+
+class _HomeRouteControls extends StatelessWidget {
+  const _HomeRouteControls({
+    required this.services,
+    required this.enabled,
+    required this.expanded,
+    required this.routingMode,
+    required this.hasSubscription,
+    required this.onExpandedChanged,
+    required this.onRoutingModeChanged,
+    required this.onPolicyChanged,
+    required this.onZapretStrategyChanged,
+    required this.onAdd,
+    required this.onRemove,
+  });
+
+  final List<RouteService> services;
+  final bool enabled;
+  final bool expanded;
+  final String routingMode;
+  final bool hasSubscription;
+  final ValueChanged<bool> onExpandedChanged;
+  final ValueChanged<String> onRoutingModeChanged;
+  final void Function(RouteService service, String policy) onPolicyChanged;
+  final void Function(RouteService service, String mode, String strategyTag)
+  onZapretStrategyChanged;
+  final VoidCallback? onAdd;
+  final void Function(RouteService service, bool visible) onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final ordered = List<RouteService>.from(services);
+    const primaryOrder = <String>['youtube', 'discord', 'meta', 'openai'];
+    ordered.sort((left, right) {
+      final leftIndex = primaryOrder.indexOf(left.tag);
+      final rightIndex = primaryOrder.indexOf(right.tag);
+      if (leftIndex >= 0 || rightIndex >= 0) {
+        if (leftIndex < 0) return 1;
+        if (rightIndex < 0) return -1;
+        return leftIndex.compareTo(rightIndex);
+      }
+      return left.name.compareTo(right.name);
+    });
+
+    return Container(
+      key: const ValueKey('home-route-controls'),
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF101C19).withValues(alpha: 0.9),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Режим подключения',
+            style: TextStyle(
+              color: Color(0xFFE8F3EF),
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _HomeRoutingModeButton(
+                  key: const ValueKey('home-routing-selected'),
+                  icon: Icons.account_tree_outlined,
+                  label: 'По сервисам',
+                  selected: routingMode != 'all_traffic',
+                  enabled: enabled,
+                  onPressed: () => onRoutingModeChanged('blocked_only'),
+                ),
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Tooltip(
+                  message: hasSubscription
+                      ? 'Направить весь трафик через VPN'
+                      : 'Сначала добавьте VPN-подписку',
+                  child: _HomeRoutingModeButton(
+                    key: const ValueKey('home-routing-all-vpn'),
+                    icon: Icons.shield_outlined,
+                    label: 'Всё через VPN',
+                    selected: routingMode == 'all_traffic',
+                    enabled: enabled,
+                    onPressed: () => onRoutingModeChanged('all_traffic'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Divider(height: 1, color: Colors.white12),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              const Icon(Icons.alt_route, size: 16, color: Color(0xFF75E3AD)),
+              const SizedBox(width: 7),
+              const Expanded(
+                child: Text(
+                  'Маршруты сервисов',
+                  style: TextStyle(
+                    color: Color(0xFFE8F3EF),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              TextButton(
+                key: const ValueKey('toggle-home-route-services'),
+                onPressed: () => onExpandedChanged(!expanded),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(expanded ? 'Скрыть' : 'Показать'),
+                    const SizedBox(width: 3),
+                    Icon(
+                      expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 18,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (expanded) ...[
+            if (routingMode == 'all_traffic')
+              const Padding(
+                padding: EdgeInsets.fromLTRB(4, 5, 4, 2),
+                child: Text(
+                  'Политики ниже сохранены для режима «По сервисам».',
+                  style: TextStyle(color: Color(0xFFA8BAB5), fontSize: 11),
+                ),
+              ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                key: const ValueKey('add-home-route-service'),
+                onPressed: onAdd,
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('Добавить сервис'),
+              ),
+            ),
+            ...ordered.map(
+              (service) => _HomeRouteServiceRow(
+                service: service,
+                enabled: enabled,
+                onPolicyChanged: (policy) => onPolicyChanged(service, policy),
+                onZapretStrategyChanged: (mode, strategyTag) =>
+                    onZapretStrategyChanged(service, mode, strategyTag),
+                onRemove: isPrimaryHomeRouteService(service.tag)
+                    ? null
+                    : () => onRemove(service, false),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _HomeRoutingModeButton extends StatelessWidget {
+  const _HomeRoutingModeButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton.icon(
+      onPressed: enabled ? onPressed : null,
+      icon: Icon(icon, size: 16),
+      label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(0, 38),
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        foregroundColor: selected
+            ? const Color(0xFF08140F)
+            : const Color(0xFFD8E4E0),
+        backgroundColor: selected
+            ? const Color(0xFF75E3AD)
+            : Colors.transparent,
+        side: BorderSide(
+          color: selected ? const Color(0xFF75E3AD) : const Color(0xFF3C554E),
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    );
+  }
+}
+
+class _HomeRouteServiceRow extends StatelessWidget {
+  const _HomeRouteServiceRow({
+    required this.service,
+    required this.enabled,
+    required this.onPolicyChanged,
+    required this.onZapretStrategyChanged,
+    required this.onRemove,
+  });
+
+  final RouteService service;
+  final bool enabled;
+  final ValueChanged<String> onPolicyChanged;
+  final void Function(String mode, String strategyTag) onZapretStrategyChanged;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = _normalizedHomeRoutePolicy(service);
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(9, 8, 7, 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFF172824),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF314B43)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _homeRouteName(service),
+                    style: const TextStyle(
+                      color: Color(0xFFE8F3EF),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                if (onRemove != null)
+                  IconButton(
+                    key: ValueKey('remove-home-route-${service.tag}'),
+                    tooltip: 'Убрать с главной',
+                    onPressed: enabled ? onRemove : null,
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 28,
+                      height: 28,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(Icons.close, size: 15),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 5),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                if (_isMobileShell)
+                  _homeRouteButton(service, 'auto', 'Авто', selected),
+                _homeRouteButton(service, 'direct', 'Напрямую', selected),
+                _homeRouteButton(service, 'vpn', 'VPN', selected),
+                if (!_isMobileShell)
+                  Tooltip(
+                    message: service.zapretSupported
+                        ? 'Встроенный обход блокировки'
+                        : 'Zapret недоступен для этого сервиса',
+                    child: _homeRouteButton(
+                      service,
+                      'zapret',
+                      'Zapret',
+                      selected,
+                      supported: service.zapretSupported,
+                    ),
+                  ),
+              ],
+            ),
+            if (selected == 'zapret' &&
+                service.zapretStrategyOptions.isNotEmpty) ...[
+              const SizedBox(height: 9),
+              _HomeZapretStrategyControls(
+                service: service,
+                enabled: enabled,
+                onChanged: onZapretStrategyChanged,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _homeRouteButton(
+    RouteService service,
+    String policy,
+    String label,
+    String selected, {
+    bool supported = true,
+  }) {
+    return _ServiceRoutePolicyButton(
+      key: ValueKey('home-route-${service.tag}-$policy'),
+      label: label,
+      selected: selected == policy,
+      enabled: enabled && supported,
+      onPressed: () => onPolicyChanged(policy),
+    );
+  }
+}
+
+class _HomeZapretStrategyControls extends StatelessWidget {
+  const _HomeZapretStrategyControls({
+    required this.service,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final RouteService service;
+  final bool enabled;
+  final void Function(String mode, String strategyTag) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final manual = service.zapretStrategyMode == 'manual';
+    final options = service.zapretStrategyOptions;
+    final selectedTag =
+        options.any((option) => option.tag == service.zapretSelectedStrategy)
+        ? service.zapretSelectedStrategy
+        : options.first.tag;
+    final effective = service.zapretEffectiveStrategyLabel.isEmpty
+        ? 'ещё не определена'
+        : service.zapretEffectiveStrategyLabel;
+
+    return Container(
+      key: ValueKey('home-zapret-strategy-${service.tag}'),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0E1D19),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: const Color(0xFF2A493F)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Стратегия Zapret',
+                  style: TextStyle(
+                    color: Color(0xFFDDEBE6),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                key: ValueKey('zapret-auto-${service.tag}'),
+                onPressed: enabled ? () => onChanged('auto', '') : null,
+                icon: const Icon(Icons.auto_fix_high, size: 15),
+                label: Text(manual ? 'Авто' : 'Подобрать заново'),
+              ),
+            ],
+          ),
+          if (!manual)
+            Text(
+              service.zapretStrategyNotFound
+                  ? 'Результат: подходящая стратегия не найдена'
+                  : 'Рабочая: $effective',
+              style: TextStyle(
+                color: service.zapretStrategyNotFound
+                    ? const Color(0xFFFF9C92)
+                    : const Color(0xFFA8BAB5),
+                fontSize: 10,
+              ),
+            ),
+          const SizedBox(height: 5),
+          DropdownButtonFormField<String>(
+            key: ValueKey('zapret-manual-${service.tag}'),
+            initialValue: manual ? selectedTag : null,
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'Выбрать вручную',
+              isDense: true,
+              border: OutlineInputBorder(),
+              contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 8),
+            ),
+            items: options
+                .map(
+                  (option) => DropdownMenuItem<String>(
+                    value: option.tag,
+                    child: Text(
+                      option.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+                )
+                .toList(growable: false),
+            onChanged: enabled
+                ? (value) {
+                    if (value != null) onChanged('manual', value);
+                  }
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AddHomeRouteServiceSheet extends StatelessWidget {
+  const _AddHomeRouteServiceSheet({required this.services});
+
+  final List<RouteService> services;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.72,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 4, 18, 12),
+              child: Text(
+                'Добавить сервис на главную',
+                style: TextStyle(
+                  color: Color(0xFFE8F3EF),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            Expanded(
+              child: ListView.separated(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 16),
+                itemCount: services.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 4),
+                itemBuilder: (context, index) {
+                  final service = services[index];
+                  return ListTile(
+                    key: ValueKey('add-home-route-${service.tag}'),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    tileColor: const Color(0xFF172824),
+                    title: Text(
+                      _homeRouteName(service),
+                      style: const TextStyle(color: Color(0xFFE8F3EF)),
+                    ),
+                    trailing: const Icon(Icons.add_circle_outline),
+                    onTap: () => Navigator.of(context).pop(service),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -10837,7 +11773,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
               value: config.routingMode,
               stacked: true,
               options: const {
-                'blocked_only': 'Только заблокированные',
+                'blocked_only': 'Выбранные сервисы',
                 'all_traffic': 'Весь трафик',
               },
               onChanged: canChangeRuntime
@@ -10900,17 +11836,11 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                     'На Android доступны Авто, Напрямую и Через VPN. Обход Zapret выполняется только встроенным Windows-движком.',
               )
             else
-              _SwitchSetting(
-                title: 'Не использовать бесплатные методы',
-                description:
-                    'Только для режима «Авто»: пропустить подбор Zapret и сразу использовать VPN, а без подписки — прямой маршрут. Явный «Обход (Zapret)» не отключается.',
-                value: config.disableFreeAccess,
-                onChanged: canChangeRuntime
-                    ? (value) => _applySpecial(
-                        () => widget.bridge.setDisableFreeAccess(value),
-                        config.copyWith(disableFreeAccess: value),
-                      )
-                    : null,
+              const _InfoBand(
+                icon: Icons.route,
+                title: 'Явные маршруты',
+                body:
+                    'Zapret и VPN применяются только к сервисам, для которых выбран соответствующий режим. Остальной трафик идёт напрямую.',
               ),
             _ServiceCatalogTable(
               bridge: widget.bridge,
@@ -10918,7 +11848,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
               loading: serviceCatalogLoading,
               error: serviceCatalogError,
               policyEditingEnabled: !saving && (!isMobile || !vpnRunning),
-              allowAutomaticPolicy: true,
+              allowAutomaticPolicy: isMobile,
               onPolicyChanged: (service, policy) =>
                   unawaited(_setServiceRoutePolicy(service, policy)),
             ),
@@ -13118,7 +14048,7 @@ String _routingModeDescription(String mode) {
     'all_traffic' =>
       'Весь трафик через VPN. Максимальная приватность, высокая нагрузка.',
     _ =>
-      'Через VPN идут только заблокированные сайты. Минимальная нагрузка на VPN.',
+      'VPN и Zapret работают только для выбранных сервисов. Остальной трафик идёт напрямую.',
   };
 }
 
@@ -13193,7 +14123,7 @@ String _routePolicyFromJson(Map<String, dynamic> json) {
 const List<RouteService> fallbackRoutes = [
   RouteService(
     tag: 'openai',
-    name: 'ChatGPT / Copilot',
+    name: 'ChatGPT',
     method: 'Через VPN',
     selectedMethod: 'vpn',
     requiresVpn: true,
@@ -13217,6 +14147,15 @@ const List<RouteService> fallbackRoutes = [
     requiresVpn: true,
     delayMs: 0,
     domainSuffixes: ['discord.com', 'discord.gg', 'discordapp.net'],
+  ),
+  RouteService(
+    tag: 'meta',
+    name: 'Instagram',
+    method: 'Через VPN',
+    selectedMethod: 'vpn',
+    requiresVpn: true,
+    delayMs: 0,
+    domainSuffixes: ['instagram.com', 'cdninstagram.com', 'threads.net'],
   ),
   RouteService(
     tag: 'google',

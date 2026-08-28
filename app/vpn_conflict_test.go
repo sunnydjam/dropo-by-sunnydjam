@@ -71,3 +71,15 @@ func TestFilterExternalVPNConflictsKeepsZapretAndWinDivert(t *testing.T) {
 		t.Fatalf("unexpected conflict kinds: %+v", conflicts)
 	}
 }
+
+func TestFilterExternalVPNConflictsKeepsExternalVPNProcess(t *testing.T) {
+	conflicts := filterExternalVPNConflicts([]externalVPNCandidate{
+		{Name: "v2raytun.exe", Detail: "PID 14784", Source: "vpn-process", Status: "Running"},
+	})
+	if len(conflicts) != 1 {
+		t.Fatalf("len(conflicts) = %d, want 1: %+v", len(conflicts), conflicts)
+	}
+	if conflicts[0].Name != "v2raytun.exe" || conflicts[0].Kind != "VPN process" {
+		t.Fatalf("conflict = %+v, want v2raytun VPN process", conflicts[0])
+	}
+}

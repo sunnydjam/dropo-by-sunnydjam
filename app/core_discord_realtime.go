@@ -34,7 +34,7 @@ const (
 	// the configured subscription (or direct when no subscription exists).
 	discordRealtimeNoFlowDeadline    = 10 * time.Second
 	discordRealtimeActivityRetention = 45 * time.Second
-	discordRealtimeMaxLocalAttempts  = 4
+	discordRealtimeMaxLocalAttempts  = 256 // explicit Zapret may exhaust the full manual catalog
 	discordRealtimeMinMediaBytes     = 512
 	discordRealtimeMinMediaPolls     = 3
 	discordRealtimeMinUploadBytes    = 64
@@ -345,7 +345,8 @@ func (a *App) prepareDiscordRealtimeSession() {
 	controller.resetLocked()
 	settings := a.storage.GetAppSettings()
 	method := FreeAccessServiceMethod(settings, "discord")
-	controller.automatic = (method == FreeAccessMethodAuto && FreeMethodsAllowed(settings)) || method == FreeAccessMethodZapret
+	controller.automatic = (method == FreeAccessMethodAuto && FreeMethodsAllowed(settings)) ||
+		(method == FreeAccessMethodZapret && ZapretStrategyMode(settings, "discord") == ZapretStrategyModeAuto)
 	controller.vpnFallbackAllowed = method == FreeAccessMethodAuto
 	controller.mu.Unlock()
 }

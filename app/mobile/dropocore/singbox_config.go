@@ -503,13 +503,9 @@ func buildAndroidRouteRules(routingMode string, hideRuTraffic bool, ruOutbound s
 			"outbound":     "direct",
 		})
 	}
-	if directIPs := androidServiceIPCIDRsByPolicy(routePolicies, androidRoutePolicyDirect); len(directIPs) > 0 {
-		rules = append(rules, map[string]interface{}{
-			"ip_cidr":  directIPs,
-			"action":   "route",
-			"outbound": "direct",
-		})
-	}
+	// Service CIDRs are intentionally not emitted as hostless direct rules.
+	// Shared Meta/CDN addresses can serve multiple services with conflicting
+	// policies; domain or Android package evidence above must select the route.
 	if vpnDomains := androidServiceDomainSuffixesByPolicy(routePolicies, androidRoutePolicyVPN); len(vpnDomains) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": vpnDomains,

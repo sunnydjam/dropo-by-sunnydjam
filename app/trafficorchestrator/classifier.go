@@ -105,6 +105,9 @@ func (c *Classifier) Classify(flow FlowEvidence) Classification {
 	fingerprints := stringSet(flow.Fingerprints, normalizeToken)
 	address, addressErr := netip.ParseAddr(strings.TrimSpace(flow.Destination))
 	hasAddress := addressErr == nil
+	if hasAddress && (address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsUnspecified() || address.IsMulticast()) {
+		return Classification{WorkNetwork: true, WorkNetworkID: "local-private", Evidence: []string{"private-address"}}
+	}
 	for _, network := range c.workNetworks {
 		if _, matched := longestDomainSuffix(host, network.suffixes); matched {
 			return Classification{WorkNetwork: true, WorkNetworkID: network.id, Evidence: []string{"work-domain"}}
@@ -199,6 +202,11 @@ func (r compiledServiceRule) score(host string, address netip.Addr, hasAddress b
 			score += 10
 			processMatched = true
 			evidence = append(evidence, "process")
+			if r.rule.ProcessMatchPolicy == ProcessMatchIdentity {
+				score += 100
+				primary = true
+				evidence = append(evidence, "process-identity")
+			}
 		}
 	}
 	if hasAddress {

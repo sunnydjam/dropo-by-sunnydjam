@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -55,8 +56,10 @@ func clientQuickCheckServiceTag(name string) string {
 		return "discord"
 	case strings.HasPrefix(value, "youtube"):
 		return "youtube"
-	case value == "instagram" || value == "facebook":
+	case value == "instagram":
 		return "meta"
+	case value == "facebook":
+		return "facebook"
 	case value == "x":
 		return "twitter"
 	case value == "linkedin":
@@ -119,10 +122,26 @@ func (a *App) switchServiceRoute(serviceTag, outboundTag string) bool {
 }
 
 func (a *App) switchOutboundSelector(groupTag, outboundTag string) bool {
+	return a.switchOutboundSelectorContext(context.Background(), groupTag, outboundTag)
+}
+
+func (a *App) switchOutboundSelectorContext(ctx context.Context, groupTag, outboundTag string) bool {
+	if ctx == nil {
+		return false
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(5 * time.Second)
 	for !a.clashAPIPortReady(250*time.Millisecond) && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	if ctx.Err() != nil {
+		return false
 	}
 	if !a.clashAPIPortReady(250 * time.Millisecond) {
 		a.writeLog(fmt.Sprintf("[FreeAccess] cannot switch %s to VPN fallback: Clash API is not ready", groupTag))
@@ -137,6 +156,7 @@ func (a *App) switchOutboundSelector(groupTag, outboundTag string) bool {
 	if err != nil {
 		return false
 	}
+	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {

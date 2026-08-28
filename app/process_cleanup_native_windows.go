@@ -23,6 +23,14 @@ const internetSettingsRegistryPath = `Software\Microsoft\Windows\CurrentVersion\
 const internetConnectionsRegistryPath = internetSettingsRegistryPath + `\Connections`
 
 var internetSetOption = windows.NewLazySystemDLL("wininet.dll").NewProc("InternetSetOptionW")
+var sendMessageTimeout = windows.NewLazySystemDLL("user32.dll").NewProc("SendMessageTimeoutW")
+
+const (
+	hwndBroadcast      = uintptr(0xffff)
+	wmSettingChange    = uintptr(0x001a)
+	smtoAbortIfHung    = uintptr(0x0002)
+	proxyRefreshWaitMS = uintptr(2000)
+)
 
 func resetWindowsSystemProxyNativeForPorts(ports []int) (bool, string, error) {
 	if len(ports) == 0 {
@@ -35,11 +43,14 @@ func resetWindowsSystemProxyNativeForPorts(ports []int) (bool, string, error) {
 	defer key.Close()
 
 	proxy, _, _ := key.GetStringValue("ProxyServer")
+	autoConfigURL, _, _ := key.GetStringValue("AutoConfigURL")
 	proxyPort := loopbackProxyPort(proxy)
+	pacPort := loopbackPACPort(autoConfigURL)
 	ownedPort := cleanupContainsInt(ports, proxyPort)
 	staleLoopback := proxyPort > 0 && !loopbackPortListening(proxyPort)
+	staleLoopbackPAC := pacPort > 0 && !loopbackPortListening(pacPort)
 	connectionNeedsReset := connectionSettingsNeedReset(ports, strings.TrimSpace(proxy) == "")
-	if !ownedPort && !staleLoopback && !connectionNeedsReset {
+	if !ownedPort && !staleLoopback && !staleLoopbackPAC && !connectionNeedsReset {
 		return false, proxy, nil
 	}
 
@@ -52,10 +63,30 @@ func resetWindowsSystemProxyNativeForPorts(ports []int) (bool, string, error) {
 	resetConnectionSettingsFlags()
 
 	// INTERNET_OPTION_SETTINGS_CHANGED and INTERNET_OPTION_REFRESH notify
-	// WinINet consumers directly; no PowerShell Add-Type or reg.exe is needed.
+	// WinINet consumers directly. WM_SETTINGCHANGE also reaches long-running
+	// Chromium/Steam processes which can otherwise retain a removed proxy until
+	// their next restart. No PowerShell Add-Type or reg.exe is needed.
 	_, _, _ = internetSetOption.Call(0, 39, 0, 0)
 	_, _, _ = internetSetOption.Call(0, 37, 0, 0)
+	broadcastWindowsProxySettingsChanged()
 	return true, proxy, nil
+}
+
+func broadcastWindowsProxySettingsChanged() {
+	section, err := windows.UTF16PtrFromString(internetSettingsRegistryPath)
+	if err != nil {
+		return
+	}
+	var result uintptr
+	_, _, _ = sendMessageTimeout.Call(
+		hwndBroadcast,
+		wmSettingChange,
+		0,
+		uintptr(unsafe.Pointer(section)),
+		smtoAbortIfHung,
+		proxyRefreshWaitMS,
+		uintptr(unsafe.Pointer(&result)),
+	)
 }
 
 func cleanupContainsInt(values []int, target int) bool {

@@ -22,8 +22,8 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 		t.Fatal("free access state should remain enabled for legacy UI/API compatibility")
 	}
 	for _, service := range DefaultFreeAccessServices {
-		if got := FreeAccessServiceMethod(settings, service.Tag); got != FreeAccessMethodAuto {
-			t.Fatalf("default route policy for %s = %q, want auto", service.Tag, got)
+		if got := FreeAccessServiceMethod(settings, service.Tag); got != FreeAccessMethodDirect {
+			t.Fatalf("default route policy for %s = %q, want direct", service.Tag, got)
 		}
 	}
 	if !settings.Notifications {
@@ -44,7 +44,7 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	}
 }
 
-func TestWindowsServiceRouteOptionsExposeExactFourPolicyContract(t *testing.T) {
+func TestWindowsServiceRouteOptionsExposeExactThreePolicyContract(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows route controls are platform specific")
 	}
@@ -53,13 +53,12 @@ func TestWindowsServiceRouteOptionsExposeExactFourPolicyContract(t *testing.T) {
 		tag   string
 		label string
 	}{
-		{FreeAccessMethodAuto, "Авто"},
 		{FreeAccessMethodDirect, "Напрямую"},
 		{FreeAccessMethodVPN, "Через VPN"},
 		{FreeAccessMethodZapret, "Обход (Zapret)"},
 	}
 	if len(options) != len(want) {
-		t.Fatalf("route options = %#v, want exactly four choices", options)
+		t.Fatalf("route options = %#v, want exactly three choices", options)
 	}
 	for index, expected := range want {
 		if options[index]["tag"] != expected.tag || options[index]["value"] != expected.tag || options[index]["label"] != expected.label {
@@ -105,6 +104,23 @@ func TestSettingsAPIsMigrateLegacyRoutingAndPersistNetworkMode(t *testing.T) {
 	}
 }
 
+func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
+	app := newInitializedSettingsScenarioApp(t)
+
+	result := app.SetRoutingMode(string(RoutingModeAllTraffic))
+	requireAPISuccess(t, result)
+	if restarted, _ := result["restarted"].(bool); restarted {
+		t.Fatal("stopped VPN must not be reported as restarted")
+	}
+	settings := app.storage.GetAppSettings()
+	if settings.RoutingMode != RoutingModeAllTraffic {
+		t.Fatalf("stored routing mode = %q, want all_traffic", settings.RoutingMode)
+	}
+	if app.configBuilder.GetRoutingMode() != RoutingModeAllTraffic {
+		t.Fatalf("builder routing mode = %q, want all_traffic", app.configBuilder.GetRoutingMode())
+	}
+}
+
 func TestSettingsAPIsPersistFreeAccessPolicy(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
 
@@ -116,8 +132,8 @@ func TestSettingsAPIsPersistFreeAccessPolicy(t *testing.T) {
 			settings.DisableFreeAccess, settings.FreeAccessEnabled, settings.FreeAccessReverse)
 	}
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
-	if !planContainsString(plan.ProxyServices, "youtube") || len(plan.TransparentServices) != 0 {
-		t.Fatalf("disable-free plan = %+v, want blocked services through subscription proxy only", plan)
+	if !planContainsString(plan.DirectServices, "youtube") || len(plan.TransparentServices) != 0 {
+		t.Fatalf("disable-free plan = %+v, want explicit default-direct service routes", plan)
 	}
 
 	result = app.SetDisableFreeAccess(false)
@@ -133,7 +149,23 @@ func TestSettingsAPIsPersistFreeAccessPolicy(t *testing.T) {
 		if !planContainsString(plan.TransparentServices, "youtube") || planContainsString(plan.ProxyServices, "youtube") {
 			t.Fatalf("strict YouTube zapret plan = %+v, want transparent without VPN fallback", plan)
 		}
-		result = app.SetFreeAccessServiceMethod("youtube", FreeAccessMethodAuto)
+		manualStrategy := rankedMethodsForService("youtube")[1]
+		result = app.SetZapretServiceStrategy("youtube", ZapretStrategyModeManual, manualStrategy.Tag)
+		requireAPISuccess(t, result)
+		settings = app.storage.GetAppSettings()
+		if mode := ZapretStrategyMode(settings, "youtube"); mode != ZapretStrategyModeManual {
+			t.Fatalf("YouTube Zapret strategy mode = %q, want manual", mode)
+		}
+		if selected, ok := ZapretManualStrategy(settings, "youtube"); !ok || selected.Tag != manualStrategy.Tag {
+			t.Fatalf("YouTube manual strategy = %#v/%t, want %q", selected, ok, manualStrategy.Tag)
+		}
+		result = app.SetZapretServiceStrategy("youtube", ZapretStrategyModeAuto, "")
+		requireAPISuccess(t, result)
+		settings = app.storage.GetAppSettings()
+		if mode := ZapretStrategyMode(settings, "youtube"); mode != ZapretStrategyModeAuto {
+			t.Fatalf("YouTube Zapret strategy mode = %q, want auto", mode)
+		}
+		result = app.SetFreeAccessServiceMethod("youtube", FreeAccessMethodDirect)
 		requireAPISuccess(t, result)
 
 		unsupported := app.SetFreeAccessServiceMethod("telegram", FreeAccessMethodZapret)
@@ -156,8 +188,8 @@ func TestSettingsAPIsPersistFreeAccessPolicy(t *testing.T) {
 	requireAPISuccess(t, result)
 	settings = app.storage.GetAppSettings()
 	plan = buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
-	if !planContainsString(plan.ProxyServices, "telegram") || planContainsString(plan.TransparentServices, "telegram") {
-		t.Fatalf("legacy manual zapret plan = %+v, want migration to automatic Telegram VPN fallback", plan)
+	if !planContainsString(plan.DirectServices, "telegram") || planContainsString(plan.TransparentServices, "telegram") {
+		t.Fatalf("legacy manual zapret plan = %+v, want unsupported legacy method migrated to direct", plan)
 	}
 
 	invalidResult := app.SetFreeAccessServiceMethod("unknown-service", FreeAccessMethodDirect)

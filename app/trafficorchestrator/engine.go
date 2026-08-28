@@ -18,6 +18,20 @@ type PacketAddress struct {
 	Data      [64]byte
 }
 
+const winDivertAddressOutboundFlag uint32 = 1 << 17
+
+func (address *PacketAddress) setDirection(direction PacketDirection) {
+	if address == nil {
+		return
+	}
+	switch direction {
+	case PacketDirectionInbound:
+		address.Flags &^= winDivertAddressOutboundFlag
+	case PacketDirectionOutbound:
+		address.Flags |= winDivertAddressOutboundFlag
+	}
+}
+
 type PacketBackend interface {
 	Receive([]byte) (int, PacketAddress, error)
 	Send([]byte, *PacketAddress) error
@@ -162,8 +176,13 @@ func (e *Engine) run() {
 		}
 		original := append([]byte(nil), buffer[:length]...)
 		decision := e.processor.Process(original)
+		if decision.Dropped {
+			continue
+		}
 		for index, packet := range decision.Packets {
-			if err := e.backend.Send(packet, &address); err != nil {
+			outputAddress := address
+			outputAddress.setDirection(decision.Direction)
+			if err := e.backend.Send(packet, &outputAddress); err != nil {
 				// The original packet is the only safe fallback. Try it once if a
 				// synthetic/segmented send failed before ending the engine.
 				if index < len(decision.Packets)-1 || decision.Transformed {

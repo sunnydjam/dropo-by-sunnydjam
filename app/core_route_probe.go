@@ -740,30 +740,9 @@ func applyRouteProbeSelectionsToConfig(config map[string]interface{}, results []
 			}
 			continue
 		}
-		if tag == SmartBypassGroupTag {
-			selected := bestAggregateProbeTag(tagStats)
-			if selected == "" {
-				continue
-			}
-			// smart-bypass is the catch-all for blocked domains NOT covered by a
-			// per-service winws2 profile, so 'direct' would not desync them. If the
-			// aggregate winner is a transparent (winws2) method and a VPN fallback
-			// exists, leave the group on its built free-proxy+VPN form instead of
-			// pinning it to transparent-direct. A VPN/proxy winner is applied
-			// normally (prefer it).
-			if tagKinds[selected] == "transparent" {
-				hasVPNFallback := false
-				for _, c := range interfaceStringSlice(outboundMap["outbounds"]) {
-					if c == "auto-select" || c == "proxy" {
-						hasVPNFallback = true
-						break
-					}
-				}
-				if hasVPNFallback {
-					continue
-				}
-			}
-			applyRouteProbeSelectionToGroup(outboundMap, routeProbeConfigOutbound(selected, tagKinds[selected]), tagKinds[selected])
+		// smart-bypass is a legacy catch-all. Service routing is explicit now,
+		// so probes must never turn unrelated traffic into VPN or Zapret traffic.
+		if tag == SmartBypassGroupTag && pinDirectOutboundGroup(outboundMap) {
 			changed = true
 		}
 	}
@@ -789,40 +768,20 @@ func applyRouteProbeSelectionToGroup(outboundMap map[string]interface{}, selecte
 }
 
 func pinTransparentOutboundGroup(outboundMap map[string]interface{}) {
-	candidates := interfaceStringSlice(outboundMap["outbounds"])
-	filtered := []string{"direct"}
-	for _, candidate := range candidates {
-		switch candidate {
-		case "direct":
-			continue
-		case "auto-select", "proxy":
-			filtered = append(filtered, candidate)
-		}
-	}
-	outboundMap["outbounds"] = filtered
-
-	if len(filtered) > 1 {
-		// Hybrid (VPN subscription present): keep the service on a urltest of
-		// [direct, VPN]. winws2 desyncs the 'direct' path, so when the desync
-		// works direct wins the health probe (free); when it can't open the
-		// service, the probe over direct fails and the group auto-falls to the
-		// VPN. The probe keeps the service-specific health URL set by the
-		// original resilient group so it reflects real reachability.
-		outboundMap["type"] = "urltest"
-		if url, ok := outboundMap["url"].(string); !ok || url == "" {
-			outboundMap["url"] = resilientGroupTestURL
-		}
-		outboundMap["interval"] = "90s"
-		outboundMap["tolerance"] = 0
-		outboundMap["interrupt_exist_connections"] = false
-		delete(outboundMap, "default")
-		return
-	}
-
-	// No VPN fallback: pin to direct (winws2 handles it; nothing else to try).
+	// Transparent Zapret is an explicit route, not a preference. WinDivert
+	// transforms the service's direct packets; a VPN candidate here would let
+	// sing-box silently override the user's choice.
+	outboundMap["outbounds"] = []string{"direct"}
 	outboundMap["type"] = "selector"
 	outboundMap["default"] = "direct"
 	deleteOutboundGroupHealthCheckFields(outboundMap)
+}
+
+func pinDirectOutboundGroup(outboundMap map[string]interface{}) bool {
+	before := interfaceStringSlice(outboundMap["outbounds"])
+	alreadyDirect := len(before) == 1 && before[0] == "direct" && outboundMap["type"] == "selector" && outboundMap["default"] == "direct"
+	pinTransparentOutboundGroup(outboundMap)
+	return !alreadyDirect
 }
 
 func preferOutboundGroupCandidate(outboundMap map[string]interface{}, selected string) {

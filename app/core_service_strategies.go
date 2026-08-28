@@ -28,6 +28,40 @@ type ServiceBypassMethod struct {
 }
 
 const (
+	ZapretStrategyModeAuto   = "auto"
+	ZapretStrategyModeManual = "manual"
+)
+
+func DefaultZapretStrategyModeState() map[string]string {
+	return map[string]string{
+		"youtube": ZapretStrategyModeAuto,
+		"discord": ZapretStrategyModeAuto,
+	}
+}
+
+func NormalizeZapretStrategyMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), ZapretStrategyModeManual) {
+		return ZapretStrategyModeManual
+	}
+	return ZapretStrategyModeAuto
+}
+
+func ZapretStrategyMode(settings GlobalAppSettings, serviceTag string) string {
+	if settings.ZapretStrategyModes == nil {
+		return ZapretStrategyModeAuto
+	}
+	return NormalizeZapretStrategyMode(settings.ZapretStrategyModes[strings.TrimSpace(strings.ToLower(serviceTag))])
+}
+
+func ZapretManualStrategy(settings GlobalAppSettings, serviceTag string) (ServiceBypassMethod, bool) {
+	serviceTag = strings.TrimSpace(strings.ToLower(serviceTag))
+	if ZapretStrategyMode(settings, serviceTag) != ZapretStrategyModeManual || settings.ZapretStrategies == nil {
+		return ServiceBypassMethod{}, false
+	}
+	return findServiceBypassMethod(serviceTag, strings.TrimSpace(strings.ToLower(settings.ZapretStrategies[serviceTag])))
+}
+
+const (
 	googleTLSPayload      = "tls_clienthello_www_google_com.bin"
 	googleQUICPayload     = "quic_initial_www_google_com.bin"
 	facebookQUICPayload   = "quic_initial_facebook_com.bin"

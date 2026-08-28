@@ -14,6 +14,7 @@ import (
 type FreeAccessService struct {
 	Tag            string   `json:"tag"`
 	DisplayName    string   `json:"display_name"`
+	ExactHosts     []string `json:"exact_hosts,omitempty"`
 	DomainSuffixes []string `json:"domain_suffixes"`
 	IPCIDRs        []string `json:"ip_cidrs,omitempty"`
 	ProcessNames   []string `json:"process_names,omitempty"`
@@ -26,9 +27,15 @@ var DefaultFreeAccessServices = []FreeAccessService{
 	{
 		Tag:         "discord",
 		DisplayName: "Discord",
+		ExactHosts: []string{
+			"discord.com", "updates.discord.com", "cdn.discordapp.com", "media.discordapp.net", "gateway.discord.gg",
+		},
 		DomainSuffixes: []string{
 			"discord.com", "discord.gg", "discordapp.com", "discordapp.net", "discord.media", "discord.gift",
-			"discordcdn.com", "discordstatus.com",
+			"discordcdn.com", "discordstatus.com", "discord.app", "discord.co", "discord.design", "discord.dev",
+			"discord.gifts", "discord.new", "discord.store", "discord.status", "discord-activities.com",
+			"discordactivities.com", "discordmerch.com", "discordpartygames.com", "discordsays.com", "discordsez.com",
+			"discord-attachments-uploads-prd.storage.googleapis.com", "dis.gd",
 		},
 		IPCIDRs: []string{
 			"66.22.192.0/18",
@@ -46,10 +53,11 @@ var DefaultFreeAccessServices = []FreeAccessService{
 		DisplayName: "YouTube",
 		DomainSuffixes: []string{
 			"youtube.com", "youtu.be", "youtube-nocookie.com", "youtubeeducation.com",
-			"ytimg.com", "yt3.ggpht.com", "ggpht.com", "googlevideo.com",
+			"youtubekids.com", "youtubeembeddedplayer.googleapis.com", "ytimg.com", "yt3.ggpht.com",
+			"yt4.ggpht.com", "yt3.googleusercontent.com", "googlevideo.com",
 			"youtube-ui.l.google.com", "wide-youtube.l.google.com",
 			"youtubei.googleapis.com", "youtube.googleapis.com",
-			"ytstatic.com", "www.gstatic.com", "gvt1.com", "gvt2.com",
+			"jnn-pa.googleapis.com", "yt-video-upload.l.google.com", "ytstatic.com",
 		},
 		HealthURL: "https://www.youtube.com",
 		ProbeURLs: []string{
@@ -62,10 +70,13 @@ var DefaultFreeAccessServices = []FreeAccessService{
 	},
 	{
 		Tag:         "meta",
-		DisplayName: "Instagram / Facebook",
+		DisplayName: "Instagram",
 		DomainSuffixes: []string{
-			"instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "fb.com", "facebook.net",
-			"messenger.com", "m.me", "threads.net", "connect.facebook.net",
+			"instagram.com", "cdninstagram.com", "threads.net",
+			// Instagram media observed on Meta's shared CDN. Keep these more
+			// specific than fbcdn.net so selecting Instagram does not route the
+			// complete Facebook CDN namespace.
+			"fna.fbcdn.net", "static.xx.fbcdn.net",
 		},
 		IPCIDRs: []string{
 			"31.13.64.0/18",
@@ -77,11 +88,23 @@ var DefaultFreeAccessServices = []FreeAccessService{
 			"173.252.64.0/18",
 			"185.60.216.0/22",
 		},
-		HealthURL: "https://www.instagram.com",
-		ProbeURLs: []string{
-			"https://www.facebook.com",
-			"https://connect.facebook.net",
+		HealthURL:   "https://www.instagram.com",
+		ProbeURLs:   []string{"https://www.instagram.com"},
+		RequiresVPN: true,
+	},
+	{
+		Tag:         "facebook",
+		DisplayName: "Facebook / Messenger",
+		DomainSuffixes: []string{
+			"facebook.com", "fbcdn.net", "fb.com", "facebook.net", "messenger.com", "m.me", "connect.facebook.net",
 		},
+		IPCIDRs: []string{
+			"31.13.64.0/18", "66.220.144.0/20", "69.63.176.0/20", "69.171.224.0/19",
+			"129.134.0.0/16", "157.240.0.0/16", "173.252.64.0/18", "185.60.216.0/22",
+		},
+		HealthURL:   "https://www.facebook.com",
+		ProbeURLs:   []string{"https://connect.facebook.net"},
+		RequiresVPN: true,
 	},
 	{
 		Tag:            "twitter",
@@ -360,10 +383,24 @@ var DefaultFreeAccessServices = []FreeAccessService{
 	},
 	{
 		Tag:         "openai",
-		DisplayName: "AI services",
+		DisplayName: "ChatGPT",
+		ExactHosts: []string{
+			"chatgpt.com", "ab.chatgpt.com", "ws.chatgpt.com", "api.openai.com", "auth.openai.com",
+			"persistent.oaistatic.com", "oaisidekickupdates.blob.core.windows.net",
+		},
 		DomainSuffixes: []string{
 			"openai.com", "chatgpt.com", "ws.chatgpt.com", "oaistatic.com", "oaiusercontent.com", "oaistatsig.com",
 			"openaimerge.com", "auth0.openai.com", "workos.com", "workoscdn.com",
+		},
+		ProcessNames: []string{"ChatGPT.exe"},
+		HealthURL:    "https://chatgpt.com",
+		ProbeURLs:    []string{"https://api.openai.com"},
+		RequiresVPN:  true,
+	},
+	{
+		Tag:         "ai-other",
+		DisplayName: "Другие AI-сервисы",
+		DomainSuffixes: []string{
 			"githubcopilot.com", "copilot-proxy.githubusercontent.com", "origin-tracker.githubusercontent.com",
 			"copilot-telemetry.githubusercontent.com", "default.exp-tas.com", "api.github.com", "github.com",
 			"cursor.com", "cursor.sh", "api2.cursor.sh", "api3.cursor.sh", "repo42.cursor.sh",
@@ -376,10 +413,29 @@ var DefaultFreeAccessServices = []FreeAccessService{
 		ProcessNames: []string{
 			"Code.exe", "Cursor.exe", "GitHubCopilot.exe",
 		},
-		HealthURL:   "https://chatgpt.com",
-		ProbeURLs:   []string{"https://api.openai.com"},
+		HealthURL:   "https://perplexity.ai",
+		ProbeURLs:   []string{"https://perplexity.ai", "https://gemini.google.com"},
 		RequiresVPN: true,
 	},
+}
+
+var primaryHomeRouteServiceTags = map[string]bool{
+	"youtube": true,
+	"discord": true,
+	"meta":    true,
+	"openai":  true,
+}
+
+func HomeRouteServiceVisible(settings GlobalAppSettings, serviceTag string) bool {
+	if primaryHomeRouteServiceTags[serviceTag] {
+		return true
+	}
+	for _, tag := range settings.HomeRouteServices {
+		if tag == serviceTag {
+			return true
+		}
+	}
+	return false
 }
 
 func (s FreeAccessService) ProbeTargets() []string {
@@ -498,7 +554,7 @@ func DefaultFreeAccessServiceState() map[string]bool {
 func DefaultFreeAccessServiceMethodState() map[string]string {
 	state := make(map[string]string, len(DefaultFreeAccessServices))
 	for _, s := range DefaultFreeAccessServices {
-		state[s.Tag] = FreeAccessMethodAuto
+		state[s.Tag] = FreeAccessMethodDirect
 	}
 	return state
 }
@@ -574,9 +630,13 @@ func NormalizeFreeAccessServiceMethod(method string) string {
 
 func FreeAccessServiceMethod(settings GlobalAppSettings, serviceTag string) string {
 	if settings.FreeAccessMethods == nil {
-		return FreeAccessMethodAuto
+		return FreeAccessMethodDirect
 	}
-	method := NormalizeFreeAccessServiceMethod(settings.FreeAccessMethods[serviceTag])
+	raw, exists := settings.FreeAccessMethods[serviceTag]
+	if !exists || strings.TrimSpace(raw) == "" {
+		return FreeAccessMethodDirect
+	}
+	method := NormalizeFreeAccessServiceMethod(raw)
 	if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(method) || IsFreeAccessTransparentMethod(method)) {
 		// Old desktop builds persisted a concrete helper/strategy tag. Preserve
 		// the user's strict free-bypass intent, but migrate it to the stable
@@ -584,7 +644,7 @@ func FreeAccessServiceMethod(settings GlobalAppSettings, serviceTag string) stri
 		if serviceHasFreeBypass(serviceTag) {
 			return FreeAccessMethodZapret
 		}
-		return FreeAccessMethodAuto
+		return FreeAccessMethodDirect
 	}
 	return method
 }
@@ -632,7 +692,6 @@ func IsFreeAccessTransparentMethod(tag string) bool {
 
 func FreeAccessServiceMethodOptions() []map[string]string {
 	options := []map[string]string{
-		{"tag": FreeAccessMethodAuto, "value": FreeAccessMethodAuto, "label": "Авто"},
 		{"tag": FreeAccessMethodDirect, "value": FreeAccessMethodDirect, "label": "Напрямую"},
 		{"tag": FreeAccessMethodVPN, "value": FreeAccessMethodVPN, "label": "Через VPN"},
 	}

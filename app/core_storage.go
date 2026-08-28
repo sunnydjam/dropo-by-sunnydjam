@@ -59,11 +59,14 @@ type GlobalAppSettings struct {
 
 	// Free access settings — opening blocked-in-RF
 	// services without a VPN key, via local DPI-bypass methods (ByeDPI).
-	FreeAccessEnabled  bool              `json:"free_access_enabled"`  // Master switch for the "Free access" tab
-	FreeAccessReverse  bool              `json:"free_access_reverse"`  // Prefer ByeDPI candidates before VPN when latency is equal
-	FreeAccessServices map[string]bool   `json:"free_access_services"` // tag -> enabled, see DefaultFreeAccessServices
-	FreeAccessMethods  map[string]string `json:"free_access_methods"`  // tag -> forced method (auto/direct/vpn/byedpi/...)
-	DisableFreeAccess  bool              `json:"disable_free_access"`  // Opt-out: require VPN/WireGuard/subscription instead of free methods
+	FreeAccessEnabled   bool              `json:"free_access_enabled"`             // Master switch for the "Free access" tab
+	FreeAccessReverse   bool              `json:"free_access_reverse"`             // Prefer ByeDPI candidates before VPN when latency is equal
+	FreeAccessServices  map[string]bool   `json:"free_access_services"`            // tag -> enabled, see DefaultFreeAccessServices
+	FreeAccessMethods   map[string]string `json:"free_access_methods"`             // tag -> forced method (auto/direct/vpn/byedpi/...)
+	ZapretStrategyModes map[string]string `json:"zapret_strategy_modes,omitempty"` // tag -> auto/manual for the strict Zapret route
+	ZapretStrategies    map[string]string `json:"zapret_strategies,omitempty"`     // tag -> concrete strategy tag in manual mode
+	HomeRouteServices   []string          `json:"home_route_services,omitempty"`   // extra service tags pinned to the home dashboard
+	DisableFreeAccess   bool              `json:"disable_free_access"`             // Opt-out: require VPN/WireGuard/subscription instead of free methods
 
 	// TelegramProxyInjected records that dropo opened the tg://proxy link at
 	// least once, so the local MTProto proxy is saved inside Telegram. It cannot
@@ -109,7 +112,7 @@ type Storage struct {
 }
 
 const (
-	SettingsVersion  = 4
+	SettingsVersion  = 6
 	ResourcesFolder  = "resources"
 	SettingsFileName = "settings.json"
 )
@@ -254,8 +257,10 @@ func (s *Storage) createDefaultSettings() *SettingsFile {
 			ActiveProfileID:     DefaultProfileID,
 			FreeAccessEnabled:   true, // enabled by default
 			FreeAccessReverse:   false,
-			FreeAccessServices:  DefaultFreeAccessServiceState(), // every service enabled by default
+			FreeAccessServices:  DefaultFreeAccessServiceState(), // retained for legacy settings decoding
 			FreeAccessMethods:   DefaultFreeAccessServiceMethodState(),
+			ZapretStrategyModes: DefaultZapretStrategyModeState(),
+			ZapretStrategies:    map[string]string{},
 			DisableFreeAccess:   false,
 			HideRuTraffic:       false, // RU traffic stays direct by default
 			RuProxyAddress:      "",
@@ -298,13 +303,24 @@ func (s *Storage) normalizeAppSettings() {
 	if app.FreeAccessMethods == nil {
 		app.FreeAccessMethods = DefaultFreeAccessServiceMethodState()
 	}
+	if app.ZapretStrategyModes == nil {
+		app.ZapretStrategyModes = DefaultZapretStrategyModeState()
+	}
+	if app.ZapretStrategies == nil {
+		app.ZapretStrategies = map[string]string{}
+	}
 	for _, svc := range DefaultFreeAccessServices {
 		normalized := NormalizeFreeAccessServiceMethod(app.FreeAccessMethods[svc.Tag])
+		// Schema v5 removes the implicit catch-all policy. Old Auto values become
+		// Direct once; future routing changes must be explicit per service.
+		if normalized == FreeAccessMethodAuto {
+			normalized = FreeAccessMethodDirect
+		}
 		if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(normalized) || IsFreeAccessTransparentMethod(normalized)) {
 			if serviceHasFreeBypass(svc.Tag) {
 				normalized = FreeAccessMethodZapret
 			} else {
-				normalized = FreeAccessMethodAuto
+				normalized = FreeAccessMethodDirect
 			}
 		}
 		// Preserve the intent of the removed per-service checkbox: a legacy
@@ -314,6 +330,15 @@ func (s *Storage) normalizeAppSettings() {
 		}
 		app.FreeAccessMethods[svc.Tag] = normalized
 		app.FreeAccessServices[svc.Tag] = true
+		mode := NormalizeZapretStrategyMode(app.ZapretStrategyModes[svc.Tag])
+		manualTag := strings.TrimSpace(strings.ToLower(app.ZapretStrategies[svc.Tag]))
+		if mode == ZapretStrategyModeManual {
+			if _, ok := findServiceBypassMethod(svc.Tag, manualTag); !ok {
+				mode = ZapretStrategyModeAuto
+				delete(app.ZapretStrategies, svc.Tag)
+			}
+		}
+		app.ZapretStrategyModes[svc.Tag] = mode
 	}
 	for i := range s.data.Profiles {
 		if s.data.Profiles[i].ID != DefaultProfileID {
@@ -400,6 +425,19 @@ func cloneGlobalAppSettings(settings GlobalAppSettings) GlobalAppSettings {
 			cloned.FreeAccessMethods[tag] = method
 		}
 	}
+	if settings.ZapretStrategyModes != nil {
+		cloned.ZapretStrategyModes = make(map[string]string, len(settings.ZapretStrategyModes))
+		for tag, mode := range settings.ZapretStrategyModes {
+			cloned.ZapretStrategyModes[tag] = mode
+		}
+	}
+	if settings.ZapretStrategies != nil {
+		cloned.ZapretStrategies = make(map[string]string, len(settings.ZapretStrategies))
+		for tag, strategy := range settings.ZapretStrategies {
+			cloned.ZapretStrategies[tag] = strategy
+		}
+	}
+	cloned.HomeRouteServices = append([]string(nil), settings.HomeRouteServices...)
 	return cloned
 }
 
@@ -777,6 +815,7 @@ func (s *Storage) WriteActiveConfigToFile() (string, error) {
 			s.preferIPv4Resolution(config)
 			relaxTunStrictRoute(config)
 			disableTunIPv6(config)
+			useWindowsSystemTunStack(config)
 			clearDirectOutboundInterface(config)
 			addTunRouteExcludesForProxyEndpoints(config, s.data.Profiles[i].XrayConfig)
 
@@ -1873,7 +1912,9 @@ func (b *ConfigBuilderForStorage) applyRoutingMode(template map[string]interface
 	outbounds, _ := template["outbounds"].([]interface{})
 	hasVPNProxy := outboundTagExists(outbounds, "auto-select")
 	b.applyDNSRouting(template, settings, hasVPNProxy)
-	b.addFreeAccessOutbounds(template, settings)
+	if b.routingMode != RoutingModeAllTraffic {
+		b.addFreeAccessOutbounds(template, settings)
+	}
 	outbounds, _ = template["outbounds"].([]interface{})
 	hasSmartBypass := outboundTagExists(outbounds, SmartBypassGroupTag)
 
@@ -1888,7 +1929,7 @@ func (b *ConfigBuilderForStorage) applyRoutingMode(template map[string]interface
 
 	case RoutingModeAllTraffic:
 		// All traffic through VPN - remove direct rules for Russia
-		b.applyAllTrafficMode(route, settings, hasVPNProxy)
+		b.applyAllTrafficMode(route)
 
 	default:
 		// Unknown mode, use blocked_only as safest default
@@ -1968,9 +2009,13 @@ func (b *ConfigBuilderForStorage) addFreeAccessOutbounds(template map[string]int
 		if FreeMethodsAllowed(settings) || serviceStrategiesAllowed || hasVPNProxy {
 			needsNoRouteOutbound := false
 			for _, svc := range DefaultFreeAccessServices {
+				routeOutbound := FreeAccessServiceRouteOutboundForSettings(svc, settings, hasVPNProxy)
+				if routeOutbound == "direct" {
+					continue
+				}
 				serviceCandidates := FreeAccessServiceCandidateTagsForSettings(svc, settings, hasVPNProxy)
 				if len(serviceCandidates) == 0 {
-					if FreeAccessServiceRouteOutboundForSettings(svc, settings, hasVPNProxy) == NoRouteOutboundTag {
+					if routeOutbound == NoRouteOutboundTag {
 						needsNoRouteOutbound = true
 					}
 					continue
@@ -2148,7 +2193,10 @@ func buildDirectServiceRules() []interface{} {
 	return rules
 }
 
-func buildBlockedServiceProtocolFallbackRules() []interface{} {
+func buildBlockedServiceProtocolFallbackRules(settings GlobalAppSettings) []interface{} {
+	if FreeAccessServiceMethod(settings, "youtube") != FreeAccessMethodZapret {
+		return nil
+	}
 	youtubeDomains := freeAccessServiceDomainSuffixes("youtube")
 	if len(youtubeDomains) == 0 {
 		return nil
@@ -2267,14 +2315,13 @@ func buildDiscordRealtimeRules(settings GlobalAppSettings, hasVPNProxy bool) []i
 	}
 }
 
-// blockedCatchAllOutbound returns which group the broad Re:filter/community
-// rule_set catch-all (everything blocked that isn't one of the named
-// free-access services) should route through.
-func (b *ConfigBuilderForStorage) blockedCatchAllOutbound(settings GlobalAppSettings, hasVPNProxy bool) string {
-	if FreeMethodsAllowed(settings) || hasVPNProxy {
-		return SmartBypassGroupTag
-	}
-	return VpnOrDirectGroupTag
+// blockedCatchAllOutbound keeps the broad Re:filter/community catalog direct.
+// Only a named service with an explicit policy may use VPN or Zapret.
+func (b *ConfigBuilderForStorage) blockedCatchAllOutbound(_ GlobalAppSettings, _ bool) string {
+	// The broad RKN catalog is classification data, not an implicit route
+	// policy. Only named services selected by the user may leave the direct
+	// path in blocked_only mode.
+	return "direct"
 }
 
 // ruRuleOutbound returns which outbound RU-classified domains should use:
@@ -2516,7 +2563,7 @@ func (b *ConfigBuilderForStorage) applyBlockedOnlyMode(route map[string]interfac
 
 	// Build new rules for blocked_only mode
 	// Order: sniff → dns → private → RU (direct/ru-route) → free-access services →
-	//        broad blocked catch-all (smart-bypass/vpn-or-direct) → final:direct
+	//        broad blocked catalog (direct) → final:direct
 	newRules := []interface{}{
 		// 1. Sniff for protocol detection
 		map[string]interface{}{
@@ -2562,9 +2609,9 @@ func (b *ConfigBuilderForStorage) applyBlockedOnlyMode(route map[string]interfac
 		},
 	)
 
-	newRules = append(newRules, buildBlockedServiceProtocolFallbackRules()...)
+	newRules = append(newRules, buildBlockedServiceProtocolFallbackRules(settings)...)
 
-	// 7. Named free-access services: smart-bypass (toggle on) or vpn-or-direct (toggle off)
+	// 7. Named services: each explicit Direct/VPN/Zapret policy is authoritative.
 	newRules = append(newRules, b.buildFreeAccessRules(settings, hasVPNProxy)...)
 
 	// 8. Everything else positively classified by the RKN catalogs. Domain
@@ -2591,7 +2638,7 @@ func (b *ConfigBuilderForStorage) applyBlockedOnlyMode(route map[string]interfac
 // RU-трафик" is on: this mode's entire point is "everything through VPN",
 // which already includes RU domains via final=proxy — the hide-toggle has
 // no additional effect in this mode.
-func (b *ConfigBuilderForStorage) applyAllTrafficMode(route map[string]interface{}, settings GlobalAppSettings, hasVPNProxy bool) {
+func (b *ConfigBuilderForStorage) applyAllTrafficMode(route map[string]interface{}) {
 	fmt.Printf("[applyRoutingMode] Using all_traffic mode\n")
 
 	// Remove rule_sets (not needed for all traffic mode)
@@ -2617,12 +2664,16 @@ func (b *ConfigBuilderForStorage) applyAllTrafficMode(route map[string]interface
 			"outbound":      "direct",
 		},
 	}
-	newRules = insertAfterFirstRouteRule(newRules, buildFreeAccessProcessRules(settings))
-
-	// Named free-access services still get a chance at a faster bypass route
-	// before falling through to the VPN proxy everything else uses here.
-	newRules = append(newRules, buildBlockedServiceProtocolFallbackRules()...)
-	newRules = append(newRules, b.buildFreeAccessRules(settings, hasVPNProxy)...)
+	// The proxy helper itself must bypass the redirector to avoid a loop. No
+	// user-facing service or Zapret exception is allowed in explicit all-VPN
+	// mode; saved per-service policies become active again in blocked_only.
+	newRules = insertAfterFirstRouteRule(newRules, []interface{}{
+		map[string]interface{}{
+			"process_name": []string{XrayExeName},
+			"action":       "route",
+			"outbound":     "direct",
+		},
+	})
 
 	route["rules"] = newRules
 	route["final"] = "proxy"
@@ -2683,7 +2734,7 @@ func (b *ConfigBuilderForStorage) applyExceptRussiaMode(route map[string]interfa
 
 	// 8. Named free-access services get their own latency-tested bypass route
 	// before falling through to the shared foreign-traffic bypass/VPN group.
-	newRules = append(newRules, buildBlockedServiceProtocolFallbackRules()...)
+	newRules = append(newRules, buildBlockedServiceProtocolFallbackRules(settings)...)
 	newRules = append(newRules, b.buildFreeAccessRules(settings, hasVPNProxy)...)
 
 	finalOutbound := VpnOrDirectGroupTag

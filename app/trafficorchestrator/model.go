@@ -117,22 +117,41 @@ const (
 	IPMatchHostless IPMatchPolicy = "hostless_only"
 )
 
+// ProcessMatchPolicy controls whether a curated executable basename is strong
+// service identity or may only corroborate host/IP/fingerprint evidence.
+type ProcessMatchPolicy string
+
+const (
+	ProcessMatchCorroborate ProcessMatchPolicy = "corroborate"
+	ProcessMatchIdentity    ProcessMatchPolicy = "identity"
+)
+
+// PortRange is an inclusive, bounded transport-port range. Selective Windows
+// capture uses it only to discover process-owned UDP flows whose remote address
+// is allocated dynamically after an authenticated service control connection.
+type PortRange struct {
+	First int `json:"first"`
+	Last  int `json:"last"`
+}
+
 // ServiceRule identifies one service across web, desktop and mobile traffic.
 type ServiceRule struct {
-	ID                   string        `json:"id"`
-	DisplayName          string        `json:"displayName"`
-	ExactHosts           []string      `json:"exactHosts,omitempty"`
-	DomainSuffixes       []string      `json:"domainSuffixes,omitempty"`
-	IPCIDRs              []string      `json:"ipCidrs,omitempty"`
-	IPMatchPolicy        IPMatchPolicy `json:"ipMatchPolicy,omitempty"`
-	ProcessNames         []string      `json:"processNames,omitempty"`
-	TCPPorts             []int         `json:"tcpPorts,omitempty"`
-	UDPPorts             []int         `json:"udpPorts,omitempty"`
-	Fingerprints         []string      `json:"fingerprints,omitempty"`
-	ProbeTargets         []ProbeTarget `json:"probeTargets,omitempty"`
-	CandidateStrategyIDs []string      `json:"candidateStrategyIds,omitempty"`
-	AllowVPNFallback     bool          `json:"allowVpnFallback"`
-	AllowDirectFallback  bool          `json:"allowDirectFallback"`
+	ID                            string             `json:"id"`
+	DisplayName                   string             `json:"displayName"`
+	ExactHosts                    []string           `json:"exactHosts,omitempty"`
+	DomainSuffixes                []string           `json:"domainSuffixes,omitempty"`
+	IPCIDRs                       []string           `json:"ipCidrs,omitempty"`
+	IPMatchPolicy                 IPMatchPolicy      `json:"ipMatchPolicy,omitempty"`
+	ProcessNames                  []string           `json:"processNames,omitempty"`
+	ProcessMatchPolicy            ProcessMatchPolicy `json:"processMatchPolicy,omitempty"`
+	TCPPorts                      []int              `json:"tcpPorts,omitempty"`
+	UDPPorts                      []int              `json:"udpPorts,omitempty"`
+	ProcessDiscoveryUDPPortRanges []PortRange        `json:"processDiscoveryUdpPortRanges,omitempty"`
+	Fingerprints                  []string           `json:"fingerprints,omitempty"`
+	ProbeTargets                  []ProbeTarget      `json:"probeTargets,omitempty"`
+	CandidateStrategyIDs          []string           `json:"candidateStrategyIds,omitempty"`
+	AllowVPNFallback              bool               `json:"allowVpnFallback"`
+	AllowDirectFallback           bool               `json:"allowDirectFallback"`
 }
 
 // ServiceSelection binds one service to the strategy currently selected for
@@ -140,6 +159,23 @@ type ServiceRule struct {
 type ServiceSelection struct {
 	ServiceID  string `json:"serviceId"`
 	StrategyID string `json:"strategyId"`
+}
+
+// ServiceRouteKind is the terminal path selected for one positively
+// classified service. Zapret keeps the packet on the native direct path and
+// applies a typed strategy; VPN is consumed by the selective relay; Direct is
+// an explicit pass-through decision.
+type ServiceRouteKind string
+
+const (
+	ServiceRouteDirect ServiceRouteKind = "direct"
+	ServiceRouteVPN    ServiceRouteKind = "vpn"
+	ServiceRouteZapret ServiceRouteKind = "zapret"
+)
+
+type ServiceRoute struct {
+	ServiceID string           `json:"serviceId"`
+	Kind      ServiceRouteKind `json:"kind"`
 }
 
 // WorkNetworkRule reserves corporate/private destinations for the native
@@ -168,6 +204,7 @@ type TrafficPlan struct {
 	Strategies      []TrafficStrategy  `json:"strategies"`
 	Services        []ServiceRule      `json:"services"`
 	Selections      []ServiceSelection `json:"selections,omitempty"`
+	Routes          []ServiceRoute     `json:"routes,omitempty"`
 	WorkNetworks    []WorkNetworkRule  `json:"workNetworks,omitempty"`
 	DirectRules     []DirectRule       `json:"directRules,omitempty"`
 }

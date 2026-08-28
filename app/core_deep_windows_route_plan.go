@@ -81,9 +81,17 @@ func buildDeepWindowsRoutePlanForSettings(settings GlobalAppSettings, hasVPNCand
 	default:
 		plan.DefaultTraffic = DeepWindowsTrafficDirect
 	}
-
-	if hasVPNCandidates {
-		plan.requireProxy("VPN/VLESS fallback candidates are available")
+	if mode == RoutingModeAllTraffic {
+		for _, svc := range DefaultFreeAccessServices {
+			if hasVPNCandidates {
+				plan.ProxyServices = append(plan.ProxyServices, svc.Tag)
+			} else {
+				plan.BlockedServices = append(plan.BlockedServices, svc.Tag)
+			}
+		}
+		plan.RequiresRedirector = plan.RequiresSingBoxProxy
+		plan.ProxyReasons = uniqueStrings(plan.ProxyReasons)
+		return plan
 	}
 
 	for _, svc := range DefaultFreeAccessServices {

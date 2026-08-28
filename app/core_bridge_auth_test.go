@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestBridgeTokenAuthorized(t *testing.T) {
@@ -32,6 +36,61 @@ func TestBridgeTokenAuthorized(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRepairBridgeTokenFileRestoresMissingAndStaleToken(t *testing.T) {
+	dataPath := t.TempDir()
+	const token = "current-core-token"
+
+	repaired, err := repairBridgeTokenFile(dataPath, token)
+	if err != nil || !repaired {
+		t.Fatalf("initial repair = repaired:%v err:%v, want true nil", repaired, err)
+	}
+	path := filepath.Join(dataPath, bridgeTokenFileName)
+	if data, err := os.ReadFile(path); err != nil || string(data) != token {
+		t.Fatalf("initial token file = %q err:%v, want %q", data, err, token)
+	}
+
+	repaired, err = repairBridgeTokenFile(dataPath, token)
+	if err != nil || repaired {
+		t.Fatalf("matching token repair = repaired:%v err:%v, want false nil", repaired, err)
+	}
+
+	if err := os.WriteFile(path, []byte("stale-ui-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err = repairBridgeTokenFile(dataPath, token)
+	if err != nil || !repaired {
+		t.Fatalf("stale token repair = repaired:%v err:%v, want true nil", repaired, err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != token {
+		t.Fatalf("repaired token file = %q err:%v, want %q", data, err, token)
+	}
+}
+
+func TestMaintainBridgeTokenFileRestoresDeletedToken(t *testing.T) {
+	dataPath := t.TempDir()
+	const token = "live-core-token"
+	if _, err := repairBridgeTokenFile(dataPath, token); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go maintainBridgeTokenFile(ctx, dataPath, token, nil)
+	path := filepath.Join(dataPath, bridgeTokenFileName)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * bridgeTokenRepairInterval)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil && string(data) == token {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("token maintainer did not restore the deleted bridge token")
 }
 
 // loopbackRequest builds a request whose Host is loopback so it passes the
@@ -158,6 +217,7 @@ func TestBridgeCallAllowlistRejectsExportedMaintenanceMethods(t *testing.T) {
 	for _, method := range []string{
 		"GetVPNSources", "AddVPNSource", "RemoveVPNSource", "RefreshVPNSources",
 		"SetVPNSourceEnabled", "SetVPNSourceNode", "MoveVPNSource",
+		"SetFreeAccessServiceMethod", "SetZapretServiceStrategy", "SetHomeRouteServiceVisible",
 	} {
 		if _, ok := bridgeCallableMethods[method]; !ok {
 			t.Fatalf("%s must be available to the trusted Flutter UI", method)

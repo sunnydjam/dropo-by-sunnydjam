@@ -133,7 +133,45 @@ func TestNativePlanIncludesOneCommonBlockedSelection(t *testing.T) {
 			t.Fatalf("native direct domains = %v, missing %s", direct.DomainSuffixes, domain)
 		}
 	}
-	if len(direct.ProcessNames) != 0 {
-		t.Fatalf("network-layer plan cannot observe process names, got %v", direct.ProcessNames)
+	for _, processName := range []string{"steam.exe", "MistfallHunter-Win64-Shipping.exe"} {
+		if !containsStringValue(direct.ProcessNames, processName) {
+			t.Fatalf("native direct processes = %v, missing %s", direct.ProcessNames, processName)
+		}
+	}
+}
+
+func TestNativePlanIncludesManualVPNServiceWithoutZapretStrategy(t *testing.T) {
+	root := t.TempDir()
+	storage := NewStorage(root)
+	if err := storage.Init(); err != nil {
+		t.Fatal(err)
+	}
+	settings := storage.GetAppSettings()
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodVPN
+	if err := storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{basePath: root, storage: storage}
+	plan, err := app.buildNativeTrafficPlan(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Selections) != 0 {
+		t.Fatalf("VPN service unexpectedly has Zapret selection: %+v", plan.Selections)
+	}
+	foundRule := false
+	for _, rule := range plan.Services {
+		if rule.ID == "discord" {
+			foundRule = true
+			if !containsStringValue(rule.ProcessNames, "Discord.exe") || rule.ProcessMatchPolicy != traffic.ProcessMatchIdentity || len(rule.CandidateStrategyIDs) != 0 {
+				t.Fatalf("Discord VPN rule = %+v", rule)
+			}
+		}
+	}
+	if !foundRule {
+		t.Fatal("Discord VPN service rule is missing")
+	}
+	if len(plan.Routes) != 1 || plan.Routes[0].ServiceID != "discord" || plan.Routes[0].Kind != traffic.ServiceRouteVPN {
+		t.Fatalf("VPN routes = %+v", plan.Routes)
 	}
 }

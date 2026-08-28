@@ -642,8 +642,8 @@ func assertDeepWindowsProxyOnlyConfig(t *testing.T, app *App) {
 	if count := countInboundType(config, "tun"); count != 0 {
 		t.Fatalf("proxy-only config still contains %d tun inbound(s)", count)
 	}
-	if !mixedInboundIsLocalSystemProxy(config) {
-		t.Fatalf("proxy-only config mixed inbound is not local system proxy: %v", config["inbounds"])
+	if !mixedInboundIsLocalPrivateProxy(config) {
+		t.Fatalf("proxy-only config mixed inbound is not a private local proxy: %v", config["inbounds"])
 	}
 	if output, err := newBackgroundCommand(app.singboxPath, "check", "-c", proxyConfigPath).CombinedOutput(); err != nil {
 		t.Fatalf("proxy-only sing-box config check failed: %v\n%s", err, output)
@@ -777,7 +777,7 @@ func countInboundType(config map[string]interface{}, inboundType string) int {
 	return count
 }
 
-func mixedInboundIsLocalSystemProxy(config map[string]interface{}) bool {
+func mixedInboundIsLocalPrivateProxy(config map[string]interface{}) bool {
 	inbounds, _ := config["inbounds"].([]interface{})
 	for _, inbound := range inbounds {
 		inboundMap, ok := inbound.(map[string]interface{})
@@ -790,7 +790,7 @@ func mixedInboundIsLocalSystemProxy(config map[string]interface{}) bool {
 		if mixedInboundPort(inboundMap["listen_port"]) != defaultDropoMixedProxyPort {
 			return false
 		}
-		if value, ok := inboundMap["set_system_proxy"].(bool); !ok || !value {
+		if value, ok := inboundMap["set_system_proxy"].(bool); !ok || value {
 			return false
 		}
 		return true

@@ -177,6 +177,8 @@ func (a *App) Start() map[string]interface{} {
 			"error":   "Конфиг не найден. Проверьте настройки бесплатного доступа или подписки.",
 		}
 	}
+	selectiveWindowsSession := false
+	selectiveProtocolEvidence := true
 	a.logFreeMethodOptOutRoute(configPath)
 	networkMode := a.currentNetworkModeStatus()
 	a.writeLog(fmt.Sprintf("[NetworkMode] requested=%s active=%s fallback=%t reason=%s", networkMode.Requested, networkMode.Active, networkMode.Fallback, networkMode.FallbackReason))
@@ -302,9 +304,35 @@ func (a *App) Start() map[string]interface{} {
 			a.writeLog(fmt.Sprintf("[Security][Defender] optional component(s) %v are unavailable and no VPN/VLESS subscription fallback exists", depsStatus.BlockedComponents))
 		}
 	}
+	if runtime.GOOS == "windows" && a.storage != nil {
+		settings := a.storage.GetAppSettings()
+		// Selected-services mode must not install a default TUN route. Hide-RU
+		// and all-traffic policies intentionally keep complete TUN coverage.
+		if shouldUseSelectiveWindowsSession(settings) {
+			// With free-access packet strategies disabled, selected services use
+			// only PAC/fake-DNS VPN routing. Avoid capturing unrelated application
+			// TLS/QUIC handshakes (notably Steam's CEF store) in that mode.
+			selectiveProtocolEvidence = FreeMethodsAllowed(settings)
+			proxyConfigPath, proxyErr := a.writeDeepWindowsProxyFallbackConfig(configPath)
+			if proxyErr != nil {
+				a.hasError.Store(true)
+				UpdateTrayIcon("error")
+				return map[string]interface{}{
+					"success": false,
+					"error":   fmt.Sprintf("Не удалось подготовить selective Windows конфигурацию: %v", proxyErr),
+				}
+			}
+			configPath = proxyConfigPath
+			selectiveWindowsSession = true
+		}
+	}
 	a.logActiveConfigDiagnostics(configPath)
 
-	a.writeLog("[NetworkMode] Windows Unified startup: sing-box TUN + one in-process WinDivert traffic engine")
+	if selectiveWindowsSession {
+		a.writeLog("[NetworkMode] Windows selective startup: proxy-only sing-box + one narrow in-process WinDivert traffic engine")
+	} else {
+		a.writeLog("[NetworkMode] Windows Unified startup: sing-box TUN + one in-process WinDivert traffic engine")
+	}
 
 	a.updateBusy(busyID, "Проверяем sing-box...")
 	if singboxPath == "" || !fileExists(singboxPath) {
@@ -378,6 +406,46 @@ func (a *App) Start() map[string]interface{} {
 	go a.logOutput(stderr, "sing-box/log")
 	a.updateBusy(busyID, "Проверяем цепочку VPN-источников...")
 	a.startVPNSourceMonitor()
+	if runtime.GOOS == "windows" && a.trafficEngine != nil {
+		if selectiveWindowsSession {
+			if !waitForLoopbackPort(defaultDropoMixedProxyPort, 5*time.Second) {
+				terminateProcessTree(cmd)
+				_ = cmd.Wait()
+				a.mu.Lock()
+				if a.cmd == cmd {
+					a.cmd = nil
+					a.cmdDone = nil
+					a.isRunning = false
+				}
+				a.mu.Unlock()
+				return map[string]interface{}{"success": false, "error": "Локальный selective VPN proxy не запустился"}
+			}
+			proxyAddress := fmt.Sprintf("127.0.0.1:%d", defaultDropoMixedProxyPort)
+			if err := a.trafficEngine.ConfigureSelectiveSession(proxyAddress, nativeSelectiveCaptureCatalog(), selectiveProtocolEvidence); err != nil {
+				terminateProcessTree(cmd)
+				_ = cmd.Wait()
+				a.mu.Lock()
+				if a.cmd == cmd {
+					a.cmd = nil
+					a.cmdDone = nil
+					a.isRunning = false
+				}
+				a.mu.Unlock()
+				return map[string]interface{}{"success": false, "error": fmt.Sprintf("Не удалось настроить selective redirector: %v", err)}
+			}
+		} else if err := a.trafficEngine.ConfigureTUNSession(); err != nil {
+			terminateProcessTree(cmd)
+			_ = cmd.Wait()
+			a.mu.Lock()
+			if a.cmd == cmd {
+				a.cmd = nil
+				a.cmdDone = nil
+				a.isRunning = false
+			}
+			a.mu.Unlock()
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Не удалось настроить TUN traffic engine: %v", err)}
+		}
+	}
 
 	// Windows Unified: sing-box owns TUN routing and the native packet engine
 	// owns one WinDivert handle. Every enabled service validates its
@@ -389,6 +457,30 @@ func (a *App) Start() map[string]interface{} {
 	a.updateBusy(busyID, "Запускаем быстрые маршруты для заблокированных сервисов...")
 	if err := a.startComposedTransparentEngine(busyID); err != nil {
 		a.writeLog(fmt.Sprintf("[NetworkMode] native traffic engine failed to start: %v", err))
+		// A proxy-only selective session has no TUN fallback. Leaving sing-box
+		// alive here would report a connected state while selected services are
+		// not redirected at all. Fail the whole startup instead.
+		if selectiveWindowsSession {
+			if a.trafficEngine != nil {
+				a.trafficEngine.Stop()
+			}
+			a.stopVPNSourceMonitor()
+			terminateProcessTree(cmd)
+			_ = cmd.Wait()
+			a.mu.Lock()
+			if a.cmd == cmd {
+				a.cmd = nil
+				a.cmdDone = nil
+				a.isRunning = false
+			}
+			a.hasError.Store(true)
+			a.mu.Unlock()
+			UpdateTrayIcon("error")
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Windows selective routing failed to start safely: %v", err),
+			}
+		}
 		_, _ = a.forceSubscriptionFallbackForTransparentRuntime(configPath)
 		switched := a.activateSubscriptionFallbackForTransparentRuntime()
 		if switched > 0 {
@@ -528,11 +620,18 @@ func (a *App) writeDeepWindowsProxyFallbackConfig(activeConfigPath string) (stri
 	} else {
 		a.writeLog(fmt.Sprintf("[NetworkMode] proxy-only fallback config removed %d TUN inbound(s)", removedTun))
 	}
-	if !enableMixedInboundLocalProxy(config, true) {
+	// Never enable this listener as an unconditional Windows proxy: that would
+	// also redirect unrelated applications such as Steam. The selective runtime
+	// may publish a bounded PAC file whose default is DIRECT and whose only PROXY
+	// entries are domains explicitly assigned to VPN.
+	if !enableMixedInboundLocalProxy(config) {
 		return "", fmt.Errorf("mixed inbound is not available for proxy fallback")
 	}
 	if a.pruneProxyFallbackVPNCandidates(config) {
 		a.writeLog("[NetworkMode] proxy-only fallback pruned inactive VPN candidates using route probe results")
+	}
+	if err := pinSelectiveVPNInbound(config); err != nil {
+		return "", err
 	}
 
 	resourcesPath := a.basePath
@@ -572,7 +671,7 @@ func removeTunInbounds(config map[string]interface{}) int {
 	return removed
 }
 
-func enableMixedInboundLocalProxy(config map[string]interface{}, setSystemProxy bool) bool {
+func enableMixedInboundLocalProxy(config map[string]interface{}) bool {
 	inbounds, ok := config["inbounds"].([]interface{})
 	if !ok {
 		return false
@@ -584,11 +683,86 @@ func enableMixedInboundLocalProxy(config map[string]interface{}, setSystemProxy 
 			continue
 		}
 		inboundMap["listen"] = "127.0.0.1"
+		inboundMap["set_system_proxy"] = false
+		if enabled {
+			continue
+		}
 		inboundMap["listen_port"] = float64(defaultDropoMixedProxyPort)
-		inboundMap["set_system_proxy"] = setSystemProxy
+		inboundTag, _ := inboundMap["tag"].(string)
+		if strings.TrimSpace(inboundTag) == "" {
+			inboundMap["tag"] = "dropo-selective-vpn-in"
+		}
 		enabled = true
 	}
 	return enabled
+}
+
+func pinSelectiveVPNInbound(config map[string]interface{}) error {
+	inbounds, ok := config["inbounds"].([]interface{})
+	if !ok {
+		return fmt.Errorf("selective inbounds are unavailable")
+	}
+	inboundTag := ""
+	for _, raw := range inbounds {
+		inbound, ok := raw.(map[string]interface{})
+		if !ok || inbound["type"] != "mixed" {
+			continue
+		}
+		value, _ := inbound["tag"].(string)
+		inboundTag = strings.TrimSpace(value)
+		if inboundTag != "" {
+			break
+		}
+	}
+	if inboundTag == "" {
+		return fmt.Errorf("selective mixed inbound tag is unavailable")
+	}
+	outbounds, _ := config["outbounds"].([]interface{})
+	terminal := "direct"
+	if outboundTagExists(outbounds, "auto-select") {
+		terminal = "auto-select"
+	}
+	route, ok := config["route"].(map[string]interface{})
+	if !ok {
+		route = make(map[string]interface{})
+		config["route"] = route
+	}
+	rules, _ := route["rules"].([]interface{})
+	filtered := make([]interface{}, 0, len(rules))
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]interface{})
+		if ok && containsStringValue(interfaceStringSlice(rule["inbound"]), inboundTag) {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	pinned := map[string]interface{}{
+		"inbound":  []interface{}{inboundTag},
+		"outbound": terminal,
+	}
+	route["rules"] = append([]interface{}{pinned}, filtered...)
+	return nil
+}
+
+func waitForLoopbackPort(port int, timeout time.Duration) bool {
+	if port < 1 || port > 65535 || timeout <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if loopbackPortReady(port, 150*time.Millisecond) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		<-timer.C
+	}
+}
+
+func shouldUseSelectiveWindowsSession(settings GlobalAppSettings) bool {
+	return NormalizeRoutingMode(settings.RoutingMode) != RoutingModeAllTraffic && !settings.HideRuTraffic
 }
 
 func (a *App) pruneProxyFallbackVPNCandidates(config map[string]interface{}) bool {
@@ -1303,7 +1477,16 @@ func (a *App) Stop() map[string]interface{} {
 	a.updateBusy(busyID, "Восстанавливаем системный proxy...")
 	a.resetDropoSystemProxy("pre-stop")
 
-	// Terminate sing-box first so the TUN interface releases traffic quickly.
+	// Close the only Dropo-owned packet handle and its relays before the local
+	// proxy disappears. This prevents captured packets from being redirected to
+	// a dead endpoint during selective shutdown. stopFreeAccess remains
+	// idempotent and performs the rest of the shared cleanup below.
+	if a.trafficEngine != nil {
+		a.trafficEngine.Stop()
+	}
+
+	// Terminate sing-box after selective interception has stopped. In TUN mode
+	// this still releases the interface immediately afterward.
 	if runtime.GOOS == "windows" {
 		a.updateBusy(busyID, "Завершаем sing-box и освобождаем TUN-интерфейс...")
 		terminateProcessTree(cmd)

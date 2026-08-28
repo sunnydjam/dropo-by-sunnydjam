@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeProfileVPNSourcesMigratesLegacySubscription(t *testing.T) {
@@ -74,4 +76,50 @@ func TestPublicVPNSourcesDoNotExposeCredentials(t *testing.T) {
 	if strings.Contains(text, "secret") || strings.Contains(strings.ToLower(text), "cached") {
 		t.Fatalf("public VPN source view leaked credentials: %s", text)
 	}
+}
+
+func TestVPNSourceMonitorStartsAsynchronouslyAndInvalidatesOldSession(t *testing.T) {
+	storage := NewStorage(t.TempDir())
+	if err := storage.Init(); err != nil {
+		t.Fatal(err)
+	}
+	profileID := storage.GetActiveProfileID()
+	source := VPNSource{ID: "primary", Name: "Primary", Kind: VPNSourceDirect, URI: "vless://id@example.com:443"}
+	if err := storage.UpdateProfileVPNSources(profileID, []VPNSource{source}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.UpdateProfileConfig(profileID, map[string]interface{}{
+		"outbounds": []interface{}{map[string]interface{}{"type": "direct", "tag": "vpn-source-primary"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{storage: storage}
+	started := time.Now()
+	app.startVPNSourceMonitor()
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("monitor blocked VPN startup for %s", elapsed)
+	}
+	app.vpnSourceMonitorMu.Lock()
+	firstGeneration := app.vpnSourceMonitorGeneration
+	app.vpnSourceMonitorMu.Unlock()
+	if !app.vpnSourceMonitorCurrent(context.Background(), firstGeneration) {
+		t.Fatal("new VPN-source monitor session is not active")
+	}
+
+	app.stopVPNSourceMonitor()
+	if app.vpnSourceMonitorCurrent(context.Background(), firstGeneration) {
+		t.Fatal("stopped VPN-source monitor generation remained active")
+	}
+	app.startVPNSourceMonitor()
+	app.vpnSourceMonitorMu.Lock()
+	secondGeneration := app.vpnSourceMonitorGeneration
+	app.vpnSourceMonitorMu.Unlock()
+	if secondGeneration <= firstGeneration {
+		t.Fatalf("monitor generation did not advance: first=%d second=%d", firstGeneration, secondGeneration)
+	}
+	if app.vpnSourceMonitorCurrent(context.Background(), firstGeneration) {
+		t.Fatal("old VPN-source monitor generation became active in the next session")
+	}
+	app.stopVPNSourceMonitor()
 }

@@ -97,6 +97,192 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('home routes keep four primary services and can pin another', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(960, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: DropoHomePage(bridge: MockCoreBridge()),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      find.byKey(const ValueKey<String>('home-route-controls')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('home-routing-selected')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('home-routing-all-vpn')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('home-route-youtube-direct')),
+      findsNothing,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('toggle-home-route-services')),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    for (final tag in const ['youtube', 'discord', 'meta', 'openai']) {
+      expect(
+        find.byKey(ValueKey<String>('home-route-$tag-direct')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(ValueKey<String>('home-route-$tag-auto')),
+        findsNothing,
+      );
+    }
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('add-home-route-service')),
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    final addGoogle = find.byKey(
+      const ValueKey<String>('add-home-route-google'),
+    );
+    tester.widget<ListTile>(addGoogle).onTap!();
+    await tester.pump(const Duration(milliseconds: 800));
+
+    expect(
+      find.byKey(const ValueKey<String>('home-route-google-direct')),
+      findsOneWidget,
+    );
+    final remove = find.byKey(
+      const ValueKey<String>('remove-home-route-google'),
+    );
+    expect(remove, findsOneWidget);
+    await tester.tap(remove);
+    await tester.pump(const Duration(milliseconds: 800));
+    expect(
+      find.byKey(const ValueKey<String>('home-route-google-direct')),
+      findsNothing,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey<String>('toggle-home-route-services')),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      find.byKey(const ValueKey<String>('home-route-youtube-direct')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('home can switch all traffic through VPN immediately', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(960, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final bridge = MockCoreBridge();
+    await bridge.saveSubscription('https://vpn.example/subscription');
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: DropoHomePage(bridge: bridge),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('home-routing-all-vpn')),
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect((await bridge.routingMode())['mode'], 'all_traffic');
+    expect(find.text('Весь трафик идёт через VPN'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('home exposes automatic and manual Zapret strategies', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(960, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final bridge = _RoutePolicyRecordingBridge();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: DropoHomePage(bridge: bridge),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.tap(
+      find.byKey(const ValueKey<String>('toggle-home-route-services')),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(
+      find.byKey(const ValueKey<String>('home-route-discord-zapret')),
+    );
+    await tester.pump(const Duration(milliseconds: 800));
+
+    expect(
+      find.byKey(const ValueKey<String>('home-zapret-strategy-discord')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey<String>('zapret-auto-discord')));
+    await tester.pump(const Duration(milliseconds: 800));
+    expect(bridge.lastStrategyMode, 'auto');
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('zapret-manual-discord')),
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.text('Flowseal 1.10.2 ALT13 — Discord').last);
+    await tester.pump(const Duration(milliseconds: 800));
+    expect(bridge.lastStrategyMode, 'manual');
+    expect(bridge.lastStrategyTag, 'flowseal-1102-discord-alt13');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('home reports when the complete Zapret catalog has failed', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(960, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _RoutePolicyRecordingBridge(strategyNotFound: true)
+      ..currentMethod = 'zapret';
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: DropoHomePage(bridge: bridge),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.tap(
+      find.byKey(const ValueKey<String>('toggle-home-route-services')),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      find.text('Результат: подходящая стратегия не найдена'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'Windows service policy is clickable, high contrast, and persists forced VPN',
     (tester) async {
@@ -119,7 +305,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 600));
 
       final routeField = find.byKey(
-        const ValueKey<String>('service-route-discord-auto'),
+        const ValueKey<String>('service-route-discord-direct'),
       );
       expect(routeField, findsOneWidget);
       expect(
@@ -229,7 +415,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 600));
 
       final routeField = find.byKey(
-        const ValueKey<String>('service-route-discord-auto'),
+        const ValueKey<String>('service-route-discord-direct'),
       );
       expect(routeField, findsOneWidget);
       final activeVpnButton = find.byKey(
@@ -363,7 +549,7 @@ void main() {
         find.text('Добавьте VPN-подписку для запуска на Android.'),
         findsOneWidget,
       );
-      expect(find.text('Добавить'), findsOneWidget);
+      expect(find.text('Добавить'), findsWidgets);
       expect((await bridge.status()).connected, isFalse);
 
       await tester.pump(const Duration(seconds: 5));
@@ -816,12 +1002,20 @@ class _StrategyProgressBridge extends MockCoreBridge {
 }
 
 class _RoutePolicyRecordingBridge extends MockCoreBridge {
-  _RoutePolicyRecordingBridge({this.restarted = false});
+  _RoutePolicyRecordingBridge({
+    this.restarted = false,
+    this.strategyNotFound = false,
+  });
 
   final bool restarted;
+  final bool strategyNotFound;
   String lastTag = '';
   String lastMethod = '';
-  String currentMethod = 'auto';
+  String currentMethod = 'direct';
+  String strategyMode = 'auto';
+  String selectedStrategy = '';
+  String lastStrategyMode = '';
+  String lastStrategyTag = '';
 
   @override
   Future<List<RouteService>> routes({bool live = false}) async {
@@ -832,6 +1026,22 @@ class _RoutePolicyRecordingBridge extends MockCoreBridge {
         method: 'Discord active decoys x3',
         selectedMethod: currentMethod,
         zapretSupported: true,
+        zapretStrategyMode: strategyMode,
+        zapretSelectedStrategy: selectedStrategy,
+        zapretEffectiveStrategy: 'flowseal-1102-discord-alt13',
+        zapretEffectiveStrategyLabel: 'Flowseal 1.10.2 ALT13 — Discord',
+        zapretStrategySource: 'auto-saved',
+        zapretStrategyNotFound: strategyNotFound,
+        zapretStrategyOptions: [
+          ZapretStrategyOption(
+            tag: 'flowseal-1102-discord-alt13',
+            label: 'Flowseal 1.10.2 ALT13 — Discord',
+          ),
+          ZapretStrategyOption(
+            tag: 'discord-zero-v2',
+            label: 'Discord zero + SNI split',
+          ),
+        ],
         requiresVpn: false,
         delayMs: 0,
         domainSuffixes: ['discord.com', 'discord.gg'],
@@ -852,6 +1062,24 @@ class _RoutePolicyRecordingBridge extends MockCoreBridge {
       'tag': tag,
       'method': method,
       'restarted': restarted,
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> setZapretServiceStrategy(
+    String tag,
+    String mode,
+    String strategyTag,
+  ) async {
+    lastStrategyMode = mode;
+    lastStrategyTag = strategyTag;
+    strategyMode = mode;
+    selectedStrategy = mode == 'manual' ? strategyTag : '';
+    return {
+      'success': true,
+      'tag': tag,
+      'mode': mode,
+      'zapretSelectedStrategy': selectedStrategy,
     };
   }
 }

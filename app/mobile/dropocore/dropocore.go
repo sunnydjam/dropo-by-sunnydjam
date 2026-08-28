@@ -39,6 +39,7 @@ type coreState struct {
 	ServiceUpdatedAt         string            `json:"serviceUpdatedAt"`
 	WireGuards               []wireGuardConfig `json:"wireguards"`
 	RoutePolicies            map[string]string `json:"routePolicies,omitempty"`
+	HomeRouteServices        []string          `json:"homeRouteServices,omitempty"`
 	NextEventID              int64             `json:"nextEventId"`
 	TotalSessions            int               `json:"totalSessions"`
 	LastDurationMs           int64             `json:"lastDurationMs"`
@@ -91,6 +92,7 @@ type routeInfo struct {
 	SelectedMethod       string   `json:"selectedMethod"`
 	RequiresVPN          bool     `json:"requiresVpn"`
 	ZapretSupported      bool     `json:"zapretSupported"`
+	HomeVisible          bool     `json:"homeVisible"`
 	DelayMS              int      `json:"delayMs"`
 	DomainSuffixes       []string `json:"domainSuffixes"`
 	IPCidrs              []string `json:"ipCidrs"`
@@ -428,6 +430,8 @@ func Call(method, argsJSON string) string {
 		return encode(map[string]interface{}{"success": true, "disableFreeAccess": current.Config.DisableFreeAccess})
 	case "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod":
 		return encode(setAndroidRoutePolicyLocked(args))
+	case "SetHomeRouteServiceVisible":
+		return encode(setAndroidHomeRouteServiceVisibleLocked(args))
 	case "GetBypassRouteSummary":
 		return encode(freeAccessLocked(true))
 	case "GetTrafficStats":

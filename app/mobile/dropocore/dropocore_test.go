@@ -193,8 +193,8 @@ func TestAndroidBlockedOnlyRoutesOnlyBlockedServicesThroughVPN(t *testing.T) {
 	}
 	for _, raw := range route["rules"].([]interface{}) {
 		rule := raw.(map[string]interface{})
-		if _, hasCIDRs := rule["ip_cidr"]; rule["outbound"] == "proxy" && hasCIDRs {
-			t.Fatalf("Android service CIDR must not be an unscoped VPN rule: %#v", rule)
+		if _, hasCIDRs := rule["ip_cidr"]; hasCIDRs {
+			t.Fatalf("Android service CIDR must not be an unscoped route rule: %#v", rule)
 		}
 	}
 	if !androidContainsDomainRegexRoute(config, androidKnownDomainRegex, "direct") {
@@ -713,6 +713,25 @@ func TestAndroidRoutesExposeAutoDirectAndVPNMethods(t *testing.T) {
 		if service["zapretSupported"] != false {
 			t.Fatalf("Android service %v unexpectedly advertises Zapret support", service["tag"])
 		}
+		if tag := service["tag"].(string); androidPrimaryHomeRouteTags[tag] && service["homeVisible"] != true {
+			t.Fatalf("primary Android service %v is not visible on home", tag)
+		}
+	}
+	if ok := decodeSuccess(Call("SetHomeRouteServiceVisible", `["spotify",true]`)); !ok {
+		t.Fatal("SetHomeRouteServiceVisible success = false")
+	}
+	if err := json.Unmarshal([]byte(Call("GetFreeAccessConfig", "[]")), &config); err != nil {
+		t.Fatal(err)
+	}
+	foundPinned := false
+	for _, raw := range config["services"].([]interface{}) {
+		service := raw.(map[string]interface{})
+		if service["tag"] == "spotify" && service["homeVisible"] == true {
+			foundPinned = true
+		}
+	}
+	if !foundPinned {
+		t.Fatal("pinned Spotify service is not visible on Android home")
 	}
 
 	if ok := decodeSuccess(Call("SetAndroidRoutePolicy", `["meta","direct"]`)); !ok {

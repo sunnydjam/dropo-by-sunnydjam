@@ -6,6 +6,7 @@ import "testing"
 
 func TestDeepWindowsRoutePlanBlockedOnlyPrefersTransparentZapret(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, false, true, true)
 
@@ -31,14 +32,18 @@ func TestDeepWindowsRoutePlanBlockedOnlyPrefersTransparentZapret(t *testing.T) {
 
 func TestDeepWindowsRoutePlanStartsLocalProxyForSubscriptionFallback(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodZapret
+	for _, serviceTag := range []string{"openai", "meta", "whatsapp", "telegram"} {
+		settings.FreeAccessMethods[serviceTag] = FreeAccessMethodVPN
+	}
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
 
 	if !plan.RequiresSingBoxProxy || !plan.RequiresRedirector {
 		t.Fatalf("subscription fallback must require local proxy endpoint and redirector: %+v", plan)
 	}
-	if !planContainsString(plan.ProxyReasons, "VPN/VLESS fallback candidates are available") {
-		t.Fatalf("proxy reasons = %v, want VPN fallback reason", plan.ProxyReasons)
+	if !planContainsString(plan.ProxyReasons, "ChatGPT is forced to VPN") {
+		t.Fatalf("proxy reasons = %v, want an explicit service VPN reason", plan.ProxyReasons)
 	}
 	if !planContainsString(plan.TransparentServices, "discord") {
 		t.Fatalf("discord should still prefer transparent free strategy, got %v", plan.TransparentServices)
@@ -53,6 +58,7 @@ func TestDeepWindowsRoutePlanStartsLocalProxyForSubscriptionFallback(t *testing.
 func TestDeepWindowsRoutePlanMigratesLegacyExceptRussiaToBlockedOnly(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
 	settings.RoutingMode = RoutingModeExceptRussia
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
 
@@ -70,6 +76,8 @@ func TestDeepWindowsRoutePlanMigratesLegacyExceptRussiaToBlockedOnly(t *testing.
 func TestDeepWindowsRoutePlanAllTrafficKeepsLocalDirectExclusions(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
 	settings.RoutingMode = RoutingModeAllTraffic
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodDirect
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
 
@@ -78,6 +86,14 @@ func TestDeepWindowsRoutePlanAllTrafficKeepsLocalDirectExclusions(t *testing.T) 
 	}
 	if !plan.RequiresSingBoxProxy || !plan.RequiresRedirector {
 		t.Fatalf("all-traffic must require local proxy endpoint and redirector under Deep Windows: %+v", plan)
+	}
+	if len(plan.DirectServices) != 0 || len(plan.TransparentServices) != 0 {
+		t.Fatalf("all-traffic must override saved service exceptions: %+v", plan)
+	}
+	for _, serviceTag := range []string{"youtube", "discord", "meta", "openai"} {
+		if !planContainsString(plan.ProxyServices, serviceTag) {
+			t.Fatalf("all-traffic proxy services = %v, want %s", plan.ProxyServices, serviceTag)
+		}
 	}
 }
 
@@ -124,7 +140,7 @@ func TestDeepWindowsRoutePlanForcedVPNWithSubscriptionUsesProxyEndpoint(t *testi
 	}
 }
 
-func TestDeepWindowsRoutePlanDisableFreeMethodsUsesSubscriptionWhenAvailable(t *testing.T) {
+func TestDeepWindowsRoutePlanDisableFreeMethodsDoesNotOverrideExplicitDirect(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
 	settings.DisableFreeAccess = true
 
@@ -133,14 +149,14 @@ func TestDeepWindowsRoutePlanDisableFreeMethodsUsesSubscriptionWhenAvailable(t *
 	if plan.FreeMethodsAllowed {
 		t.Fatalf("free methods allowed = true, want false")
 	}
-	if !planContainsString(plan.ProxyServices, "youtube") || !planContainsString(plan.ProxyServices, "telegram") {
-		t.Fatalf("proxy services = %v, want ordinary blocked services through subscription fallback", plan.ProxyServices)
+	if !planContainsString(plan.DirectServices, "youtube") || !planContainsString(plan.DirectServices, "telegram") {
+		t.Fatalf("direct services = %v, want explicit direct routes preserved", plan.DirectServices)
 	}
 	if len(plan.TransparentServices) != 0 {
 		t.Fatalf("transparent services = %v, want none while free methods are disabled", plan.TransparentServices)
 	}
-	if !plan.RequiresSingBoxProxy || !plan.RequiresRedirector {
-		t.Fatalf("disabled free methods with VPN candidates should require local proxy endpoint: %+v", plan)
+	if plan.RequiresSingBoxProxy || plan.RequiresRedirector {
+		t.Fatalf("explicit direct routes must not require a local proxy endpoint: %+v", plan)
 	}
 }
 
@@ -187,14 +203,14 @@ func TestDeepWindowsRoutePlanManualDirectOverridesSubscriptionFallback(t *testin
 	}
 }
 
-func TestWindowsUnifiedMigratesLegacyGlobalZapretMethodToAutomatic(t *testing.T) {
+func TestWindowsUnifiedMigratesUnsupportedLegacyZapretMethodToDirect(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
 	settings.FreeAccessMethods["telegram"] = DefaultZapretTransparentStrategies[0].Tag
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
 
-	if !planContainsString(plan.ProxyServices, "telegram") {
-		t.Fatalf("proxy services = %v, want Telegram automatic VPN fallback", plan.ProxyServices)
+	if !planContainsString(plan.DirectServices, "telegram") {
+		t.Fatalf("direct services = %v, want unsupported legacy Telegram method direct", plan.DirectServices)
 	}
 	if planContainsString(plan.TransparentServices, "telegram") {
 		t.Fatalf("legacy global zapret choice must not create a separate transparent strategy: %+v", plan)
@@ -215,19 +231,21 @@ func TestWindowsUnifiedMigratesLegacyByeDPIMethodToAutomatic(t *testing.T) {
 	}
 }
 
-func TestDeepWindowsRoutePlanFallsBackToFreeProxyWhenTransparentUnavailable(t *testing.T) {
+func TestDeepWindowsRoutePlanKeepsStrictZapretWhenTransparentUnavailable(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodZapret
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, false, false, true)
 
-	if !planContainsString(plan.ProxyServices, "youtube") || !planContainsString(plan.ProxyServices, "discord") {
-		t.Fatalf("proxy services = %v, want free proxy methods when transparent zapret is unavailable", plan.ProxyServices)
+	if !planContainsString(plan.BlockedServices, "youtube") || !planContainsString(plan.BlockedServices, "discord") {
+		t.Fatalf("blocked services = %v, want strict Zapret without an implicit proxy fallback", plan.BlockedServices)
 	}
 	if len(plan.TransparentServices) != 0 {
 		t.Fatalf("transparent services = %v, want none without transparent strategies", plan.TransparentServices)
 	}
-	if !plan.RequiresSingBoxProxy || !plan.RequiresRedirector {
-		t.Fatalf("free proxy methods should require local proxy endpoint and redirector: %+v", plan)
+	if plan.RequiresSingBoxProxy || plan.RequiresRedirector {
+		t.Fatalf("strict Zapret failure must not create a proxy endpoint: %+v", plan)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,6 +62,85 @@ func TestServiceFallbackCacheKeepsCursorForNextSession(t *testing.T) {
 	}
 	if indexes := serviceStrategyBatchStartIndexes(cache, []string{"youtube"}); indexes["youtube"] != 3 {
 		t.Fatalf("retry start indexes = %v, want youtube=3", indexes)
+	}
+}
+
+func TestManualZapretStrategyOverridesSavedAutomaticResult(t *testing.T) {
+	app := newServiceEngineTestApp(t)
+	methods := rankedMethodsForService("youtube")
+	if len(methods) < 2 {
+		t.Fatal("YouTube strategy ladder must contain manual choices")
+	}
+	settings := app.storage.GetAppSettings()
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	settings.ZapretStrategyModes["youtube"] = ZapretStrategyModeManual
+	settings.ZapretStrategies["youtube"] = methods[1].Tag
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatalf("save manual strategy: %v", err)
+	}
+	writeServiceStrategyCacheForTest(t, app, map[string]serviceStrategyCacheEntry{
+		"youtube": {MethodTag: methods[0].Tag, State: serviceStrategyStateWorking, UpdatedAt: time.Now()},
+	})
+
+	selections, needSearch := app.resolveServiceSelections(app.serviceHostlistDir(), app.loadServiceStrategyCache())
+	selection, ok := selections["youtube"]
+	if !ok || selection.Method.Tag != methods[1].Tag {
+		t.Fatalf("manual selection = %#v, want %q", selection, methods[1].Tag)
+	}
+	if containsStringValue(needSearch, "youtube") {
+		t.Fatalf("manual strategy unexpectedly scheduled for automatic search: %v", needSearch)
+	}
+	summary := zapretStrategySummary(settings, "youtube", app.loadServiceStrategyCache())
+	if summary["zapretStrategyMode"] != ZapretStrategyModeManual || summary["zapretEffectiveStrategy"] != methods[1].Tag {
+		t.Fatalf("manual strategy summary = %#v", summary)
+	}
+}
+
+func TestAutomaticZapretSummaryUsesPersistedWorkingStrategy(t *testing.T) {
+	app := newServiceEngineTestApp(t)
+	methods := rankedMethodsForService("discord")
+	working := methods[len(methods)-1]
+	writeServiceStrategyCacheForTest(t, app, map[string]serviceStrategyCacheEntry{
+		"discord": {MethodTag: working.Tag, State: serviceStrategyStateWorking, Source: "discord-live-media", UpdatedAt: time.Now()},
+	})
+	settings := app.storage.GetAppSettings()
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodZapret
+	summary := zapretStrategySummary(settings, "discord", app.loadServiceStrategyCache())
+	if summary["zapretStrategyMode"] != ZapretStrategyModeAuto || summary["zapretEffectiveStrategy"] != working.Tag || summary["zapretStrategySource"] != "auto-saved" {
+		t.Fatalf("automatic strategy summary = %#v", summary)
+	}
+}
+
+func TestFlowseal1102CatalogContainsEveryGeneralProfilePerService(t *testing.T) {
+	for _, serviceTag := range []string{"youtube", "discord"} {
+		count := 0
+		seen := map[string]bool{}
+		for _, method := range rankedMethodsForService(serviceTag) {
+			if !strings.HasPrefix(method.Tag, "flowseal-1102-"+serviceTag+"-") {
+				continue
+			}
+			count++
+			if seen[method.Tag] {
+				t.Fatalf("%s Flowseal catalog repeats %q", serviceTag, method.Tag)
+			}
+			seen[method.Tag] = true
+		}
+		if count != 22 {
+			t.Fatalf("%s Flowseal 1.10.2 profile count = %d, want 22", serviceTag, count)
+		}
+	}
+}
+
+func TestAutomaticZapretSummaryReportsExhaustedCatalog(t *testing.T) {
+	app := newServiceEngineTestApp(t)
+	settings := app.storage.GetAppSettings()
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	writeServiceStrategyCacheForTest(t, app, map[string]serviceStrategyCacheEntry{
+		"youtube": {MethodTag: FreeAccessMethodDirect, State: serviceStrategyStateFallback, Source: "fallback-direct", UpdatedAt: time.Now()},
+	})
+	summary := zapretStrategySummary(settings, "youtube", app.loadServiceStrategyCache())
+	if summary["zapretStrategyNotFound"] != true || summary["zapretStrategySource"] != "auto-not-found" {
+		t.Fatalf("exhausted automatic strategy summary = %#v", summary)
 	}
 }
 
@@ -140,8 +220,8 @@ func TestWindowsUnifiedServiceGroupIsDeterministicSelector(t *testing.T) {
 		settings := GlobalAppSettings{FreeAccessEnabled: true}
 		service, _ := findFreeAccessService("youtube")
 		got := FreeAccessServiceCandidateTagsForSettings(service, settings, true)
-		if !sameStringSet(got, []string{"direct", "auto-select"}) || got[0] != "direct" {
-			t.Fatalf("Windows Unified candidates = %v, want direct then VPN fallback", got)
+		if len(got) != 1 || got[0] != "direct" {
+			t.Fatalf("Windows Unified default candidates = %v, want explicit direct", got)
 		}
 	}
 }
@@ -152,22 +232,57 @@ func TestWindowsUnifiedBootstrapUsesSafeFallbackUntilStrategyIsProven(t *testing
 		FreeAccessServices: DefaultFreeAccessServiceState(),
 		FreeAccessMethods:  DefaultFreeAccessServiceMethodState(),
 	}
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodZapret
 	youtube, ok := findFreeAccessService("youtube")
 	if !ok {
 		t.Fatal("YouTube service is missing")
 	}
-	if got := windowsUnifiedBootstrapServiceRoute(settings, youtube, serviceStrategyCacheEntry{}, true); got != "auto-select" {
-		t.Fatalf("uncached automatic service bootstrap = %q, want VPN fallback", got)
+	if got := windowsUnifiedBootstrapServiceRoute(settings, youtube, serviceStrategyCacheEntry{}, true); got != "direct" {
+		t.Fatalf("explicit Zapret service bootstrap = %q, want direct carrier", got)
 	}
 	method := rankedMethodsForService("youtube")[0]
 	if got := windowsUnifiedBootstrapServiceRoute(settings, youtube, serviceStrategyCacheEntry{MethodTag: method.Tag}, true); got != "direct" {
 		t.Fatalf("proven transparent service bootstrap = %q, want direct", got)
 	}
-	if got := windowsUnifiedBootstrapDiscordRealtimeRoute(settings, serviceStrategyCacheEntry{}, true); got != discordVPNGroupTag {
-		t.Fatalf("uncached Discord realtime bootstrap = %q, want safe VPN route", got)
+	if got := windowsUnifiedBootstrapDiscordRealtimeRoute(settings, serviceStrategyCacheEntry{}, true); got != "direct" {
+		t.Fatalf("explicit Discord Zapret realtime bootstrap = %q, want direct carrier", got)
 	}
 	if got := windowsUnifiedBootstrapDiscordRealtimeRoute(settings, serviceStrategyCacheEntry{MethodTag: method.Tag}, true); got != "direct" {
 		t.Fatalf("proven Discord realtime bootstrap = %q, want direct", got)
+	}
+}
+
+func TestExplicitZapretSelectionDoesNotComposeUnselectedServicesOrCatchAll(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Zapret service selection is Windows-specific")
+	}
+	app := newInitializedSettingsScenarioApp(t)
+	settings := app.storage.GetAppSettings()
+	for _, service := range DefaultFreeAccessServices {
+		settings.FreeAccessMethods[service.Tag] = FreeAccessMethodDirect
+	}
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodZapret
+	settings.FreeAccessMethods["meta"] = FreeAccessMethodVPN
+	settings.FreeAccessMethods["openai"] = FreeAccessMethodVPN
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	selections, _ := app.resolveServiceSelections(app.serviceHostlistDir(), nil)
+	if len(selections) != 2 {
+		t.Fatalf("native selections = %#v, want only YouTube and Discord", selections)
+	}
+	for _, tag := range []string{"youtube", "discord"} {
+		if _, ok := selections[tag]; !ok {
+			t.Fatalf("explicit Zapret service %q is missing from native selections", tag)
+		}
+	}
+	for _, tag := range []string{"meta", "openai", commonBlockedServiceTag} {
+		if _, ok := selections[tag]; ok {
+			t.Fatalf("non-Zapret route %q leaked into native selections", tag)
+		}
 	}
 }
 
@@ -261,8 +376,10 @@ func TestWindowsUnifiedCatalogUsesPerServiceWorkingCache(t *testing.T) {
 	app := newServiceEngineTestApp(t)
 	service, _ := findFreeAccessService("youtube")
 	method := rankedMethodsForService(service.Tag)[0]
+	settings := app.storage.GetAppSettings()
+	settings.FreeAccessMethods[service.Tag] = FreeAccessMethodZapret
 	selection := app.selectFreeAccessStrategyForService(
-		app.storage.GetAppSettings(),
+		settings,
 		service,
 		nil,
 		map[string]serviceStrategyCacheEntry{
@@ -323,23 +440,23 @@ func TestStartupServiceSearchLadderKeepsWorkingCachedMethodFirst(t *testing.T) {
 	}
 }
 
-func TestAutomaticServiceStrategySearchIsBoundedBeforeVPNFallback(t *testing.T) {
+func TestAutomaticServiceStrategySearchExhaustsCatalogBeforeFallback(t *testing.T) {
 	ranked := rankedMethodsForService("youtube")
-	if len(ranked) < maxAutomaticServiceStrategies {
-		t.Fatalf("YouTube native ladder = %d strategies, want at least %d distinct typed plans", len(ranked), maxAutomaticServiceStrategies)
+	if len(ranked) < 22 {
+		t.Fatalf("YouTube native ladder = %d strategies, want all 22 Flowseal profiles", len(ranked))
 	}
 	cached := ranked[2]
 	startup := startupServiceSearchLadder("youtube", cached)
 	if len(startup) != maxAutomaticServiceStrategies || startup[0].Tag != cached.Tag {
-		t.Fatalf("startup ladder = %#v, want cached first and %d total strategies", startup, maxAutomaticServiceStrategies)
+		t.Fatalf("subscription-backed ladder has %d entries, want bounded %d", len(startup), maxAutomaticServiceStrategies)
 	}
-	withoutVPN := startupServiceSearchLadder("youtube", cached, maxNoSubscriptionStrategies)
-	if len(withoutVPN) != maxNoSubscriptionStrategies || withoutVPN[0].Tag != cached.Tag {
-		t.Fatalf("no-subscription ladder = %#v, want cached first and %d attempts", withoutVPN, maxNoSubscriptionStrategies)
+	withoutVPN := startupServiceSearchLadder("youtube", cached, len(ranked))
+	if len(withoutVPN) != len(ranked) || withoutVPN[0].Tag != cached.Tag {
+		t.Fatalf("no-subscription campaign has %d entries, want all %d", len(withoutVPN), len(ranked))
 	}
 	recovery := recoveryServiceSearchLadder("youtube", cached.Tag)
 	if len(recovery) != maxAutomaticServiceStrategies-1 {
-		t.Fatalf("recovery ladder = %#v, want %d alternatives after failed current strategy", recovery, maxAutomaticServiceStrategies-1)
+		t.Fatalf("live recovery ladder has %d entries, want bounded %d", len(recovery), maxAutomaticServiceStrategies-1)
 	}
 	for _, method := range recovery {
 		if method.Tag == cached.Tag {
@@ -348,20 +465,19 @@ func TestAutomaticServiceStrategySearchIsBoundedBeforeVPNFallback(t *testing.T) 
 	}
 }
 
-func TestServiceStrategyBatchIsFourAndNextSessionAdvances(t *testing.T) {
+func TestServiceStrategyProgressCoversTheFullCatalog(t *testing.T) {
 	ranked := rankedMethodsForService("youtube")
-	first := startupServiceSearchLadder("youtube", ranked[0], maxAutomaticServiceStrategies, 0)
-	if len(first) != maxAutomaticServiceStrategies {
-		t.Fatalf("first batch has %d strategies, want %d", len(first), maxAutomaticServiceStrategies)
+	first := startupServiceSearchLadder("youtube", ranked[0], len(ranked), 0)
+	if len(first) != len(ranked) {
+		t.Fatalf("automatic search has %d strategies, want full catalog of %d", len(first), len(ranked))
 	}
 	next := nextServiceStrategyIndexAfterLadder("youtube", first)
-	second := startupServiceSearchLadder("youtube", ranked[next], maxAutomaticServiceStrategies, next)
-	if second[0].Tag != ranked[next].Tag {
-		t.Fatalf("second batch starts with %q, want next catalog strategy %q", second[0].Tag, ranked[next].Tag)
+	if next != 0 {
+		t.Fatalf("cursor after exhausting full catalog = %d, want 0", next)
 	}
-	attempt, total := backgroundStrategyAttempt(maxAutomaticServiceStrategies-1, maxAutomaticServiceStrategies)
-	if attempt != maxAutomaticServiceStrategies || total != maxAutomaticServiceStrategies {
-		t.Fatalf("bounded batch progress = %d/%d, want %d/%d", attempt, total, maxAutomaticServiceStrategies, maxAutomaticServiceStrategies)
+	attempt, total := backgroundStrategyAttempt(len(first)-1, len(first))
+	if attempt != len(first) || total != len(first) {
+		t.Fatalf("full-catalog progress = %d/%d, want %d/%d", attempt, total, len(first), len(first))
 	}
 }
 
@@ -400,13 +516,13 @@ func TestConnectedValidationRetriesOnlyRequestedFallbacks(t *testing.T) {
 
 func TestCommonBlockedStrategySearchIsBounded(t *testing.T) {
 	all := commonBlockedMethods()
-	if len(all) < maxAutomaticServiceStrategies {
+	if len(all) < maxCommonAutomaticStrategies {
 		t.Fatalf("common strategy catalog is too short: %d", len(all))
 	}
 	cached := all[len(all)-1]
 	ladder := commonBlockedSearchLadder(cached)
-	if len(ladder) != maxAutomaticServiceStrategies || ladder[0].Tag != cached.Tag {
-		t.Fatalf("common startup ladder = %#v, want cached first and %d attempts", ladder, maxAutomaticServiceStrategies)
+	if len(ladder) != maxCommonAutomaticStrategies || ladder[0].Tag != cached.Tag {
+		t.Fatalf("common startup ladder = %#v, want cached first and %d attempts", ladder, maxCommonAutomaticStrategies)
 	}
 	seen := map[string]bool{}
 	for _, method := range ladder {

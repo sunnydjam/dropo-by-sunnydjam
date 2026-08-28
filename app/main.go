@@ -61,6 +61,7 @@ func main() {
 		return
 	}
 	defer removeBridgeToken(appInstance.dataPath)
+	go maintainBridgeTokenFile(ctx, appInstance.dataPath, bridgeToken, appInstance.writeLog)
 
 	server := &http.Server{
 		Addr:              *listen,
