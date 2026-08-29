@@ -279,12 +279,13 @@ function Invoke-ArtifactValidation {
 	Assert-FileExists $sbomPath
 	Assert-FileExists $provenancePath
 	Assert-FileExists (Join-Path $runtimeFolder "licenses\THIRD_PARTY_NOTICES.md")
+	Assert-FileExists (Join-Path $runtimeFolder "licenses\metacubex-utls-LICENSE.txt")
 	$sbom = Get-Content -LiteralPath $sbomPath -Raw | ConvertFrom-Json
 	if ($sbom.spdxVersion -ne "SPDX-2.3" -or @($sbom.files).Count -ne @($runtimeManifest.files).Count) {
 		throw "SPDX SBOM does not describe the complete native runtime manifest."
 	}
 	$sbomNames = @($sbom.packages | ForEach-Object { [string]$_.name })
-	foreach ($component in @("dropo", "sing-box", "Xray-core", "WireGuard for Windows", "WinDivert", "tg-ws-proxy", "Flowseal zapret-discord-youtube payloads")) {
+	foreach ($component in @("dropo", "sing-box", "Xray-core", "WireGuard for Windows", "WinDivert", "tg-ws-proxy", "Flowseal zapret-discord-youtube payloads", "metacubex uTLS")) {
 		if ($component -notin $sbomNames) {
 			throw "SPDX SBOM is missing component: $component"
 		}

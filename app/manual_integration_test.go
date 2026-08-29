@@ -36,6 +36,28 @@ func TestManualSubscriptionURLFromEnv(t *testing.T) {
 	}
 }
 
+func TestManualZapretBrowserProbeFromEnv(t *testing.T) {
+	proxyAddress := strings.TrimSpace(os.Getenv("DROPO_TEST_ZAPRET_PROXY"))
+	if proxyAddress == "" {
+		t.Skip("DROPO_TEST_ZAPRET_PROXY is not set")
+	}
+	for _, serviceTag := range []string{"youtube", "discord"} {
+		service, ok := findFreeAccessService(serviceTag)
+		if !ok {
+			t.Fatalf("service %q is missing", serviceTag)
+		}
+		client := newServiceZapretProbeHTTPClient(serviceTag, proxyAddress)
+		for _, target := range service.ProbeTargets() {
+			t.Run(serviceTag+"/"+target, func(t *testing.T) {
+				t.Parallel()
+				if _, err := probeHTTPThroughClient(client, target); err != nil {
+					t.Fatalf("browser-compatible Zapret probe failed: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestManualWireGuardConfigFromEnv(t *testing.T) {
 	configText := os.Getenv("DROPO_TEST_WG_CONFIG")
 	if configText == "" {

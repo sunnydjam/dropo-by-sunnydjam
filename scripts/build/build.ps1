@@ -222,6 +222,7 @@ $XrayVersion = $VersionInfo.xray.version
 $XrayArchiveSHA256 = ([string]$VersionInfo.xray.archiveSha256).ToLowerInvariant()
 $XrayExeSHA256 = ([string]$VersionInfo.xray.executableSha256).ToLowerInvariant()
 $TgWsProxyVersion = $VersionInfo.tgwsproxy.version
+$UTLSVersion = "1.8.4"
 $TgWsProxyHeadlessSHA256 = ([string]$VersionInfo.tgwsproxy.headlessSha256).ToLowerInvariant()
 $TgWsProxyOfficialSHA256 = ([string]$VersionInfo.tgwsproxy.officialWindowsSha256).ToLowerInvariant()
 $SourceRevision = ([string](& git -C $ScriptRoot rev-parse HEAD 2>$null | Select-Object -First 1)).Trim()
@@ -965,6 +966,7 @@ function Build-Application {
     Copy-LicenseFile (Join-Path $WireGuardDir "LICENSE") $licensesDir "wireguard-windows-LICENSE.txt"
     Copy-LicenseFile (Join-Path $WinDivertDir "LICENSE") $licensesDir "WinDivert-LICENSE.txt"
     Copy-LicenseFile (Join-Path $DepsDir "filters\LICENSE.Re-filter-lists.txt") $licensesDir "Re-filter-lists-LICENSE.txt"
+    Copy-LicenseFile (Join-Path $DepsDir "metacubex-utls-LICENSE.txt") $licensesDir "metacubex-utls-LICENSE.txt"
     Copy-LicenseFile (Join-Path $ScriptRoot "THIRD_PARTY_NOTICES.md") $licensesDir "THIRD_PARTY_NOTICES.md"
     # Copy template.json
     $templateSrc = Join-Path $AppDir "config\template.json"
@@ -1086,7 +1088,8 @@ function Build-Application {
         [ordered]@{ name = "WireGuard for Windows"; SPDXID = "SPDXRef-Package-wireguard"; versionInfo = $WireGuardVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "NOASSERTION"; licenseDeclared = "NOASSERTION" },
         [ordered]@{ name = "WinDivert"; SPDXID = "SPDXRef-Package-windivert"; versionInfo = $WinDivertVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "LGPL-3.0-only OR GPL-2.0-only"; licenseDeclared = "LGPL-3.0-only OR GPL-2.0-only" },
         [ordered]@{ name = "tg-ws-proxy"; SPDXID = "SPDXRef-Package-tg-ws-proxy"; versionInfo = $TgWsProxyVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" },
-        [ordered]@{ name = "Flowseal zapret-discord-youtube payloads"; SPDXID = "SPDXRef-Package-flowseal-payloads"; versionInfo = "1.10.2"; downloadLocation = "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.2"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" }
+        [ordered]@{ name = "Flowseal zapret-discord-youtube payloads"; SPDXID = "SPDXRef-Package-flowseal-payloads"; versionInfo = "1.10.2"; downloadLocation = "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.2"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" },
+        [ordered]@{ name = "metacubex uTLS"; SPDXID = "SPDXRef-Package-metacubex-utls"; versionInfo = $UTLSVersion; downloadLocation = "https://github.com/metacubex/utls"; filesAnalyzed = $false; licenseConcluded = "BSD-3-Clause"; licenseDeclared = "BSD-3-Clause" }
     )
     $spdxFiles = @()
     $spdxRelationships = @([ordered]@{ spdxElementId = "SPDXRef-DOCUMENT"; relationshipType = "DESCRIBES"; relatedSpdxElement = "SPDXRef-Package-dropo" })
@@ -1134,7 +1137,8 @@ function Build-Application {
                     [ordered]@{ uri = "pkg:generic/wireguard-windows@$WireGuardVersion" },
                     [ordered]@{ uri = "pkg:generic/windivert@$WinDivertVersion" },
                     [ordered]@{ uri = "pkg:generic/tg-ws-proxy@$TgWsProxyVersion" },
-                    [ordered]@{ uri = "pkg:github/Flowseal/zapret-discord-youtube@1.10.2" }
+                    [ordered]@{ uri = "pkg:github/Flowseal/zapret-discord-youtube@1.10.2" },
+                    [ordered]@{ uri = "pkg:golang/github.com/metacubex/utls@$UTLSVersion" }
                 )
             }
             runDetails = [ordered]@{ builder = [ordered]@{ id = "dropo-local-windows-builder" }; metadata = [ordered]@{ invocationId = $BuildHash; startedOn = $BuildTimestampISO } }

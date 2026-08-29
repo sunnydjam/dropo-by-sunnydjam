@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -2557,6 +2558,33 @@ func TestProbeHTTPThroughClientRejectsTruncatedResponse(t *testing.T) {
 	if _, err := probeHTTPThroughClient(server.Client(), server.URL); err == nil || !strings.Contains(err.Error(), "body") {
 		t.Fatalf("probeHTTPThroughClient() error = %v, want truncated body failure", err)
 	}
+}
+
+func TestServiceZapretProbeClientsUseScopedApplicationPath(t *testing.T) {
+	youtube := newServiceZapretProbeHTTPClient("youtube", "127.0.0.1:32123")
+	youtubeTransport, ok := youtube.Transport.(*http.Transport)
+	if !ok || youtubeTransport.Proxy == nil {
+		t.Fatalf("YouTube probe transport = %T, want scoped HTTP proxy transport", youtube.Transport)
+	}
+	proxyURL, err := youtubeTransport.Proxy(&http.Request{URL: mustParseURL(t, "https://www.youtube.com")})
+	if err != nil || proxyURL == nil || proxyURL.Host != "127.0.0.1:32123" {
+		t.Fatalf("YouTube probe proxy = %v, %v", proxyURL, err)
+	}
+
+	discord := newServiceZapretProbeHTTPClient("discord", "127.0.0.1:32124")
+	discordTransport, ok := discord.Transport.(*zapretBrowserRoundTripper)
+	if !ok || discordTransport.proxyAddress != "127.0.0.1:32124" {
+		t.Fatalf("Discord probe transport = %#v, want browser-compatible scoped CONNECT transport", discord.Transport)
+	}
+}
+
+func mustParseURL(t *testing.T, value string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
 
 func TestServiceProbeChecksTargetsConcurrently(t *testing.T) {

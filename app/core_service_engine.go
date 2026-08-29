@@ -1584,6 +1584,13 @@ func (a *App) probeServiceFailuresThroughEngine(serviceTags []string) map[string
 		}
 		return failing
 	}
+	zapretProxyAddress := a.trafficEngine.ZapretProbeProxyAddress()
+	if zapretProxyAddress == "" {
+		for _, tag := range serviceTags {
+			failing[tag] = "локальный канал проверки Zapret не активен"
+		}
+		return failing
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, tag := range serviceTags {
@@ -1620,7 +1627,7 @@ func (a *App) probeServiceFailuresThroughEngine(serviceTags []string) map[string
 				Tag:       composedStrategyTag,
 				Label:     "per-service",
 				Kind:      "transparent",
-				Client:    newDirectHTTPClient(),
+				Client:    newServiceZapretProbeHTTPClient(service.Tag, zapretProxyAddress),
 				Available: true,
 			}
 			item := a.probeSingleCandidateQuiet(service, candidate)

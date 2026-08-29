@@ -81,6 +81,22 @@ func (m *NativeTrafficManager) ActiveTag() string {
 	return m.activeTag
 }
 
+// ZapretProbeProxyAddress returns the active service-scoped CONNECT endpoint.
+// Automatic strategy probes must use the same path as browsers and Electron;
+// probing the fake-IP relay directly validates a different transport and can
+// reject a strategy that is working for the real application.
+func (m *NativeTrafficManager) ZapretProbeProxyAddress() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.zapretProxy == nil {
+		return ""
+	}
+	return m.zapretProxy.Address()
+}
+
 // SuccessfulOpenCount reports how many times this manager successfully opened
 // the single WinDivert owner. The counter intentionally survives Stop so
 // lifecycle diagnostics can distinguish "never opened" from "opened and then

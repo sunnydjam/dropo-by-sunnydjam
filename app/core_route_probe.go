@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	utls "github.com/metacubex/utls"
+	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
 
@@ -944,6 +947,122 @@ func newDirectHTTPClient() *http.Client {
 			ExpectContinueTimeout: 1 * time.Second,
 		},
 	}
+}
+
+// newZapretProbeHTTPClient follows the same scoped CONNECT path as Chrome and
+// Electron and emits a Chromium-compatible ClientHello. A plain Go TLS probe
+// has a different first flight and produced false negatives even while the
+// selected strategy was working in YouTube and Discord.
+func newZapretProbeHTTPClient(proxyAddress string) *http.Client {
+	return newZapretProbeHTTPClientWithHello(proxyAddress, utls.HelloChrome_Auto)
+}
+
+func newServiceZapretProbeHTTPClient(serviceTag, proxyAddress string) *http.Client {
+	if strings.EqualFold(strings.TrimSpace(serviceTag), "discord") {
+		return newZapretProbeHTTPClient(proxyAddress)
+	}
+	return newHTTPProxyClient("http://" + strings.TrimSpace(proxyAddress))
+}
+
+func newZapretProbeHTTPClientWithHello(proxyAddress string, clientHelloID utls.ClientHelloID) *http.Client {
+	return &http.Client{
+		Timeout:   routeProbeHTTPTimeout,
+		Transport: &zapretBrowserRoundTripper{proxyAddress: strings.TrimSpace(proxyAddress), clientHelloID: clientHelloID},
+	}
+}
+
+type zapretBrowserRoundTripper struct {
+	proxyAddress  string
+	clientHelloID utls.ClientHelloID
+}
+
+func (transport *zapretBrowserRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request == nil || request.URL == nil || !strings.EqualFold(request.URL.Scheme, "https") {
+		return nil, errors.New("scoped Zapret probe requires an HTTPS request")
+	}
+	if transport == nil || strings.TrimSpace(transport.proxyAddress) == "" {
+		return nil, errors.New("scoped Zapret CONNECT proxy is unavailable")
+	}
+	target := request.URL.Host
+	if request.URL.Port() == "" {
+		target = net.JoinHostPort(request.URL.Hostname(), "443")
+	}
+	rawConnection, err := dialProbeCONNECT(request.Context(), transport.proxyAddress, target)
+	if err != nil {
+		return nil, err
+	}
+	connection := utls.UClient(rawConnection, &utls.Config{
+		ServerName: request.URL.Hostname(),
+		NextProtos: []string{"h2", "http/1.1"},
+	}, transport.clientHelloID)
+	if err := connection.HandshakeContext(request.Context()); err != nil {
+		_ = rawConnection.Close()
+		return nil, fmt.Errorf("Chromium TLS handshake: %w", err)
+	}
+
+	cloned := request.Clone(request.Context())
+	cloned.Header = request.Header.Clone()
+	var response *http.Response
+	if connection.ConnectionState().NegotiatedProtocol == "h2" {
+		clientConnection, createErr := (&http2.Transport{}).NewClientConn(connection)
+		if createErr != nil {
+			_ = connection.Close()
+			return nil, fmt.Errorf("create HTTP/2 probe connection: %w", createErr)
+		}
+		response, err = clientConnection.RoundTrip(cloned)
+	} else {
+		cloned.Close = true
+		if err = cloned.Write(connection); err == nil {
+			response, err = http.ReadResponse(bufio.NewReader(connection), cloned)
+		}
+	}
+	if err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	response.Body = &probeConnectionBody{ReadCloser: response.Body, connection: connection}
+	return response, nil
+}
+
+func dialProbeCONNECT(ctx context.Context, proxyAddress, target string) (net.Conn, error) {
+	connection, err := (&net.Dialer{Timeout: routeProbeHTTPTimeout, KeepAlive: 30 * time.Second}).DialContext(ctx, "tcp", proxyAddress)
+	if err != nil {
+		return nil, fmt.Errorf("connect to scoped Zapret proxy: %w", err)
+	}
+	deadline := time.Now().Add(routeProbeHTTPTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = connection.SetDeadline(deadline)
+	if _, err := fmt.Fprintf(connection, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Connection: Keep-Alive\r\n\r\n", target, target); err != nil {
+		_ = connection.Close()
+		return nil, fmt.Errorf("write scoped Zapret CONNECT request: %w", err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		_ = connection.Close()
+		return nil, fmt.Errorf("read scoped Zapret CONNECT response: %w", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_ = connection.Close()
+		return nil, fmt.Errorf("scoped Zapret CONNECT returned HTTP %d", response.StatusCode)
+	}
+	return connection, nil
+}
+
+type probeConnectionBody struct {
+	io.ReadCloser
+	connection net.Conn
+	once       sync.Once
+}
+
+func (body *probeConnectionBody) Close() error {
+	var result error
+	body.once.Do(func() {
+		result = errors.Join(body.ReadCloser.Close(), body.connection.Close())
+	})
+	return result
 }
 
 type temporarySingBoxProxy struct {

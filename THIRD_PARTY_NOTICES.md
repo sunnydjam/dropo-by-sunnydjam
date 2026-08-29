@@ -14,6 +14,7 @@
 | Xray-core | Поддержка отдельных VLESS transport-вариантов | [XTLS/Xray-core](https://github.com/XTLS/Xray-core); текст лицензии включается в release |
 | tg-ws-proxy | Локальный MTProto-over-WebSocket transport для Telegram | Локально закреплённая версия 1.7.3, MIT; текст лицензии включается в `licenses/tg-ws-proxy-LICENSE.txt` |
 | Flowseal zapret-discord-youtube 1.10.2 protocol payloads | Восемь неизменяемых fake TLS/QUIC/STUN/Discord payload встроены как данные в подписанное ядро | MIT; copyright и полный текст разрешения сохранены ниже. `winws`, Cygwin, Lua, драйвер и код Flowseal не включаются |
+| metacubex/uTLS 1.8.4 | Chromium-compatible TLS ClientHello только для проверки выбранной Discord-стратегии через сервисно-ограниченный CONNECT relay | BSD-3-Clause; текст лицензии включается в `licenses/metacubex-utls-LICENSE.txt` |
 | Flutter | Пользовательский интерфейс | [flutter/flutter](https://github.com/flutter/flutter), BSD-3-Clause |
 | Re-filter lists | Вложенный каталог заблокированных доменов и IP-сетей, а также локально скомпилированные sing-box rule-set | [1andrevich/Re-filter-lists](https://github.com/1andrevich/Re-filter-lists), MIT; точный release и SHA-256 записываются в `bin/filters/version.json`, лицензия включается в `licenses/Re-filter-lists-LICENSE.txt` |
 

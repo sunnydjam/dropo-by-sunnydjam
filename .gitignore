@@ -24,6 +24,7 @@ release/
 # routing catalogs are the one exception: they are versioned in GitHub and
 # embedded into every build so clients never download them at runtime.
 dependencies/*
+!dependencies/metacubex-utls-LICENSE.txt
 !dependencies/filters/
 dependencies/filters/*
 !dependencies/filters/*.srs
