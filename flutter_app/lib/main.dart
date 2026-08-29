@@ -5193,9 +5193,12 @@ class _DropoHomePageState extends State<DropoHomePage>
     String strategyTag,
   ) async {
     if (uiBusy) return;
+    final experimentalDiscordAuto = service.tag == 'discord' && mode == 'auto';
     setState(() {
       uiBusy = true;
-      statusMessage = mode == 'auto'
+      statusMessage = experimentalDiscordAuto
+          ? 'Запускаем экспериментальный автоподбор Discord'
+          : mode == 'auto'
           ? 'Запускаем автоподбор Zapret для ${_homeRouteName(service)}'
           : 'Сохраняем стратегию Zapret для ${_homeRouteName(service)}';
       connectionHint = '';
@@ -5215,11 +5218,15 @@ class _DropoHomePageState extends State<DropoHomePage>
       if (!mounted) return;
       setState(() {
         routes = refreshed;
-        statusMessage = mode == 'auto'
+        statusMessage = experimentalDiscordAuto
+            ? 'Экспериментальный автоподбор Discord включён'
+            : mode == 'auto'
             ? 'Автоподбор Zapret для ${_homeRouteName(service)} включён'
             : 'Стратегия Zapret для ${_homeRouteName(service)} сохранена';
         connectionHint = result['searchStarted'] == true
-            ? 'Проверка стратегий идёт в фоне; рабочий вариант сохранится для текущей сети.'
+            ? experimentalDiscordAuto
+                  ? 'Discord voice проверяется по живому медиапотоку. Для стабильного использования пока рекомендуется ручная стратегия.'
+                  : 'Проверка стратегий идёт в фоне; рабочий вариант сохранится для текущей сети.'
             : result['restarted'] == true
             ? 'Подключение автоматически переподключено.'
             : mode == 'auto'
@@ -6753,6 +6760,7 @@ class _HomeZapretStrategyControls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final manual = service.zapretStrategyMode == 'manual';
+    final experimentalAuto = service.tag == 'discord';
     final options = service.zapretStrategyOptions;
     final selectedTag =
         options.any((option) => option.tag == service.zapretSelectedStrategy)
@@ -6785,11 +6793,23 @@ class _HomeZapretStrategyControls extends StatelessWidget {
                   ),
                 ),
               ),
-              TextButton.icon(
-                key: ValueKey('zapret-auto-${service.tag}'),
-                onPressed: enabled ? () => onChanged('auto', '') : null,
-                icon: const Icon(Icons.auto_fix_high, size: 15),
-                label: Text(manual ? 'Авто' : 'Подобрать заново'),
+              Flexible(
+                child: TextButton.icon(
+                  key: ValueKey('zapret-auto-${service.tag}'),
+                  onPressed: enabled ? () => onChanged('auto', '') : null,
+                  icon: const Icon(Icons.auto_fix_high, size: 15),
+                  label: Text(
+                    experimentalAuto
+                        ? manual
+                              ? 'Авто (эксп.)'
+                              : 'Повторить (эксп.)'
+                        : manual
+                        ? 'Авто'
+                        : 'Подобрать заново',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
               ),
             ],
           ),
@@ -6798,6 +6818,8 @@ class _HomeZapretStrategyControls extends StatelessWidget {
                 ? 'Активна вручную: $effective'
                 : service.zapretStrategyNotFound
                 ? 'Результат: подходящая стратегия не найдена'
+                : experimentalAuto
+                ? 'Авто (эксперимент): проверяется $effective'
                 : 'Рабочая: $effective',
             style: TextStyle(
               color: !manual && service.zapretStrategyNotFound
@@ -6806,6 +6828,15 @@ class _HomeZapretStrategyControls extends StatelessWidget {
               fontSize: 10,
             ),
           ),
+          if (experimentalAuto) ...[
+            const SizedBox(height: 3),
+            const Text(
+              'Авто Discord экспериментально; ручной режим пока стабильнее.',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: Color(0xFFFFC979), fontSize: 10),
+            ),
+          ],
           const SizedBox(height: 5),
           DropdownButtonFormField<String>(
             key: ValueKey('zapret-manual-${service.tag}'),

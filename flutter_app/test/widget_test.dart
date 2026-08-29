@@ -240,13 +240,21 @@ void main() {
       find.byKey(const ValueKey<String>('home-zapret-strategy-discord')),
       findsOneWidget,
     );
+    expect(find.text('Повторить (эксп.)'), findsOneWidget);
+    expect(
+      find.textContaining('Авто Discord экспериментально'),
+      findsOneWidget,
+    );
     await tester.tap(find.byKey(const ValueKey<String>('zapret-auto-discord')));
     await tester.pump(const Duration(milliseconds: 800));
     expect(bridge.lastStrategyMode, 'auto');
 
-    await tester.tap(
-      find.byKey(const ValueKey<String>('zapret-manual-discord')),
+    final manualDropdown = find.byKey(
+      const ValueKey<String>('zapret-manual-discord'),
     );
+    await tester.ensureVisible(manualDropdown);
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(manualDropdown);
     await tester.pump(const Duration(milliseconds: 500));
     await tester.tap(find.text('Flowseal 1.10.2 ALT13 — Discord').last);
     await tester.pump(const Duration(milliseconds: 800));
@@ -256,6 +264,7 @@ void main() {
       find.text('Активна вручную: Flowseal 1.10.2 ALT13 — Discord'),
       findsOneWidget,
     );
+    expect(find.text('Авто (эксп.)'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
