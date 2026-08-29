@@ -24,6 +24,7 @@ const (
 	zapretConnectSourcePortLast  = 21999
 	maxZapretProxyHeaderBytes    = 32 * 1024
 	maxZapretProxyResolvedIPs    = 16
+	zapretPerAddressDialTimeout  = 1500 * time.Millisecond
 )
 
 var zapretConnectSourcePorts = traffic.PortRange{First: zapretConnectSourcePortFirst, Last: zapretConnectSourcePortLast}
@@ -207,6 +208,7 @@ func (proxy *zapretConnectProxy) allows(host string, port int) bool {
 }
 
 func (proxy *zapretConnectProxy) dialScoped(ctx context.Context, host string, port int) (net.Conn, error) {
+	host = normalizeProxyHost(host)
 	addresses, err := proxy.lookupPublicAddresses(ctx, host)
 	if err != nil {
 		return nil, err
@@ -215,11 +217,13 @@ func (proxy *zapretConnectProxy) dialScoped(ctx context.Context, host string, po
 		addresses = addresses[:maxZapretProxyResolvedIPs]
 	}
 	var dialErr error
+	eligibleAddresses := 0
 	for _, address := range addresses {
 		address = address.Unmap()
 		if !zapretPublicAddress(address) {
 			continue
 		}
+		eligibleAddresses++
 		network := "tcp4"
 		localIP := net.IPv4zero
 		if address.Is6() {
@@ -232,11 +236,12 @@ func (proxy *zapretConnectProxy) dialScoped(ctx context.Context, host string, po
 				return nil, errors.New("scoped Zapret source port pool is exhausted")
 			}
 			dialer := net.Dialer{
-				Timeout: 10 * time.Second, KeepAlive: 30 * time.Second,
+				Timeout: zapretPerAddressDialTimeout, KeepAlive: 30 * time.Second,
 				LocalAddr: &net.TCPAddr{IP: localIP, Port: sourcePort},
 			}
 			connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), strconv.Itoa(port)))
 			if err == nil {
+				proxy.promoteResolvedAddress(host, address)
 				return &zapretPortLeaseConn{Conn: connection, release: func() { proxy.ports.release(sourcePort) }}, nil
 			}
 			proxy.ports.release(sourcePort)
@@ -248,6 +253,8 @@ func (proxy *zapretConnectProxy) dialScoped(ctx context.Context, host string, po
 	}
 	if dialErr == nil {
 		dialErr = errors.New("Zapret target did not resolve to a public address")
+	} else {
+		dialErr = fmt.Errorf("dial %d public Zapret address(es): %w", eligibleAddresses, dialErr)
 	}
 	return nil, dialErr
 }
@@ -300,6 +307,29 @@ func (proxy *zapretConnectProxy) lookupPublicAddresses(ctx context.Context, host
 	proxy.resolved[host] = zapretResolvedTarget{addresses: append([]netip.Addr(nil), addresses...), expires: now.Add(5 * time.Minute)}
 	proxy.resolveMu.Unlock()
 	return addresses, nil
+}
+
+func (proxy *zapretConnectProxy) promoteResolvedAddress(host string, address netip.Addr) {
+	host = normalizeProxyHost(host)
+	address = address.Unmap()
+	if host == "" || !address.IsValid() {
+		return
+	}
+	proxy.resolveMu.Lock()
+	defer proxy.resolveMu.Unlock()
+	cached, ok := proxy.resolved[host]
+	if !ok || len(cached.addresses) < 2 {
+		return
+	}
+	for index, candidate := range cached.addresses {
+		if candidate.Unmap() != address || index == 0 {
+			continue
+		}
+		copy(cached.addresses[1:index+1], cached.addresses[:index])
+		cached.addresses[0] = candidate
+		proxy.resolved[host] = cached
+		return
+	}
 }
 
 func (proxy *zapretConnectProxy) track(connection net.Conn) bool {

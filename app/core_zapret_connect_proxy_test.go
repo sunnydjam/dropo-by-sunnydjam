@@ -1,7 +1,9 @@
 package main
 
 import (
+	"net/netip"
 	"testing"
+	"time"
 
 	traffic "dropo/trafficorchestrator"
 )
@@ -77,5 +79,24 @@ func TestZapretSourcePortPoolIsBoundedAndReusable(t *testing.T) {
 	pool.release(zapretConnectSourcePortFirst)
 	if port, ok := pool.acquire(); !ok || port != zapretConnectSourcePortFirst {
 		t.Fatalf("released source port was not reusable: port=%d ok=%t", port, ok)
+	}
+}
+
+func TestZapretProxyPromotesWorkingAddressWithoutExtendingCache(t *testing.T) {
+	host := "discord.com"
+	first := netip.MustParseAddr("162.159.136.232")
+	working := netip.MustParseAddr("162.159.128.233")
+	expires := time.Now().Add(time.Minute)
+	proxy := &zapretConnectProxy{resolved: map[string]zapretResolvedTarget{
+		host: {addresses: []netip.Addr{first, working}, expires: expires},
+	}}
+
+	proxy.promoteResolvedAddress(host, working)
+	cached := proxy.resolved[host]
+	if len(cached.addresses) != 2 || cached.addresses[0] != working || cached.addresses[1] != first {
+		t.Fatalf("promoted addresses = %v", cached.addresses)
+	}
+	if !cached.expires.Equal(expires) {
+		t.Fatalf("promotion extended cache expiry from %v to %v", expires, cached.expires)
 	}
 }

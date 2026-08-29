@@ -650,14 +650,14 @@ func TestFlowseal1102YouTubeALTUsesExactTypedRecipe(t *testing.T) {
 	if strategy.ID == "" {
 		t.Fatal("exact YouTube General ALT strategy is missing")
 	}
-	if strategy.Revision != 3 || len(strategy.TCP) != 2 || len(strategy.UDP) != 1 {
+	if strategy.Revision != 4 || len(strategy.TCP) != 2 || len(strategy.UDP) != 1 {
 		t.Fatalf("General ALT shape = %+v", strategy)
 	}
 	fake, split := strategy.TCP[0], strategy.TCP[1]
 	if fake.Kind != ActionFake || fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || fake.TCPFooling != TCPFoolingTimestampOrBadSum || fake.TimestampDelta != -600000 || fake.IPv4ID != IPv4IDZero {
 		t.Fatalf("General ALT TLS fake = %+v", fake)
 	}
-	if split.Kind != ActionFakeDataSplit || split.Position != 2 || split.Repeats != 6 || split.FakePattern != FakePatternZero || split.TCPFooling != TCPFoolingTimestampOrBadSum || split.TimestampDelta != -600000 || split.IPv4ID != IPv4IDZero {
+	if split.Kind != ActionFakeDataSplit || split.Position != 1 || split.Repeats != 6 || split.FakePattern != FakePatternZero || split.TCPFooling != TCPFoolingTimestampOrBadSum || split.TimestampDelta != -600000 || split.IPv4ID != IPv4IDZero {
 		t.Fatalf("General ALT fake data split = %+v", split)
 	}
 	if udp := strategy.UDP[0]; udp.Kind != ActionFake || udp.Payload != "quic_google" || udp.PadTo != 1200 || udp.Repeats != 6 {
@@ -676,7 +676,7 @@ func TestFlowseal1102DiscordALTUsesExactTypedRecipe(t *testing.T) {
 	if strategy.ID == "" {
 		t.Fatal("exact Discord General ALT strategy is missing")
 	}
-	if strategy.Revision != 3 || len(strategy.TCP) != 3 || len(strategy.UDP) != 2 || strategy.Cost.SyntheticPackets != 36 {
+	if strategy.Revision != 4 || len(strategy.TCP) != 3 || len(strategy.UDP) != 2 || strategy.Cost.SyntheticPackets != 36 {
 		t.Fatalf("Discord General ALT shape = %+v", strategy)
 	}
 	if fake := strategy.TCP[0]; fake.Payload != "stun_decoy" || fake.PadTo != 100 || fake.Repeats != 6 || len(fake.Ports) != 1 || fake.Ports[0] != 443 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
@@ -685,7 +685,7 @@ func TestFlowseal1102DiscordALTUsesExactTypedRecipe(t *testing.T) {
 	if fake := strategy.TCP[1]; fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
 		t.Fatalf("Discord TLS fake = %+v", fake)
 	}
-	if split := strategy.TCP[2]; split.Kind != ActionFakeDataSplit || split.Position != 2 || split.FakePattern != FakePatternZero || split.Repeats != 6 {
+	if split := strategy.TCP[2]; split.Kind != ActionFakeDataSplit || split.Position != 1 || split.FakePattern != FakePatternZero || split.Repeats != 6 {
 		t.Fatalf("Discord fake data split = %+v", split)
 	}
 	if udp := strategy.UDP[0]; udp.Payload != "quic_google" || udp.PadTo != 1200 || udp.Repeats != 6 || len(udp.Ports) != 1 || udp.Ports[0] != 443 {
@@ -882,7 +882,7 @@ func TestFlowseal1102YouTubeALTPacketOrderAndFooling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fakeFirst.payload()) != 2 || !bytes.Equal(fakeFirst.payload(), []byte{0, 0}) {
+	if len(fakeFirst.payload()) != 1 || !bytes.Equal(fakeFirst.payload(), []byte{0}) {
 		t.Fatalf("first fake split payload = %x", fakeFirst.payload())
 	}
 	if got := testTCPTimestampValue(t, packets[6]); got != 400000 {

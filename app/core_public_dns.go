@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"strings"
@@ -76,8 +78,14 @@ func queryPublicDNS(ctx context.Context, server netip.Addr, host string, queryTy
 		return nil, err
 	}
 
+	// The selective packet engine intentionally owns outbound UDP/53 so it can
+	// synthesize fake addresses for exact native-app bootstrap names. The scoped
+	// Zapret relay must resolve those same names without consuming its own fake
+	// answer, so this narrowly bounded resolver uses standard DNS-over-TCP.
+	// It is neither a system proxy nor encrypted DNS and cannot capture unrelated
+	// application traffic.
 	dialer := net.Dialer{Timeout: 2 * time.Second}
-	connection, err := dialer.DialContext(ctx, "udp", net.JoinHostPort(server.String(), "53"))
+	connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(server.String(), "53"))
 	if err != nil {
 		return nil, err
 	}
@@ -87,15 +95,33 @@ func queryPublicDNS(ctx context.Context, server netip.Addr, host string, queryTy
 		deadline = ctxDeadline
 	}
 	_ = connection.SetDeadline(deadline)
-	if _, err := connection.Write(query); err != nil {
+	framed := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(framed[:2], uint16(len(query)))
+	copy(framed[2:], query)
+	if _, err := connection.Write(framed); err != nil {
 		return nil, err
 	}
-	response := make([]byte, 4096)
-	count, err := connection.Read(response)
+	response, err := readBoundedTCPDNSMessage(connection)
 	if err != nil {
 		return nil, err
 	}
-	return parsePublicDNSAnswer(response[:count], id)
+	return parsePublicDNSAnswer(response, id)
+}
+
+func readBoundedTCPDNSMessage(reader io.Reader) ([]byte, error) {
+	var length [2]byte
+	if _, err := io.ReadFull(reader, length[:]); err != nil {
+		return nil, err
+	}
+	responseLength := int(binary.BigEndian.Uint16(length[:]))
+	if responseLength < 12 || responseLength > 4096 {
+		return nil, fmt.Errorf("unusable TCP DNS response length %d", responseLength)
+	}
+	response := make([]byte, responseLength)
+	if _, err := io.ReadFull(reader, response); err != nil {
+		return nil, err
+	}
+	return response, nil
 }
 
 func parsePublicDNSAnswer(message []byte, id uint16) ([]netip.Addr, error) {

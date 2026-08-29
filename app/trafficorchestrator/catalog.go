@@ -1,7 +1,7 @@
 package trafficorchestrator
 
 // BuiltinCatalogRevision changes whenever packet semantics or ordering changes.
-const BuiltinCatalogRevision = "dropo-native-windows-7-flowseal-1.10.2-alt-exact"
+const BuiltinCatalogRevision = "dropo-native-windows-8-flowseal-1.10.2-alt-exact"
 
 // BuiltinStrategies returns the bounded strategy ladder implemented by the
 // Dropo packet engine. It contains data only: no shell arguments, Lua or
@@ -267,7 +267,7 @@ func flowseal1102GeneralALTStrategies(common StrategyConstraints) []TrafficStrat
 	}
 	return []TrafficStrategy{
 		{
-			ID: "native-flowseal-1102-youtube-alt", Revision: 3,
+			ID: "native-flowseal-1102-youtube-alt", Revision: 4,
 			Label: "Flowseal 1.10.2 ALT exact — YouTube",
 			TCP: []PacketAction{
 				{
@@ -275,7 +275,7 @@ func flowseal1102GeneralALTStrategies(common StrategyConstraints) []TrafficStrat
 					TCPFooling: youtubeMetadata.TCPFooling, TimestampDelta: youtubeMetadata.TimestampDelta, IPv4ID: youtubeMetadata.IPv4ID,
 				},
 				{
-					Kind: ActionFakeDataSplit, Position: 2, Repeats: 6, FakePattern: FakePatternZero, Ports: []int{443},
+					Kind: ActionFakeDataSplit, Position: 1, Repeats: 6, FakePattern: FakePatternZero, Ports: []int{443},
 					TCPFooling: youtubeMetadata.TCPFooling, TimestampDelta: youtubeMetadata.TimestampDelta, IPv4ID: youtubeMetadata.IPv4ID,
 				},
 			},
@@ -284,7 +284,7 @@ func flowseal1102GeneralALTStrategies(common StrategyConstraints) []TrafficStrat
 			Cost:        StrategyCost{SyntheticPackets: 30, BufferedBytes: 1881, Risk: 18},
 		},
 		{
-			ID: "native-discord-flowseal-1102-alt", Revision: 3,
+			ID: "native-discord-flowseal-1102-alt", Revision: 4,
 			Label: "Flowseal 1.10.2 ALT exact — Discord",
 			TCP: []PacketAction{
 				{
@@ -296,7 +296,7 @@ func flowseal1102GeneralALTStrategies(common StrategyConstraints) []TrafficStrat
 					TCPFooling: discordMetadata.TCPFooling, TimestampDelta: discordMetadata.TimestampDelta,
 				},
 				{
-					Kind: ActionFakeDataSplit, Position: 2, Repeats: 6, FakePattern: FakePatternZero,
+					Kind: ActionFakeDataSplit, Position: 1, Repeats: 6, FakePattern: FakePatternZero,
 					TCPFooling: discordMetadata.TCPFooling, TimestampDelta: discordMetadata.TimestampDelta,
 				},
 			},

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"net/netip"
 	"os"
 	"testing"
@@ -52,16 +54,19 @@ func TestLookupPublicHostWithoutHostsIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	addresses, err := lookupPublicHostWithoutHosts(ctx, "updates.discord.com")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(addresses) == 0 {
-		t.Fatal("Discord updater returned no public address")
-	}
-	for _, address := range addresses {
-		if !zapretPublicAddress(address) || dropoFakeIPv4Prefix.Contains(address) {
-			t.Fatalf("unsafe integration address returned: %s", address)
+	t.Logf("active DNS servers: %v", systemDNSServers())
+	for _, host := range []string{"www.youtube.com", "discord.com", "updates.discord.com"} {
+		addresses, err := lookupPublicHostWithoutHosts(ctx, host)
+		if err != nil {
+			t.Fatalf("lookup %s: %v", host, err)
+		}
+		if len(addresses) == 0 {
+			t.Fatalf("%s returned no public address", host)
+		}
+		for _, address := range addresses {
+			if !zapretPublicAddress(address) || dropoFakeIPv4Prefix.Contains(address) {
+				t.Fatalf("unsafe integration address returned for %s: %s", host, address)
+			}
 		}
 	}
 }
@@ -74,5 +79,21 @@ func TestParsePublicDNSAnswerRejectsMismatchedTransaction(t *testing.T) {
 	}
 	if _, err := parsePublicDNSAnswer(message, 8); err == nil {
 		t.Fatal("mismatched DNS transaction was accepted")
+	}
+}
+
+func TestReadBoundedTCPDNSMessage(t *testing.T) {
+	payload := []byte("0123456789ab")
+	framed := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(framed[:2], uint16(len(payload)))
+	copy(framed[2:], payload)
+	message, err := readBoundedTCPDNSMessage(bytes.NewReader(framed))
+	if err != nil || !bytes.Equal(message, payload) {
+		t.Fatalf("TCP DNS message = %q err=%v", message, err)
+	}
+	for _, invalid := range [][]byte{{0, 11}, {0x10, 0x01}, {0, 12, 1, 2, 3}} {
+		if _, err := readBoundedTCPDNSMessage(bytes.NewReader(invalid)); err == nil {
+			t.Fatalf("invalid framed DNS message accepted: %x", invalid)
+		}
 	}
 }
