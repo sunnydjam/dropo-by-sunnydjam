@@ -47,12 +47,22 @@ Remove-Item Env:\DROPO_TEST_SUBSCRIPTION_URL
 
 ## publish-release-assets.ps1
 
-Локально проверяет и загружает единый Windows EXE и Android APK в уже созданную
-GitHub Actions карточку релиза. Actions при этом не получает signing keys и не
-собирает артефакты.
+Локально проверяет и загружает Windows installer, portable ZIP, их SHA-256,
+SBOM/provenance и, для полного релиза, подписанный Android APK в уже созданную
+карточку GitHub Release. Actions при этом не получает signing keys и не собирает
+артефакты.
 
 ```powershell
 .\publish-release-assets.ps1 -ReleaseFolder ..\release\dropo-<version>-<hash>
+```
+
+Windows-only release candidate публикуется с явными тегом и режимом:
+
+```powershell
+.\publish-release-assets.ps1 `
+  -ReleaseFolder ..\release\dropo-<version>-<hash> `
+  -Tag v<version>-rc.1 `
+  -WindowsOnly
 ```
 
 Аутентификация берётся из `GH_TOKEN` или из локального Git credential manager.
