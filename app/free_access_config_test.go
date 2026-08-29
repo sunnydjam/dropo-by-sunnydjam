@@ -1474,6 +1474,9 @@ func TestApplyServiceFreeFallbackKeepsExplicitZapretOffVPN(t *testing.T) {
 }
 
 func TestStoredServiceVPNFallbackDoesNotOverrideExplicitZapret(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("strict Zapret carrier is Windows-only")
+	}
 	app, configPath := newDeepWindowsTestApp(t, map[string]interface{}{
 		"outbounds": []interface{}{
 			map[string]interface{}{"type": "direct", "tag": "direct"},

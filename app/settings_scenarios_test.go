@@ -184,12 +184,14 @@ func TestSettingsAPIsPersistFreeAccessPolicy(t *testing.T) {
 		t.Fatalf("forced-vpn-without-candidate plan = %+v, want telegram blocked", plan)
 	}
 
-	result = app.SetFreeAccessServiceMethod("telegram", DefaultZapretTransparentStrategies[0].Tag)
-	requireAPISuccess(t, result)
-	settings = app.storage.GetAppSettings()
-	plan = buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
-	if !planContainsString(plan.DirectServices, "telegram") || planContainsString(plan.TransparentServices, "telegram") {
-		t.Fatalf("legacy manual zapret plan = %+v, want unsupported legacy method migrated to direct", plan)
+	if runtime.GOOS == "windows" {
+		result = app.SetFreeAccessServiceMethod("telegram", DefaultZapretTransparentStrategies[0].Tag)
+		requireAPISuccess(t, result)
+		settings = app.storage.GetAppSettings()
+		plan = buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
+		if !planContainsString(plan.DirectServices, "telegram") || planContainsString(plan.TransparentServices, "telegram") {
+			t.Fatalf("legacy manual zapret plan = %+v, want unsupported legacy method migrated to direct", plan)
+		}
 	}
 
 	invalidResult := app.SetFreeAccessServiceMethod("unknown-service", FreeAccessMethodDirect)
