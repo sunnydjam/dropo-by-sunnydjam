@@ -495,9 +495,9 @@ func (c *discordRealtimeController) collectDiagnostics(now time.Time) (discordRe
 	sort.Ints(result.TCPPorts)
 	sort.Ints(result.UDPPorts)
 	sort.Strings(result.UDPIPs)
-	diagnosticInterval := discordRealtimeDiagInterval
-	if len(c.flows) == 0 && !c.initialBusy {
-		diagnosticInterval = discordRealtimeIdleDiagInterval
+	diagnosticInterval := discordRealtimeIdleDiagInterval
+	if c.initialBusy || c.hasUDPFlowLocked() {
+		diagnosticInterval = discordRealtimeDiagInterval
 	}
 	summaryDue := c.lastDiagnostics.IsZero() || now.Sub(c.lastDiagnostics) >= diagnosticInterval
 	flowIDs := make([]string, 0, len(c.flows))
@@ -547,6 +547,15 @@ func (c *discordRealtimeController) collectDiagnostics(now time.Time) (discordRe
 		c.lastDiagnostics = now
 	}
 	return result, summaryDue
+}
+
+func (c *discordRealtimeController) hasUDPFlowLocked() bool {
+	for _, flow := range c.flows {
+		if flow != nil && strings.EqualFold(flow.Network, "udp") {
+			return true
+		}
+	}
+	return false
 }
 
 func discordCounterDelta(current, previous int64) int64 {

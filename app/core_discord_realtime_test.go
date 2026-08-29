@@ -205,6 +205,34 @@ func TestDiscordRealtimeIdleDiagnosticsAreThrottled(t *testing.T) {
 	}
 }
 
+func TestDiscordRealtimeTCPControlOnlyDiagnosticsAreThrottled(t *testing.T) {
+	controller := newDiscordRealtimeController()
+	controller.running = true
+	started := time.Unix(2027, 0)
+	connection := clashConnection{
+		ID: "voice-tcp-idle",
+		Metadata: clashConnectionMetadata{
+			Network:         "tcp",
+			Host:            "latency.discord.media",
+			DestinationPort: "443",
+			Process:         "Discord.exe",
+		},
+		Upload:   2412,
+		Download: 4786,
+	}
+	controller.observeConnections([]clashConnection{connection}, started)
+
+	if _, due := controller.collectDiagnostics(started); !due {
+		t.Fatal("first TCP control-flow diagnostic must be emitted")
+	}
+	if _, due := controller.collectDiagnostics(started.Add(discordRealtimeDiagInterval)); due {
+		t.Fatal("idle TCP control-flow diagnostics must not repeat at the active media interval")
+	}
+	if _, due := controller.collectDiagnostics(started.Add(discordRealtimeIdleDiagInterval)); !due {
+		t.Fatal("TCP control-flow diagnostic must be emitted at the throttled interval")
+	}
+}
+
 func TestDiscordRealtimeDoesNotTreatDiscoveryResponseAsMedia(t *testing.T) {
 	controller := newDiscordRealtimeController()
 	controller.running = true
