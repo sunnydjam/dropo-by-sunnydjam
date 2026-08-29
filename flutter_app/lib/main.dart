@@ -6793,18 +6793,19 @@ class _HomeZapretStrategyControls extends StatelessWidget {
               ),
             ],
           ),
-          if (!manual)
-            Text(
-              service.zapretStrategyNotFound
-                  ? 'Результат: подходящая стратегия не найдена'
-                  : 'Рабочая: $effective',
-              style: TextStyle(
-                color: service.zapretStrategyNotFound
-                    ? const Color(0xFFFF9C92)
-                    : const Color(0xFFA8BAB5),
-                fontSize: 10,
-              ),
+          Text(
+            manual
+                ? 'Активна вручную: $effective'
+                : service.zapretStrategyNotFound
+                ? 'Результат: подходящая стратегия не найдена'
+                : 'Рабочая: $effective',
+            style: TextStyle(
+              color: !manual && service.zapretStrategyNotFound
+                  ? const Color(0xFFFF9C92)
+                  : const Color(0xFFA8BAB5),
+              fontSize: 10,
             ),
+          ),
           const SizedBox(height: 5),
           DropdownButtonFormField<String>(
             key: ValueKey('zapret-manual-${service.tag}'),

@@ -252,6 +252,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 800));
     expect(bridge.lastStrategyMode, 'manual');
     expect(bridge.lastStrategyTag, 'flowseal-1102-discord-alt13');
+    expect(
+      find.text('Активна вручную: Flowseal 1.10.2 ALT13 — Discord'),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
   });
 

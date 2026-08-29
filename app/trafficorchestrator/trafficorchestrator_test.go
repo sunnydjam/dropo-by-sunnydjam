@@ -676,26 +676,17 @@ func TestFlowseal1102DiscordALTUsesExactTypedRecipe(t *testing.T) {
 	if strategy.ID == "" {
 		t.Fatal("exact Discord General ALT strategy is missing")
 	}
-	if strategy.Revision != 5 || len(strategy.TCP) != 7 || len(strategy.UDP) != 2 {
+	if strategy.Revision != 5 || len(strategy.TCP) != 3 || len(strategy.UDP) != 2 {
 		t.Fatalf("Discord General ALT shape = %+v", strategy)
 	}
-	if fake := strategy.TCP[0]; fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || len(fake.Ports) != 5 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
-		t.Fatalf("Discord media TLS fake = %+v", fake)
-	}
-	if split := strategy.TCP[1]; split.Kind != ActionFakeDataSplit || split.Position != 1 || split.FakePattern != FakePatternZero || split.Repeats != 6 {
-		t.Fatalf("Discord media fake data split = %+v", split)
-	}
-	if fake := strategy.TCP[2]; fake.Payload != "stun_decoy" || fake.PadTo != 100 || fake.Repeats != 6 || len(fake.Ports) != 2 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
+	if fake := strategy.TCP[0]; fake.Kind != ActionFake || fake.Payload != "stun_decoy" || fake.PadTo != 100 || fake.Repeats != 6 || len(fake.Ports) != 1 || fake.Ports[0] != 443 || fake.TCPFooling != TCPFoolingTimestampOrBadSum || fake.TimestampDelta != -600000 {
 		t.Fatalf("Discord web STUN fake = %+v", fake)
 	}
-	if fake := strategy.TCP[3]; fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || len(fake.Payloads) != 1 || fake.Payloads[0] != "tls-client-hello" {
-		t.Fatalf("Discord web TLS fake = %+v", fake)
+	if fake := strategy.TCP[1]; fake.Kind != ActionFake || fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || len(fake.Ports) != 0 || len(fake.Payloads) != 0 || fake.TCPFooling != TCPFoolingTimestampOrBadSum || fake.TimestampDelta != -600000 {
+		t.Fatalf("Discord all-TCP TLS fake = %+v", fake)
 	}
-	if split := strategy.TCP[4]; split.Kind != ActionFakeDataSplit || split.Position != 1 || split.FakePattern != FakePatternZero || split.Repeats != 6 || split.Payloads[0] != "tls-client-hello" {
-		t.Fatalf("Discord web TLS fake data split = %+v", split)
-	}
-	if fake := strategy.TCP[5]; fake.Payload != "tls_max" || fake.PadTo != 664 || fake.Payloads[0] != "http-request" {
-		t.Fatalf("Discord web HTTP fake = %+v", fake)
+	if split := strategy.TCP[2]; split.Kind != ActionFakeDataSplit || split.Position != 1 || split.FakePattern != FakePatternZero || split.Repeats != 6 || len(split.Ports) != 0 || len(split.Payloads) != 0 || split.TCPFooling != TCPFoolingTimestampOrBadSum || split.TimestampDelta != -600000 {
+		t.Fatalf("Discord all-TCP fake data split = %+v", split)
 	}
 	if udp := strategy.UDP[0]; udp.Payload != "quic_google" || udp.PadTo != 1200 || udp.Repeats != 6 || len(udp.Ports) != 1 || udp.Ports[0] != 443 {
 		t.Fatalf("Discord QUIC fake = %+v", udp)

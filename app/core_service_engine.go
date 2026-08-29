@@ -1338,13 +1338,14 @@ func (a *App) firstRunServiceSearch(
 			a.emitBackgroundStrategyCandidate(tag, method, round, len(ladder))
 		}
 
-		failing := a.probeServicesThroughEngine(pending)
+		failures := a.probeServiceFailuresThroughEngine(pending)
 		if !a.routeStrategySessionActive(session) {
 			return pending, fmt.Errorf("service strategy search interrupted after probes")
 		}
 		next := make([]string, 0, len(pending))
 		for _, tag := range pending {
-			if !failing[tag] {
+			failureDetail, failed := failures[tag]
+			if !failed {
 				if tag == "discord" {
 					a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
 				}
@@ -1364,8 +1365,10 @@ func (a *App) firstRunServiceSearch(
 			if tag == "discord" {
 				a.removeServiceStrategyCacheEntry(tag)
 			}
+			a.writeLog(fmt.Sprintf("[FreeAccess] %s: %s did not pass every required target: %s", tag, selections[tag].Method.Label, failureDetail))
 			if round+1 < len(ladders[tag]) {
-				a.emitBackgroundStrategyService(tag, selections[tag].Method, false, false, true, "retrying", "Стратегия не прошла полную проверку; пробуем следующую", round, len(ladders[tag]))
+				detail := "Не пройдена обязательная проверка: " + failureDetail + "; пробуем следующую стратегию"
+				a.emitBackgroundStrategyService(tag, selections[tag].Method, false, false, true, "retrying", detail, round, len(ladders[tag]))
 				next = append(next, tag)
 			} else {
 				if tag == "discord" {
@@ -1569,13 +1572,15 @@ func (a *App) searchServiceStrategy(serviceTag string, selections map[string]ser
 	return ServiceBypassMethod{}, false
 }
 
-// probeServicesThroughEngine probes the given services through the currently
-// running engine (no restart) and returns the set that FAILED.
-func (a *App) probeServicesThroughEngine(serviceTags []string) map[string]bool {
-	failing := map[string]bool{}
+// probeServiceFailuresThroughEngine probes the given services through the
+// currently running engine (no restart). The returned map contains only failed
+// services and retains the exact required target that failed, so an automatic
+// search never looks like it skipped a partially working strategy.
+func (a *App) probeServiceFailuresThroughEngine(serviceTags []string) map[string]string {
+	failing := map[string]string{}
 	if a.trafficEngine == nil || a.trafficEngine.ActiveTag() != composedStrategyTag {
 		for _, tag := range serviceTags {
-			failing[tag] = true
+			failing[tag] = "движок выбранных сервисов не активен"
 		}
 		return failing
 	}
@@ -1591,13 +1596,13 @@ func (a *App) probeServicesThroughEngine(serviceTags []string) map[string]bool {
 		previousRoute := a.currentServiceRoute(tag)
 		if previousRoute == "" {
 			mu.Lock()
-			failing[tag] = true
+			failing[tag] = "не найден активный маршрут сервиса"
 			mu.Unlock()
 			continue
 		}
 		if !a.switchServiceRoute(tag, "direct") {
 			mu.Lock()
-			failing[tag] = true
+			failing[tag] = "не удалось включить прямой тестовый маршрут"
 			mu.Unlock()
 			continue
 		}
@@ -1624,13 +1629,28 @@ func (a *App) probeServicesThroughEngine(serviceTags []string) map[string]bool {
 				item = a.probeSingleCandidateQuiet(service, candidate)
 			}
 			if !item.Success {
+				detail := strings.TrimSpace(item.Error)
+				if detail == "" {
+					detail = "обязательная web/TCP-проверка завершилась без подтверждения"
+				}
 				mu.Lock()
-				failing[service.Tag] = true
+				failing[service.Tag] = detail
 				mu.Unlock()
 			}
 		}(svc, previousRoute)
 	}
 	wg.Wait()
+	return failing
+}
+
+// probeServicesThroughEngine is retained for callers that only need the
+// success/failure bit. Detailed automatic-selection reporting uses the helper
+// above directly.
+func (a *App) probeServicesThroughEngine(serviceTags []string) map[string]bool {
+	failing := make(map[string]bool)
+	for tag := range a.probeServiceFailuresThroughEngine(serviceTags) {
+		failing[tag] = true
+	}
 	return failing
 }
 

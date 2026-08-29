@@ -58,12 +58,17 @@ func flowseal1102BuiltinStrategies(common StrategyConstraints) []TrafficStrategy
 	profiles := flowseal1102Profiles()
 	result := make([]TrafficStrategy, 0, len(profiles)*2)
 	for _, profile := range profiles {
+		// General ALT was already validated live for YouTube, Discord desktop,
+		// Discord voice and Steam isolation before the complete 1.10.2 catalog
+		// was transcribed. Preserve that proven service-scoped recipe exactly;
+		// the more granular upstream transcription caused a live regression.
+		if profile.slug == "alt" {
+			result = append(result, flowseal1102ProvenALTStrategies(common)...)
+			continue
+		}
 		youtubeLabel := "Flowseal 1.10.2 " + profile.label + " adapted — YouTube"
 		discordLabel := "Flowseal 1.10.2 " + profile.label + " adapted — Discord"
-		if profile.slug == "alt" {
-			youtubeLabel = "Flowseal 1.10.2 ALT exact — YouTube"
-			discordLabel = "Flowseal 1.10.2 ALT exact — Discord"
-		} else if profile.dataPhase {
+		if profile.dataPhase {
 			youtubeLabel = "Flowseal 1.10.2 ALT5 scoped data phase — YouTube"
 			discordLabel = "Flowseal 1.10.2 ALT5 scoped data phase — Discord"
 		}
@@ -73,6 +78,61 @@ func flowseal1102BuiltinStrategies(common StrategyConstraints) []TrafficStrategy
 		)
 	}
 	return result
+}
+
+// flowseal1102ProvenALTStrategies is the bounded in-process General ALT
+// adaptation that passed the project's live release gate. It deliberately has
+// no payload fingerprint on the TCP actions: service classification already
+// supplies the required domain/process context, while Discord's desktop and
+// gateway connections must also be covered after their ClientHello packet.
+func flowseal1102ProvenALTStrategies(common StrategyConstraints) []TrafficStrategy {
+	const timestampDelta = -600000
+	return []TrafficStrategy{
+		{
+			ID: "native-flowseal-1102-youtube-alt", Revision: 5,
+			Label: "Flowseal 1.10.2 ALT proven — YouTube",
+			TCP: []PacketAction{
+				{
+					Kind: ActionFake, Payload: "tls_google", PadTo: 681, Repeats: 6, Ports: []int{443},
+					TCPFooling: TCPFoolingTimestampOrBadSum, TimestampDelta: timestampDelta, IPv4ID: IPv4IDZero,
+				},
+				{
+					Kind: ActionFakeDataSplit, Position: 1, Repeats: 6, FakePattern: FakePatternZero, Ports: []int{443},
+					TCPFooling: TCPFoolingTimestampOrBadSum, TimestampDelta: timestampDelta, IPv4ID: IPv4IDZero,
+				},
+			},
+			UDP:         []PacketAction{{Kind: ActionFake, Payload: "quic_google", PadTo: 1200, Repeats: 6, Ports: []int{443}}},
+			Constraints: common,
+			Cost:        StrategyCost{SyntheticPackets: 30, BufferedBytes: 1881, Risk: 18},
+		},
+		{
+			ID: "native-discord-flowseal-1102-alt", Revision: 5,
+			Label: "Flowseal 1.10.2 ALT proven — Discord",
+			TCP: []PacketAction{
+				{
+					Kind: ActionFake, Payload: "stun_decoy", PadTo: 100, Repeats: 6, Ports: []int{443},
+					TCPFooling: TCPFoolingTimestampOrBadSum, TimestampDelta: timestampDelta,
+				},
+				{
+					Kind: ActionFake, Payload: "tls_google", PadTo: 681, Repeats: 6,
+					TCPFooling: TCPFoolingTimestampOrBadSum, TimestampDelta: timestampDelta,
+				},
+				{
+					Kind: ActionFakeDataSplit, Position: 1, Repeats: 6, FakePattern: FakePatternZero,
+					TCPFooling: TCPFoolingTimestampOrBadSum, TimestampDelta: timestampDelta,
+				},
+			},
+			UDP: []PacketAction{
+				{Kind: ActionFake, Payload: "quic_google", PadTo: 1200, Repeats: 6, Ports: []int{443}},
+				{
+					Kind: ActionFake, Payload: "discord_active", PadTo: 1200, Repeats: 6,
+					PortRanges: []PortRange{{First: 19294, Last: 19344}, {First: 50000, Last: 50100}},
+				},
+			},
+			Constraints: common,
+			Cost:        StrategyCost{SyntheticPackets: 36, BufferedBytes: 1881, Risk: 20},
+		},
+	}
 }
 
 func flowseal1102BuildStrategy(id, label string, tcpRecipes []flowseal1102TCPRecipe, udpRecipes []flowseal1102UDPRecipe, common StrategyConstraints, dataPhase bool) TrafficStrategy {
