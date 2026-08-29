@@ -770,7 +770,10 @@ function Build-Application {
 
     # Build an initial core. It is rebuilt after native files are staged, with
     # the exact runtime-manifest hash embedded into the signed executable.
-    $ldflags = "-X 'main.Version=$AppVersion' -X 'main.BuildTime=$BuildTime' -X 'main.BuildHash=$BuildHash' -X 'main.SingBoxVersion=$SingBoxVersion' -X 'main.WireGuardVersion=$WireGuardVersion' -s -w -H=windowsgui"
+    # Keep Go symbol and DWARF metadata in the unsigned Windows core. Stripped
+    # network-facing Go binaries are prone to unstable Defender ML detections;
+    # public Authenticode signing remains the publication-grade solution.
+    $ldflags = "-X 'main.Version=$AppVersion' -X 'main.BuildTime=$BuildTime' -X 'main.BuildHash=$BuildHash' -X 'main.SingBoxVersion=$SingBoxVersion' -X 'main.WireGuardVersion=$WireGuardVersion' -H=windowsgui"
 
     Push-Location $AppDir
     try {
@@ -1141,7 +1144,7 @@ function Build-Application {
     [System.IO.File]::WriteAllText($provenancePath, ($provenance | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "[OK] Wrote SPDX SBOM and package provenance metadata" -ForegroundColor Green
 
-    $finalLdflags = "-X 'main.trustedRuntimeVersion=$RuntimeVersion' -X 'main.trustedRuntimeManifestSHA256=$runtimeManifestSHA256' -X 'main.Version=$AppVersion' -X 'main.BuildTime=$BuildTime' -X 'main.BuildHash=$BuildHash' -X 'main.SingBoxVersion=$SingBoxVersion' -X 'main.WireGuardVersion=$WireGuardVersion' -s -w -H=windowsgui"
+    $finalLdflags = "-X 'main.trustedRuntimeVersion=$RuntimeVersion' -X 'main.trustedRuntimeManifestSHA256=$runtimeManifestSHA256' -X 'main.Version=$AppVersion' -X 'main.BuildTime=$BuildTime' -X 'main.BuildHash=$BuildHash' -X 'main.SingBoxVersion=$SingBoxVersion' -X 'main.WireGuardVersion=$WireGuardVersion' -H=windowsgui"
     Push-Location $AppDir
     try {
         & go build -trimpath -buildvcs=false -ldflags $finalLdflags -o $coreExe .
