@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/sunnydjam/dropo-by-sunnydjam/security/advisories/new
+    about: Report vulnerabilities privately. Never include VPN credentials in a public issue.
+  - name: Upstream Dropo
+    url: https://github.com/Droponevedimka/dropo
+    about: Open upstream-specific reports in the original project.

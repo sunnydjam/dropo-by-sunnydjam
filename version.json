@@ -2,11 +2,11 @@
   "version": "3.0.25",
   "name": "dropo",
   "productName": "dropo",
-  "description": "dropo VPN client with sing-box, WireGuard, and smart routing",
-  "author": "Droponevedimka",
+  "description": "Dropo by sunnydjam VPN client with selective routing",
+  "author": "Droponevedimka (upstream); sunnydjam (fork)",
   "license": "MIT",
-  "homepage": "https://k-ampus.dev",
-  "repository": "https://github.com/Droponevedimka/dropo",
+  "homepage": "https://github.com/sunnydjam/dropo-by-sunnydjam",
+  "repository": "https://github.com/sunnydjam/dropo-by-sunnydjam",
   "singbox": {
     "version": "1.13.14",
     "minVersion": "1.12.0",
@@ -39,6 +39,6 @@
   },
   "build": {
     "appId": "in.droponevedimka.dropo",
-    "copyright": "Copyright © 2026 dropo"
+    "copyright": "Copyright © 2026 Droponevedimka and contributors"
   }
 }

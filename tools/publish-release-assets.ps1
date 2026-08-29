@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptRoot
-$Repository = "Droponevedimka/dropo"
+$Repository = "sunnydjam/dropo-by-sunnydjam"
 
 function Get-GitHubToken {
     if (-not [string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {

@@ -53,8 +53,8 @@ func TestLatestPortableReleaseUsesPortableArchive(t *testing.T) {
 	releases := []GitHubRelease{{
 		TagName: "v3.1.0",
 		Assets: []GitHubReleaseAsset{
-			{Name: "dropo-Windows-Setup-x64.exe", BrowserDownloadURL: "https://downloads.droponevedimka.ru/releases/download/v3.1.0/dropo-Windows-Setup-x64.exe", Size: 100, Digest: digest},
-			{Name: "dropo-Windows-Portable-x64.zip", BrowserDownloadURL: "https://downloads.droponevedimka.ru/releases/download/v3.1.0/dropo-Windows-Portable-x64.zip", Size: 100, Digest: digest},
+			{Name: "dropo-Windows-Setup-x64.exe", BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.1.0/dropo-Windows-Setup-x64.exe", Size: 100, Digest: digest},
+			{Name: "dropo-Windows-Portable-x64.zip", BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.1.0/dropo-Windows-Portable-x64.zip", Size: 100, Digest: digest},
 		},
 	}}
 	_, asset, ok := selectLatestInstallableReleaseForMode(releases, "windows", "amd64", distributionModePortable)
@@ -68,7 +68,7 @@ func TestWindowsUpdateCheckFallsBackFromAndroidOnlyGatewayToGitHub(t *testing.T)
 	writeReleases := func(t *testing.T, releases []GitHubRelease) http.HandlerFunc {
 		t.Helper()
 		return func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/repos/Droponevedimka/dropo/releases" || r.URL.Query().Get("per_page") != "100" {
+			if r.URL.Path != "/repos/sunnydjam/dropo-by-sunnydjam/releases" || r.URL.Query().Get("per_page") != "100" {
 				t.Errorf("unexpected metadata request: %s", r.URL.String())
 				http.NotFound(w, r)
 				return
@@ -84,7 +84,7 @@ func TestWindowsUpdateCheckFallsBackFromAndroidOnlyGatewayToGitHub(t *testing.T)
 		TagName: "v3.0.18",
 		Assets: []GitHubReleaseAsset{{
 			Name:               "dropo-Android-arm64.apk",
-			BrowserDownloadURL: "https://downloads.droponevedimka.ru/releases/download/v3.0.18/dropo-Android-arm64.apk",
+			BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.18/dropo-Android-arm64.apk",
 			Size:               100,
 			Digest:             digest,
 		}},
@@ -93,10 +93,10 @@ func TestWindowsUpdateCheckFallsBackFromAndroidOnlyGatewayToGitHub(t *testing.T)
 
 	github := httptest.NewServer(writeReleases(t, []GitHubRelease{{
 		TagName: "v3.0.18",
-		HTMLURL: "https://github.com/Droponevedimka/dropo/releases/tag/v3.0.18",
+		HTMLURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v3.0.18",
 		Assets: []GitHubReleaseAsset{
-			{Name: "dropo-Windows-Setup-x64.exe", BrowserDownloadURL: "https://github.com/Droponevedimka/dropo/releases/download/v3.0.18/dropo-Windows-Setup-x64.exe", Size: 101, Digest: digest},
-			{Name: "dropo-Windows-Portable-x64.zip", BrowserDownloadURL: "https://github.com/Droponevedimka/dropo/releases/download/v3.0.18/dropo-Windows-Portable-x64.zip", Size: 102, Digest: digest},
+			{Name: "dropo-Windows-Setup-x64.exe", BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.18/dropo-Windows-Setup-x64.exe", Size: 101, Digest: digest},
+			{Name: "dropo-Windows-Portable-x64.zip", BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.18/dropo-Windows-Portable-x64.zip", Size: 102, Digest: digest},
 		},
 	}}))
 	defer github.Close()
@@ -112,7 +112,7 @@ func TestWindowsUpdateCheckFallsBackFromAndroidOnlyGatewayToGitHub(t *testing.T)
 			info, err := checkForUpdatesWithClient(
 				gateway.Client(),
 				[]string{gateway.URL, github.URL},
-				"Droponevedimka/dropo",
+				"sunnydjam/dropo-by-sunnydjam",
 				"3.0.17",
 				"windows",
 				"amd64",
@@ -124,7 +124,7 @@ func TestWindowsUpdateCheckFallsBackFromAndroidOnlyGatewayToGitHub(t *testing.T)
 			if !info.Available || info.Version != "3.0.18" || info.AssetName != tc.assetName {
 				t.Fatalf("update info = %+v, want available GitHub %s", info, tc.assetName)
 			}
-			if !strings.HasPrefix(info.DownloadURL, "https://github.com/Droponevedimka/dropo/releases/download/") {
+			if !strings.HasPrefix(info.DownloadURL, "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/") {
 				t.Fatalf("download URL = %q, want exact repository release URL", info.DownloadURL)
 			}
 		})
@@ -137,7 +137,7 @@ func TestWindowsUpdateCheckRetriesWhenCanonicalMetadataFails(t *testing.T) {
 		_ = json.NewEncoder(w).Encode([]GitHubRelease{{
 			TagName: "v3.0.18",
 			Assets: []GitHubReleaseAsset{{
-				Name: "dropo-Android-arm64.apk", BrowserDownloadURL: "https://downloads.droponevedimka.ru/releases/download/v3.0.18/dropo-Android-arm64.apk", Size: 100, Digest: digest,
+				Name: "dropo-Android-arm64.apk", BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.18/dropo-Android-arm64.apk", Size: 100, Digest: digest,
 			}},
 		}})
 	}))
@@ -148,7 +148,7 @@ func TestWindowsUpdateCheckRetriesWhenCanonicalMetadataFails(t *testing.T) {
 	defer canonical.Close()
 
 	_, err := checkForUpdatesWithClient(
-		gateway.Client(), []string{gateway.URL, canonical.URL}, "Droponevedimka/dropo", "3.0.17", "windows", "amd64", distributionModeInstalled,
+		gateway.Client(), []string{gateway.URL, canonical.URL}, "sunnydjam/dropo-by-sunnydjam", "3.0.17", "windows", "amd64", distributionModeInstalled,
 	)
 	if err == nil {
 		t.Fatal("Android-only gateway plus failed canonical metadata must return an error for the startup retry")
@@ -205,7 +205,7 @@ func TestSelectLatestInstallableReleaseAcceptsExactGitHubRepository(t *testing.T
 			TagName: "v3.0.5",
 			Assets: []GitHubReleaseAsset{{
 				Name:               "dropo-Windows-Setup-x64.exe",
-				BrowserDownloadURL: "https://github.com/Droponevedimka/dropo/releases/download/v3.0.5/dropo-Windows-Setup-x64.exe",
+				BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.5/dropo-Windows-Setup-x64.exe",
 				Size:               100,
 				Digest:             digest,
 			}},
@@ -214,14 +214,14 @@ func TestSelectLatestInstallableReleaseAcceptsExactGitHubRepository(t *testing.T
 			TagName: "v3.0.4",
 			Assets: []GitHubReleaseAsset{{
 				Name:               "dropo-Windows-Setup-x64.exe",
-				BrowserDownloadURL: "https://downloads.droponevedimka.ru/releases/download/v3.0.4/dropo-Windows-Setup-x64.exe",
+				BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.4/dropo-Windows-Setup-x64.exe",
 				Size:               100,
 				Digest:             digest,
 			}},
 		},
 	}
 	release, asset, ok := selectLatestInstallableRelease(releases, "windows", "amd64")
-	if !ok || release.TagName != "v3.0.5" || !strings.Contains(asset.BrowserDownloadURL, "github.com/Droponevedimka/dropo") {
+	if !ok || release.TagName != "v3.0.5" || !strings.Contains(asset.BrowserDownloadURL, "github.com/sunnydjam/dropo-by-sunnydjam") {
 		t.Fatalf("selected release=%q asset=%q ok=%v, want exact GitHub repository", release.TagName, asset.BrowserDownloadURL, ok)
 	}
 }
@@ -337,19 +337,19 @@ func TestCompareVersions(t *testing.T) {
 
 func TestValidateTrustedUpdateURL(t *testing.T) {
 	for _, allowed := range []string{
-		"https://downloads.droponevedimka.ru/releases/download/v3.0.3/dropo-Windows-Setup-x64.exe",
-		"https://github.com/Droponevedimka/dropo/releases/download/v3.0.18/dropo-Windows-Setup-x64.exe",
-		"https://github.com/Droponevedimka/dropo/releases/download/v3.0.18/dropo-Windows-Portable-x64.zip",
+		"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.18/dropo-Windows-Setup-x64.exe",
+		"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.18/dropo-Windows-Portable-x64.zip",
 	} {
 		if err := validateTrustedUpdateURL(allowed); err != nil {
 			t.Fatalf("trusted release asset rejected: %v", err)
 		}
 	}
 	for _, rawURL := range []string{
-		"http://github.com/Droponevedimka/dropo/releases/download/v2.2.0/update.exe",
+		"http://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v2.2.0/update.exe",
 		"https://example.com/update.exe",
+		"https://downloads.droponevedimka.ru/releases/download/v3.0.3/dropo-Windows-Setup-x64.exe",
 		"https://github.com/example/dropo/releases/download/v2.2.0/update.zip",
-		"https://github.com/Droponevedimka/dropo/actions/download/update.exe",
+		"https://github.com/sunnydjam/dropo-by-sunnydjam/actions/download/update.exe",
 		"https://release-assets.githubusercontent.com/github-production-release-asset/update.exe",
 	} {
 		if err := validateTrustedUpdateURL(rawURL); err == nil {
@@ -359,7 +359,7 @@ func TestValidateTrustedUpdateURL(t *testing.T) {
 }
 
 func TestValidateTrustedUpdateRedirect(t *testing.T) {
-	initial := "https://github.com/Droponevedimka/dropo/releases/download/v3.0.18/dropo-Windows-Setup-x64.exe"
+	initial := "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.18/dropo-Windows-Setup-x64.exe"
 	if err := validateTrustedUpdateRedirect(initial, "https://release-assets.githubusercontent.com/github-production-release-asset/123/signed?token=value"); err != nil {
 		t.Fatalf("GitHub signed asset redirect rejected: %v", err)
 	}

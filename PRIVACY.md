@@ -10,14 +10,13 @@ needed to operate the application:
 - configured VPN, proxy and WireGuard endpoints receive the traffic routed to
   them according to the active profile;
 - service health checks contact the service domains shown by the application;
-- update checks contact the official dropo GitHub releases API and configured
-  official download mirror;
+- update checks contact this fork's GitHub Releases API;
 - the optional network fingerprint check contacts `ipinfo.io` to determine the
   public country code;
 - subscription import and refresh contact the URL supplied by the user.
 
 The application does not send profiles, credentials, visited URLs or logs to
-the dropo maintainers. Third-party endpoints are governed by their respective
+the upstream or fork maintainers. Third-party endpoints are governed by their respective
 privacy policies. Users can avoid optional checks by not invoking those
 features, remove local application data after uninstall, and inspect all
 network behavior in the source code in this repository.

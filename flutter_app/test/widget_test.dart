@@ -835,16 +835,16 @@ void main() {
     expect(openDropoSpace, isTrue);
   });
 
-  test('UpdateInfo keeps Android Russian mirror APK asset details', () {
+  test('UpdateInfo keeps fork Android APK asset details', () {
     final info = UpdateInfo.fromJson(const {
       'success': true,
       'hasUpdate': true,
       'currentVersion': '2.1.6',
       'latestVersion': '2.1.7',
       'releaseURL':
-          'https://github.com/Droponevedimka/dropo/releases/tag/v2.1.7',
+          'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v2.1.7',
       'downloadURL':
-          'https://downloads.droponevedimka.ru/releases/download/v2.1.7/dropo-Android-arm64.apk',
+          'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v2.1.7/dropo-Android-arm64.apk',
       'assetName': 'dropo-Android-arm64.apk',
       'fileSize': 58242990,
       'platform': 'android',
@@ -949,9 +949,9 @@ class _UpdateAvailableBridge extends MockCoreBridge {
       'currentVersion': '3.0.3',
       'latestVersion': '3.0.4',
       'releaseURL':
-          'https://github.com/Droponevedimka/dropo/releases/tag/v3.0.4',
+          'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v3.0.4',
       'downloadURL':
-          'https://github.com/Droponevedimka/dropo/releases/download/v3.0.4/dropo-Windows-Setup-x64.exe',
+          'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.4/dropo-Windows-Setup-x64.exe',
       'assetName': 'dropo-Windows-Setup-x64.exe',
       'fileSize': 123456,
       'platform': 'windows',

@@ -2630,10 +2630,10 @@ class AppConfig {
     disableFreeAccess: false,
     routingMode: 'blocked_only',
     networkMode: 'auto',
-    githubRepo: 'Droponevedimka/dropo',
-    githubUrl: 'https://github.com/Droponevedimka/dropo',
-    telegramName: 't.me/droponevedimka555',
-    telegramUrl: 'https://t.me/droponevedimka555',
+    githubRepo: 'sunnydjam/dropo-by-sunnydjam',
+    githubUrl: 'https://github.com/sunnydjam/dropo-by-sunnydjam',
+    telegramName: 'GitHub Releases',
+    telegramUrl: 'https://github.com/sunnydjam/dropo-by-sunnydjam/releases',
   );
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
@@ -12103,7 +12103,8 @@ class _ServiceCatalogTable extends StatelessWidget {
 class _RequestServiceDialog extends StatelessWidget {
   const _RequestServiceDialog({required this.bridge});
 
-  static const telegramUrl = 'https://t.me/droponevedimka555';
+  static const requestServiceUrl =
+      'https://github.com/sunnydjam/dropo-by-sunnydjam/issues/new';
 
   final CoreBridge bridge;
 
@@ -12118,7 +12119,7 @@ class _RequestServiceDialog extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const Text(
-            'Если нужного сервиса нет в списке, напишите админу группы и в форме обратной связи укажите, какой сервис требуется добавить.',
+            'Если нужного сервиса нет в списке, создайте запрос в GitHub Issues и укажите домены и приложение, которые требуется добавить.',
             style: TextStyle(color: Color(0xFFD8E4E0), height: 1.35),
           ),
           const SizedBox(height: 12),
@@ -12131,11 +12132,11 @@ class _RequestServiceDialog extends StatelessWidget {
             ),
             child: const Row(
               children: [
-                Icon(Icons.telegram, size: 18, color: Color(0xFF93C5FD)),
+                Icon(Icons.code, size: 18, color: Color(0xFF93C5FD)),
                 SizedBox(width: 9),
                 Expanded(
                   child: SelectableText(
-                    't.me/droponevedimka555',
+                    'github.com/sunnydjam/dropo-by-sunnydjam/issues',
                     style: TextStyle(
                       color: Color(0xFFBBD7FF),
                       fontSize: 13,
@@ -12151,10 +12152,10 @@ class _RequestServiceDialog extends StatelessWidget {
             children: [
               Expanded(
                 child: _ActionButton(
-                  label: 'Открыть Telegram',
+                  label: 'Открыть GitHub Issues',
                   icon: Icons.open_in_new,
                   onPressed: () async {
-                    await bridge.openExternal(telegramUrl);
+                    await bridge.openExternal(requestServiceUrl);
                   },
                 ),
               ),

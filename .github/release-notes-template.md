@@ -7,9 +7,9 @@
 
 | Платформа | Файл | Ссылка | Примечание |
 | --- | --- | --- | --- |
-| Windows 10/11 x64 | `dropo-Windows-Setup-x64.exe` | [Установщик](https://github.com/Droponevedimka/dropo/releases/download/{{TAG}}/dropo-Windows-Setup-x64.exe) | Рекомендуемый автономный установщик: защищённый каталог, автозапуск по выбору и автоматические обновления. |
-| Windows 10/11 x64 | `dropo-Windows-Portable-x64.zip` | [Portable](https://github.com/Droponevedimka/dropo/releases/download/{{TAG}}/dropo-Windows-Portable-x64.zip) | Не требует установки. При обновлении скачайте новый архив; профили и настройки сохраняются в AppData. |
-| Android 11+ arm64 | `dropo-Android-arm64.apk` | [Скачать](https://downloads.droponevedimka.ru/releases/download/{{TAG}}/dropo-Android-arm64.apk) | Для Android 11+ на arm64. |
+| Windows 10/11 x64 | `dropo-Windows-Setup-x64.exe` | [Установщик](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/{{TAG}}/dropo-Windows-Setup-x64.exe) | Рекомендуемый автономный установщик: защищённый каталог, автозапуск по выбору и автоматические обновления. |
+| Windows 10/11 x64 | `dropo-Windows-Portable-x64.zip` | [Portable](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/{{TAG}}/dropo-Windows-Portable-x64.zip) | Не требует установки. При обновлении скачайте новый архив; профили и настройки сохраняются в AppData. |
+| Android 11+ arm64 | `dropo-Android-arm64.apk` | [Скачать](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/{{TAG}}/dropo-Android-arm64.apk) | Для Android 11+ на arm64. |
 
 Windows installer SHA-256: `__WINDOWS_INSTALLER_SHA256_PENDING_LOCAL_UPLOAD__`
 

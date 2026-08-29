@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const androidReleaseMirrorBaseURL = "https://downloads.droponevedimka.ru"
+const androidGitHubAPIBaseURL = "https://api.github.com"
 
 type androidGitHubRelease struct {
 	TagName     string    `json:"tag_name"`
@@ -33,7 +33,7 @@ func checkAndroidUpdates() string {
 	currentVersion := strings.TrimPrefix(strings.TrimSpace(current.Version.Version), "v")
 	repo := strings.TrimSpace(current.Config.GithubRepo)
 	if repo == "" {
-		repo = "Droponevedimka/dropo"
+		repo = "sunnydjam/dropo-by-sunnydjam"
 	}
 	mu.Unlock()
 
@@ -45,7 +45,7 @@ func checkAndroidUpdates() string {
 		})
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
-	return checkAndroidUpdatesWithClient(client, androidReleaseMirrorBaseURL, repo, currentVersion)
+	return checkAndroidUpdatesWithClient(client, androidGitHubAPIBaseURL, repo, currentVersion)
 }
 
 func checkAndroidUpdatesWithClient(client *http.Client, baseURL, repo, currentVersion string) string {
@@ -63,7 +63,7 @@ func checkAndroidUpdatesWithClient(client *http.Client, baseURL, repo, currentVe
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return encode(map[string]interface{}{"success": false, "error": fmt.Sprintf("release mirror returned %s", response.Status)})
+		return encode(map[string]interface{}{"success": false, "error": fmt.Sprintf("GitHub Releases returned %s", response.Status)})
 	}
 
 	body, err := readHTTPBodyLimited(response.Body, maxAndroidMetadataBytes)
@@ -74,7 +74,7 @@ func checkAndroidUpdatesWithClient(client *http.Client, baseURL, repo, currentVe
 	if err := json.Unmarshal(body, &releases); err != nil {
 		return encode(map[string]interface{}{"success": false, "error": err.Error()})
 	}
-	release, latestVersion, assetName, downloadURL, fileSize, found := selectLatestAndroidRelease(releases, baseURL)
+	release, latestVersion, assetName, downloadURL, fileSize, found := selectLatestAndroidRelease(releases, repo)
 	if !found {
 		return encode(map[string]interface{}{
 			"success":        true,
@@ -108,7 +108,7 @@ func checkAndroidUpdatesWithClient(client *http.Client, baseURL, repo, currentVe
 	})
 }
 
-func selectLatestAndroidRelease(releases []androidGitHubRelease, baseURL string) (androidGitHubRelease, string, string, string, int64, bool) {
+func selectLatestAndroidRelease(releases []androidGitHubRelease, repo string) (androidGitHubRelease, string, string, string, int64, bool) {
 	var selected androidGitHubRelease
 	var selectedVersion, selectedAsset, selectedURL string
 	var selectedSize int64
@@ -124,7 +124,7 @@ func selectLatestAndroidRelease(releases []androidGitHubRelease, baseURL string)
 			continue
 		}
 		assetName, downloadURL, fileSize := androidUpdateAsset(release)
-		if assetName == "" || fileSize <= 0 || !trustedAndroidDownloadURL(downloadURL, baseURL) {
+		if assetName == "" || fileSize <= 0 || !trustedAndroidDownloadURL(downloadURL, repo) {
 			continue
 		}
 		selected = release
@@ -136,16 +136,15 @@ func selectLatestAndroidRelease(releases []androidGitHubRelease, baseURL string)
 	return selected, selectedVersion, selectedAsset, selectedURL, selectedSize, selectedVersion != ""
 }
 
-func trustedAndroidDownloadURL(rawURL, baseURL string) bool {
+func trustedAndroidDownloadURL(rawURL, repo string) bool {
 	candidate, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || candidate.User != nil || !strings.EqualFold(path.Ext(candidate.Path), ".apk") {
+	if err != nil || candidate.User != nil || candidate.Scheme != "https" ||
+		!strings.EqualFold(candidate.Hostname(), "github.com") ||
+		!strings.EqualFold(path.Ext(candidate.Path), ".apk") {
 		return false
 	}
-	base, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil {
-		return false
-	}
-	return candidate.Scheme == base.Scheme && strings.EqualFold(candidate.Host, base.Host)
+	expectedPrefix := "/" + strings.ToLower(strings.Trim(repo, "/")) + "/releases/download/"
+	return strings.HasPrefix(strings.ToLower(candidate.EscapedPath()), expectedPrefix)
 }
 
 func androidUpdateAsset(release androidGitHubRelease) (string, string, int64) {

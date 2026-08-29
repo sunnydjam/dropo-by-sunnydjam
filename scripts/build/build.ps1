@@ -1104,7 +1104,7 @@ function Build-Application {
         dataLicense = "CC0-1.0"
         SPDXID = "SPDXRef-DOCUMENT"
         name = "dropo-$AppVersion-windows-x64"
-        documentNamespace = "https://k-ampus.dev/spdx/dropo/$AppVersion/$BuildHash"
+        documentNamespace = "https://github.com/sunnydjam/dropo-by-sunnydjam/spdx/$AppVersion/$BuildHash"
         creationInfo = [ordered]@{ created = $BuildTimestampISO; creators = @("Organization: Droponevedimka") }
         packages = $spdxPackages
         files = $spdxFiles
@@ -1122,7 +1122,7 @@ function Build-Application {
         predicateType = "https://slsa.dev/provenance/v1"
         predicate = [ordered]@{
             buildDefinition = [ordered]@{
-                buildType = "https://k-ampus.dev/build/windows-installer-portable/v1"
+                buildType = "https://github.com/sunnydjam/dropo-by-sunnydjam/build/windows-installer-portable/v1"
                 externalParameters = [ordered]@{ version = $AppVersion; platform = $ReleasePlatform; architecture = $ReleaseArch }
                 internalParameters = [ordered]@{ buildHash = $BuildHash; sourceRevision = $SourceRevision; sourceDirty = $SourceDirty }
                 resolvedDependencies = @(

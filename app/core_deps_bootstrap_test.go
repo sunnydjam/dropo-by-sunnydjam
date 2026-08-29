@@ -17,7 +17,7 @@ import (
 
 func writeDepsManifest(t *testing.T, base, depsVersion string) {
 	t.Helper()
-	m := `{"depsVersion":"` + depsVersion + `","asset":"dependencies-` + depsVersion + `.zip","sha256":"","size":1048576,"appVersion":"9.9.9","repo":"Droponevedimka/dropo"}`
+	m := `{"depsVersion":"` + depsVersion + `","asset":"dependencies-` + depsVersion + `.zip","sha256":"","size":1048576,"appVersion":"9.9.9","repo":"sunnydjam/dropo-by-sunnydjam"}`
 	if err := os.WriteFile(filepath.Join(base, "dependencies.json"), []byte(m), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestReleaseAssetMatchesExpectedSize(t *testing.T) {
 		Name:               "dropo-Windows-Dependencies-x64.zip",
 		Size:               68575183,
 		Digest:             "sha256:" + sha,
-		BrowserDownloadURL: "https://downloads.droponevedimka.ru/releases/download/v2.2.0/dependencies.zip",
+		BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v2.2.0/dependencies.zip",
 	}
 	if !releaseAssetMatches(asset, "dropo-Windows-Dependencies-x64.zip", 68575183, sha) {
 		t.Fatal("asset with matching name and size should match")
@@ -247,7 +247,7 @@ func TestReleaseAssetMatchesExpectedSize(t *testing.T) {
 	}
 	asset.BrowserDownloadURL = "https://github.com/Droponevedimka/dropo/releases/download/v2.2.0/dependencies.zip"
 	if releaseAssetMatches(asset, "dropo-Windows-Dependencies-x64.zip", 68575183, sha) {
-		t.Fatal("asset outside the Russian release mirror must not match")
+		t.Fatal("asset outside the fork release repository must not match")
 	}
 }
 
@@ -263,17 +263,17 @@ func TestFindReleaseAssetURLUsesNewestCompatibleRelease(t *testing.T) {
 	}
 	releases := []GitHubRelease{
 		{TagName: "v2.2.1", Assets: []GitHubReleaseAsset{{Name: "dropo-Windows-x64.exe"}}},
-		{TagName: "v2.2.0", Assets: []GitHubReleaseAsset{asset("https://downloads.droponevedimka.ru/v2.2.0/deps.zip", sha)}},
-		{TagName: "v2.1.14", Assets: []GitHubReleaseAsset{asset("https://downloads.droponevedimka.ru/v2.1.14/deps.zip", sha)}},
+		{TagName: "v2.2.0", Assets: []GitHubReleaseAsset{asset("https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v2.2.0/deps.zip", sha)}},
+		{TagName: "v2.1.14", Assets: []GitHubReleaseAsset{asset("https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v2.1.14/deps.zip", sha)}},
 	}
 	got := findReleaseAssetURLIn(releases, "dropo-Windows-Dependencies-x64.zip", 68575183, sha)
-	if got != "https://downloads.droponevedimka.ru/v2.2.0/deps.zip" {
+	if got != "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v2.2.0/deps.zip" {
 		t.Fatalf("selected URL = %q, want newest compatible v2.2.0 asset", got)
 	}
 
-	releases[1].Assets[0] = asset("https://downloads.droponevedimka.ru/v2.2.0/wrong.zip", strings.Repeat("0", 64))
+	releases[1].Assets[0] = asset("https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v2.2.0/wrong.zip", strings.Repeat("0", 64))
 	got = findReleaseAssetURLIn(releases, "dropo-Windows-Dependencies-x64.zip", 68575183, sha)
-	if got != "https://downloads.droponevedimka.ru/v2.1.14/deps.zip" {
+	if got != "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v2.1.14/deps.zip" {
 		t.Fatalf("selected URL = %q, want older asset after digest mismatch", got)
 	}
 }

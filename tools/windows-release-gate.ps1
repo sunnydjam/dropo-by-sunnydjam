@@ -163,8 +163,8 @@ try {
     $portableCopy = Join-Path $gateRoot (Split-Path -Leaf $portable)
     Copy-Item -LiteralPath $installer -Destination $installerCopy
     Copy-Item -LiteralPath $portable -Destination $portableCopy
-    Add-MarkOfTheWeb -Path $installerCopy -SourceUrl "https://downloads.droponevedimka.ru/$([IO.Path]::GetFileName($installerCopy))"
-    Add-MarkOfTheWeb -Path $portableCopy -SourceUrl "https://downloads.droponevedimka.ru/$([IO.Path]::GetFileName($portableCopy))"
+    Add-MarkOfTheWeb -Path $installerCopy -SourceUrl "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/local/$([IO.Path]::GetFileName($installerCopy))"
+    Add-MarkOfTheWeb -Path $portableCopy -SourceUrl "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/local/$([IO.Path]::GetFileName($portableCopy))"
 
     Write-Host "[GATE] Scanning Internet-marked installer..." -ForegroundColor Cyan
     Invoke-DefenderScan -MpCmdRun $mpCmdRun -Path $installerCopy

@@ -54,13 +54,11 @@ type UpdateInfo struct {
 	DistributionMode string `json:"distribution_mode"`
 }
 
-// CheckForUpdates checks the trusted Russian release gateway and the canonical
-// GitHub metadata. The gateway can expose only assets that it mirrors (Android
-// today), while Windows Setup/Portable remain available on GitHub.
+// CheckForUpdates checks the canonical GitHub metadata for this fork.
 func CheckForUpdates() (*UpdateInfo, error) {
 	return checkForUpdatesWithClient(
 		HTTPClient,
-		[]string{ReleaseMirrorBaseURL, GitHubAPIBaseURL},
+		[]string{GitHubAPIBaseURL},
 		GitHubRepo,
 		Version,
 		runtime.GOOS,
@@ -365,25 +363,7 @@ func validateTrustedUpdateURL(rawURL string) error {
 	return nil
 }
 
-func validateTrustedUpdateHost(rawURL string) error {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return fmt.Errorf("invalid update URL: %w", err)
-	}
-	if parsed.Scheme != "https" {
-		return fmt.Errorf("update URL must use HTTPS")
-	}
-	host := strings.ToLower(parsed.Hostname())
-	if host != "downloads.droponevedimka.ru" {
-		return fmt.Errorf("untrusted update host: %s", host)
-	}
-	return nil
-}
-
 func validateTrustedAppUpdateSourceURL(rawURL string) error {
-	if err := validateTrustedUpdateHost(rawURL); err == nil {
-		return nil
-	}
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Scheme != "https" || strings.ToLower(parsed.Hostname()) != "github.com" {
 		return fmt.Errorf("untrusted application update URL")

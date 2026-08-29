@@ -36,19 +36,18 @@ const (
 	// LegacyAppDataDirName is used only for migration from pre-2.0 releases.
 	LegacyAppDataDirName = "KampusVPN"
 	// GitHubRepo is the GitHub repository path for updates.
-	GitHubRepo = "Droponevedimka/dropo"
-	// ReleaseMirrorBaseURL is the Russian release gateway used for update metadata and assets.
-	ReleaseMirrorBaseURL = "https://downloads.droponevedimka.ru"
-	// GitHubAPIBaseURL is the canonical metadata fallback. The Russian gateway
-	// can intentionally expose only mirrored assets, so Windows must consult
-	// GitHub when Setup/Portable files are absent there.
+	GitHubRepo = "sunnydjam/dropo-by-sunnydjam"
+	// GitHubAPIBaseURL is the canonical metadata source for this fork.
 	GitHubAPIBaseURL = "https://api.github.com"
+	// ReleaseMirrorBaseURL remains a compatibility name for update code that
+	// accepts more than one metadata source. This fork publishes on GitHub.
+	ReleaseMirrorBaseURL = GitHubAPIBaseURL
 	// GitHubURL is the full GitHub URL.
 	GitHubURL = "https://github.com/" + GitHubRepo
-	// TelegramUpdatesURL is the public channel/group for release news.
-	TelegramUpdatesURL = "https://t.me/droponevedimka555"
-	// TelegramUpdatesName is the compact display label for TelegramUpdatesURL.
-	TelegramUpdatesName = "t.me/droponevedimka555"
+	// TelegramUpdatesURL is the legacy API field for the release-news URL.
+	TelegramUpdatesURL = GitHubURL + "/releases"
+	// TelegramUpdatesName is the display label for TelegramUpdatesURL.
+	TelegramUpdatesName = "GitHub Releases"
 )
 
 // GetVersionInfo returns the single source of truth for user-facing build data.

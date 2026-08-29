@@ -471,7 +471,7 @@ func (a *App) DownloadDependencies() error {
 	if err != nil {
 		return a.failDepsDownload(m, fmt.Errorf("не найден архив зависимостей %s: %w", m.Asset, err))
 	}
-	a.writeLog(fmt.Sprintf("[Deps] downloading %s (%d MB) from trusted Russian release mirror", m.Asset, m.Size/(1024*1024)))
+	a.writeLog(fmt.Sprintf("[Deps] downloading %s (%d MB) from trusted fork GitHub release", m.Asset, m.Size/(1024*1024)))
 	a.emitDepsProgress(0, m.Size, "Загрузка компонентов…")
 
 	tmp, err := os.CreateTemp(a.runtimeBasePath(), "dropo-deps-*.zip")
@@ -568,7 +568,7 @@ func (a *App) DownloadBypassDependencies() error {
 	if err != nil {
 		return a.failDepsDownload(m, fmt.Errorf("не найден пакет локального обхода %s: %w", m.Asset, err))
 	}
-	a.writeLog(fmt.Sprintf("[Bypass] explicit user request: downloading %s (%d MB) from trusted Russian release mirror", m.Asset, m.Size/(1024*1024)))
+	a.writeLog(fmt.Sprintf("[Bypass] explicit user request: downloading %s (%d MB) from trusted fork GitHub release", m.Asset, m.Size/(1024*1024)))
 	a.emitDepsProgress(0, m.Size, "Загрузка локального обхода…")
 
 	tmp, err := os.CreateTemp(a.runtimeBasePath(), "dropo-bypass-*.zip")
@@ -772,7 +772,7 @@ func extractSelectedDependencies(archivePath, destDir string, selected []string)
 func (a *App) downloadVerified(url string, out *os.File, m *DepsManifest) error {
 	productionDownload := strings.TrimSpace(trustedDepsSHA256) != ""
 	if productionDownload {
-		if err := validateTrustedUpdateHost(url); err != nil {
+		if err := validateTrustedAppUpdateSourceURL(url); err != nil {
 			return fmt.Errorf("untrusted dependencies URL: %w", err)
 		}
 	}
@@ -790,7 +790,7 @@ func (a *App) downloadVerified(url string, out *os.File, m *DepsManifest) error 
 	}
 	defer resp.Body.Close()
 	if productionDownload {
-		if err := validateTrustedUpdateHost(resp.Request.URL.String()); err != nil {
+		if err := validateTrustedUpdateRedirect(url, resp.Request.URL.String()); err != nil {
 			return fmt.Errorf("dependencies redirect rejected: %w", err)
 		}
 	}
@@ -1071,8 +1071,7 @@ func httpResourceLooksUsable(url string, expectedSize int64) bool {
 	return true
 }
 
-// findReleaseAssetURL scans every published release through the trusted Russian
-// mirror in newest-first order. There is intentionally no direct GitHub fallback.
+// findReleaseAssetURL scans every published fork release in newest-first order.
 func findReleaseAssetURL(repo, asset string, expectedSize int64, expectedSHA256 string) string {
 	for page := 1; ; page++ {
 		url := fmt.Sprintf("%s/repos/%s/releases?per_page=100&page=%d", ReleaseMirrorBaseURL, repo, page)
@@ -1132,7 +1131,7 @@ func releaseAssetMatches(as GitHubReleaseAsset, asset string, expectedSize int64
 	if expectedSHA256 != "" && as.Digest != "" && normalizeGitHubSHA256(as.Digest) != expectedSHA256 {
 		return false
 	}
-	return validateTrustedUpdateHost(as.BrowserDownloadURL) == nil
+	return validateTrustedAppUpdateSourceURL(as.BrowserDownloadURL) == nil
 }
 
 // extractZip unpacks src into destDir, guarding against path traversal.
