@@ -60,7 +60,12 @@ func resetWindowsSystemProxyNativeForPorts(ports []int) (bool, string, error) {
 	_ = key.SetDWordValue("AutoDetect", 0)
 	_ = key.DeleteValue("ProxyServer")
 	_ = key.DeleteValue("AutoConfigURL")
-	resetConnectionSettingsFlags()
+	connectionErr := applyWindowsConnectionProxyState(windowsConnectionProxyState{Flags: proxyTypeDirect})
+	if connectionErr != nil {
+		// Preserve the old byte-level cleanup only as a last-resort fallback for
+		// damaged WinINet profiles. Normal runtime changes use the documented API.
+		resetConnectionSettingsFlags()
+	}
 
 	// INTERNET_OPTION_SETTINGS_CHANGED and INTERNET_OPTION_REFRESH notify
 	// WinINet consumers directly. WM_SETTINGCHANGE also reaches long-running
@@ -69,7 +74,7 @@ func resetWindowsSystemProxyNativeForPorts(ports []int) (bool, string, error) {
 	_, _, _ = internetSetOption.Call(0, 39, 0, 0)
 	_, _, _ = internetSetOption.Call(0, 37, 0, 0)
 	broadcastWindowsProxySettingsChanged()
-	return true, proxy, nil
+	return true, proxy, connectionErr
 }
 
 func broadcastWindowsProxySettingsChanged() {

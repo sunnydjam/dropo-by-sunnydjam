@@ -4,9 +4,31 @@ package main
 
 import (
 	"testing"
+	"unsafe"
 
 	traffic "dropo/trafficorchestrator"
 )
+
+func TestSelectivePACConnectionStateEnablesDirectFallbackAndPAC(t *testing.T) {
+	state := selectivePACConnectionState("http://127.0.0.1:32123/route.pac")
+	if state.Flags != proxyTypeDirect|proxyTypeAutoProxyURL {
+		t.Fatalf("connection flags = 0x%x", state.Flags)
+	}
+	if state.AutoConfigURL != "http://127.0.0.1:32123/route.pac" {
+		t.Fatalf("PAC URL = %q", state.AutoConfigURL)
+	}
+}
+
+func TestWinInetPerConnectionLayoutsMatchWindowsABI(t *testing.T) {
+	pointerSize := unsafe.Sizeof(uintptr(0))
+	if got := unsafe.Offsetof(internetPerConnectionOption{}.value); got != pointerSize {
+		t.Fatalf("option union offset = %d, pointer size = %d", got, pointerSize)
+	}
+	wantOptionSize := pointerSize * 2
+	if got := unsafe.Sizeof(internetPerConnectionOption{}); got != wantOptionSize {
+		t.Fatalf("option size = %d, want %d", got, wantOptionSize)
+	}
+}
 
 func TestSelectivePACUnchangedPlanKeepsOneURL(t *testing.T) {
 	plan := traffic.TrafficPlan{

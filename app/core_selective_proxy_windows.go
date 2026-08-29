@@ -42,6 +42,7 @@ type windowsSelectiveProxyLease struct {
 	autoConfig  registryStringState
 	proxyEnable registryDWORDState
 	autoDetect  registryDWORDState
+	connection  windowsConnectionProxyState
 	restored    bool
 }
 
@@ -142,6 +143,10 @@ func (lease *windowsSelectiveProxyLease) Update(plan traffic.TrafficPlan) error 
 }
 
 func (lease *windowsSelectiveProxyLease) install() error {
+	connection, err := readWindowsConnectionProxyState()
+	if err != nil {
+		return fmt.Errorf("read effective Windows proxy profile: %w", err)
+	}
 	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsRegistryPath, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		return fmt.Errorf("open Windows proxy settings: %w", err)
@@ -150,6 +155,7 @@ func (lease *windowsSelectiveProxyLease) install() error {
 	lease.autoConfig = readRegistryStringState(key, "AutoConfigURL")
 	lease.proxyEnable = readRegistryDWORDState(key, "ProxyEnable")
 	lease.autoDetect = readRegistryDWORDState(key, "AutoDetect")
+	lease.connection = connection
 	if err := key.SetStringValue("AutoConfigURL", lease.pacURL); err != nil {
 		return fmt.Errorf("set selective PAC URL: %w", err)
 	}
@@ -161,6 +167,14 @@ func (lease *windowsSelectiveProxyLease) install() error {
 		_ = restoreRegistryStringState(key, "AutoConfigURL", lease.autoConfig)
 		_ = restoreRegistryDWORDState(key, "ProxyEnable", lease.proxyEnable)
 		return fmt.Errorf("disable proxy autodetection: %w", err)
+	}
+	if err := applyWindowsConnectionProxyState(selectivePACConnectionState(lease.pacURL)); err != nil {
+		_ = restoreRegistryStringState(key, "AutoConfigURL", lease.autoConfig)
+		_ = restoreRegistryDWORDState(key, "ProxyEnable", lease.proxyEnable)
+		_ = restoreRegistryDWORDState(key, "AutoDetect", lease.autoDetect)
+		_ = applyWindowsConnectionProxyState(lease.connection)
+		notifyWindowsProxySettingsChanged()
+		return fmt.Errorf("activate selective PAC in Windows connection profile: %w", err)
 	}
 	notifyWindowsProxySettingsChanged()
 	return nil
@@ -197,6 +211,7 @@ func (lease *windowsSelectiveProxyLease) Restore() error {
 	autoConfig := lease.autoConfig
 	proxyEnable := lease.proxyEnable
 	autoDetect := lease.autoDetect
+	connection := lease.connection
 	server := lease.server
 	listener := lease.listener
 	lease.mu.Unlock()
@@ -211,8 +226,9 @@ func (lease *windowsSelectiveProxyLease) Restore() error {
 			restoreRegistryDWORDState(key, "AutoDetect", autoDetect),
 		)
 		_ = key.Close()
-		notifyWindowsProxySettingsChanged()
 	}
+	restoreErr = errors.Join(restoreErr, applyWindowsConnectionProxyState(connection))
+	notifyWindowsProxySettingsChanged()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if server != nil {
