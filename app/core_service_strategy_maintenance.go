@@ -34,7 +34,12 @@ func (a *App) handleClientQuickCheckFailures(results []clientQuickCheckResult) {
 		if result.Name == "" || result.Category != "Blocked" {
 			continue
 		}
-		if result.Success && !result.ProxyRescued {
+		// Explicit Direct and VPN policies are authoritative. A route-aware
+		// quick check must never turn their result into a Zapret retune request.
+		if result.ExpectedRoute != clientQuickCheckRouteZapret && result.ExpectedRoute != FreeAccessMethodAuto {
+			continue
+		}
+		if result.Success {
 			continue
 		}
 		serviceTag := clientQuickCheckServiceTag(result.Name)
@@ -82,6 +87,34 @@ func clientQuickCheckServiceTag(name string) string {
 		return "snapchat"
 	case value == "tiktok":
 		return "tiktok"
+	case value == "chatgpt" || value == "openai api":
+		return "openai"
+	case value == "copilot proxy" || value == "cursor api":
+		return "ai-other"
+	case value == "canva":
+		return "canva"
+	case value == "notion":
+		return "notion"
+	case value == "slack":
+		return "slack"
+	case value == "miro":
+		return "miro"
+	case value == "wix":
+		return "wix"
+	case value == "coda":
+		return "coda"
+	case value == "grammarly":
+		return "grammarly"
+	case value == "docker hub":
+		return "docker"
+	case value == "clickup":
+		return "clickup"
+	case value == "manychat":
+		return "manychat"
+	case value == "help scout":
+		return "helpscout"
+	case value == "trello" || value == "bitbucket":
+		return "atlassian"
 	default:
 		return ""
 	}

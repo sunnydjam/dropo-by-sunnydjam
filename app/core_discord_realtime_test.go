@@ -189,6 +189,22 @@ func TestDiscordRealtimeDiagnosticsCaptureRouteAndCounterDeltas(t *testing.T) {
 	}
 }
 
+func TestDiscordRealtimeIdleDiagnosticsAreThrottled(t *testing.T) {
+	controller := newDiscordRealtimeController()
+	controller.running = true
+	started := time.Unix(2026, 0)
+
+	if _, due := controller.collectDiagnostics(started); !due {
+		t.Fatal("first idle diagnostic must be emitted")
+	}
+	if _, due := controller.collectDiagnostics(started.Add(discordRealtimeDiagInterval)); due {
+		t.Fatal("idle diagnostics must not repeat at the active-flow interval")
+	}
+	if _, due := controller.collectDiagnostics(started.Add(discordRealtimeIdleDiagInterval)); !due {
+		t.Fatal("idle diagnostic must be emitted at the throttled interval")
+	}
+}
+
 func TestDiscordRealtimeDoesNotTreatDiscoveryResponseAsMedia(t *testing.T) {
 	controller := newDiscordRealtimeController()
 	controller.running = true

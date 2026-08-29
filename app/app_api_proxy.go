@@ -23,6 +23,7 @@ var routeSummaryProbeSlots = make(chan struct{}, routeSummaryMaxParallel)
 
 type routeSummaryLatencyEntry struct {
 	Delay     int
+	Route     string
 	CheckedAt time.Time
 	InFlight  bool
 }
@@ -524,7 +525,8 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 			delay = int(probe.LatencyMS)
 		}
 		if delay <= 0 {
-			delay = a.cachedRouteServiceDelay(svc)
+			expectedRoute := a.clientQuickCheckExpectedRoute(settings, serviceFallbackCache, clientQuickCheckService{ServiceTag: svc.Tag, Category: "Blocked"})
+			delay = a.cachedRouteServiceDelay(svc, expectedRoute)
 		}
 
 		item := map[string]interface{}{
@@ -605,7 +607,8 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 			}
 		}
 		if delay <= 0 && method != "Direct (no VPN key)" {
-			delay = a.cachedRouteServiceDelay(svc)
+			expectedRoute := a.clientQuickCheckExpectedRoute(settings, serviceFallbackCache, clientQuickCheckService{ServiceTag: svc.Tag, Category: "Blocked"})
+			delay = a.cachedRouteServiceDelay(svc, expectedRoute)
 		}
 
 		item := map[string]interface{}{
@@ -654,7 +657,7 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 	}
 }
 
-func (a *App) cachedRouteServiceDelay(svc FreeAccessService) int {
+func (a *App) cachedRouteServiceDelay(svc FreeAccessService, expectedRoute string) int {
 	target := strings.TrimSpace(svc.HealthURL)
 	if target == "" && len(svc.ProbeURLs) > 0 {
 		target = strings.TrimSpace(svc.ProbeURLs[0])
@@ -669,53 +672,69 @@ func (a *App) cachedRouteServiceDelay(svc FreeAccessService) int {
 		a.routeLatencyCache = make(map[string]routeSummaryLatencyEntry)
 	}
 	entry := a.routeLatencyCache[svc.Tag]
-	if !entry.CheckedAt.IsZero() && now.Sub(entry.CheckedAt) < routeSummaryPingTTL {
+	if entry.Route == expectedRoute && !entry.CheckedAt.IsZero() && now.Sub(entry.CheckedAt) < routeSummaryPingTTL {
 		delay := entry.Delay
 		a.routeLatencyMu.Unlock()
 		return delay
 	}
-	if entry.InFlight {
+	if entry.Route == expectedRoute && entry.InFlight {
 		delay := entry.Delay
 		a.routeLatencyMu.Unlock()
 		return delay
 	}
 	entry.InFlight = true
+	entry.Route = expectedRoute
 	a.routeLatencyCache[svc.Tag] = entry
 	delay := entry.Delay
 	a.routeLatencyMu.Unlock()
 
-	go a.refreshRouteServiceDelay(svc.Tag, svc.DisplayName, target)
+	go a.refreshRouteServiceDelay(svc.Tag, svc.DisplayName, target, expectedRoute)
 	return delay
 }
 
-func (a *App) refreshRouteServiceDelay(tag, name, target string) {
+func (a *App) refreshRouteServiceDelay(tag, name, target, expectedRoute string) {
 	routeSummaryProbeSlots <- struct{}{}
 	defer func() { <-routeSummaryProbeSlots }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), routeSummaryPingTimeout)
 	defer cancel()
 
-	client := newQuickCheckHTTPClient(nil)
+	client, ready := a.quickCheckHTTPClientForRoute(expectedRoute)
+	if !ready {
+		a.writeLog(fmt.Sprintf("[RouteSummary] %s probe unavailable for %s: selected VPN proxy is not ready", expectedRoute, name))
+		a.storeRouteSummaryLatency(tag, expectedRoute, 0)
+		return
+	}
 	client.Timeout = routeSummaryPingTimeout
 	result := invokeQuickCheckURL(ctx, client, target)
 	delay := 0
 	if result.Success && result.TimeMS > 0 {
 		delay = int(result.TimeMS)
 	}
-	if !result.Success {
-		a.writeLog(fmt.Sprintf("[RouteSummary] ping failed for %s (%s): %s", name, target, result.Error))
+	if !result.Success && expectedRoute != clientQuickCheckRouteDirect {
+		a.writeLog(fmt.Sprintf("[RouteSummary] %s probe failed for %s (%s): %s", expectedRoute, name, target, result.Error))
 	}
 
+	a.storeRouteSummaryLatency(tag, expectedRoute, delay)
+}
+
+func (a *App) storeRouteSummaryLatency(tag, expectedRoute string, delay int) {
 	a.routeLatencyMu.Lock()
+	defer a.routeLatencyMu.Unlock()
 	if a.routeLatencyCache == nil {
 		a.routeLatencyCache = make(map[string]routeSummaryLatencyEntry)
 	}
+	if current, ok := a.routeLatencyCache[tag]; ok && current.Route != "" && current.Route != expectedRoute {
+		// A route switch started a newer probe while this one was in flight.
+		// Never let the stale completion overwrite the new route's cache entry.
+		return
+	}
 	a.routeLatencyCache[tag] = routeSummaryLatencyEntry{
 		Delay:     delay,
+		Route:     expectedRoute,
 		CheckedAt: time.Now(),
 		InFlight:  false,
 	}
-	a.routeLatencyMu.Unlock()
 }
 
 // TestRouteMethods runs the blocked-service method probe without starting the

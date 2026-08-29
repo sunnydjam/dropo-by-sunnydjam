@@ -79,11 +79,14 @@ cd tools
 
 ## check-routes.ps1
 
-Проверяет DNS и активный `active_config.json`. Скрипт ищет конфиг в:
+Проверяет фактически запущенный маршрут. В selective-режиме сначала читает
+`deep_windows_proxy_config.json`, а `active_config.json` использует только как
+резервный источник:
 
-- `.\resources\active_config.json`
+- `.\resources\deep_windows_proxy_config.json`
+- `%LOCALAPPDATA%\dropo\resources\deep_windows_proxy_config.json`
+- `.\resources\active_config.json` (fallback)
 - `%LOCALAPPDATA%\dropo\resources\active_config.json`
-- legacy `%LOCALAPPDATA%\KampusVPN\resources\active_config.json`
 
 Запуск:
 
@@ -108,7 +111,7 @@ owner, VPN-source health and stale app-owned processes from older installations.
 .\client-quick-check.ps1
 ```
 
-Run it while dropo is connected. It writes a Desktop folder with service results, a redacted configuration summary, ports, adapters, routes and authenticated Clash API data. The raw `active_config.json` is deliberately excluded because it can contain VPN credentials and the process-local Clash API secret. If normal checks fail but proxy checks pass, the problem is likely TUN/default-route handling on the client machine.
+Run it while dropo is connected. It writes a Desktop folder with service results, a redacted configuration summary, ports, adapters, routes and authenticated Clash API data. The raw configs are deliberately excluded because they can contain VPN credentials and the process-local Clash API secret. The check follows the configured route: VPN services use the live mixed proxy, Direct services bypass PAC, and Zapret services use the transparent engine. Steam/EA/Apex probes are always negative Direct guards.
 
 For blocked-service failures, run the deeper method matrix:
 
@@ -137,8 +140,8 @@ It does not target other VPN applications.
 
 ## Практические сценарии
 
-1. Без VPN-ключа: включить `Бесплатный доступ`, оставить сервисы включенными, запустить приложение и проверить `check-services.ps1 -Phase2Only`.
-2. С VPN-подпиской: добавить подписку в UI, подключиться, проверить `check-services.ps1`.
+1. Без VPN-ключа: включить `Бесплатный доступ`, выбрать Zapret для нужных сервисов, запустить приложение и проверить `check-services.ps1 -Phase2Only`.
+2. С VPN-подпиской: добавить подписку в UI, подключиться и проверить `check-services.ps1`; тест проверит только выбранные непрямые сервисы и Direct-регрессии.
 3. С WireGuard: добавить рабочую сеть, подключиться, затем проверить корпоративные домены и маршруты через `check-routes.ps1`.
 4. В режиме `Только заблокированные` проверить `route.final=direct`: blocked-domain правила идут до known-domain `direct`, generic blocked-IP правила — после него, а service-specific IP-списки не входят в global catch-all. Широкие сети общих CDN не должны перехватывать обычный трафик.
 5. AI services: без подписки `openai.com`, `api.openai.com`, Copilot/Cursor endpoints должны идти direct/pass-through; с подпиской должен появиться `bypass-openai` с единственным кандидатом `auto-select`.

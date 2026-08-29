@@ -30,11 +30,13 @@ const (
 )
 
 type clientQuickCheckService struct {
-	Index    int
-	Name     string
-	URL      string
-	Category string
-	Regional bool
+	Index         int
+	Name          string
+	URL           string
+	Category      string
+	ServiceTag    string
+	ExpectedRoute string
+	Regional      bool
 }
 
 type clientQuickHTTPResult struct {
@@ -45,14 +47,16 @@ type clientQuickHTTPResult struct {
 }
 
 type clientQuickCheckResult struct {
-	Index        int    `json:"index"`
-	Name         string `json:"name"`
-	Category     string `json:"category"`
-	URL          string `json:"url"`
-	StatusText   string `json:"statusText"`
-	Success      bool   `json:"success"`
-	ProxyRescued bool   `json:"proxyRescued"`
+	Index         int    `json:"index"`
+	Name          string `json:"name"`
+	Category      string `json:"category"`
+	URL           string `json:"url"`
+	StatusText    string `json:"statusText"`
+	Success       bool   `json:"success"`
+	ProxyRescued  bool   `json:"proxyRescued"`
+	ExpectedRoute string `json:"expectedRoute"`
 
+	NormalChecked bool   `json:"normalChecked"`
 	NormalSuccess bool   `json:"normalSuccess"`
 	NormalStatus  int    `json:"normalStatus"`
 	NormalTimeMS  int64  `json:"normalTimeMs"`
@@ -66,12 +70,18 @@ type clientQuickCheckResult struct {
 	Regional     bool   `json:"regional,omitempty"`
 }
 
+const (
+	clientQuickCheckRouteDirect = FreeAccessMethodDirect
+	clientQuickCheckRouteVPN    = FreeAccessMethodVPN
+	clientQuickCheckRouteZapret = FreeAccessMethodZapret
+)
+
 var clientQuickCheckServices = []clientQuickCheckService{
 	{Index: 0, Name: "Yandex", URL: "https://ya.ru", Category: "Direct-RU"},
 	{Index: 1, Name: "Yandex Mail", URL: "https://mail.yandex.ru", Category: "Direct-RU"},
 	{Index: 2, Name: "VK", URL: "https://vk.com", Category: "Direct-RU"},
 	{Index: 3, Name: "Ozon", URL: "https://www.ozon.ru", Category: "Direct-RU"},
-	{Index: 4, Name: "Sber", URL: "https://www.sberbank.ru", Category: "Direct-RU"},
+	{Index: 4, Name: "Sber", URL: "https://www.sberbank.ru", Category: "Direct-RU", Regional: true},
 	{Index: 5, Name: "Gosuslugi", URL: "https://www.gosuslugi.ru", Category: "Direct-RU", Regional: true},
 	{Index: 6, Name: "Rutube", URL: "https://rutube.ru", Category: "Direct-RU"},
 	{Index: 7, Name: "Habr", URL: "https://habr.com", Category: "Direct-RU"},
@@ -117,6 +127,11 @@ var clientQuickCheckServices = []clientQuickCheckService{
 	{Index: 49, Name: "Help Scout", URL: "https://secure.helpscout.net", Category: "VPNOnly"},
 	{Index: 50, Name: "Trello", URL: "https://trello.com", Category: "VPNOnly"},
 	{Index: 51, Name: "Bitbucket", URL: "https://bitbucket.org", Category: "VPNOnly"},
+	{Index: 52, Name: "Steam Store", URL: "https://store.steampowered.com", Category: "Direct-Game"},
+	{Index: 53, Name: "Steam Community", URL: "https://steamcommunity.com", Category: "Direct-Game"},
+	{Index: 54, Name: "Steam Static", URL: "https://clientconfig.akamai.steamstatic.com", Category: "Direct-Game"},
+	{Index: 55, Name: "EA", URL: "https://www.ea.com", Category: "Direct-Game"},
+	{Index: 56, Name: "Apex Legends", URL: "https://www.ea.com/games/apex-legends", Category: "Direct-Game"},
 }
 
 // RunClientQuickCheck performs the in-app service availability check. It is
@@ -131,8 +146,27 @@ func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
 
 	a.ensureTransparentBypassForClientQuickCheck()
 
+	catalog := denseClientQuickCheckServices(clientQuickCheckServices)
+	settings := GlobalAppSettings{}
+	if a.storage != nil {
+		settings = a.storage.GetAppSettings()
+	}
+	cache := a.loadServiceStrategyCache()
+	services := make([]clientQuickCheckService, 0, len(catalog))
+	for i := range catalog {
+		catalog[i].ServiceTag = clientQuickCheckServiceTag(catalog[i].Name)
+		catalog[i].ExpectedRoute = a.clientQuickCheckExpectedRoute(settings, cache, catalog[i])
+		// Unselected service catalogs are not application failures: their
+		// explicit Direct policy is the intended default. Keep representative
+		// regional/foreign and game Direct guards, plus every selected non-direct
+		// service.
+		if !includeClientQuickCheckService(catalog[i]) {
+			continue
+		}
+		services = append(services, catalog[i])
+	}
+	services = denseClientQuickCheckServices(services)
 	proxyURL := a.quickCheckProxyURL()
-	services := append([]clientQuickCheckService(nil), clientQuickCheckServices...)
 	results := make([]clientQuickCheckResult, len(services))
 	directClient := newQuickCheckHTTPClient(nil)
 	var proxyClient *http.Client
@@ -203,10 +237,10 @@ enqueue:
 		if result.ProxyRescued {
 			proxyRescued++
 		}
-		if strings.HasPrefix(result.Category, "Direct") && !result.Success {
+		if result.ExpectedRoute == clientQuickCheckRouteDirect && !result.Success {
 			directFailed++
 		}
-		if !strings.HasPrefix(result.Category, "Direct") && !result.Success {
+		if result.ExpectedRoute != clientQuickCheckRouteDirect && !result.Success {
 			blockedFailed++
 		}
 	}
@@ -263,9 +297,71 @@ func (a *App) ensureTransparentBypassForClientQuickCheck() {
 	a.writeLog("[ClientCheck] Windows Unified per-service engine checked before service test")
 }
 
+func includeClientQuickCheckService(svc clientQuickCheckService) bool {
+	return strings.HasPrefix(svc.Category, "Direct") || svc.ExpectedRoute != clientQuickCheckRouteDirect
+}
+
+func denseClientQuickCheckServices(catalog []clientQuickCheckService) []clientQuickCheckService {
+	services := append([]clientQuickCheckService(nil), catalog...)
+	for i := range services {
+		// The catalog keeps stable historical indexes for UI compatibility and
+		// intentionally has gaps. Runtime result storage must always use a dense
+		// index or the final services can write past the result slice.
+		services[i].Index = i
+	}
+	return services
+}
+
+func (a *App) clientQuickCheckExpectedRoute(settings GlobalAppSettings, cache map[string]serviceStrategyCacheEntry, svc clientQuickCheckService) string {
+	if strings.HasPrefix(svc.Category, "Direct") || svc.ServiceTag == "" {
+		return clientQuickCheckRouteDirect
+	}
+	switch method := FreeAccessServiceMethod(settings, svc.ServiceTag); method {
+	case FreeAccessMethodVPN:
+		return clientQuickCheckRouteVPN
+	case FreeAccessMethodZapret:
+		return clientQuickCheckRouteZapret
+	case FreeAccessMethodDirect:
+		return clientQuickCheckRouteDirect
+	case FreeAccessMethodAuto:
+		if cached, ok := cache[svc.ServiceTag]; ok {
+			switch cached.MethodTag {
+			case FreeAccessMethodVPN:
+				return clientQuickCheckRouteVPN
+			case FreeAccessMethodDirect:
+				return clientQuickCheckRouteDirect
+			}
+		}
+		if !FreeMethodsAllowed(settings) {
+			if a.quickCheckProxyURL() != "" {
+				return clientQuickCheckRouteVPN
+			}
+			return clientQuickCheckRouteDirect
+		}
+		return clientQuickCheckRouteZapret
+	default:
+		return clientQuickCheckRouteDirect
+	}
+}
+
 func runSingleClientQuickCheck(ctx context.Context, svc clientQuickCheckService, directClient *http.Client, proxyClient *http.Client) clientQuickCheckResult {
-	normal := invokeQuickCheckURL(ctx, directClient, svc.URL)
-	if !normal.Success && !svc.Regional && quickCheckRetryableError(normal.Error) {
+	expectedRoute := svc.ExpectedRoute
+	if expectedRoute == "" {
+		if strings.Contains(svc.Category, "VPNOnly") {
+			expectedRoute = clientQuickCheckRouteVPN
+		} else {
+			expectedRoute = clientQuickCheckRouteDirect
+		}
+	}
+
+	var normal clientQuickHTTPResult
+	var proxy clientQuickHTTPResult
+	normalChecked := expectedRoute != clientQuickCheckRouteVPN
+	proxyChecked := expectedRoute == clientQuickCheckRouteVPN && proxyClient != nil
+	if normalChecked {
+		normal = invokeQuickCheckURL(ctx, directClient, svc.URL)
+	}
+	if normalChecked && !normal.Success && !svc.Regional && quickCheckRetryableError(normal.Error) {
 		select {
 		case <-ctx.Done():
 		case <-time.After(clientQuickCheckRetryDelay):
@@ -277,29 +373,24 @@ func runSingleClientQuickCheck(ctx context.Context, svc clientQuickCheckService,
 			}
 		}
 	}
-	var proxy clientQuickHTTPResult
-	proxyChecked := proxyClient != nil && !svc.Regional
-	if proxyChecked && !normal.Success {
+	if proxyChecked {
 		proxy = invokeQuickCheckURL(ctx, proxyClient, svc.URL)
 	}
 
 	statusText := "FAIL"
 	success := false
-	proxyRescued := false
-	if normal.Success {
-		statusText = "OK"
-		success = true
-	} else if svc.Regional {
+	if svc.Regional && normalChecked && !normal.Success {
 		statusText = "REGION_LIMIT"
 		success = true
-	} else if proxyChecked && proxy.Success {
-		if strings.Contains(svc.Category, "VPNOnly") {
-			statusText = "VPN_PROXY_OK"
-		} else {
-			statusText = "TUN_FAIL_PROXY_OK"
-		}
+	} else if expectedRoute == clientQuickCheckRouteVPN && proxyChecked && proxy.Success {
+		statusText = "VPN_OK"
 		success = true
-		proxyRescued = true
+	} else if expectedRoute == clientQuickCheckRouteDirect && normal.Success {
+		statusText = "DIRECT_OK"
+		success = true
+	} else if expectedRoute == clientQuickCheckRouteZapret && normal.Success {
+		statusText = "ZAPRET_OK"
+		success = true
 	}
 
 	return clientQuickCheckResult{
@@ -309,7 +400,9 @@ func runSingleClientQuickCheck(ctx context.Context, svc clientQuickCheckService,
 		URL:           svc.URL,
 		StatusText:    statusText,
 		Success:       success,
-		ProxyRescued:  proxyRescued,
+		ProxyRescued:  false,
+		ExpectedRoute: expectedRoute,
+		NormalChecked: normalChecked,
 		NormalSuccess: normal.Success,
 		NormalStatus:  normal.Status,
 		NormalTimeMS:  normal.TimeMS,
@@ -388,26 +481,46 @@ func newQuickCheckHTTPClient(proxy func(*http.Request) (*url.URL, error)) *http.
 	}
 }
 
+func (a *App) quickCheckHTTPClientForRoute(expectedRoute string) (*http.Client, bool) {
+	if expectedRoute != clientQuickCheckRouteVPN {
+		return newQuickCheckHTTPClient(nil), true
+	}
+	proxyURL := a.quickCheckProxyURL()
+	parsed, err := url.Parse(proxyURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, false
+	}
+	return newQuickCheckHTTPClient(http.ProxyURL(parsed)), true
+}
+
 func (a *App) quickCheckProxyURL() string {
-	configPath := ""
+	configPaths := make([]string, 0, 2)
 	if a.storage != nil {
-		configPath = a.storage.ActiveConfigFilePath()
+		configPaths = append(configPaths, filepath.Join(a.storage.GetResourcesPath(), "deep_windows_proxy_config.json"))
 	}
-	if configPath == "" && a.basePath != "" {
-		configPath = filepath.Join(a.basePath, ResourcesFolder, "active_config.json")
+	if a.storage != nil {
+		configPaths = append(configPaths, a.storage.ActiveConfigFilePath())
 	}
-	if configPath == "" {
-		return ""
+	if a.basePath != "" {
+		configPaths = append(configPaths,
+			filepath.Join(a.basePath, ResourcesFolder, "deep_windows_proxy_config.json"),
+			filepath.Join(a.basePath, ResourcesFolder, "active_config.json"),
+		)
 	}
-	config, err := readJSONConfig(configPath)
-	if err != nil {
-		return ""
+	for _, configPath := range uniqueStrings(configPaths) {
+		if strings.TrimSpace(configPath) == "" {
+			continue
+		}
+		config, err := readJSONConfig(configPath)
+		if err != nil {
+			continue
+		}
+		port := quickCheckMixedInboundPort(config)
+		if port > 0 && loopbackPortReady(port, 250*time.Millisecond) {
+			return fmt.Sprintf("http://127.0.0.1:%d", port)
+		}
 	}
-	port := quickCheckMixedInboundPort(config)
-	if port <= 0 || !loopbackPortReady(port, 250*time.Millisecond) {
-		return ""
-	}
-	return fmt.Sprintf("http://127.0.0.1:%d", port)
+	return ""
 }
 
 func quickCheckMixedInboundPort(config map[string]interface{}) int {
@@ -435,11 +548,11 @@ func formatClientQuickCheckOutput(results []clientQuickCheckResult, proxyURL str
 		if result.Name == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "Testing %-18s %s", result.Name, result.StatusText)
+		fmt.Fprintf(&b, "Testing %-18s %-10s %s", result.Name, strings.ToUpper(result.ExpectedRoute), result.StatusText)
 		if result.NormalTimeMS > 0 {
 			fmt.Fprintf(&b, " (%d ms)", result.NormalTimeMS)
 		}
-		if result.ProxyRescued && result.ProxyTimeMS > 0 {
+		if result.ExpectedRoute == clientQuickCheckRouteVPN && result.ProxyTimeMS > 0 {
 			fmt.Fprintf(&b, " proxy=%d ms", result.ProxyTimeMS)
 		}
 		if !result.Success && result.NormalError != "" {
@@ -449,8 +562,8 @@ func formatClientQuickCheckOutput(results []clientQuickCheckResult, proxyURL str
 	}
 	fmt.Fprintf(&b, "\nSummary\n")
 	fmt.Fprintf(&b, "  Duration:      %s\n", duration.Round(time.Millisecond))
-	fmt.Fprintf(&b, "  Normal failed: %d/%d\n", directFailed+blockedFailed, len(results))
-	fmt.Fprintf(&b, "  Proxy rescued: %d\n", proxyRescued)
+	fmt.Fprintf(&b, "  Route failed:  %d/%d\n", directFailed+blockedFailed, len(results))
+	fmt.Fprintf(&b, "  Legacy proxy rescues: %d\n", proxyRescued)
 	fmt.Fprintf(&b, "  Direct failed: %d\n", directFailed)
 	fmt.Fprintf(&b, "  Blocked failed:%d\n", blockedFailed)
 	return b.String()

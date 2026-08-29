@@ -57,8 +57,8 @@ func (failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 func TestQuickCheckFailuresQueueUniqueBlockedServiceMaintenance(t *testing.T) {
 	app := &App{routeStrategyJobs: make(chan string, 4), isRunning: true}
 	app.handleClientQuickCheckFailures([]clientQuickCheckResult{
-		{Name: "Discord", Category: "Blocked", Success: false, NormalError: "timeout"},
-		{Name: "Discord API", Category: "Blocked", Success: false, NormalError: "timeout"},
+		{Name: "Discord", Category: "Blocked", ExpectedRoute: clientQuickCheckRouteZapret, Success: false, NormalError: "timeout"},
+		{Name: "Discord API", Category: "Blocked", ExpectedRoute: clientQuickCheckRouteZapret, Success: false, NormalError: "timeout"},
 		{Name: "Yandex", Category: "Direct-RU", Success: false, NormalError: "timeout"},
 	})
 
@@ -78,26 +78,23 @@ func TestQuickCheckFailuresQueueUniqueBlockedServiceMaintenance(t *testing.T) {
 	}
 }
 
-func TestQuickCheckProxyRescueQueuesBlockedServiceMaintenance(t *testing.T) {
+func TestQuickCheckExplicitVPNDoesNotQueueFreeMethodMaintenance(t *testing.T) {
 	app := &App{routeStrategyJobs: make(chan string, 2), isRunning: true}
 	app.handleClientQuickCheckFailures([]clientQuickCheckResult{
-		{Name: "YouTube", Category: "Blocked", Success: true, ProxyRescued: true, StatusText: "TUN_FAIL_PROXY_OK"},
+		{Name: "YouTube", Category: "Blocked", ExpectedRoute: clientQuickCheckRouteVPN, Success: true, ProxySuccess: true, StatusText: "VPN_OK"},
 	})
 
 	select {
 	case reason := <-app.routeStrategyJobs:
-		if !strings.HasPrefix(reason, "service:youtube ") {
-			t.Fatalf("queued reason = %q, want youtube service maintenance", reason)
-		}
+		t.Fatalf("explicit VPN route must not queue free-method maintenance, got %q", reason)
 	default:
-		t.Fatal("expected proxy-rescued blocked service to queue maintenance")
 	}
 }
 
 func TestQuickCheckAIVPNOnlyProxyFallbackDoesNotQueueFreeMethodMaintenance(t *testing.T) {
 	app := &App{routeStrategyJobs: make(chan string, 2), isRunning: true}
 	app.handleClientQuickCheckFailures([]clientQuickCheckResult{
-		{Name: "OpenAI API", Category: "AI-VPNOnly", Success: true, ProxyRescued: true, StatusText: "VPN_PROXY_OK"},
+		{Name: "OpenAI API", Category: "AI-VPNOnly", ExpectedRoute: clientQuickCheckRouteVPN, Success: true, ProxySuccess: true, StatusText: "VPN_OK"},
 	})
 
 	select {
@@ -210,11 +207,102 @@ func TestClientQuickCheckServiceTag(t *testing.T) {
 		"WhatsApp CDN": "whatsapp",
 		"Instagram":    "meta",
 		"X":            "twitter",
+		"ChatGPT":      "openai",
+		"Cursor API":   "ai-other",
+		"Docker Hub":   "docker",
+		"Trello":       "atlassian",
 		"Gosuslugi":    "",
 	}
 	for name, want := range cases {
 		if got := clientQuickCheckServiceTag(name); got != want {
 			t.Fatalf("clientQuickCheckServiceTag(%q) = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func TestClientQuickCheckCatalogUsesDenseRuntimeIndexes(t *testing.T) {
+	services := denseClientQuickCheckServices(clientQuickCheckServices)
+	results := make([]clientQuickCheckResult, len(services))
+	for _, service := range services {
+		if service.Index < 0 || service.Index >= len(results) {
+			t.Fatalf("runtime index %d is outside result size %d for %s", service.Index, len(results), service.Name)
+		}
+		results[service.Index] = clientQuickCheckResult{Name: service.Name}
+	}
+	for i, result := range results {
+		if result.Name == "" {
+			t.Fatalf("runtime result %d was not populated", i)
+		}
+	}
+}
+
+func TestClientQuickCheckKeepsDirectGuardsAndSelectedServicesOnly(t *testing.T) {
+	cases := []struct {
+		service clientQuickCheckService
+		want    bool
+	}{
+		{clientQuickCheckService{Category: "Direct-Game", ExpectedRoute: clientQuickCheckRouteDirect}, true},
+		{clientQuickCheckService{Category: "Blocked", ExpectedRoute: clientQuickCheckRouteVPN}, true},
+		{clientQuickCheckService{Category: "Blocked", ExpectedRoute: clientQuickCheckRouteZapret}, true},
+		{clientQuickCheckService{Category: "Blocked", ExpectedRoute: clientQuickCheckRouteDirect}, false},
+	}
+	for _, tc := range cases {
+		if got := includeClientQuickCheckService(tc.service); got != tc.want {
+			t.Fatalf("includeClientQuickCheckService(%#v) = %v, want %v", tc.service, got, tc.want)
+		}
+	}
+}
+
+type countingRoundTripper struct {
+	calls int
+}
+
+func (r *countingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.calls++
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
+		Request:    req,
+	}, nil
+}
+
+func TestQuickCheckUsesOnlyTheExpectedRoute(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	directTransport := &countingRoundTripper{}
+	proxyTransport := &countingRoundTripper{}
+	directClient := &http.Client{Transport: directTransport}
+	proxyClient := &http.Client{Transport: proxyTransport}
+
+	directResult := runSingleClientQuickCheck(ctx, clientQuickCheckService{
+		Name: "Steam", URL: "https://store.steampowered.com", Category: "Direct-Game", ExpectedRoute: clientQuickCheckRouteDirect,
+	}, directClient, proxyClient)
+	if !directResult.Success || directResult.StatusText != "DIRECT_OK" || directTransport.calls != 1 || proxyTransport.calls != 0 {
+		t.Fatalf("direct route result=%#v direct_calls=%d proxy_calls=%d", directResult, directTransport.calls, proxyTransport.calls)
+	}
+
+	directTransport.calls = 0
+	proxyTransport.calls = 0
+	vpnResult := runSingleClientQuickCheck(ctx, clientQuickCheckService{
+		Name: "Discord", URL: "https://discord.com", Category: "Blocked", ExpectedRoute: clientQuickCheckRouteVPN,
+	}, directClient, proxyClient)
+	if !vpnResult.Success || vpnResult.StatusText != "VPN_OK" || directTransport.calls != 0 || proxyTransport.calls != 1 {
+		t.Fatalf("VPN route result=%#v direct_calls=%d proxy_calls=%d", vpnResult, directTransport.calls, proxyTransport.calls)
+	}
+}
+
+func TestRouteSummaryStaleProbeCannotOverwriteNewRoute(t *testing.T) {
+	app := &App{routeLatencyCache: map[string]routeSummaryLatencyEntry{
+		"youtube": {Route: clientQuickCheckRouteVPN, InFlight: true},
+	}}
+	app.storeRouteSummaryLatency("youtube", clientQuickCheckRouteDirect, 10)
+	if got := app.routeLatencyCache["youtube"]; got.Route != clientQuickCheckRouteVPN || got.Delay != 0 || !got.InFlight {
+		t.Fatalf("stale direct completion overwrote VPN cache: %#v", got)
+	}
+	app.storeRouteSummaryLatency("youtube", clientQuickCheckRouteVPN, 25)
+	if got := app.routeLatencyCache["youtube"]; got.Route != clientQuickCheckRouteVPN || got.Delay != 25 || got.InFlight {
+		t.Fatalf("current VPN completion was not stored: %#v", got)
 	}
 }

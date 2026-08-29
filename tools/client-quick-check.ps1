@@ -8,7 +8,10 @@ param(
     [string]$AppDir = "",
     [switch]$SkipProxyCheck,
     [switch]$DeepMethodCheck,
-    [switch]$CleanupDropoOrphans
+    [switch]$CleanupDropoOrphans,
+    [switch]$AllCatalog,
+    [switch]$DirectOnly,
+    [switch]$SelectedOnly
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -26,7 +29,7 @@ $directServices = @(
     @{ Name = "Yandex Mail"; URL = "https://mail.yandex.ru"; Category = "Direct-RU" },
     @{ Name = "VK"; URL = "https://vk.com"; Category = "Direct-RU" },
     @{ Name = "Ozon"; URL = "https://www.ozon.ru"; Category = "Direct-RU" },
-    @{ Name = "Sber"; URL = "https://www.sberbank.ru"; Category = "Direct-RU" },
+    @{ Name = "Sber"; URL = "https://www.sberbank.ru"; Category = "Direct-RU"; Regional = $true },
     @{ Name = "Gosuslugi"; URL = "https://www.gosuslugi.ru"; Category = "Direct-RU" },
     @{ Name = "Rutube"; URL = "https://rutube.ru"; Category = "Direct-RU" },
     @{ Name = "Habr"; URL = "https://habr.com"; Category = "Direct-RU" },
@@ -64,6 +67,14 @@ $blockedServices = @(
     @{ Name = "Cursor API"; URL = "https://api2.cursor.sh"; Category = "AI-VPNOnly" }
 )
 
+$directGameServices = @(
+    @{ Name = "Steam Store"; URL = "https://store.steampowered.com"; Category = "Direct-Game" },
+    @{ Name = "Steam Community"; URL = "https://steamcommunity.com"; Category = "Direct-Game" },
+    @{ Name = "Steam Static"; URL = "https://clientconfig.akamai.steamstatic.com"; Category = "Direct-Game" },
+    @{ Name = "EA"; URL = "https://www.ea.com"; Category = "Direct-Game" },
+    @{ Name = "Apex Legends"; URL = "https://www.ea.com/games/apex-legends"; Category = "Direct-Game" }
+)
+
 function Test-TcpPort {
     param([string]$HostName, [int]$Port)
     try {
@@ -79,7 +90,7 @@ function Test-TcpPort {
 }
 
 function Invoke-CheckUrl {
-    param([string]$Url, [string]$ProxyUrl)
+    param([string]$Url, [string]$ProxyUrl, [switch]$Direct)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $params = @{
@@ -92,6 +103,8 @@ function Invoke-CheckUrl {
         }
         if ($ProxyUrl) {
             $params.Proxy = $ProxyUrl
+        } elseif ($Direct -and (Get-Command Invoke-WebRequest).Parameters.ContainsKey("NoProxy")) {
+            $params.NoProxy = $true
         }
         $response = Invoke-WebRequest @params
         $sw.Stop()
@@ -172,9 +185,14 @@ function Invoke-CurlSocksCheck {
 function Find-ActiveConfig {
     $candidates = @()
     if ($AppDir) {
+        $candidates += (Join-Path $AppDir "resources\deep_windows_proxy_config.json")
         $candidates += (Join-Path $AppDir "resources\active_config.json")
-        $candidates += (Join-Path $AppDir "resources\settings.json")
     }
+    $candidates += (Join-Path $env:LOCALAPPDATA "dropo\resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path $PSScriptRoot "resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path (Split-Path $PSScriptRoot -Parent) "resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path (Get-Location) "resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path $env:ProgramFiles "dropo\resources\deep_windows_proxy_config.json")
     $candidates += (Join-Path $PSScriptRoot "resources\active_config.json")
     $candidates += (Join-Path (Split-Path $PSScriptRoot -Parent) "resources\active_config.json")
     $candidates += (Join-Path (Get-Location) "resources\active_config.json")
@@ -187,6 +205,56 @@ function Find-ActiveConfig {
         }
     }
     return ""
+}
+
+function Find-SettingsPath {
+    $candidates = @()
+    if ($AppDir) { $candidates += (Join-Path $AppDir "resources\settings.json") }
+    $candidates += (Join-Path $env:LOCALAPPDATA "dropo\resources\settings.json")
+    $candidates += (Join-Path $env:ProgramFiles "dropo\resources\settings.json")
+    foreach ($path in $candidates | Where-Object { $_ } | Select-Object -Unique) {
+        if (Test-Path $path -PathType Leaf) { return $path }
+    }
+    return ""
+}
+
+function Get-ServiceTag {
+    param([string]$Name)
+    $value = $Name.Trim().ToLowerInvariant()
+    switch -Regex ($value) {
+        '^discord' { return "discord" }
+        '^youtube' { return "youtube" }
+        '^instagram$' { return "meta" }
+        '^facebook$' { return "facebook" }
+        '^x$' { return "twitter" }
+        '^linkedin$' { return "linkedin" }
+        '^spotify$' { return "spotify" }
+        '^twitch$' { return "twitch" }
+        '^telegram$' { return "telegram" }
+        '^signal$' { return "signal" }
+        '^whatsapp' { return "whatsapp" }
+        '^facetime$' { return "facetime" }
+        '^viber$' { return "viber" }
+        '^snapchat$' { return "snapchat" }
+        '^tiktok$' { return "tiktok" }
+        '^(chatgpt|openai api)$' { return "openai" }
+        '^(copilot proxy|cursor api)$' { return "ai-other" }
+    }
+    return ""
+}
+
+function Get-ServiceRouteMethods {
+    param([string]$Path)
+    $methods = @{}
+    if (-not $Path) { return $methods }
+    try {
+        $settings = Get-Content $Path -Raw | ConvertFrom-Json
+        $appSettings = if ($settings.app) { $settings.app } else { $settings }
+        foreach ($property in $appSettings.free_access_methods.PSObject.Properties) {
+            $methods[$property.Name] = ([string]$property.Value).Trim().ToLowerInvariant()
+        }
+    } catch {}
+    return $methods
 }
 
 function Get-ConfigSummary {
@@ -298,6 +366,11 @@ function Get-LiveMixedPort {
 function Find-AppRoot {
     $candidates = @()
     if ($AppDir) { $candidates += $AppDir }
+    try {
+        Get-CimInstance Win32_Process -Filter "Name = 'dropo.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath } |
+            ForEach-Object { $candidates += (Split-Path $_.ExecutablePath -Parent) }
+    } catch {}
     $candidates += $PSScriptRoot
     $parent = Split-Path $PSScriptRoot -Parent
     if ($parent) { $candidates += $parent }
@@ -334,8 +407,8 @@ function Test-PathInside {
 
 function Get-DropoProcessDetails {
     param([string]$Root)
-    $names = @("dropo.exe", "sing-box.exe", "ciadpi.exe", "winws2.exe", "xray.exe")
-    $managedNames = @("sing-box.exe", "ciadpi.exe", "winws2.exe", "xray.exe")
+    $names = @("dropo.exe", "dropo-ui.exe", "dropo-core.exe", "sing-box.exe", "wireguard.exe", "tg-ws-proxy.exe", "xray.exe")
+    $managedNames = @("sing-box.exe", "wireguard.exe", "tg-ws-proxy.exe", "xray.exe")
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object { $names -contains $_.Name } |
         ForEach-Object {
@@ -392,6 +465,8 @@ $singBoxListeners | Export-Csv (Join-Path $OutDir "singbox-listeners.csv") -NoTy
 $activeConfigPath = Find-ActiveConfig
 $configSummary = Get-ConfigSummary -Path $activeConfigPath
 $configSummary | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir "config-summary.json") -Encoding UTF8
+$settingsPath = Find-SettingsPath
+$serviceMethods = Get-ServiceRouteMethods -Path $settingsPath
 
 # Never copy active_config.json into a support bundle: it contains the
 # process-local Clash bearer secret and can also contain VPN credentials.
@@ -445,38 +520,74 @@ if (-not $SkipProxyCheck -and $liveMixedPort -and (Test-TcpPort "127.0.0.1" $liv
 }
 
 $allServices = @()
-$allServices += $directServices
-$allServices += $blockedServices
+if (-not $SelectedOnly) {
+    $allServices += $directServices
+    $allServices += $directGameServices
+}
+if (-not $DirectOnly) {
+    foreach ($svc in $blockedServices) {
+        $serviceTag = Get-ServiceTag -Name $svc.Name
+        $method = if ($serviceTag -and $serviceMethods.ContainsKey($serviceTag)) { $serviceMethods[$serviceTag] } else { "direct" }
+        if ($AllCatalog -or $method -ne "direct") {
+            $allServices += $svc
+        }
+    }
+}
 
 $results = foreach ($svc in $allServices) {
-    Write-Host ("Testing {0,-18} " -f $svc.Name) -NoNewline
-    $normal = Invoke-CheckUrl -Url $svc.URL -ProxyUrl ""
-    $proxy = $null
-    if ($proxyUrl) {
-        $proxy = Invoke-CheckUrl -Url $svc.URL -ProxyUrl $proxyUrl
+    $serviceTag = Get-ServiceTag -Name $svc.Name
+    $method = if ($svc.Category -like "Direct*") {
+        "direct"
+    } elseif ($serviceTag -and $serviceMethods.ContainsKey($serviceTag)) {
+        $serviceMethods[$serviceTag]
+    } else {
+        "direct"
+    }
+    $expectedRoute = switch ($method) {
+        "vpn" { "vpn" }
+        "zapret" { "zapret" }
+        "auto" { "zapret" }
+        default { "direct" }
     }
 
-    $color = if ($normal.Success) { "Green" } elseif ($proxy -and $proxy.Success) { "Yellow" } else { "Red" }
-    $statusText = if ($normal.Success) {
-        "OK"
-    } elseif ($proxy -and $proxy.Success -and $svc.Category -eq "AI-VPNOnly") {
-        "VPN_PROXY_OK"
-    } elseif ($proxy -and $proxy.Success) {
-        "TUN_FAIL_PROXY_OK"
-    } else {
+    Write-Host ("Testing {0,-18} [{1,-6}] " -f $svc.Name, $expectedRoute.ToUpperInvariant()) -NoNewline
+    $normal = $null
+    $proxy = $null
+    if ($expectedRoute -eq "vpn" -and $proxyUrl) {
+        $proxy = Invoke-CheckUrl -Url $svc.URL -ProxyUrl $proxyUrl
+    } elseif ($expectedRoute -ne "vpn") {
+        $normal = Invoke-CheckUrl -Url $svc.URL -ProxyUrl "" -Direct
+    }
+
+    $regionalLimit = [bool]($svc.Regional -and $normal -and -not $normal.Success)
+    $effectiveSuccess = if ($expectedRoute -eq "vpn") { [bool]($proxy -and $proxy.Success) } else { [bool](($normal -and $normal.Success) -or $regionalLimit) }
+    $color = if ($regionalLimit) { "Yellow" } elseif ($effectiveSuccess) { "Green" } else { "Red" }
+    $statusText = if ($regionalLimit) {
+        "REGION_LIMIT"
+    } elseif (-not $effectiveSuccess) {
         "FAIL"
+    } elseif ($expectedRoute -eq "vpn") {
+        "VPN_OK"
+    } elseif ($expectedRoute -eq "zapret") {
+        "ZAPRET_OK"
+    } else {
+        "DIRECT_OK"
     }
     Write-Host $statusText -ForegroundColor $color
 
     [PSCustomObject]@{
         Name = $svc.Name
         Category = $svc.Category
+        ServiceTag = $serviceTag
+        ExpectedRoute = $expectedRoute
         Url = $svc.URL
-        NormalSuccess = $normal.Success
-        NormalStatus = $normal.Status
-        NormalTimeMs = $normal.TimeMs
-        NormalError = $normal.Error
-        ProxyChecked = [bool]$proxyUrl
+        EffectiveSuccess = $effectiveSuccess
+        StatusText = $statusText
+        NormalSuccess = if ($normal) { $normal.Success } else { $null }
+        NormalStatus = if ($normal) { $normal.Status } else { $null }
+        NormalTimeMs = if ($normal) { $normal.TimeMs } else { $null }
+        NormalError = if ($normal) { $normal.Error } else { "" }
+        ProxyChecked = [bool]$proxy
         ProxySuccess = if ($proxy) { $proxy.Success } else { $null }
         ProxyStatus = if ($proxy) { $proxy.Status } else { $null }
         ProxyTimeMs = if ($proxy) { $proxy.TimeMs } else { $null }
@@ -487,8 +598,8 @@ $results = foreach ($svc in $allServices) {
 $results | Export-Csv (Join-Path $OutDir "service-results.csv") -NoTypeInformation -Encoding UTF8
 $results | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir "service-results.json") -Encoding UTF8
 $results |
-    Where-Object { -not $_.NormalSuccess } |
-    Select-Object Name, Category, Url, NormalStatus, NormalTimeMs, NormalError, ProxyChecked, ProxySuccess, ProxyError |
+    Where-Object { -not $_.EffectiveSuccess } |
+    Select-Object Name, Category, ExpectedRoute, Url, NormalStatus, NormalTimeMs, NormalError, ProxyChecked, ProxySuccess, ProxyError |
     Format-List |
     Out-String |
     Set-Content (Join-Path $OutDir "failures.txt") -Encoding UTF8
@@ -502,7 +613,7 @@ if ($DeepMethodCheck) {
         @{ Tag = "byedpi-fake"; Port = 18094; Type = "socks" }
     )
     $openFreeProxyMethods = $freeProxyMethods | Where-Object { Test-TcpPort "127.0.0.1" $_.Port }
-    $failedBlocked = $results | Where-Object { $_.Category -notlike "Direct*" -and -not $_.NormalSuccess }
+    $failedBlocked = $results | Where-Object { $_.ExpectedRoute -eq "zapret" -and -not $_.EffectiveSuccess }
 
     if ($failedBlocked -and $openFreeProxyMethods) {
         Write-Host ""
@@ -546,6 +657,7 @@ $summary = [PSCustomObject]@{
     CreatedAt = (Get-Date).ToString("s")
     AppRoot = $appRoot
     ActiveConfig = $activeConfigPath
+    SettingsPath = $settingsPath
     MixedProxy = $proxyUrl
     ConfiguredMixedPort = $mixedPort
     LiveMixedPort = $liveMixedPort
@@ -554,11 +666,12 @@ $summary = [PSCustomObject]@{
     SingBoxListeners = $singBoxListeners
     Config = $configSummary
     Total = $results.Count
-    NormalFailed = ($results | Where-Object { -not $_.NormalSuccess }).Count
-    ProxyRecovered = ($results | Where-Object { -not $_.NormalSuccess -and $_.ProxySuccess }).Count
+    EffectiveFailed = ($results | Where-Object { -not $_.EffectiveSuccess }).Count
+    NormalFailed = ($results | Where-Object { $null -ne $_.NormalSuccess -and -not $_.NormalSuccess }).Count
+    ProxyRecovered = 0
     MethodRecovered = ($methodResults | Where-Object { $_.Success } | Select-Object -ExpandProperty Name -Unique).Count
-    DirectFailed = ($results | Where-Object { $_.Category -like "Direct*" -and -not $_.NormalSuccess }).Count
-    BlockedFailed = ($results | Where-Object { $_.Category -notlike "Direct*" -and -not $_.NormalSuccess }).Count
+    DirectFailed = ($results | Where-Object { $_.ExpectedRoute -eq "direct" -and -not $_.EffectiveSuccess }).Count
+    BlockedFailed = ($results | Where-Object { $_.ExpectedRoute -ne "direct" -and -not $_.EffectiveSuccess }).Count
     NoRouteGroupCount = $noRouteGroups.Count
     NoRouteGroups = ($noRouteGroups -join ",")
     ManagedSidecarProcesses = ($processInfo | Where-Object { $_.ManagedSidecar }).Count
@@ -569,6 +682,7 @@ Write-Host ""
 Write-Host "Summary" -ForegroundColor Cyan
 Write-Host "  App root:      $appRoot"
 Write-Host "  Active config: $activeConfigPath"
+Write-Host "  Settings:      $settingsPath"
 Write-Host "  Mixed proxy:   $proxyUrl"
 if ($summary.ManagedSidecarProcesses -gt 0) {
     Write-Host "  Managed sidecars still running: $($summary.ManagedSidecarProcesses)" -ForegroundColor Yellow
@@ -591,8 +705,7 @@ if ($mixedPort -and $mixedPort -ne $liveMixedPort) {
 } elseif ($mixedPort -and -not $proxyUrl) {
     Write-Host "  Mixed port:    $mixedPort (not listening)" -ForegroundColor Yellow
 }
-Write-Host "  Normal failed: $($summary.NormalFailed)/$($summary.Total)"
-Write-Host "  Proxy rescued: $($summary.ProxyRecovered)"
+Write-Host "  Route failed:  $($summary.EffectiveFailed)/$($summary.Total)"
 if ($DeepMethodCheck) {
     Write-Host "  Method rescued:$($summary.MethodRecovered)"
 }
@@ -607,16 +720,17 @@ Write-Host ""
 Write-Host "Send this folder back for analysis:" -ForegroundColor Yellow
 Write-Host "  $OutDir"
 
-$firstFailures = $results | Where-Object { -not $_.NormalSuccess } | Select-Object -First 5
+$firstFailures = $results | Where-Object { -not $_.EffectiveSuccess } | Select-Object -First 5
 if ($firstFailures) {
     Write-Host ""
     Write-Host "First errors:" -ForegroundColor Red
     foreach ($failure in $firstFailures) {
-        Write-Host "  $($failure.Name): $($failure.NormalError)" -ForegroundColor DarkRed
+        $errorText = if ($failure.ExpectedRoute -eq "vpn") { $failure.ProxyError } else { $failure.NormalError }
+        Write-Host "  $($failure.Name) [$($failure.ExpectedRoute)]: $errorText" -ForegroundColor DarkRed
     }
 }
 
-if ($summary.NormalFailed -gt 0) {
+if ($summary.EffectiveFailed -gt 0) {
     exit 1
 }
 exit 0

@@ -16,17 +16,18 @@ import (
 )
 
 const (
-	discordRealtimePollInterval   = 2 * time.Second
-	discordRealtimeDialDeadline   = 10 * time.Second
-	discordRealtimeStallDeadline  = 30 * time.Second
-	discordRealtimeProvenDeadline = 18 * time.Second
-	discordRealtimeInboundGrace   = 10 * time.Second
-	discordRealtimeMediaWarmup    = 6 * time.Second
-	discordRealtimeSwitchCooldown = 5 * time.Second
-	discordRealtimeFlowRetention  = 30 * time.Second
-	discordRealtimeLearnedTTL     = 15 * time.Minute
-	discordRealtimeDiagInterval   = 10 * time.Second
-	discordRealtimeErrorInterval  = 30 * time.Second
+	discordRealtimePollInterval     = 2 * time.Second
+	discordRealtimeDialDeadline     = 10 * time.Second
+	discordRealtimeStallDeadline    = 30 * time.Second
+	discordRealtimeProvenDeadline   = 18 * time.Second
+	discordRealtimeInboundGrace     = 10 * time.Second
+	discordRealtimeMediaWarmup      = 6 * time.Second
+	discordRealtimeSwitchCooldown   = 5 * time.Second
+	discordRealtimeFlowRetention    = 30 * time.Second
+	discordRealtimeLearnedTTL       = 15 * time.Minute
+	discordRealtimeDiagInterval     = 10 * time.Second
+	discordRealtimeIdleDiagInterval = 5 * time.Minute
+	discordRealtimeErrorInterval    = 30 * time.Second
 	// A blocked Discord control path can prevent the voice WebSocket and UDP
 	// discovery flow from appearing at all. Treating that as idle left automatic
 	// mode on attempt 1 forever. Once the Discord process emits public traffic,
@@ -494,7 +495,11 @@ func (c *discordRealtimeController) collectDiagnostics(now time.Time) (discordRe
 	sort.Ints(result.TCPPorts)
 	sort.Ints(result.UDPPorts)
 	sort.Strings(result.UDPIPs)
-	summaryDue := c.lastDiagnostics.IsZero() || now.Sub(c.lastDiagnostics) >= discordRealtimeDiagInterval
+	diagnosticInterval := discordRealtimeDiagInterval
+	if len(c.flows) == 0 && !c.initialBusy {
+		diagnosticInterval = discordRealtimeIdleDiagInterval
+	}
+	summaryDue := c.lastDiagnostics.IsZero() || now.Sub(c.lastDiagnostics) >= diagnosticInterval
 	flowIDs := make([]string, 0, len(c.flows))
 	for id := range c.flows {
 		flowIDs = append(flowIDs, id)
@@ -587,7 +592,6 @@ func (a *App) logDiscordRealtimeDiagnostic(diagnostic discordRealtimeDiagnostic)
 	}
 	a.writeLog(fmt.Sprintf("[DiscordRealtime][Status] route=%s vpn_node=%s automatic=%v vpn_mode=%v state=%s route_healthy=%v last_media_inbound=%s attempt=%d/%d profile=%s active_flows=%d learned_tcp=%v learned_udp=%v learned_ips=%v realtime_candidates=%v vpn_candidates=%v", realtimeCurrent, vpnCurrent, diagnostic.Automatic, diagnostic.FallbackVPN, state, diagnostic.RouteHealthy, lastInbound, diagnostic.Attempt, discordLocalStrategyCount(), diagnostic.Profile.Tag, len(diagnostic.Flows), diagnostic.TCPPorts, diagnostic.UDPPorts, diagnostic.UDPIPs, realtimeCandidates, vpnCandidates))
 	if len(diagnostic.Flows) == 0 {
-		a.writeLog("[DiscordRealtime][Flow] snapshot: no active Discord realtime flows")
 		return
 	}
 	for _, flow := range diagnostic.Flows {
