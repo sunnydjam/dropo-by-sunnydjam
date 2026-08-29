@@ -1,7 +1,7 @@
 package trafficorchestrator
 
 // BuiltinCatalogRevision changes whenever packet semantics or ordering changes.
-const BuiltinCatalogRevision = "dropo-native-windows-5-flowseal-1.10.2-full"
+const BuiltinCatalogRevision = "dropo-native-windows-7-flowseal-1.10.2-alt-exact"
 
 // BuiltinStrategies returns the bounded strategy ladder implemented by the
 // Dropo packet engine. It contains data only: no shell arguments, Lua or
@@ -245,12 +245,72 @@ func flowseal1102BuiltinStrategies(common StrategyConstraints) []TrafficStrategy
 	}
 	result := make([]TrafficStrategy, 0, len(presets)*2)
 	for _, preset := range presets {
+		if preset.slug == "alt" {
+			result = append(result, flowseal1102GeneralALTStrategies(common)...)
+			continue
+		}
 		result = append(result,
 			flowseal1102Strategy("native-flowseal-1102-youtube-"+preset.slug, "Flowseal 1.10.2 "+preset.label+" — YouTube", preset.youtube, "quic_decoy", preset.youtubeUDP, common),
 			flowseal1102Strategy("native-discord-flowseal-1102-"+preset.slug, "Flowseal 1.10.2 "+preset.label+" — Discord", preset.discord, "protocol_decoy", preset.discordUDP, common),
 		)
 	}
 	return result
+}
+
+func flowseal1102GeneralALTStrategies(common StrategyConstraints) []TrafficStrategy {
+	const timestampDelta = -600000
+	youtubeMetadata := PacketAction{
+		TCPFooling: TCPFoolingTimestampOrBadSum, TimestampDelta: timestampDelta, IPv4ID: IPv4IDZero,
+	}
+	discordMetadata := PacketAction{
+		TCPFooling: TCPFoolingTimestampOrBadSum, TimestampDelta: timestampDelta,
+	}
+	return []TrafficStrategy{
+		{
+			ID: "native-flowseal-1102-youtube-alt", Revision: 3,
+			Label: "Flowseal 1.10.2 ALT exact — YouTube",
+			TCP: []PacketAction{
+				{
+					Kind: ActionFake, Payload: "tls_google", PadTo: 681, Repeats: 6, Ports: []int{443},
+					TCPFooling: youtubeMetadata.TCPFooling, TimestampDelta: youtubeMetadata.TimestampDelta, IPv4ID: youtubeMetadata.IPv4ID,
+				},
+				{
+					Kind: ActionFakeDataSplit, Position: 2, Repeats: 6, FakePattern: FakePatternZero, Ports: []int{443},
+					TCPFooling: youtubeMetadata.TCPFooling, TimestampDelta: youtubeMetadata.TimestampDelta, IPv4ID: youtubeMetadata.IPv4ID,
+				},
+			},
+			UDP:         []PacketAction{{Kind: ActionFake, Payload: "quic_google", PadTo: 1200, Repeats: 6, Ports: []int{443}}},
+			Constraints: common,
+			Cost:        StrategyCost{SyntheticPackets: 30, BufferedBytes: 1881, Risk: 18},
+		},
+		{
+			ID: "native-discord-flowseal-1102-alt", Revision: 3,
+			Label: "Flowseal 1.10.2 ALT exact — Discord",
+			TCP: []PacketAction{
+				{
+					Kind: ActionFake, Payload: "stun_decoy", PadTo: 100, Repeats: 6, Ports: []int{443},
+					TCPFooling: discordMetadata.TCPFooling, TimestampDelta: discordMetadata.TimestampDelta,
+				},
+				{
+					Kind: ActionFake, Payload: "tls_google", PadTo: 681, Repeats: 6,
+					TCPFooling: discordMetadata.TCPFooling, TimestampDelta: discordMetadata.TimestampDelta,
+				},
+				{
+					Kind: ActionFakeDataSplit, Position: 2, Repeats: 6, FakePattern: FakePatternZero,
+					TCPFooling: discordMetadata.TCPFooling, TimestampDelta: discordMetadata.TimestampDelta,
+				},
+			},
+			UDP: []PacketAction{
+				{Kind: ActionFake, Payload: "quic_google", PadTo: 1200, Repeats: 6, Ports: []int{443}},
+				{
+					Kind: ActionFake, Payload: "discord_active", PadTo: 1200, Repeats: 6,
+					PortRanges: []PortRange{{First: 19294, Last: 19344}, {First: 50000, Last: 50100}},
+				},
+			},
+			Constraints: common,
+			Cost:        StrategyCost{SyntheticPackets: 36, BufferedBytes: 1881, Risk: 20},
+		},
+	}
 }
 
 func flowseal1102Strategy(id, label string, recipe flowseal1102Recipe, udpPayload string, udpRepeats int, common StrategyConstraints) TrafficStrategy {

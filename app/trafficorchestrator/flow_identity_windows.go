@@ -103,12 +103,12 @@ func (resolver *windowsFlowIdentityResolver) ResolveProcessName(tuple FlowTuple)
 	}
 
 	pid := ownerPID(table.owners, tuple)
-	// A just-created TCP flow may not exist in a still-valid owner-table
-	// snapshot. Initial SYN packets are the only safe point at which the
-	// selective relay can be installed, so refresh once immediately on a cache
-	// miss. This is bounded, does not sleep, and still treats a second miss as
-	// unknown traffic that must pass unchanged.
-	if pid == 0 && tuple.Network == NetworkTCP && !refreshed {
+	// A just-created TCP or UDP flow may not exist in a still-valid owner-table
+	// snapshot. TCP needs its initial SYN for selective relay setup, while a
+	// Discord voice discovery exchange may contain only a few UDP datagrams.
+	// Refresh once immediately for either transport. This is bounded, does not
+	// sleep, and a second miss still passes unchanged.
+	if pid == 0 && (tuple.Network == NetworkTCP || tuple.Network == NetworkUDP) && !refreshed {
 		owners, err := resolver.loadOwnerTable(kind)
 		if err == nil {
 			table = ownerTableSnapshot{loaded: now, owners: owners}

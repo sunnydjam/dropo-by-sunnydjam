@@ -1033,8 +1033,8 @@ func (a *App) handleDiscordLearnedMedia(tcpPorts, udpPorts map[int]struct{}, udp
 		class := "observed-only"
 		if port >= 19294 && port <= 19344 {
 			class = "official-19294-19344"
-		} else if port >= 50000 && port <= 50099 {
-			class = "official-50000-50099"
+		} else if port >= 50000 && port <= 50100 {
+			class = "official-50000-50100"
 		}
 		classes = append(classes, fmt.Sprintf("%d:%s", port, class))
 	}

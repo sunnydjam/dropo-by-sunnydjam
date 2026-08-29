@@ -22,6 +22,17 @@ $MobileCoreDir = Join-Path $AppDir "mobile\dropocore"
 $FlutterDir = Join-Path $RepoRoot "flutter_app"
 $ReleaseRoot = Join-Path $RepoRoot "release"
 
+# Keep the release gate usable on a clean Windows workstation where Dropo's
+# verified repository-local toolchain is installed but Go is intentionally not
+# added to the user's global PATH.
+if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
+    $repositoryGoBin = Join-Path $RepoRoot ".toolchain\go-1.25.13\go\bin"
+    $repositoryGoExe = Join-Path $repositoryGoBin "go.exe"
+    if (Test-Path -LiteralPath $repositoryGoExe -PathType Leaf) {
+        $env:Path = "$repositoryGoBin;$env:Path"
+    }
+}
+
 function Invoke-Step {
     param(
         [string]$Name,
@@ -91,8 +102,13 @@ function Get-FlutterCommand {
         return $flutter.Source
     }
 
+    $repositoryFlutter = Join-Path $RepoRoot ".toolchain\flutter\bin\flutter.bat"
+    if (Test-Path -LiteralPath $repositoryFlutter -PathType Leaf) {
+        return $repositoryFlutter
+    }
+
     $localFlutter = "E:\flutter-sdk\flutter\bin\flutter.bat"
-    if (Test-Path $localFlutter) {
+    if (Test-Path -LiteralPath $localFlutter -PathType Leaf) {
         return $localFlutter
     }
 
@@ -273,7 +289,7 @@ function Invoke-ArtifactValidation {
 		throw "SPDX SBOM does not describe the complete native runtime manifest."
 	}
 	$sbomNames = @($sbom.packages | ForEach-Object { [string]$_.name })
-	foreach ($component in @("dropo", "sing-box", "Xray-core", "WireGuard for Windows", "WinDivert", "tg-ws-proxy")) {
+	foreach ($component in @("dropo", "sing-box", "Xray-core", "WireGuard for Windows", "WinDivert", "tg-ws-proxy", "Flowseal zapret-discord-youtube payloads")) {
 		if ($component -notin $sbomNames) {
 			throw "SPDX SBOM is missing component: $component"
 		}

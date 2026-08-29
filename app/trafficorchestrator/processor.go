@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type processorSnapshot struct {
@@ -38,6 +39,20 @@ type ServiceCounters struct {
 	Transformed uint64
 	Passed      uint64
 	Errors      uint64
+	Throttled   uint64
+}
+
+const (
+	strategyOutputWindow       = time.Second
+	strategyOutputPacketBudget = 768
+	strategyOutputCooldown     = 5 * time.Second
+	maxStrategyDecisionPackets = 64
+)
+
+type strategyOutputLoad struct {
+	windowStarted time.Time
+	packetCount   int
+	blockedUntil  time.Time
 }
 
 // Processor owns the immutable plan snapshot but no driver handle. It is used
@@ -49,7 +64,11 @@ type Processor struct {
 	udpRedirector *UDPPacketRedirector
 	fakeIPs       *FakeIPDirectory
 	dnsFake       *DNSFakeResponder
+	zapretPorts   PortRange
 	flows         *flowDecisionTable
+	loadMu        sync.Mutex
+	strategyLoad  map[string]strategyOutputLoad
+	now           func() time.Time
 	statsMu       sync.Mutex
 	stats         map[string]ServiceCounters
 }
@@ -73,7 +92,20 @@ func NewProcessorWithSelectiveRuntime(plan TrafficPlan, identity FlowIdentityRes
 }
 
 func NewProcessorWithFullSelectiveRuntime(plan TrafficPlan, identity FlowIdentityResolver, redirector *TCPPacketRedirector, udpRedirector *UDPPacketRedirector, fakeIPs *FakeIPDirectory) (*Processor, error) {
-	processor := &Processor{identity: identity, redirector: redirector, udpRedirector: udpRedirector, fakeIPs: fakeIPs, flows: newFlowDecisionTable(), stats: make(map[string]ServiceCounters)}
+	return NewProcessorWithScopedZapretRuntime(plan, identity, redirector, udpRedirector, fakeIPs, PortRange{})
+}
+
+// NewProcessorWithScopedZapretRuntime marks only the source ports owned by the
+// in-process selective CONNECT relay as eligible Dropo-core traffic. All other
+// sing-box/core egress remains trusted terminal traffic and bypasses service
+// classification, preventing recursion into the selective engine.
+func NewProcessorWithScopedZapretRuntime(plan TrafficPlan, identity FlowIdentityResolver, redirector *TCPPacketRedirector, udpRedirector *UDPPacketRedirector, fakeIPs *FakeIPDirectory, zapretPorts PortRange) (*Processor, error) {
+	processor := &Processor{
+		identity: identity, redirector: redirector, udpRedirector: udpRedirector, fakeIPs: fakeIPs,
+		zapretPorts: zapretPorts,
+		flows:       newFlowDecisionTable(), strategyLoad: make(map[string]strategyOutputLoad), now: time.Now,
+		stats: make(map[string]ServiceCounters),
+	}
 	if fakeIPs != nil {
 		processor.dnsFake = NewDNSFakeResponder(fakeIPs)
 	}
@@ -142,6 +174,9 @@ func (p *Processor) ApplyPlan(plan TrafficPlan) error {
 	}
 	p.snapshot.Store(snapshot)
 	p.flows.clear()
+	p.loadMu.Lock()
+	clear(p.strategyLoad)
+	p.loadMu.Unlock()
 	return nil
 }
 
@@ -218,8 +253,8 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			if responseErr != nil {
 				return passDecision(snapshot.plan.Revision, packet, "fake DNS response failed safe: "+responseErr.Error())
 			}
-			reason := "selected VPN domain mapped to fake IP"
-			route := ServiceRouteVPN
+			reason := "selected service domain mapped to fake IP"
+			route := target.Route
 			if target.ServiceID == "" {
 				reason = "encrypted DNS endpoint denied in selective mode"
 				route = ""
@@ -236,11 +271,15 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 		restored, target, recognized, restoreErr := p.redirector.RestoreRelayPacket(parsed)
 		if recognized {
 			if restoreErr != nil {
-				return PacketDecision{PlanRevision: snapshot.plan.Revision, Route: ServiceRouteVPN, Dropped: true, Reason: restoreErr.Error()}
+				return PacketDecision{PlanRevision: snapshot.plan.Revision, Route: target.Route, Dropped: true, Reason: restoreErr.Error()}
+			}
+			reason := "restored selective TCP relay response"
+			if target.Route == ServiceRouteVPN {
+				reason = "restored selective VPN relay response"
 			}
 			return PacketDecision{
-				PlanRevision: snapshot.plan.Revision, ServiceID: target.ServiceID, Route: ServiceRouteVPN,
-				Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{restored}, Reason: "restored selective VPN relay response",
+				PlanRevision: snapshot.plan.Revision, ServiceID: target.ServiceID, Route: target.Route,
+				Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{restored}, Reason: reason,
 			}
 		}
 	}
@@ -259,11 +298,13 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 	// The relay hands selected destinations to sing-box over loopback. Any
 	// subsequent sing-box/Xray/WireGuard egress is already on its terminal path
 	// and must never be classified back into the selective redirector.
-	if trustedRuntime {
+	if trustedRuntime && !portRangeContains(p.zapretPorts, int(tuple.SourcePort)) {
 		return passDecision(snapshot.plan.Revision, packet, "trusted Dropo runtime egress")
 	}
+	fakeDestination := false
 	if p.fakeIPs != nil {
 		if target, matched := p.fakeIPs.LookupAddress(parsed.destination); matched {
+			fakeDestination = true
 			evidence.Host = target.Host
 		}
 	}
@@ -300,7 +341,19 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 		decision.Route = route
 		return decision
 	}
-	if route == ServiceRouteVPN {
+	if route == ServiceRouteZapret && fakeDestination && parsed.network == NetworkUDP {
+		// Exact Zapret bootstrap mappings exist to catch native TCP clients that
+		// ignore PAC. A fake destination has no safe UDP terminal translation;
+		// dropping the positively classified fake flow forces normal QUIC/UDP
+		// clients to retry TCP without widening capture to unrelated traffic.
+		p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
+		return PacketDecision{
+			PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route,
+			Dropped: true, Reason: "selected Zapret fake-IP UDP forces TCP fallback",
+		}
+	}
+	usesTCPRelay := route == ServiceRouteVPN || (route == ServiceRouteZapret && fakeDestination)
+	if usesTCPRelay {
 		if parsed.network == NetworkUDP {
 			if p.udpRedirector == nil {
 				p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++ })
@@ -323,11 +376,15 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			}
 		}
 		if parsed.network != NetworkTCP {
-			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "unsupported selective VPN transport"}
+			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "unsupported selective TCP relay transport"}
 		}
 		if p.redirector == nil {
 			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
-			decision := passDecision(snapshot.plan.Revision, packet, "service requires selective VPN relay")
+			reason := "service requires selective TCP relay"
+			if route == ServiceRouteVPN {
+				reason = "service requires selective VPN relay"
+			}
+			decision := passDecision(snapshot.plan.Revision, packet, reason)
 			decision.ServiceID = classification.ServiceID
 			decision.Route = route
 			return decision
@@ -340,21 +397,21 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 				p.flows.store(tuple, FlowDecision{
 					PlanRevision: snapshot.plan.Revision, Disposition: FlowDirect,
 					ProcessName: normalizeProcessName(evidence.ProcessName),
-					Reason:      "selective VPN redirect declined for established TCP flow",
+					Reason:      "selective TCP redirect declined for established flow",
 				})
 				p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++; value.Passed++ })
-				decision := passDecision(snapshot.plan.Revision, packet, "selective VPN redirect failed safe: "+redirectErr.Error())
+				decision := passDecision(snapshot.plan.Revision, packet, "selective TCP redirect failed safe: "+redirectErr.Error())
 				decision.ServiceID = classification.ServiceID
 				decision.Route = route
 				return decision
 			}
 			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++ })
-			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "selective VPN redirect failed: " + redirectErr.Error()}
+			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "selective TCP redirect failed: " + redirectErr.Error()}
 		}
 		p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Transformed++ })
 		return PacketDecision{
 			PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route,
-			Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{reflected}, Reason: "reflected to selective VPN relay",
+			Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{reflected}, Reason: "reflected to selective TCP relay",
 		}
 	}
 	strategyID := snapshot.selected[classification.ServiceID]
@@ -370,6 +427,18 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 	if err != nil {
 		p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++; value.Passed++ })
 		decision := passDecision(snapshot.plan.Revision, packet, "strategy failed safe: "+err.Error())
+		decision.ServiceID = classification.ServiceID
+		decision.StrategyID = strategy.ID
+		decision.Route = route
+		return decision
+	}
+	if transformed && !p.allowStrategyOutput(classification.ServiceID, len(packets)) {
+		p.bump(classification.ServiceID, func(value *ServiceCounters) {
+			value.Matched++
+			value.Passed++
+			value.Throttled++
+		})
+		decision := passDecision(snapshot.plan.Revision, packet, "strategy output budget exceeded; fail-safe direct cooldown")
 		decision.ServiceID = classification.ServiceID
 		decision.StrategyID = strategy.ID
 		decision.Route = route
@@ -391,6 +460,43 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 		Transformed:  transformed,
 		Packets:      packets,
 	}
+}
+
+// allowStrategyOutput bounds the number of packets one selected service may
+// enqueue into the single WinDivert owner. A broken manual recipe can otherwise
+// enter a reconnect loop and delay unrelated direct TLS handshakes (Steam CEF
+// was the first observed example). Exceeding the budget affects only that
+// service and fails safe to the original byte-for-byte packet for a short,
+// bounded cooldown.
+func (p *Processor) allowStrategyOutput(serviceID string, packetCount int) bool {
+	if p == nil || serviceID == "" || packetCount <= 1 {
+		return true
+	}
+	now := time.Now()
+	if p.now != nil {
+		now = p.now()
+	}
+	p.loadMu.Lock()
+	defer p.loadMu.Unlock()
+	if p.strategyLoad == nil {
+		p.strategyLoad = make(map[string]strategyOutputLoad)
+	}
+	load := p.strategyLoad[serviceID]
+	if now.Before(load.blockedUntil) {
+		return false
+	}
+	if load.windowStarted.IsZero() || now.Sub(load.windowStarted) >= strategyOutputWindow {
+		load.windowStarted = now
+		load.packetCount = 0
+	}
+	if packetCount > strategyOutputPacketBudget-load.packetCount {
+		load.blockedUntil = now.Add(strategyOutputCooldown)
+		p.strategyLoad[serviceID] = load
+		return false
+	}
+	load.packetCount += packetCount
+	p.strategyLoad[serviceID] = load
+	return true
 }
 
 func isTrustedSelectiveRuntimeProcess(value string) bool {
@@ -479,6 +585,9 @@ func applyStrategy(parsed parsedPacket, strategy TrafficStrategy) ([][]byte, boo
 	transformed := false
 	ttl := 0
 	for _, action := range actions {
+		if !actionMatchesPacket(action, parsed) {
+			continue
+		}
 		switch action.Kind {
 		case ActionPass:
 			continue
@@ -492,6 +601,16 @@ func applyStrategy(parsed parsedPacket, strategy TrafficStrategy) ([][]byte, boo
 			for repeat := 0; repeat < action.Repeats; repeat++ {
 				outputs = append(outputs, append([]byte(nil), fake...))
 			}
+			transformed = true
+		case ActionFakeDataSplit:
+			packets, err := makeFakeDataSplitPackets(parsed, action)
+			if err != nil {
+				return nil, false, err
+			}
+			outputs = append(outputs, packets...)
+			// Fake data split emits the real segments in their precise interleaved
+			// order, so the original unsplit packet must not be appended again.
+			originals = nil
 			transformed = true
 		case ActionSplit, ActionDisorder:
 			if parsed.network != NetworkTCP {
@@ -536,7 +655,27 @@ func applyStrategy(parsed parsedPacket, strategy TrafficStrategy) ([][]byte, boo
 		}
 	}
 	outputs = append(outputs, originals...)
+	if len(outputs) > maxStrategyDecisionPackets {
+		return nil, false, fmt.Errorf("strategy produced %d packets; limit is %d", len(outputs), maxStrategyDecisionPackets)
+	}
 	return outputs, transformed, nil
+}
+
+func actionMatchesPacket(action PacketAction, parsed parsedPacket) bool {
+	if len(action.Ports) == 0 && len(action.PortRanges) == 0 {
+		return true
+	}
+	for _, port := range action.Ports {
+		if parsed.destinationPort == port {
+			return true
+		}
+	}
+	for _, portRange := range action.PortRanges {
+		if parsed.destinationPort >= portRange.First && parsed.destinationPort <= portRange.Last {
+			return true
+		}
+	}
+	return false
 }
 
 func strategyApplies(parsed parsedPacket, constraints StrategyConstraints) bool {
@@ -579,10 +718,18 @@ func makeFakePacket(parsed parsedPacket, action PacketAction, ttl int) ([]byte, 
 	switch action.Payload {
 	case "tls_client_hello":
 		payload = fakeTLSClientHelloLike(parsed.payload())
+	case "tls_google":
+		payload = append([]byte(nil), flowseal1102GoogleTLS...)
+	case "stun_decoy":
+		payload = append([]byte(nil), flowseal1102STUN...)
 	case "quic_initial":
 		payload = fakeQUICInitial(parsed.payload())
 	case "quic_decoy":
 		payload = fakeQUICInitial(nil)
+	case "quic_google":
+		payload = append([]byte(nil), flowseal1102GoogleQUIC...)
+	case "discord_active":
+		payload = append([]byte(nil), flowseal1102DiscordUDP...)
 	case "original":
 		payload = append([]byte(nil), parsed.payload()...)
 	case "protocol_decoy":
@@ -610,11 +757,145 @@ func makeFakePacket(parsed parsedPacket, action PacketAction, ttl int) ([]byte, 
 		sequence := uint32(int64(updated.tcpSequence) + int64(action.SequenceDelta))
 		binary.BigEndian.PutUint32(packet[updated.transportOffset+4:updated.transportOffset+8], sequence)
 	}
+	invalidFallback, err := applyGeneratedPacketMetadata(packet, updated, action, true)
+	if err != nil {
+		return nil, err
+	}
 	calculateChecksums(packet)
-	if action.InvalidSum {
+	if action.InvalidSum || invalidFallback {
 		corruptTransportChecksum(packet, updated)
 	}
 	return packet, nil
+}
+
+func makeFakeDataSplitPackets(parsed parsedPacket, action PacketAction) ([][]byte, error) {
+	positions, err := resolvePacketPositions(parsed.payload(), action)
+	if err != nil {
+		return nil, err
+	}
+	if len(positions) != 1 {
+		return nil, errors.New("fake data split requires exactly one resolved position")
+	}
+	realSegments, err := splitTCPPacketAtPositions(parsed, positions)
+	if err != nil {
+		return nil, err
+	}
+	if len(realSegments) != 2 {
+		return nil, errors.New("fake data split did not produce two TCP segments")
+	}
+	fakeSegments := make([][]byte, len(realSegments))
+	for index, real := range realSegments {
+		realParsed, parseErr := parsePacket(real)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse generated real segment %d: %w", index, parseErr)
+		}
+		if _, err := applyGeneratedPacketMetadata(real, realParsed, action, false); err != nil {
+			return nil, err
+		}
+		calculateChecksums(real)
+
+		fake := append([]byte(nil), real...)
+		fakeParsed, parseErr := parsePacket(fake)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse generated fake segment %d: %w", index, parseErr)
+		}
+		switch action.FakePattern {
+		case FakePatternZero:
+			clear(fake[fakeParsed.payloadOffset:])
+		default:
+			return nil, fmt.Errorf("unsupported fake data split pattern %q", action.FakePattern)
+		}
+		invalidFallback, err := applyGeneratedPacketMetadata(fake, fakeParsed, action, true)
+		if err != nil {
+			return nil, err
+		}
+		calculateChecksums(fake)
+		if invalidFallback {
+			corruptTransportChecksum(fake, fakeParsed)
+		}
+		fakeSegments[index] = fake
+	}
+
+	result := make([][]byte, 0, action.Repeats*4+2)
+	appendRepeated := func(packet []byte) {
+		for repeat := 0; repeat < action.Repeats; repeat++ {
+			result = append(result, append([]byte(nil), packet...))
+		}
+	}
+	// zapret fakedsplit altorder=0:
+	// fake1, real1, fake1, fake2, real2, fake2. Repeats apply to each fake.
+	appendRepeated(fakeSegments[0])
+	result = append(result, realSegments[0])
+	appendRepeated(fakeSegments[0])
+	appendRepeated(fakeSegments[1])
+	result = append(result, realSegments[1])
+	appendRepeated(fakeSegments[1])
+	return result, nil
+}
+
+var errTCPTimestampNotPresent = errors.New("TCP timestamp option is not present")
+
+func applyGeneratedPacketMetadata(packet []byte, parsed parsedPacket, action PacketAction, synthetic bool) (bool, error) {
+	if action.IPv4ID == IPv4IDZero && parsed.ipVersion == 4 {
+		binary.BigEndian.PutUint16(packet[4:6], 0)
+	}
+	if !synthetic || action.TCPFooling == "" {
+		return false, nil
+	}
+	if parsed.network != NetworkTCP {
+		return false, errors.New("TCP fooling applied to non-TCP packet")
+	}
+	switch action.TCPFooling {
+	case TCPFoolingTimestamp:
+		return false, adjustTCPTimestamp(packet, parsed, action.TimestampDelta)
+	case TCPFoolingTimestampOrBadSum:
+		err := adjustTCPTimestamp(packet, parsed, action.TimestampDelta)
+		if errors.Is(err, errTCPTimestampNotPresent) {
+			// Windows TCP timestamps can be disabled globally or absent on a flow
+			// that predates the setting. Keep the decoy rejectable by the remote
+			// stack without failing the complete real ClientHello.
+			return true, nil
+		}
+		return false, err
+	default:
+		return false, fmt.Errorf("unsupported TCP fooling %q", action.TCPFooling)
+	}
+}
+
+func adjustTCPTimestamp(packet []byte, parsed parsedPacket, delta int) error {
+	if parsed.network != NetworkTCP || parsed.payloadOffset < parsed.transportOffset+20 {
+		return errors.New("TCP timestamp fooling requires a valid TCP header")
+	}
+	options := packet[parsed.transportOffset+20 : parsed.payloadOffset]
+	for offset := 0; offset < len(options); {
+		kind := options[offset]
+		switch kind {
+		case 0:
+			return errTCPTimestampNotPresent
+		case 1:
+			offset++
+			continue
+		}
+		if offset+2 > len(options) {
+			return errors.New("malformed TCP option")
+		}
+		length := int(options[offset+1])
+		if length < 2 || offset+length > len(options) {
+			return errors.New("malformed TCP option length")
+		}
+		if kind == 8 && length == 10 {
+			value := binary.BigEndian.Uint32(options[offset+2 : offset+6])
+			value = uint32(int64(value) + int64(delta))
+			binary.BigEndian.PutUint32(options[offset+2:offset+6], value)
+			return nil
+		}
+		offset += length
+	}
+	return errTCPTimestampNotPresent
+}
+
+func portRangeContains(portRange PortRange, port int) bool {
+	return portRange.First > 0 && port >= portRange.First && port <= portRange.Last
 }
 
 func protocolDecoyPayload(parsed parsedPacket) []byte {

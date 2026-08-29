@@ -35,6 +35,17 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 
+# Local developer toolchains are intentionally kept outside PATH so they do
+# not affect the rest of Windows. Make the repository-local Go SDK available
+# to every Go invocation in this build when no system installation exists.
+if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
+    $repositoryGoBin = Join-Path $ScriptRoot ".toolchain\go-1.25.13\go\bin"
+    $repositoryGoExe = Join-Path $repositoryGoBin "go.exe"
+    if (Test-Path -LiteralPath $repositoryGoExe -PathType Leaf) {
+        $env:Path = "$repositoryGoBin;$env:Path"
+    }
+}
+
 # Read version from version.json
 function Get-VersionInfo {
     $versionFile = Join-Path $ScriptRoot "version.json"
@@ -78,6 +89,37 @@ function Get-BuildHash {
     $bytes = [Text.Encoding]::UTF8.GetBytes($Revision)
     $digest = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
     return ([BitConverter]::ToString($digest).Replace("-", "").ToLowerInvariant()).Substring(0, 7)
+}
+
+function Get-DirtyBuildHash {
+    param(
+        [string]$Revision,
+        [string]$RepositoryRoot
+    )
+
+    $sourceFiles = @(& git -C $RepositoryRoot ls-files --cached --others --exclude-standard 2>$null |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Sort-Object -Unique)
+    if ($LASTEXITCODE -ne 0 -or $sourceFiles.Count -eq 0) {
+        throw "Could not enumerate source files for a dirty development build."
+    }
+
+    $fingerprint = [Text.StringBuilder]::new()
+    [void]$fingerprint.AppendLine($Revision)
+    foreach ($relativePath in $sourceFiles) {
+        $sourcePath = Join-Path $RepositoryRoot $relativePath
+        [void]$fingerprint.Append($relativePath.Replace('\\', '/'))
+        [void]$fingerprint.Append("`0")
+        if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
+            [void]$fingerprint.Append((Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant())
+        } else {
+            [void]$fingerprint.Append("missing")
+        }
+        [void]$fingerprint.AppendLine()
+    }
+    $bytes = [Text.Encoding]::UTF8.GetBytes($fingerprint.ToString())
+    $digest = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    return ([BitConverter]::ToString($digest).Replace("-", "").ToLowerInvariant()).Substring(0, 12)
 }
 
 function Copy-LicenseFile {
@@ -196,7 +238,11 @@ $willBuildWindows = $Build -or $Flutter -or $AppOnly -or $All -or (-not $Portabl
 if ($willBuildWindows -and $SourceDirty -and -not $dirtyBuildAllowed) {
     throw "Reproducible Windows packages require a clean Git worktree. Commit the intended source first, or use -AllowDirtySource for a development-only build."
 }
-$BuildHash = Get-BuildHash -Revision $SourceRevision
+$BuildHash = if ($SourceDirty) {
+    Get-DirtyBuildHash -Revision $SourceRevision -RepositoryRoot $ScriptRoot
+} else {
+    Get-BuildHash -Revision $SourceRevision
+}
 $sourceEpoch = 0L
 if ([long]::TryParse([string]$env:SOURCE_DATE_EPOCH, [ref]$sourceEpoch) -and $sourceEpoch -gt 0) {
     $BuildDate = ([DateTimeOffset]::FromUnixTimeSeconds($sourceEpoch)).UtcDateTime
@@ -526,6 +572,10 @@ function Get-InnoSetupCommand {
         }
         return $env:DROPO_INNO_ISCC_PATH
     }
+    $repositoryInno = Join-Path $ScriptRoot ".toolchain\inno\ISCC.exe"
+    if (Test-Path -LiteralPath $repositoryInno -PathType Leaf) {
+        return $repositoryInno
+    }
     foreach ($candidate in @(
         (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
         (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
@@ -745,8 +795,21 @@ function Build-Application {
         if ($ReuseFlutterWindowsOutput) {
             Write-Host "Reusing existing Flutter Windows Release output..." -ForegroundColor Yellow
         } else {
+            # Flutter/CMake can reuse an AOT snapshot compiled with an older
+            # --dart-define value even when the release build hash changes.
+            # That makes a freshly packaged UI reject its own freshly built
+            # core as an incompatible instance. Release builds must invalidate
+            # both layers of the Windows AOT cache before compiling the UI.
+            $flutterAOTCache = Join-Path $FlutterDir ".dart_tool\flutter_build"
+            $flutterWindowsCache = Join-Path $FlutterDir "build\windows"
+            foreach ($cachePath in @($flutterAOTCache, $flutterWindowsCache)) {
+                if (Test-Path -LiteralPath $cachePath) {
+                    Write-Host "[CLEAN] Removing stale Flutter release cache: $cachePath" -ForegroundColor Yellow
+                    Remove-Item -LiteralPath $cachePath -Recurse -Force
+                }
+            }
             Write-Host "Building Flutter Windows UI..." -ForegroundColor Gray
-            & $FlutterCmd build windows --release --build-name $AppVersion --build-number 1 --dart-define "DROPO_CORE_ENDPOINT=http://127.0.0.1:17890" --dart-define "DROPO_APP_VERSION=$AppVersion"
+            & $FlutterCmd build windows --release --build-name $AppVersion --build-number 1 --dart-define "DROPO_CORE_ENDPOINT=http://127.0.0.1:17890" --dart-define "DROPO_APP_VERSION=$AppVersion" --dart-define "DROPO_BUILD_HASH=$BuildHash"
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "[ERROR] Flutter Windows build failed." -ForegroundColor Red
                 exit 1
@@ -760,6 +823,17 @@ function Build-Application {
         Write-Host "[ERROR] Flutter output not found: $FlutterOutput" -ForegroundColor Red
         exit 1
     }
+    $flutterAOTSnapshot = Join-Path $FlutterOutput "data\app.so"
+    if (-not (Test-Path -LiteralPath $flutterAOTSnapshot -PathType Leaf)) {
+        Write-Host "[ERROR] Flutter AOT snapshot not found: $flutterAOTSnapshot" -ForegroundColor Red
+        exit 1
+    }
+    $flutterAOTText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($flutterAOTSnapshot))
+    if (-not $flutterAOTText.Contains($BuildHash)) {
+        Write-Host "[ERROR] Flutter AOT snapshot does not contain current build hash $BuildHash. Refusing to package a UI/core mismatch." -ForegroundColor Red
+        exit 1
+    }
+    $flutterAOTText = $null
     Copy-Item -Path (Join-Path $FlutterOutput "*") -Destination $RuntimeFolder -Recurse -Force
     $uiExe = Join-Path $RuntimeFolder "dropo.exe"
     if (-not (Test-Path $uiExe)) {
@@ -1012,7 +1086,8 @@ function Build-Application {
         [ordered]@{ name = "Xray-core"; SPDXID = "SPDXRef-Package-xray"; versionInfo = $XrayVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "MPL-2.0"; licenseDeclared = "MPL-2.0" },
         [ordered]@{ name = "WireGuard for Windows"; SPDXID = "SPDXRef-Package-wireguard"; versionInfo = $WireGuardVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "NOASSERTION"; licenseDeclared = "NOASSERTION" },
         [ordered]@{ name = "WinDivert"; SPDXID = "SPDXRef-Package-windivert"; versionInfo = $WinDivertVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "LGPL-3.0-only OR GPL-2.0-only"; licenseDeclared = "LGPL-3.0-only OR GPL-2.0-only" },
-        [ordered]@{ name = "tg-ws-proxy"; SPDXID = "SPDXRef-Package-tg-ws-proxy"; versionInfo = $TgWsProxyVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" }
+        [ordered]@{ name = "tg-ws-proxy"; SPDXID = "SPDXRef-Package-tg-ws-proxy"; versionInfo = $TgWsProxyVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" },
+        [ordered]@{ name = "Flowseal zapret-discord-youtube payloads"; SPDXID = "SPDXRef-Package-flowseal-payloads"; versionInfo = "1.10.2"; downloadLocation = "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.2"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" }
     )
     $spdxFiles = @()
     $spdxRelationships = @([ordered]@{ spdxElementId = "SPDXRef-DOCUMENT"; relationshipType = "DESCRIBES"; relatedSpdxElement = "SPDXRef-Package-dropo" })
@@ -1059,7 +1134,8 @@ function Build-Application {
                     [ordered]@{ uri = "pkg:generic/xray-core@$XrayVersion" },
                     [ordered]@{ uri = "pkg:generic/wireguard-windows@$WireGuardVersion" },
                     [ordered]@{ uri = "pkg:generic/windivert@$WinDivertVersion" },
-                    [ordered]@{ uri = "pkg:generic/tg-ws-proxy@$TgWsProxyVersion" }
+                    [ordered]@{ uri = "pkg:generic/tg-ws-proxy@$TgWsProxyVersion" },
+                    [ordered]@{ uri = "pkg:github/Flowseal/zapret-discord-youtube@1.10.2" }
                 )
             }
             runDetails = [ordered]@{ builder = [ordered]@{ id = "dropo-local-windows-builder" }; metadata = [ordered]@{ invocationId = $BuildHash; startedOn = $BuildTimestampISO } }
@@ -1138,8 +1214,13 @@ function Get-FlutterCommand {
         return $flutter.Source
     }
 
+    $repositoryFlutter = Join-Path $ScriptRoot ".toolchain\flutter\bin\flutter.bat"
+    if (Test-Path -LiteralPath $repositoryFlutter -PathType Leaf) {
+        return $repositoryFlutter
+    }
+
     $localFlutter = "E:\flutter-sdk\flutter\bin\flutter.bat"
-    if (Test-Path $localFlutter) {
+    if (Test-Path -LiteralPath $localFlutter -PathType Leaf) {
         return $localFlutter
     }
 

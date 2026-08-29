@@ -72,17 +72,54 @@ func TestVPNOnlyFilterDoesNotCaptureGlobalProcessSYN(t *testing.T) {
 	}
 }
 
+func TestScopedZapretFilterCapturesOnlyRelayTLSAndLeavesSteamOut(t *testing.T) {
+	services := []ServiceRule{{
+		ID: "discord", ProcessNames: []string{"Discord.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
+		DomainSuffixes: []string{"discord.com"}, TCPPorts: []int{443},
+	}}
+	filter, err := BuildSelectiveWinDivertFilterForModeAndZapretProxy(
+		services, 32123, false, PortRange{First: 20000, Last: 21999},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"tcp.SrcPort >= 20000", "tcp.SrcPort <= 21999", "tcp.PayloadLength >= 4",
+		"tcp.SrcPort == 32123", "udp.DstPort == 53",
+	} {
+		if !strings.Contains(filter, required) {
+			t.Fatalf("scoped Zapret filter is missing %q: %s", required, filter)
+		}
+	}
+	if strings.Contains(filter, winDivertCaptureFilter) {
+		t.Fatalf("scoped Zapret filter unexpectedly contains global protocol capture: %s", filter)
+	}
+	if strings.Contains(filter, "udp.PayloadLength") {
+		t.Fatalf("scoped Zapret filter unexpectedly captures global QUIC: %s", filter)
+	}
+}
+
+func TestScopedZapretFilterRejectsUnsafeSourceRanges(t *testing.T) {
+	for _, portRange := range []PortRange{
+		{First: 1, Last: 100}, {First: 22000, Last: 20000}, {First: 20000, Last: 25000},
+	} {
+		if _, err := BuildSelectiveWinDivertFilterForModeAndZapretProxy(nil, 32123, false, portRange); err == nil {
+			t.Fatalf("unsafe scoped Zapret source range accepted: %+v", portRange)
+		}
+	}
+}
+
 func TestSelectiveWinDivertFilterAddsOnlyBoundedProcessUDPDiscovery(t *testing.T) {
 	services := []ServiceRule{{
 		ID: "discord", DisplayName: "Discord", DomainSuffixes: []string{"discord.media"},
 		ProcessNames: []string{"Discord.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
-		ProcessDiscoveryUDPPortRanges: []PortRange{{First: 50000, Last: 50099}},
+		ProcessDiscoveryUDPPortRanges: []PortRange{{First: 50000, Last: 50100}},
 	}}
 	filter, err := BuildSelectiveWinDivertFilterForMode(services, 32123, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(filter, "udp.DstPort >= 50000") || !strings.Contains(filter, "udp.DstPort <= 50099") {
+	if !strings.Contains(filter, "udp.DstPort >= 50000") || !strings.Contains(filter, "udp.DstPort <= 50100") {
 		t.Fatalf("bounded process UDP discovery missing: %s", filter)
 	}
 	if strings.Contains(filter, "udp.PayloadLength") || strings.Contains(filter, "udp.DstPort > 0") {

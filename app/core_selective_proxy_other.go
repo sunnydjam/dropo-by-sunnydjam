@@ -6,7 +6,7 @@ import traffic "dropo/trafficorchestrator"
 
 type noopSelectiveProxyLease struct{}
 
-func prepareSelectiveProxyRouting(_ traffic.TrafficPlan, _ string) (selectiveProxyRoutingLease, error) {
+func prepareSelectiveProxyRouting(_ traffic.TrafficPlan, _, _ string) (selectiveProxyRoutingLease, error) {
 	return noopSelectiveProxyLease{}, nil
 }
 

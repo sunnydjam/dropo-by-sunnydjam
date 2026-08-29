@@ -34,7 +34,8 @@ type windowsSelectiveProxyLease struct {
 	listener    net.Listener
 	pacURL      string
 	pacURLBase  string
-	proxy       string
+	vpnProxy    string
+	zapretProxy string
 	script      string
 	revision    uint64
 	domainCount int
@@ -44,8 +45,11 @@ type windowsSelectiveProxyLease struct {
 	restored    bool
 }
 
-func prepareSelectiveProxyRouting(plan traffic.TrafficPlan, proxyAddress string) (selectiveProxyRoutingLease, error) {
-	script, domains, err := buildSelectiveProxyPAC(proxyAddress, selectedVPNDomainSuffixes(plan), directDomainSuffixesForPlan(plan))
+func prepareSelectiveProxyRouting(plan traffic.TrafficPlan, vpnProxyAddress, zapretProxyAddress string) (selectiveProxyRoutingLease, error) {
+	script, domains, err := buildSelectiveProxyPAC(
+		vpnProxyAddress, zapretProxyAddress,
+		selectedVPNDomainSuffixes(plan), selectedZapretDomainSuffixes(plan), directDomainSuffixesForPlan(plan),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +67,7 @@ func prepareSelectiveProxyRouting(plan traffic.TrafficPlan, proxyAddress string)
 	}
 	path := "/dropo-selective-" + hex.EncodeToString(tokenBytes) + ".pac"
 	lease := &windowsSelectiveProxyLease{
-		listener: listener, domainCount: len(domains), proxy: proxyAddress, script: script, revision: 1,
+		listener: listener, domainCount: len(domains), vpnProxy: vpnProxyAddress, zapretProxy: zapretProxyAddress, script: script, revision: 1,
 		pacURLBase: "http://" + listener.Addr().String() + path,
 	}
 	lease.pacURL = lease.pacURLBase + "?revision=1"
@@ -104,7 +108,10 @@ func (lease *windowsSelectiveProxyLease) Update(plan traffic.TrafficPlan) error 
 	if lease == nil {
 		return errors.New("selective PAC lease is not initialized")
 	}
-	script, domains, err := buildSelectiveProxyPAC(lease.proxy, selectedVPNDomainSuffixes(plan), directDomainSuffixesForPlan(plan))
+	script, domains, err := buildSelectiveProxyPAC(
+		lease.vpnProxy, lease.zapretProxy,
+		selectedVPNDomainSuffixes(plan), selectedZapretDomainSuffixes(plan), directDomainSuffixesForPlan(plan),
+	)
 	if err != nil {
 		return err
 	}
@@ -116,52 +123,20 @@ func (lease *windowsSelectiveProxyLease) Update(plan traffic.TrafficPlan) error 
 		lease.mu.Unlock()
 		return errors.New("selective PAC lease is already restored")
 	}
-	previousScript := lease.script
-	previousURL := lease.pacURL
-	previousCount := lease.domainCount
+	if lease.script == script {
+		lease.domainCount = len(domains)
+		lease.mu.Unlock()
+		return nil
+	}
+	// Keep one PAC URL for the complete selective session. Changing the URL on
+	// every immutable plan revision makes Chromium-based native applications
+	// (notably Steam WebHelper) tear down their proxy resolver and active TLS
+	// context. The response is explicitly non-cacheable, so a Windows settings
+	// notification is sufficient to fetch the updated script at the same URL.
 	lease.revision++
 	lease.script = script
 	lease.domainCount = len(domains)
-	lease.pacURL = fmt.Sprintf("%s?revision=%d", lease.pacURLBase, lease.revision)
-	currentURL := lease.pacURL
-	currentRevision := lease.revision
 	lease.mu.Unlock()
-	if err := setCurrentSelectivePAC(currentURL); err != nil {
-		lease.mu.Lock()
-		if lease.revision == currentRevision && !lease.restored {
-			lease.script = previousScript
-			lease.pacURL = previousURL
-			lease.domainCount = previousCount
-			lease.revision--
-		}
-		lease.mu.Unlock()
-		return err
-	}
-	return nil
-}
-
-func setCurrentSelectivePAC(pacURL string) error {
-	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsRegistryPath, registry.QUERY_VALUE|registry.SET_VALUE)
-	if err != nil {
-		return fmt.Errorf("open Windows proxy settings for update: %w", err)
-	}
-	defer key.Close()
-	previousURL := readRegistryStringState(key, "AutoConfigURL")
-	previousEnable := readRegistryDWORDState(key, "ProxyEnable")
-	previousDetect := readRegistryDWORDState(key, "AutoDetect")
-	if err := key.SetStringValue("AutoConfigURL", pacURL); err != nil {
-		return fmt.Errorf("update selective PAC URL: %w", err)
-	}
-	if err := key.SetDWordValue("ProxyEnable", 0); err != nil {
-		_ = restoreRegistryStringState(key, "AutoConfigURL", previousURL)
-		return fmt.Errorf("disable unconditional Windows proxy: %w", err)
-	}
-	if err := key.SetDWordValue("AutoDetect", 0); err != nil {
-		_ = restoreRegistryStringState(key, "AutoConfigURL", previousURL)
-		_ = restoreRegistryDWORDState(key, "ProxyEnable", previousEnable)
-		_ = restoreRegistryDWORDState(key, "AutoDetect", previousDetect)
-		return fmt.Errorf("disable proxy autodetection: %w", err)
-	}
 	notifyWindowsProxySettingsChanged()
 	return nil
 }

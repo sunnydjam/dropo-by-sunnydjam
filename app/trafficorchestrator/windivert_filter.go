@@ -43,6 +43,14 @@ const winDivertCaptureFilter = `outbound and !loopback and !impostor and (
     ))
 )`
 
+const winDivertTCPEvidenceFilter = `tcp.PayloadLength >= 4 and (
+    (tcp.Payload[0] == 0x16 and tcp.Payload[1] == 0x03) or
+    tcp.Payload32[0] == 0x47455420 or
+    tcp.Payload32[0] == 0x504f5354 or
+    tcp.Payload32[0] == 0x48454144 or
+    tcp.Payload32[0] == 0x4f505449
+)`
+
 // BuildSelectiveWinDivertFilter extends the protocol-evidence filter with the
 // complete TCP streams that the selective VPN relay can identify before the
 // first packet leaves the machine. A CIDR is not sufficient identity: the
@@ -64,8 +72,25 @@ func BuildSelectiveWinDivertFilter(services []ServiceRule, relayPort int) (strin
 // process+CIDR catalog. Unrelated TLS/QUIC traffic (Steam, games and other direct
 // applications) never enters user mode.
 func BuildSelectiveWinDivertFilterForMode(services []ServiceRule, relayPort int, captureProtocolEvidence bool) (string, error) {
+	return BuildSelectiveWinDivertFilterForModeAndZapretProxy(services, relayPort, captureProtocolEvidence, PortRange{})
+}
+
+// BuildSelectiveWinDivertFilterForModeAndZapretProxy adds one bounded source
+// port range owned exclusively by Dropo's in-process CONNECT relay. Browser and
+// Electron traffic selected by PAC is re-originated from that range, allowing
+// Zapret classification without diverting every unrelated TLS/QUIC handshake
+// on the machine through user mode.
+func BuildSelectiveWinDivertFilterForModeAndZapretProxy(services []ServiceRule, relayPort int, captureProtocolEvidence bool, zapretSourcePorts PortRange) (string, error) {
 	if relayPort < 1 || relayPort > 65535 {
 		return "", errors.New("TCP relay port is outside 1..65535")
+	}
+	if zapretSourcePorts != (PortRange{}) {
+		if zapretSourcePorts.First < 1024 || zapretSourcePorts.Last > 65535 || zapretSourcePorts.First > zapretSourcePorts.Last {
+			return "", errors.New("Zapret CONNECT source port range is invalid")
+		}
+		if zapretSourcePorts.Last-zapretSourcePorts.First+1 > 4096 {
+			return "", errors.New("Zapret CONNECT source port range exceeds 4096 ports")
+		}
 	}
 	type captureRule struct {
 		network Network
@@ -163,6 +188,12 @@ func BuildSelectiveWinDivertFilterForMode(services []ServiceRule, relayPort int,
 	parts := make([]string, 0, 6)
 	if captureProtocolEvidence {
 		parts = append(parts, "("+winDivertCaptureFilter+")")
+	}
+	if zapretSourcePorts != (PortRange{}) {
+		parts = append(parts, fmt.Sprintf(
+			"(outbound and !loopback and !impostor and tcp and tcp.SrcPort >= %d and tcp.SrcPort <= %d and (%s))",
+			zapretSourcePorts.First, zapretSourcePorts.Last, winDivertTCPEvidenceFilter,
+		))
 	}
 	parts = append(parts,
 		fmt.Sprintf("(outbound and !impostor and tcp and tcp.SrcPort == %d)", relayPort),

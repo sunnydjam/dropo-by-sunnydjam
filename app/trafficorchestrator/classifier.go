@@ -16,6 +16,7 @@ type compiledServiceRule struct {
 	fingerprints map[string]struct{}
 	tcpPorts     map[int]struct{}
 	udpPorts     map[int]struct{}
+	udpRanges    []PortRange
 }
 
 // Classifier is immutable and safe for concurrent use. A new classifier is
@@ -50,6 +51,7 @@ func NewClassifier(plan TrafficPlan) (*Classifier, error) {
 			fingerprints: stringSet(service.Fingerprints, normalizeToken),
 			tcpPorts:     intSet(service.TCPPorts),
 			udpPorts:     intSet(service.UDPPorts),
+			udpRanges:    append([]PortRange(nil), service.ProcessDiscoveryUDPPortRanges...),
 		}
 		for _, cidr := range service.IPCIDRs {
 			prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
@@ -160,9 +162,16 @@ func (r compiledServiceRule) portAllows(network Network, port int) bool {
 		_, ok := r.tcpPorts[port]
 		return ok
 	}
-	if network == NetworkUDP && len(r.udpPorts) > 0 {
-		_, ok := r.udpPorts[port]
-		return ok
+	if network == NetworkUDP && (len(r.udpPorts) > 0 || len(r.udpRanges) > 0) {
+		if _, ok := r.udpPorts[port]; ok {
+			return true
+		}
+		for _, portRange := range r.udpRanges {
+			if port >= portRange.First && port <= portRange.Last {
+				return true
+			}
+		}
+		return false
 	}
 	return true
 }

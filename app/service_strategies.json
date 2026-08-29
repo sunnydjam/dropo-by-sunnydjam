@@ -1,15 +1,15 @@
 {
-  "version": 12,
-  "updated": "2026-08-25",
+  "version": 13,
+  "updated": "2026-08-29",
   "note": "Per-service native DPI-bypass ladders. blockType: 'dpi' uses the local packet engine; 'vpn' uses the ordered VPN-source fallback. Strategy names describe Dropo's typed packet actions; research provenance is kept in THIRD_PARTY_NOTICES.md.",
   "services": {
     "discord": {
-      "source": "All 22 Flowseal zapret-discord-youtube 1.10.2 general profiles plus Dropo live-media diagnostics, adapted to typed bounded actions",
+      "source": "Flowseal zapret-discord-youtube 1.10.2 profiles adapted to typed bounded actions; General ALT is an exact native priority profile, remaining profiles are staged adaptations",
       "blockType": "dpi",
       "methods": [
+        { "tag": "flowseal-1102-discord-alt", "label": "Flowseal 1.10.2 ALT exact — Discord", "technique": "fakedsplit-ts", "nativeStrategy": "native-discord-flowseal-1102-alt", "repeats": 6, "quic": "google" },
         { "tag": "flowseal-1102-discord-alt13", "label": "Flowseal 1.10.2 ALT13 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt13", "seqovl": 681, "pos": 1, "repeats": 7, "quic": "google" },
         { "tag": "flowseal-1102-discord-general", "label": "Flowseal 1.10.2 General — Discord", "technique": "multisplit", "nativeStrategy": "native-discord-flowseal-1102-general", "seqovl": 681, "pos": 1, "quic": "google" },
-        { "tag": "flowseal-1102-discord-alt", "label": "Flowseal 1.10.2 ALT — Discord", "technique": "fakedsplit-ts", "nativeStrategy": "native-discord-flowseal-1102-alt", "repeats": 6, "quic": "google" },
         { "tag": "flowseal-1102-discord-alt2", "label": "Flowseal 1.10.2 ALT2 — Discord", "technique": "multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt2", "seqovl": 652, "pos": 2, "quic": "google" },
         { "tag": "flowseal-1102-discord-alt3", "label": "Flowseal 1.10.2 ALT3 — Discord", "technique": "multidisorder", "nativeStrategy": "native-discord-flowseal-1102-alt3", "repeats": 6, "quic": "google" },
         { "tag": "flowseal-1102-discord-alt4", "label": "Flowseal 1.10.2 ALT4 — Discord", "technique": "fake-multisplit", "nativeStrategy": "native-discord-flowseal-1102-alt4", "pos": 2, "repeats": 6, "quic": "google" },
@@ -36,12 +36,12 @@
       ]
     },
     "youtube": {
-      "source": "All 22 Flowseal zapret-discord-youtube 1.10.2 general profiles plus Dropo typed equivalents; hostfakesplit is represented by a safe service-scoped SNI split adaptation",
+      "source": "Flowseal zapret-discord-youtube 1.10.2 profiles adapted to typed bounded actions; General ALT is an exact native priority profile, remaining profiles are staged adaptations",
       "blockType": "dpi",
       "methods": [
+        { "tag": "flowseal-1102-youtube-alt", "label": "Flowseal 1.10.2 ALT exact — YouTube", "technique": "fakedsplit-ts", "nativeStrategy": "native-flowseal-1102-youtube-alt", "repeats": 6, "quic": "google" },
         { "tag": "flowseal-1102-youtube-alt13", "label": "Flowseal 1.10.2 ALT13 — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt13", "pos": 1, "quic": "google" },
         { "tag": "flowseal-1102-youtube-general", "label": "Flowseal 1.10.2 General — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-general", "seqovl": 681, "pos": 1, "quic": "google" },
-        { "tag": "flowseal-1102-youtube-alt", "label": "Flowseal 1.10.2 ALT — YouTube", "technique": "fakedsplit-ts", "nativeStrategy": "native-flowseal-1102-youtube-alt", "repeats": 6, "quic": "google" },
         { "tag": "flowseal-1102-youtube-alt2", "label": "Flowseal 1.10.2 ALT2 — YouTube", "technique": "multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt2", "seqovl": 652, "pos": 2, "quic": "google" },
         { "tag": "flowseal-1102-youtube-alt3", "label": "Flowseal 1.10.2 ALT3 — YouTube", "technique": "multidisorder", "nativeStrategy": "native-flowseal-1102-youtube-alt3", "repeats": 6, "quic": "google" },
         { "tag": "flowseal-1102-youtube-alt4", "label": "Flowseal 1.10.2 ALT4 — YouTube", "technique": "fake-multisplit", "nativeStrategy": "native-flowseal-1102-youtube-alt4", "pos": 2, "repeats": 6, "quic": "google" },

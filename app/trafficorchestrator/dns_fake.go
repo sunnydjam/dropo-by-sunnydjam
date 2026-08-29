@@ -22,9 +22,10 @@ func NewDNSFakeResponder(directory *FakeIPDirectory) *DNSFakeResponder {
 	return &DNSFakeResponder{directory: directory}
 }
 
-// Respond synthesizes an inbound DNS answer only for selected VPN domains.
-// All other queries are returned as handled=false and pass unchanged. AAAA and
-// HTTPS/SVCB hints receive NODATA so a client cannot bypass the fake IPv4 path.
+// Respond synthesizes an inbound DNS answer only for selected VPN domains and
+// exact Zapret bootstrap hosts. All other queries are returned as handled=false
+// and pass unchanged. AAAA and HTTPS/SVCB hints receive NODATA so a client
+// cannot bypass the fake IPv4 path.
 func (responder *DNSFakeResponder) Respond(parsed parsedPacket) ([]byte, FakeIPTarget, bool, error) {
 	if responder == nil || responder.directory == nil || parsed.network != NetworkUDP || parsed.destinationPort != 53 {
 		return nil, FakeIPTarget{}, false, nil

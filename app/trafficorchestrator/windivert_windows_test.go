@@ -80,6 +80,9 @@ func TestWinDivertCaptureFilterCompilesWithBundledRuntime(t *testing.T) {
 	if err := dll.Load(); err != nil {
 		t.Fatalf("load bundled WinDivert: %v", err)
 	}
+	if err := dll.NewProc("WinDivertSendEx").Find(); err != nil {
+		t.Fatalf("bundled WinDivert lacks batch reinjection: %v", err)
+	}
 	compile := dll.NewProc("WinDivertHelperCompileFilter")
 	if err := compile.Find(); err != nil {
 		t.Fatal(err)

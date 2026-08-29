@@ -30,17 +30,17 @@ type selectiveNameResolutionPlan struct {
 	Directory *traffic.FakeIPDirectory
 }
 
-func selectedVPNFakeHostMappings(plan traffic.TrafficPlan, directory *traffic.FakeIPDirectory) []selectiveFakeHostMapping {
+func selectedFakeHostMappings(plan traffic.TrafficPlan, directory *traffic.FakeIPDirectory) []selectiveFakeHostMapping {
 	if directory == nil {
 		return nil
 	}
-	vpn := make(map[string]bool, len(plan.Routes))
+	selected := make(map[string]bool, len(plan.Routes))
 	for _, route := range plan.Routes {
-		vpn[route.ServiceID] = route.Kind == traffic.ServiceRouteVPN
+		selected[route.ServiceID] = route.Kind == traffic.ServiceRouteVPN || route.Kind == traffic.ServiceRouteZapret
 	}
 	hosts := make([]string, 0)
 	for _, service := range plan.Services {
-		if vpn[service.ID] {
+		if selected[service.ID] {
 			hosts = append(hosts, service.ExactHosts...)
 		}
 	}
@@ -54,10 +54,41 @@ func selectedVPNFakeHostMappings(plan traffic.TrafficPlan, directory *traffic.Fa
 	return result
 }
 
+// selectedFakeHostsConflictScope keeps the existing VPN suffix behavior but
+// adds only exact Zapret bootstrap names. Dynamic Zapret suffixes continue to
+// resolve normally and therefore cannot disturb unrelated native applications.
+func selectedFakeHostsConflictScope(plan traffic.TrafficPlan) map[string]struct{} {
+	result := selectedVPNDomainSuffixes(plan)
+	zapret := make(map[string]bool, len(plan.Routes))
+	for _, route := range plan.Routes {
+		zapret[route.ServiceID] = route.Kind == traffic.ServiceRouteZapret
+	}
+	for _, service := range plan.Services {
+		if !zapret[service.ID] {
+			continue
+		}
+		for _, host := range service.ExactHosts {
+			host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+			if host != "" {
+				result[host] = struct{}{}
+			}
+		}
+	}
+	return result
+}
+
 func selectedVPNDomainSuffixes(plan traffic.TrafficPlan) map[string]struct{} {
+	return selectedDomainSuffixesForRoute(plan, traffic.ServiceRouteVPN)
+}
+
+func selectedZapretDomainSuffixes(plan traffic.TrafficPlan) map[string]struct{} {
+	return selectedDomainSuffixesForRoute(plan, traffic.ServiceRouteZapret)
+}
+
+func selectedDomainSuffixesForRoute(plan traffic.TrafficPlan, kind traffic.ServiceRouteKind) map[string]struct{} {
 	vpn := make(map[string]bool, len(plan.Routes))
 	for _, route := range plan.Routes {
-		vpn[route.ServiceID] = route.Kind == traffic.ServiceRouteVPN
+		vpn[route.ServiceID] = route.Kind == kind
 	}
 	result := make(map[string]struct{})
 	for _, service := range plan.Services {
@@ -140,6 +171,12 @@ func removeSelectiveFakeHosts(input []byte) ([]byte, int) {
 		kept = append(kept, line)
 	}
 	return []byte(strings.Join(kept, "")), removed
+}
+
+func restoreSelectiveHostsContent(input []byte) ([]byte, int) {
+	output, removed := removeSelectiveFakeHosts(input)
+	output, restored := restoreSelectedVPNHostsMappings(output)
+	return output, removed + restored
 }
 
 // disableSelectedVPNHostsMappings comments only complete hosts-file records

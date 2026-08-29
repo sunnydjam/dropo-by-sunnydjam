@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -21,18 +23,19 @@ type NativeTrafficManager struct {
 	basePath string
 	logger   func(string)
 
-	mu        sync.Mutex
-	engine    *traffic.Engine
-	processor *traffic.Processor
-	relay     *traffic.TCPRelay
-	udpRelay  *traffic.UDPRelay
-	fakeIPs   *traffic.FakeIPDirectory
-	plan      traffic.TrafficPlan
-	activeTag string
-	openCount uint64
-	selective *nativeSelectiveSession
-	resolver  selectiveNameResolutionLease
-	proxyPAC  selectiveProxyRoutingLease
+	mu          sync.Mutex
+	engine      *traffic.Engine
+	processor   *traffic.Processor
+	relay       *traffic.TCPRelay
+	udpRelay    *traffic.UDPRelay
+	zapretProxy *zapretConnectProxy
+	fakeIPs     *traffic.FakeIPDirectory
+	plan        traffic.TrafficPlan
+	activeTag   string
+	openCount   uint64
+	selective   *nativeSelectiveSession
+	resolver    selectiveNameResolutionLease
+	proxyPAC    selectiveProxyRoutingLease
 }
 
 type nativeSelectiveSession struct {
@@ -100,12 +103,12 @@ func (m *NativeTrafficManager) ConfigureSelectiveSession(proxyAddress string, ca
 	}
 	// Compile a representative filter before mutating manager state. The real
 	// relay chooses its port at StartPlan and the exact same builder is rerun.
-	if _, err := traffic.BuildSelectiveWinDivertFilterForMode(catalog, 32000, captureProtocolEvidence); err != nil {
+	if _, err := traffic.BuildSelectiveWinDivertFilterForModeAndZapretProxy(catalog, 32000, captureProtocolEvidence, zapretConnectSourcePorts); err != nil {
 		return fmt.Errorf("validate selective capture catalog: %w", err)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.engine != nil || m.relay != nil || m.udpRelay != nil {
+	if m.engine != nil || m.relay != nil || m.udpRelay != nil || m.zapretProxy != nil {
 		return errors.New("cannot change Windows traffic session while the engine is active")
 	}
 	m.selective = &nativeSelectiveSession{
@@ -122,7 +125,7 @@ func (m *NativeTrafficManager) ConfigureTUNSession() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.engine != nil || m.relay != nil || m.udpRelay != nil {
+	if m.engine != nil || m.relay != nil || m.udpRelay != nil || m.zapretProxy != nil {
 		return errors.New("cannot change Windows traffic session while the engine is active")
 	}
 	m.selective = nil
@@ -189,12 +192,18 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 			return err
 		}
 		if overlayChanged {
+			if err := m.zapretProxy.Update(plan); err != nil {
+				m.rollbackSelectivePlan(previous, plan.Revision)
+				return fmt.Errorf("update scoped Zapret CONNECT routing: %w", err)
+			}
 			if err := m.resolver.Update(selectiveNameResolutionPlan{Plan: plan, Directory: m.fakeIPs}); err != nil {
 				m.rollbackSelectivePlan(previous, plan.Revision)
+				_ = m.zapretProxy.Update(previous)
 				return fmt.Errorf("update selective name resolution: %w", err)
 			}
 			if err := m.proxyPAC.Update(plan); err != nil {
 				m.rollbackSelectivePlan(previous, plan.Revision)
+				_ = m.zapretProxy.Update(previous)
 				_ = m.resolver.Update(selectiveNameResolutionPlan{Plan: m.plan, Directory: m.fakeIPs})
 				return fmt.Errorf("update selective PAC routing: %w", err)
 			}
@@ -205,12 +214,13 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 		return nil
 	}
 	var (
-		processor *traffic.Processor
-		backend   *traffic.WinDivertBackend
-		relay     *traffic.TCPRelay
-		udpRelay  *traffic.UDPRelay
-		directory *traffic.FakeIPDirectory
-		err       error
+		processor   *traffic.Processor
+		backend     *traffic.WinDivertBackend
+		relay       *traffic.TCPRelay
+		udpRelay    *traffic.UDPRelay
+		zapretProxy *zapretConnectProxy
+		directory   *traffic.FakeIPDirectory
+		err         error
 	)
 	if m.selective == nil {
 		processor, err = traffic.NewProcessorWithIdentityResolver(plan, traffic.NewWindowsFlowIdentityResolver())
@@ -223,8 +233,25 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 		if directoryErr != nil {
 			return fmt.Errorf("compile selective fake-IP directory: %w", directoryErr)
 		}
+		zapretProxy, err = startZapretConnectProxy(plan, m.log)
 		registry := traffic.NewTCPRedirectRegistry()
-		relay, err = traffic.StartTCPRelay(registry, m.selective.proxyAddress, m.log)
+		if err == nil {
+			relay, err = traffic.StartTCPRelayWithDialer(registry, func(ctx context.Context, target traffic.TCPRedirectTarget) (net.Conn, error) {
+				switch target.Route {
+				case traffic.ServiceRouteVPN:
+					host := target.Host
+					if host == "" {
+						host = target.Flow.Destination.String()
+					}
+					destination := net.JoinHostPort(host, strconv.Itoa(int(target.Flow.DestinationPort)))
+					return traffic.DialLoopbackSOCKS5(ctx, m.selective.proxyAddress, destination)
+				case traffic.ServiceRouteZapret:
+					return zapretProxy.dialRedirected(ctx, target)
+				default:
+					return nil, fmt.Errorf("unsupported selective relay route %q", target.Route)
+				}
+			}, m.log)
+		}
 		if err == nil {
 			udpRegistry := traffic.NewUDPRedirectRegistry()
 			udpRelay, err = traffic.StartUDPRelay(udpRegistry, m.selective.proxyAddress, relay.Port(), m.log)
@@ -242,9 +269,9 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 			}
 			if err == nil {
 				var filter string
-				filter, err = traffic.BuildSelectiveWinDivertFilterForMode(m.selective.catalog, relay.Port(), m.selective.captureProtocolEvidence)
+				filter, err = traffic.BuildSelectiveWinDivertFilterForModeAndZapretProxy(m.selective.catalog, relay.Port(), m.selective.captureProtocolEvidence, zapretConnectSourcePorts)
 				if err == nil {
-					processor, err = traffic.NewProcessorWithFullSelectiveRuntime(plan, traffic.NewWindowsFlowIdentityResolver(), redirector, udpRedirector, directory)
+					processor, err = traffic.NewProcessorWithScopedZapretRuntime(plan, traffic.NewWindowsFlowIdentityResolver(), redirector, udpRedirector, directory, zapretConnectSourcePorts)
 				}
 				if err == nil {
 					backend, err = traffic.OpenWinDivertBackendWithFilter(m.dllPath(), filter)
@@ -253,6 +280,9 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 		}
 	}
 	if err != nil {
+		if zapretProxy != nil {
+			_ = zapretProxy.Close()
+		}
 		if udpRelay != nil {
 			_ = udpRelay.Close()
 		}
@@ -264,6 +294,9 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 	engine, err := traffic.NewEngine(backend, processor, m.log)
 	if err != nil {
 		_ = backend.Close()
+		if zapretProxy != nil {
+			_ = zapretProxy.Close()
+		}
 		if udpRelay != nil {
 			_ = udpRelay.Close()
 		}
@@ -274,6 +307,9 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 	}
 	if err := engine.Start(); err != nil {
 		_ = backend.Close()
+		if zapretProxy != nil {
+			_ = zapretProxy.Close()
+		}
 		if udpRelay != nil {
 			_ = udpRelay.Close()
 		}
@@ -288,6 +324,9 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 		resolver, err = prepareSelectiveNameResolution(plan, directory)
 		if err != nil {
 			_ = engine.Stop()
+			if zapretProxy != nil {
+				_ = zapretProxy.Close()
+			}
 			if udpRelay != nil {
 				_ = udpRelay.Close()
 			}
@@ -296,10 +335,13 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 			}
 			return fmt.Errorf("prepare selective name resolution: %w", err)
 		}
-		proxyPAC, err = prepareSelectiveProxyRouting(plan, m.selective.proxyAddress)
+		proxyPAC, err = prepareSelectiveProxyRouting(plan, m.selective.proxyAddress, zapretProxy.Address())
 		if err != nil {
 			_ = resolver.Restore()
 			_ = engine.Stop()
+			if zapretProxy != nil {
+				_ = zapretProxy.Close()
+			}
 			if udpRelay != nil {
 				_ = udpRelay.Close()
 			}
@@ -313,6 +355,7 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 	m.processor = processor
 	m.relay = relay
 	m.udpRelay = udpRelay
+	m.zapretProxy = zapretProxy
 	m.fakeIPs = directory
 	m.resolver = resolver
 	m.proxyPAC = proxyPAC
@@ -321,7 +364,7 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 	m.openCount++
 	mode := "tun-sidecar"
 	if m.selective != nil {
-		mode = fmt.Sprintf("selective relay=%d protocol_evidence=%t", relay.Port(), m.selective.captureProtocolEvidence)
+		mode = fmt.Sprintf("selective relay=%d scoped_zapret=%s protocol_evidence=%t", relay.Port(), zapretProxy.Address(), m.selective.captureProtocolEvidence)
 		if resolver != nil {
 			m.log(fmt.Sprintf("selective DNS cache refreshed; primed %d native-app host(s), temporarily disabled %d conflicting hosts mapping(s)", resolver.PrimedMappings(), resolver.DisabledMappings()))
 		}
@@ -364,12 +407,14 @@ func (m *NativeTrafficManager) Stop() {
 	processor := m.processor
 	relay := m.relay
 	udpRelay := m.udpRelay
+	zapretProxy := m.zapretProxy
 	resolver := m.resolver
 	proxyPAC := m.proxyPAC
 	m.engine = nil
 	m.processor = nil
 	m.relay = nil
 	m.udpRelay = nil
+	m.zapretProxy = nil
 	m.fakeIPs = nil
 	m.resolver = nil
 	m.proxyPAC = nil
@@ -389,6 +434,11 @@ func (m *NativeTrafficManager) Stop() {
 			m.log("selective PAC restore error: " + err.Error())
 		} else {
 			m.log("selective PAC removed and previous Windows proxy settings restored")
+		}
+	}
+	if zapretProxy != nil {
+		if err := zapretProxy.Close(); err != nil {
+			m.log("scoped Zapret CONNECT proxy stop error: " + err.Error())
 		}
 	}
 	if udpRelay != nil {
@@ -433,7 +483,7 @@ func logSelectiveServiceCounters(log func(string), counters map[string]traffic.S
 	sort.Strings(services)
 	for _, service := range services {
 		value := counters[service]
-		log(fmt.Sprintf("service=%s matched=%d transformed=%d passed=%d errors=%d", service, value.Matched, value.Transformed, value.Passed, value.Errors))
+		log(fmt.Sprintf("service=%s matched=%d transformed=%d passed=%d errors=%d throttled=%d", service, value.Matched, value.Transformed, value.Passed, value.Errors, value.Throttled))
 	}
 }
 
@@ -445,6 +495,7 @@ func sameSelectivePlanScope(previous, next traffic.TrafficPlan) bool {
 
 func sameSelectiveRoutingOverlay(previous, next traffic.TrafficPlan) bool {
 	return reflect.DeepEqual(selectedVPNDomainSuffixes(previous), selectedVPNDomainSuffixes(next)) &&
+		reflect.DeepEqual(selectedZapretDomainSuffixes(previous), selectedZapretDomainSuffixes(next)) &&
 		reflect.DeepEqual(directDomainSuffixesForPlan(previous), directDomainSuffixesForPlan(next))
 }
 

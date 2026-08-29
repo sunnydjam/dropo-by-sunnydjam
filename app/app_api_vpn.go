@@ -178,7 +178,8 @@ func (a *App) Start() map[string]interface{} {
 		}
 	}
 	selectiveWindowsSession := false
-	selectiveProtocolEvidence := true
+	selectiveProtocolEvidence := false
+	selectiveCaptureCatalog := nativeSelectiveCaptureCatalog()
 	a.logFreeMethodOptOutRoute(configPath)
 	networkMode := a.currentNetworkModeStatus()
 	a.writeLog(fmt.Sprintf("[NetworkMode] requested=%s active=%s fallback=%t reason=%s", networkMode.Requested, networkMode.Active, networkMode.Fallback, networkMode.FallbackReason))
@@ -312,7 +313,11 @@ func (a *App) Start() map[string]interface{} {
 			// With free-access packet strategies disabled, selected services use
 			// only PAC/fake-DNS VPN routing. Avoid capturing unrelated application
 			// TLS/QUIC handshakes (notably Steam's CEF store) in that mode.
-			selectiveProtocolEvidence = FreeMethodsAllowed(settings)
+			// Zapret browser/Electron domains use the scoped in-process CONNECT
+			// relay. Its fixed source-port range is the only TCP evidence captured;
+			// unrelated Steam/game TLS and QUIC stay entirely in the kernel path.
+			selectiveProtocolEvidence = false
+			selectiveCaptureCatalog = nativeSelectiveCaptureCatalogForSettings(settings)
 			proxyConfigPath, proxyErr := a.writeDeepWindowsProxyFallbackConfig(configPath)
 			if proxyErr != nil {
 				a.hasError.Store(true)
@@ -421,7 +426,7 @@ func (a *App) Start() map[string]interface{} {
 				return map[string]interface{}{"success": false, "error": "Локальный selective VPN proxy не запустился"}
 			}
 			proxyAddress := fmt.Sprintf("127.0.0.1:%d", defaultDropoMixedProxyPort)
-			if err := a.trafficEngine.ConfigureSelectiveSession(proxyAddress, nativeSelectiveCaptureCatalog(), selectiveProtocolEvidence); err != nil {
+			if err := a.trafficEngine.ConfigureSelectiveSession(proxyAddress, selectiveCaptureCatalog, selectiveProtocolEvidence); err != nil {
 				terminateProcessTree(cmd)
 				_ = cmd.Wait()
 				a.mu.Lock()
@@ -535,11 +540,19 @@ func (a *App) Start() map[string]interface{} {
 	// Monitor process in goroutine
 	go func(cmd *exec.Cmd, done chan error) {
 		err := cmd.Wait()
-		done <- err
-		close(done)
 		a.mu.Lock()
 		wasStoppedManually := a.stoppedManually
 		isCurrentProcess := a.cmd == cmd
+		if !isCurrentProcess || wasStoppedManually {
+			a.mu.Unlock()
+			if isCurrentProcess && a.trafficStats != nil {
+				a.trafficStats.EndSession()
+				a.trafficStats.Save()
+			}
+			done <- err
+			close(done)
+			return
+		}
 		if isCurrentProcess {
 			a.isRunning = false
 			a.stoppedManually = false
@@ -552,6 +565,8 @@ func (a *App) Start() map[string]interface{} {
 			a.trafficStats.EndSession()
 			a.trafficStats.Save()
 		}
+		done <- err
+		close(done)
 
 		// ALWAYS stop WireGuard tunnels when VPN process exits
 		// This prevents orphaned tunnels that block user's native WireGuard
@@ -567,18 +582,7 @@ func (a *App) Start() map[string]interface{} {
 		a.cleanupDropoRuntimeResidue("process exit")
 		a.mu.Lock()
 
-		if !isCurrentProcess {
-			a.closeLogFile()
-			a.mu.Unlock()
-			return
-		}
-
-		if wasStoppedManually {
-			// Manual stop - not an error
-			a.writeLog("VPN stopped by user")
-			a.AddToLogBuffer("VPN остановлен пользователем")
-			UpdateTrayIcon("disconnected")
-		} else if err != nil {
+		if err != nil {
 			a.hasError.Store(true)
 			a.writeLog(fmt.Sprintf("VPN process exited with error: %v", err))
 			a.AddToLogBuffer(fmt.Sprintf("VPN завершился с ошибкой: %v", err))
@@ -950,11 +954,19 @@ func (a *App) startSingBoxProxyFallback(configPath, logLevel string) error {
 
 func (a *App) monitorSingBoxProcess(cmd *exec.Cmd, done chan error) {
 	err := cmd.Wait()
-	done <- err
-	close(done)
 	a.mu.Lock()
 	wasStoppedManually := a.stoppedManually
 	isCurrentProcess := a.cmd == cmd
+	if !isCurrentProcess || wasStoppedManually {
+		a.mu.Unlock()
+		if isCurrentProcess && a.trafficStats != nil {
+			a.trafficStats.EndSession()
+			a.trafficStats.Save()
+		}
+		done <- err
+		close(done)
+		return
+	}
 	if isCurrentProcess {
 		a.isRunning = false
 		a.stoppedManually = false
@@ -966,6 +978,8 @@ func (a *App) monitorSingBoxProcess(cmd *exec.Cmd, done chan error) {
 		a.trafficStats.EndSession()
 		a.trafficStats.Save()
 	}
+	done <- err
+	close(done)
 
 	a.mu.Unlock()
 	a.stopNativeWireGuardTunnels()
@@ -976,17 +990,7 @@ func (a *App) monitorSingBoxProcess(cmd *exec.Cmd, done chan error) {
 	a.cleanupDropoRuntimeResidue("process exit")
 	a.mu.Lock()
 
-	if !isCurrentProcess {
-		a.closeLogFile()
-		a.mu.Unlock()
-		return
-	}
-
-	if wasStoppedManually {
-		a.writeLog("VPN stopped by user")
-		a.AddToLogBuffer("VPN остановлен пользователем")
-		UpdateTrayIcon("disconnected")
-	} else if err != nil {
+	if err != nil {
 		a.hasError.Store(true)
 		a.writeLog(fmt.Sprintf("VPN process exited with error: %v", err))
 		a.AddToLogBuffer(fmt.Sprintf("VPN завершился с ошибкой: %v", err))
@@ -1529,7 +1533,8 @@ func (a *App) Stop() map[string]interface{} {
 	a.hasError.Store(false)
 	a.mu.Unlock()
 	UpdateTrayIcon("disconnected")
-	if !processExited && a.ctx != nil {
+	a.closeLogFile()
+	if a.ctx != nil {
 		a.emitEvent("vpn-status-changed", false)
 	}
 

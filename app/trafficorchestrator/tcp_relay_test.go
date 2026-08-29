@@ -30,7 +30,7 @@ func TestTCPRedirectRegistryConsumesReflectedTupleOnce(t *testing.T) {
 	}
 }
 
-func TestTCPRedirectRegistryExpiresAndRejectsNonVPN(t *testing.T) {
+func TestTCPRedirectRegistryExpiresAndRejectsDirect(t *testing.T) {
 	registry := NewTCPRedirectRegistry()
 	now := time.Unix(100, 0)
 	registry.now = func() time.Time { return now }
@@ -50,6 +50,20 @@ func TestTCPRedirectRegistryExpiresAndRejectsNonVPN(t *testing.T) {
 	remote := &net.TCPAddr{IP: net.ParseIP("66.22.200.1"), Port: 51000}
 	if _, ok := registry.ConsumeAccepted(local, remote); ok {
 		t.Fatal("expired redirect target was consumed")
+	}
+}
+
+func TestTCPRedirectRegistryAcceptsTypedZapretTarget(t *testing.T) {
+	registry := NewTCPRedirectRegistry()
+	target := TCPRedirectTarget{
+		Flow: FlowTuple{
+			Network: NetworkTCP, Source: netip.MustParseAddr("192.0.2.10"), SourcePort: 51000,
+			Destination: netip.MustParseAddr("198.18.1.20"), DestinationPort: 443,
+		},
+		Host: "updates.discord.com", ServiceID: "discord", Route: ServiceRouteZapret,
+	}
+	if err := registry.Register(target); err != nil {
+		t.Fatalf("typed Zapret redirect was rejected: %v", err)
 	}
 }
 

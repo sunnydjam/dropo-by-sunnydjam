@@ -77,6 +77,71 @@ func TestFakeIPDirectoryAppliesTypedRouteRevision(t *testing.T) {
 	}
 }
 
+func TestFakeIPDirectoryMapsOnlyExactZapretBootstrapHosts(t *testing.T) {
+	plan := fakeIPTestPlan()
+	plan.Services = append(plan.Services, ServiceRule{
+		ID: "discord", DisplayName: "Discord", ExactHosts: []string{"updates.discord.com"},
+		DomainSuffixes: []string{"discord.com"}, TCPPorts: []int{443},
+	})
+	plan.Routes = append(plan.Routes, ServiceRoute{ServiceID: "discord", Kind: ServiceRouteZapret})
+	directory, err := NewFakeIPDirectory(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, ok := directory.ResolveHost("updates.discord.com")
+	if !ok || target.ServiceID != "discord" || target.Route != ServiceRouteZapret {
+		t.Fatalf("Zapret bootstrap target = %+v, found=%t", target, ok)
+	}
+	if _, ok := directory.ResolveHost("images.discord.com"); ok {
+		t.Fatal("suffix-only Zapret host received a fake IP")
+	}
+	if _, ok := directory.ResolveHost("store.steampowered.com"); ok {
+		t.Fatal("unrelated Steam host received a fake IP")
+	}
+}
+
+func TestProcessorRedirectsExactZapretFakeIPFromInitialSYN(t *testing.T) {
+	plan := fakeIPTestPlan()
+	plan.Services = append(plan.Services, ServiceRule{
+		ID: "discord", DisplayName: "Discord", ExactHosts: []string{"updates.discord.com"},
+		DomainSuffixes: []string{"discord.com"}, TCPPorts: []int{443},
+	})
+	plan.Routes = append(plan.Routes, ServiceRoute{ServiceID: "discord", Kind: ServiceRouteZapret})
+	directory, err := NewFakeIPDirectory(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, ok := directory.ResolveHost("updates.discord.com")
+	if !ok {
+		t.Fatal("Discord updater did not receive a fake IP")
+	}
+	registry := NewTCPRedirectRegistry()
+	redirector, err := NewTCPPacketRedirector(registry, 34010)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor, err := NewProcessorWithSelectiveRuntime(plan, nil, redirector, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := testIPv4TCPPacketTo(t, target.Address.String(), "unrelated.example")
+	packet[33] = 0x02
+	calculateChecksums(packet)
+	decision := processor.Process(packet)
+	if decision.Dropped || !decision.Transformed || decision.ServiceID != "discord" || decision.Route != ServiceRouteZapret {
+		t.Fatalf("fake-IP Zapret decision = %+v", decision)
+	}
+	if !registry.contains(TCPRedirectTarget{
+		Flow: FlowTuple{
+			Network: NetworkTCP, Source: testMustAddr("10.0.0.1"), SourcePort: 50000,
+			Destination: target.Address, DestinationPort: 443,
+		},
+		Host: "updates.discord.com", ServiceID: "discord", Route: ServiceRouteZapret,
+	}) {
+		t.Fatal("Zapret fake-IP redirect target was not registered")
+	}
+}
+
 func TestProcessorRedirectsFakeIPFromInitialSYN(t *testing.T) {
 	plan := fakeIPTestPlan()
 	directory, err := NewFakeIPDirectory(plan)

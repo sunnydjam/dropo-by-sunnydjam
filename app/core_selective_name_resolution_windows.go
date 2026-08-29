@@ -40,7 +40,7 @@ func (lease *windowsSelectiveNameResolutionLease) Update(update selectiveNameRes
 	if lease == nil || strings.TrimSpace(lease.hostsPath) == "" {
 		return errors.New("selective name-resolution lease is not initialized")
 	}
-	suffixes := selectedVPNDomainSuffixes(update.Plan)
+	suffixes := selectedFakeHostsConflictScope(update.Plan)
 
 	selectiveHostsMutationMutex.Lock()
 	defer selectiveHostsMutationMutex.Unlock()
@@ -54,7 +54,7 @@ func (lease *windowsSelectiveNameResolutionLease) Update(update selectiveNameRes
 	if conflicts > 0 {
 		return fmt.Errorf("Windows hosts file has %d mixed selected/direct mapping(s)", conflicts)
 	}
-	output, primed := installSelectiveFakeHosts(output, selectedVPNFakeHostMappings(update.Plan, update.Directory))
+	output, primed := installSelectiveFakeHosts(output, selectedFakeHostMappings(update.Plan, update.Directory))
 	if !bytes.Equal(input, output) {
 		if err := writeExistingFile(lease.hostsPath, output); err != nil {
 			return fmt.Errorf("update selected-service hosts overlay: %w", err)
@@ -96,9 +96,12 @@ func (lease *windowsSelectiveNameResolutionLease) Restore() error {
 	if err != nil {
 		return fmt.Errorf("read Windows hosts file for restore: %w", err)
 	}
-	output, _ := removeSelectiveFakeHosts(input)
-	output, restored := restoreSelectedVPNHostsMappings(output)
-	if restored > 0 && !bytes.Equal(input, output) {
+	output, changed := restoreSelectiveHostsContent(input)
+	// A session can install fake bootstrap records without disabling any
+	// pre-existing user mapping. Persist the cleanup whenever either class of
+	// Dropo-owned record changed; gating only on restored disabled records left
+	// fake addresses behind after a normal Stop.
+	if changed > 0 && !bytes.Equal(input, output) {
 		if err := writeExistingFile(lease.hostsPath, output); err != nil {
 			return fmt.Errorf("restore selected-service hosts mappings: %w", err)
 		}

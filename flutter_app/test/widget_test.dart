@@ -886,6 +886,41 @@ void main() {
     expect(info.hasUpdate, isFalse);
   });
 
+  test('core compatibility rejects a stale build on the local bridge', () {
+    const info = <String, dynamic>{
+      'bridge': 'dropo-core',
+      'version': <String, dynamic>{'version': '3.0.25', 'buildHash': 'b88ccae'},
+    };
+
+    expect(
+      coreCompatibilityError(
+        info,
+        expectedVersion: '3.0.25',
+        expectedBuildHash: '12ab34cd56ef',
+      ),
+      contains('b88ccae'),
+    );
+    expect(
+      coreCompatibilityError(
+        info,
+        expectedVersion: '3.0.25',
+        expectedBuildHash: 'b88ccae',
+      ),
+      isNull,
+    );
+  });
+
+  test('core compatibility rejects a non-Dropo listener', () {
+    expect(
+      coreCompatibilityError(
+        const <String, dynamic>{'bridge': 'other'},
+        expectedVersion: '3.0.25',
+        expectedBuildHash: '12ab34cd56ef',
+      ),
+      contains('другим приложением'),
+    );
+  });
+
   test('MockCoreBridge exposes an autonomous Android UI backend', () async {
     final bridge = MockCoreBridge();
 

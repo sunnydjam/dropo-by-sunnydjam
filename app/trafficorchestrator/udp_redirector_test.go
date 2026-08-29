@@ -75,7 +75,7 @@ func TestProcessorRoutesProcessScopedDiscordMediaOutsideStaticCIDR(t *testing.T)
 		Services: []ServiceRule{{
 			ID: "discord", DisplayName: "Discord", DomainSuffixes: []string{"discord.media"},
 			ProcessNames: []string{"Discord.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
-			ProcessDiscoveryUDPPortRanges: []PortRange{{First: 50000, Last: 50099}},
+			ProcessDiscoveryUDPPortRanges: []PortRange{{First: 50000, Last: 50100}},
 		}},
 		Routes: []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteVPN}},
 	}

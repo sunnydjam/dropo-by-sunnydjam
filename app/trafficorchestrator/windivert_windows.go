@@ -26,6 +26,9 @@ const (
 	dropoQueueSize   = 8 * 1024 * 1024
 	dropoBatchSize   = 16
 	dropoPacketSize  = 65535
+
+	maxWinDivertSendBatchPackets = 64
+	maxWinDivertSendBatchBytes   = 4 * 1024 * 1024
 )
 
 var invalidWinDivertHandle = ^uintptr(0)
@@ -38,6 +41,7 @@ type WinDivertBackend struct {
 	procRecv     *windows.LazyProc
 	procRecvEx   *windows.LazyProc
 	procSend     *windows.LazyProc
+	procSendEx   *windows.LazyProc
 	procShutdown *windows.LazyProc
 	procClose    *windows.LazyProc
 	closeOnce    sync.Once
@@ -95,10 +99,11 @@ func OpenWinDivertBackendWithFilter(dllPath, captureFilter string) (*WinDivertBa
 	backend.procRecv = backend.dll.NewProc("WinDivertRecv")
 	backend.procRecvEx = backend.dll.NewProc("WinDivertRecvEx")
 	backend.procSend = backend.dll.NewProc("WinDivertSend")
+	backend.procSendEx = backend.dll.NewProc("WinDivertSendEx")
 	backend.procShutdown = backend.dll.NewProc("WinDivertShutdown")
 	backend.procClose = backend.dll.NewProc("WinDivertClose")
 	procSetParam := backend.dll.NewProc("WinDivertSetParam")
-	for _, proc := range []*windows.LazyProc{procOpen, backend.procRecv, backend.procRecvEx, backend.procSend, backend.procShutdown, backend.procClose, procSetParam} {
+	for _, proc := range []*windows.LazyProc{procOpen, backend.procRecv, backend.procRecvEx, backend.procSend, backend.procSendEx, backend.procShutdown, backend.procClose, procSetParam} {
 		if err := proc.Find(); err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", proc.Name, err)
 		}
@@ -246,6 +251,55 @@ func (b *WinDivertBackend) Send(packet []byte, address *PacketAddress) error {
 	}
 	if int(sent) != len(packet) {
 		return fmt.Errorf("WinDivertSend sent %d of %d bytes", sent, len(packet))
+	}
+	return nil
+}
+
+// SendBatch uses WinDivertSendEx's documented packet-batch representation:
+// concatenated IP packets plus one address record per packet. This keeps an
+// exact multi-packet strategy ordered while returning to Receive quickly so
+// unrelated direct handshakes are not held behind dozens of driver syscalls.
+func (b *WinDivertBackend) SendBatch(packets [][]byte, addresses []PacketAddress) error {
+	if b == nil || b.handle == 0 {
+		return ErrBackendClosed
+	}
+	if len(packets) == 0 || len(packets) != len(addresses) {
+		return errors.New("packet batch and address batch must have equal non-zero length")
+	}
+	if len(packets) > maxWinDivertSendBatchPackets {
+		return fmt.Errorf("packet batch exceeds %d packets", maxWinDivertSendBatchPackets)
+	}
+	total := 0
+	for index, packet := range packets {
+		if len(packet) == 0 || len(packet) > dropoPacketSize {
+			return fmt.Errorf("packet batch item %d has invalid length %d", index, len(packet))
+		}
+		if total > maxWinDivertSendBatchBytes-len(packet) {
+			return fmt.Errorf("packet batch exceeds %d bytes", maxWinDivertSendBatchBytes)
+		}
+		total += len(packet)
+	}
+	buffer := make([]byte, 0, total)
+	for _, packet := range packets {
+		buffer = append(buffer, packet...)
+	}
+	var sent uint32
+	addressBytes := uintptr(len(addresses)) * unsafe.Sizeof(PacketAddress{})
+	result, _, callErr := b.procSendEx.Call(
+		b.handle,
+		uintptr(unsafe.Pointer(&buffer[0])),
+		uintptr(len(buffer)),
+		uintptr(unsafe.Pointer(&sent)),
+		0,
+		uintptr(unsafe.Pointer(&addresses[0])),
+		addressBytes,
+		0,
+	)
+	if result == 0 {
+		return windowsCallError("WinDivertSendEx", callErr)
+	}
+	if int(sent) != len(buffer) {
+		return fmt.Errorf("WinDivertSendEx sent %d of %d bytes", sent, len(buffer))
 	}
 	return nil
 }

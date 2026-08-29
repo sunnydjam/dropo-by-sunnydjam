@@ -15,6 +15,7 @@ func TestSelectiveRuntimeLeavesSteamAndGameTrafficByteForByteDirect(t *testing.T
 		},
 		ProcessNames: []string{
 			"steam.exe",
+			"steamwebhelper.exe",
 			"MistfallHunter-Win64-Shipping.exe",
 		},
 	}}
@@ -26,9 +27,23 @@ func TestSelectiveRuntimeLeavesSteamAndGameTrafficByteForByteDirect(t *testing.T
 	}{
 		{
 			name:        "Steam TLS on a shared selected-service address",
-			processName: `C:\Program Files (x86)\Steam\steam.exe`,
+			processName: `C:\Program Files (x86)\Steam\bin\cef\cef.win64\steamwebhelper.exe`,
 			packet: func(t *testing.T) []byte {
 				return testIPv4TCPPacketTo(t, "66.22.200.1", "store.steampowered.com")
+			},
+		},
+		{
+			name:        "Steam WebHelper CDN TLS remains direct",
+			processName: `C:\Program Files (x86)\Steam\bin\cef\cef.win64\steamwebhelper.exe`,
+			packet: func(t *testing.T) []byte {
+				return testIPv4TCPPacketTo(t, "142.250.74.206", "cdn.cloudflare.steamstatic.com")
+			},
+		},
+		{
+			name:        "Steam WebHelper QUIC remains direct",
+			processName: `C:\Program Files (x86)\Steam\bin\cef\cef.win64\steamwebhelper.exe`,
+			packet: func(t *testing.T) []byte {
+				return testIPv4UDPPacket("8.8.4.4", 443, []byte{0xc0, 0, 0, 0, 1, 7, 9, 11})
 			},
 		},
 		{

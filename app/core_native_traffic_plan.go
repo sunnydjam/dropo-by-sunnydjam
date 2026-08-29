@@ -208,7 +208,7 @@ func nativeServiceRule(service FreeAccessService, strategyIDs []string) traffic.
 func discordProcessDiscoveryUDPPortRanges() []traffic.PortRange {
 	return []traffic.PortRange{
 		{First: 19294, Last: 19344},
-		{First: 50000, Last: 50099},
+		{First: 50000, Last: 50100},
 	}
 }
 
@@ -223,6 +223,32 @@ func nativeSelectiveCaptureCatalog() []traffic.ServiceRule {
 		if service.Tag == "discord" {
 			// Discord voice/media ports are allocated dynamically. The CIDR still
 			// requires Discord.exe identity before the active plan redirects it.
+			rule.UDPPorts = nil
+		}
+		result = append(result, rule)
+	}
+	return result
+}
+
+// nativeSelectiveCaptureCatalogForSettings keeps the immutable session filter
+// limited to services that have an explicit non-direct policy. Browser traffic
+// for selected VPN domains is still handled through fake DNS, while curated
+// process/CIDR evidence captures native apps. Direct services never contribute
+// Discord discovery ranges or provider CIDRs to the WinDivert filter.
+func nativeSelectiveCaptureCatalogForSettings(settings GlobalAppSettings) []traffic.ServiceRule {
+	result := make([]traffic.ServiceRule, 0, len(DefaultFreeAccessServices))
+	for _, service := range DefaultFreeAccessServices {
+		method := FreeAccessServiceMethod(settings, service.Tag)
+		if method == FreeAccessMethodDirect {
+			continue
+		}
+		if method == FreeAccessMethodAuto && !FreeAccessServiceEnabled(settings, service.Tag) {
+			continue
+		}
+		rule := nativeServiceRule(service, nil)
+		if service.Tag == "discord" {
+			// Discord media endpoints are dynamic, but this discovery scope is
+			// present only when Discord itself has a non-direct route.
 			rule.UDPPorts = nil
 		}
 		result = append(result, rule)

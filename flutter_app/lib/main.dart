@@ -19,6 +19,39 @@ const String _bundledAppVersion = String.fromEnvironment(
   'DROPO_APP_VERSION',
   defaultValue: 'dev',
 );
+const String _bundledBuildHash = String.fromEnvironment(
+  'DROPO_BUILD_HASH',
+  defaultValue: '',
+);
+
+@visibleForTesting
+String? coreCompatibilityError(
+  Map<String, dynamic> info, {
+  required String expectedVersion,
+  required String expectedBuildHash,
+}) {
+  if (info['bridge']?.toString() != 'dropo-core') {
+    return 'локальный порт занят другим приложением';
+  }
+  final version = _asMap(info['version']);
+  final actualVersion = version['version']?.toString().trim() ?? '';
+  final actualBuildHash = version['buildHash']?.toString().trim() ?? '';
+  final normalizedVersion = expectedVersion.trim();
+  final normalizedBuildHash = expectedBuildHash.trim();
+  if (normalizedVersion.isNotEmpty &&
+      normalizedVersion != 'dev' &&
+      actualVersion != normalizedVersion) {
+    return 'запущена версия ${actualVersion.isEmpty ? 'без номера' : actualVersion}, '
+        'ожидалась $normalizedVersion';
+  }
+  if (normalizedBuildHash.isNotEmpty &&
+      actualBuildHash != normalizedBuildHash) {
+    return 'запущена сборка '
+        '${actualBuildHash.isEmpty ? 'без хеша' : actualBuildHash}, '
+        'ожидалась $normalizedBuildHash';
+  }
+  return null;
+}
 
 @visibleForTesting
 bool isConnectionBlockingBusyTask(String id) {
@@ -249,7 +282,8 @@ class HttpCoreBridge implements CoreBridge {
 
   @override
   Future<void> ensureStarted() async {
-    if (!await _isReachable()) {
+    var info = await _probeInfo();
+    if (info == null) {
       if (!Platform.isWindows) {
         return;
       }
@@ -269,14 +303,27 @@ class HttpCoreBridge implements CoreBridge {
       }
 
       for (var i = 0; i < 80; i++) {
-        if (await _isReachable()) {
+        info = await _probeInfo();
+        if (info != null) {
           break;
         }
         await Future<void>.delayed(const Duration(milliseconds: 150));
       }
     }
 
-    if (await _isReachable()) {
+    info ??= await _probeInfo();
+    if (info != null) {
+      final compatibilityError = coreCompatibilityError(
+        info,
+        expectedVersion: _bundledAppVersion,
+        expectedBuildHash: _bundledBuildHash,
+      );
+      if (compatibilityError != null) {
+        throw HttpException(
+          'Уже запущено другое ядро Dropo: $compatibilityError. '
+          'Полностью закройте предыдущую Dropo и запустите эту сборку снова.',
+        );
+      }
       unawaited(
         _postMap(
           '/api/tray/ensure',
@@ -852,12 +899,11 @@ class HttpCoreBridge implements CoreBridge {
     );
   }
 
-  Future<bool> _isReachable() async {
+  Future<Map<String, dynamic>?> _probeInfo() async {
     try {
-      await _getMap('/api/info');
-      return true;
+      return await _getMap('/api/info');
     } catch (_) {
-      return false;
+      return null;
     }
   }
 

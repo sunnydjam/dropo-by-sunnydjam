@@ -127,6 +127,14 @@ func TestServiceBypassMethodsOnlyReferenceBundledPayloads(t *testing.T) {
 
 func TestServiceStrategiesAreCuratedPerServiceFromFile(t *testing.T) {
 	methods := DefaultServiceBypassMethods()
+	for service, expected := range map[string]string{
+		"youtube": "flowseal-1102-youtube-alt",
+		"discord": "flowseal-1102-discord-alt",
+	} {
+		if len(methods[service]) == 0 || methods[service][0].Tag != expected {
+			t.Fatalf("%s first strategy = %+v, want exact General ALT %q", service, methods[service], expected)
+		}
+	}
 
 	// Every DPI-solvable service must have a curated ladder; VPN-only services
 	// (Meta/WhatsApp) must have NONE so they are never searched.

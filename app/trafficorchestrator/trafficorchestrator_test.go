@@ -1,6 +1,7 @@
 package trafficorchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -82,7 +83,7 @@ func TestValidatePlanAndClassifier(t *testing.T) {
 func TestValidatePlanBoundsProcessUDPDiscoveryRanges(t *testing.T) {
 	plan := testPlan()
 	plan.Services[0].ProcessMatchPolicy = ProcessMatchIdentity
-	plan.Services[0].ProcessDiscoveryUDPPortRanges = []PortRange{{First: 50000, Last: 50099}}
+	plan.Services[0].ProcessDiscoveryUDPPortRanges = []PortRange{{First: 50000, Last: 50100}}
 	if err := ValidatePlan(plan); err != nil {
 		t.Fatalf("valid bounded discovery range rejected: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestValidatePlanBoundsProcessUDPDiscoveryRanges(t *testing.T) {
 		t.Fatal("oversized process UDP discovery range accepted")
 	}
 	plan.Services[0].ProcessMatchPolicy = ProcessMatchCorroborate
-	plan.Services[0].ProcessDiscoveryUDPPortRanges = []PortRange{{First: 50000, Last: 50099}}
+	plan.Services[0].ProcessDiscoveryUDPPortRanges = []PortRange{{First: 50000, Last: 50100}}
 	if err := ValidatePlan(plan); err == nil {
 		t.Fatal("process UDP discovery without identity accepted")
 	}
@@ -270,6 +271,34 @@ func (resolver *fixedFlowIdentityResolver) ResolveProcessName(tuple FlowTuple) s
 	resolver.tuple = tuple
 	resolver.calls++
 	return resolver.name
+}
+
+func TestScopedZapretRuntimeTransformsOnlyOwnedSourcePorts(t *testing.T) {
+	makePacket := func(sourcePort uint16) []byte {
+		packet := testIPv4TCPPacket(t, "discord.com")
+		binary.BigEndian.PutUint16(packet[20:22], sourcePort)
+		calculateChecksums(packet)
+		return packet
+	}
+	newScopedProcessor := func() *Processor {
+		processor, err := NewProcessorWithScopedZapretRuntime(
+			testPlan(), &fixedFlowIdentityResolver{name: "dropo-core.exe"}, nil, nil, nil,
+			PortRange{First: 20000, Last: 21999},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return processor
+	}
+
+	decision := newScopedProcessor().Process(makePacket(20000))
+	if !decision.Transformed || decision.ServiceID != "discord" {
+		t.Fatalf("owned scoped Zapret flow decision = %+v", decision)
+	}
+	decision = newScopedProcessor().Process(makePacket(50000))
+	if decision.Transformed || decision.Reason != "trusted Dropo runtime egress" {
+		t.Fatalf("ordinary Dropo runtime egress decision = %+v", decision)
+	}
 }
 
 func TestProcessorUsesObservedProcessForDirectPrecedence(t *testing.T) {
@@ -499,7 +528,7 @@ func TestOrphanRelayResponseIsDropped(t *testing.T) {
 	binary.BigEndian.PutUint16(packet[22:24], 50000)
 	calculateChecksums(packet)
 	decision := processor.Process(packet)
-	if !decision.Dropped || len(decision.Packets) != 0 || decision.Route != ServiceRouteVPN {
+	if !decision.Dropped || len(decision.Packets) != 0 || decision.Route != "" {
 		t.Fatalf("orphan relay decision = %+v", decision)
 	}
 }
@@ -607,6 +636,287 @@ func TestBuiltinStrategiesAreValidAndUnique(t *testing.T) {
 		if err := ValidateStrategy(strategy); err != nil {
 			t.Fatalf("ValidateStrategy(%q) error = %v", strategy.ID, err)
 		}
+	}
+}
+
+func TestFlowseal1102YouTubeALTUsesExactTypedRecipe(t *testing.T) {
+	var strategy TrafficStrategy
+	for _, candidate := range BuiltinStrategies() {
+		if candidate.ID == "native-flowseal-1102-youtube-alt" {
+			strategy = candidate
+			break
+		}
+	}
+	if strategy.ID == "" {
+		t.Fatal("exact YouTube General ALT strategy is missing")
+	}
+	if strategy.Revision != 3 || len(strategy.TCP) != 2 || len(strategy.UDP) != 1 {
+		t.Fatalf("General ALT shape = %+v", strategy)
+	}
+	fake, split := strategy.TCP[0], strategy.TCP[1]
+	if fake.Kind != ActionFake || fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || fake.TCPFooling != TCPFoolingTimestampOrBadSum || fake.TimestampDelta != -600000 || fake.IPv4ID != IPv4IDZero {
+		t.Fatalf("General ALT TLS fake = %+v", fake)
+	}
+	if split.Kind != ActionFakeDataSplit || split.Position != 2 || split.Repeats != 6 || split.FakePattern != FakePatternZero || split.TCPFooling != TCPFoolingTimestampOrBadSum || split.TimestampDelta != -600000 || split.IPv4ID != IPv4IDZero {
+		t.Fatalf("General ALT fake data split = %+v", split)
+	}
+	if udp := strategy.UDP[0]; udp.Kind != ActionFake || udp.Payload != "quic_google" || udp.PadTo != 1200 || udp.Repeats != 6 {
+		t.Fatalf("General ALT QUIC fake = %+v", udp)
+	}
+}
+
+func TestFlowseal1102DiscordALTUsesExactTypedRecipe(t *testing.T) {
+	var strategy TrafficStrategy
+	for _, candidate := range BuiltinStrategies() {
+		if candidate.ID == "native-discord-flowseal-1102-alt" {
+			strategy = candidate
+			break
+		}
+	}
+	if strategy.ID == "" {
+		t.Fatal("exact Discord General ALT strategy is missing")
+	}
+	if strategy.Revision != 3 || len(strategy.TCP) != 3 || len(strategy.UDP) != 2 || strategy.Cost.SyntheticPackets != 36 {
+		t.Fatalf("Discord General ALT shape = %+v", strategy)
+	}
+	if fake := strategy.TCP[0]; fake.Payload != "stun_decoy" || fake.PadTo != 100 || fake.Repeats != 6 || len(fake.Ports) != 1 || fake.Ports[0] != 443 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
+		t.Fatalf("Discord STUN fake = %+v", fake)
+	}
+	if fake := strategy.TCP[1]; fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
+		t.Fatalf("Discord TLS fake = %+v", fake)
+	}
+	if split := strategy.TCP[2]; split.Kind != ActionFakeDataSplit || split.Position != 2 || split.FakePattern != FakePatternZero || split.Repeats != 6 {
+		t.Fatalf("Discord fake data split = %+v", split)
+	}
+	if udp := strategy.UDP[0]; udp.Payload != "quic_google" || udp.PadTo != 1200 || udp.Repeats != 6 || len(udp.Ports) != 1 || udp.Ports[0] != 443 {
+		t.Fatalf("Discord QUIC fake = %+v", udp)
+	}
+	if udp := strategy.UDP[1]; udp.Payload != "discord_active" || udp.PadTo != 1200 || udp.Repeats != 6 || len(udp.PortRanges) != 2 || udp.PortRanges[0] != (PortRange{First: 19294, Last: 19344}) || udp.PortRanges[1] != (PortRange{First: 50000, Last: 50100}) {
+		t.Fatalf("Discord media fake = %+v", udp)
+	}
+}
+
+func TestDiscordDiscoveryRangesParticipateInClassification(t *testing.T) {
+	strategy := TrafficStrategy{
+		ID: "discord-test", Revision: 1, Label: "Discord test",
+		UDP:         []PacketAction{{Kind: ActionFake, Payload: "discord_active", Repeats: 1}},
+		Constraints: StrategyConstraints{Networks: []Network{NetworkUDP}, Payloads: []string{"discord-media"}, IPv4: true, IPv6: true},
+	}
+	plan := TrafficPlan{
+		Revision: 1, CatalogRevision: "discord-ranges", Strategies: []TrafficStrategy{strategy},
+		Services: []ServiceRule{{
+			ID: "discord", DisplayName: "Discord", ProcessNames: []string{"Discord.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
+			Fingerprints: []string{"discord-media"},
+			UDPPorts:     []int{443}, ProcessDiscoveryUDPPortRanges: []PortRange{{First: 19294, Last: 19344}, {First: 50000, Last: 50100}},
+			CandidateStrategyIDs: []string{strategy.ID}, AllowVPNFallback: true, AllowDirectFallback: true,
+		}},
+	}
+	classifier, err := NewClassifier(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []int{443, 19294, 19344, 50000, 50100} {
+		got := classifier.Classify(FlowEvidence{Network: NetworkUDP, Destination: "203.0.113.10", Port: port, ProcessName: `C:\Users\u\AppData\Local\Discord\Discord.exe`})
+		if !got.Matched || got.ServiceID != "discord" {
+			t.Fatalf("Discord port %d classification = %+v", port, got)
+		}
+	}
+	got := classifier.Classify(FlowEvidence{Network: NetworkUDP, Destination: "203.0.113.10", Port: 50050, ProcessName: "steam.exe"})
+	if got.Matched {
+		t.Fatalf("unrelated process in Discord discovery range matched: %+v", got)
+	}
+}
+
+func TestDiscordALTUsesProtocolSpecificUDPDecoys(t *testing.T) {
+	var strategy TrafficStrategy
+	for _, candidate := range BuiltinStrategies() {
+		if candidate.ID == "native-discord-flowseal-1102-alt" {
+			strategy = candidate
+			break
+		}
+	}
+	quicPacket := testIPv4UDPPacket("162.159.135.232", 443, testQUICInitialPacket(t, quicVersion1, "discord.com"))
+	quicParsed, err := parsePacket(quicPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quicPackets, transformed, err := applyStrategy(quicParsed, strategy)
+	if err != nil || !transformed || len(quicPackets) != 7 {
+		t.Fatalf("Discord QUIC strategy packets=%d transformed=%v err=%v", len(quicPackets), transformed, err)
+	}
+	firstQUIC, err := parsePacket(quicPackets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstQUIC.payload(), flowseal1102GoogleQUIC) {
+		t.Fatal("Discord UDP/443 did not use the Flowseal QUIC decoy")
+	}
+
+	discovery := make([]byte, 74)
+	discovery[1], discovery[3] = 1, 70
+	mediaPacket := testIPv4UDPPacket("66.22.200.1", 50000, discovery)
+	mediaParsed, err := parsePacket(mediaPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaPackets, transformed, err := applyStrategy(mediaParsed, strategy)
+	if err != nil || !transformed || len(mediaPackets) != 7 {
+		t.Fatalf("Discord media strategy packets=%d transformed=%v err=%v", len(mediaPackets), transformed, err)
+	}
+	firstMedia, err := parsePacket(mediaPackets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstMedia.payload(), flowseal1102DiscordUDP) {
+		t.Fatal("Discord media range did not use the active Discord decoy")
+	}
+}
+
+func TestActionPortRangesAreBounded(t *testing.T) {
+	strategy := TrafficStrategy{
+		ID: "range-test", Revision: 1, Label: "Range test",
+		UDP: []PacketAction{{
+			Kind: ActionFake, Payload: "discord_active", Repeats: 1,
+			PortRanges: []PortRange{{First: 50000, Last: 60000}},
+		}},
+	}
+	if err := ValidateStrategy(strategy); err == nil || !strings.Contains(err.Error(), "at most 512 ports") {
+		t.Fatalf("oversized action port range validation error = %v", err)
+	}
+	strategy.UDP[0].PortRanges = []PortRange{{First: 50100, Last: 50000}}
+	if err := ValidateStrategy(strategy); err == nil || !strings.Contains(err.Error(), "is invalid") {
+		t.Fatalf("reversed action port range validation error = %v", err)
+	}
+}
+
+func TestFlowseal1102ALTFallsBackToInvalidSyntheticChecksumsWithoutTimestamp(t *testing.T) {
+	var strategy TrafficStrategy
+	for _, candidate := range BuiltinStrategies() {
+		if candidate.ID == "native-flowseal-1102-youtube-alt" {
+			strategy = candidate
+			break
+		}
+	}
+	original := testIPv4TCPPacket(t, "www.youtube.com")
+	parsed, err := parsePacket(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, transformed, err := applyStrategy(parsed, strategy)
+	if err != nil {
+		t.Fatalf("applyStrategy() error = %v", err)
+	}
+	if !transformed || len(packets) != 32 {
+		t.Fatalf("timestamp-free ALT emitted packets=%d transformed=%v, want 32/true", len(packets), transformed)
+	}
+	for _, index := range []int{0, 6, 13, 19, 26} {
+		decoy := packets[index]
+		valid := append([]byte(nil), decoy...)
+		calculateChecksums(valid)
+		if bytes.Equal(valid, decoy) {
+			t.Fatalf("synthetic packet %d unexpectedly retained a valid checksum", index)
+		}
+	}
+	for _, index := range []int{12, 25} {
+		real := packets[index]
+		valid := append([]byte(nil), real...)
+		calculateChecksums(valid)
+		if !bytes.Equal(valid, real) {
+			t.Fatalf("real segment %d has an invalid checksum", index)
+		}
+	}
+}
+
+func TestFlowseal1102YouTubeALTPacketOrderAndFooling(t *testing.T) {
+	var strategy TrafficStrategy
+	for _, candidate := range BuiltinStrategies() {
+		if candidate.ID == "native-flowseal-1102-youtube-alt" {
+			strategy = candidate
+			break
+		}
+	}
+	original := testIPv4TCPPacketWithTimestampTo(t, "1.1.1.1", "www.youtube.com")
+	originalParsed, err := parsePacket(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, transformed, err := applyStrategy(originalParsed, strategy)
+	if err != nil {
+		t.Fatalf("applyStrategy() error = %v", err)
+	}
+	if !transformed || len(packets) != 32 {
+		t.Fatalf("transformed=%v packets=%d, want true/32", transformed, len(packets))
+	}
+	first, err := parsePacket(packets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ipVersion != 4 || binary.BigEndian.Uint16(packets[0][4:6]) != 0 {
+		t.Fatalf("first fake IPv4 ID = %d", binary.BigEndian.Uint16(packets[0][4:6]))
+	}
+	if got := testTCPTimestampValue(t, packets[0]); got != 400000 {
+		t.Fatalf("fooled timestamp = %d, want 400000", got)
+	}
+	if got := extractTLSServerName(first.payload()); got != "www.google.com" {
+		t.Fatalf("fake TLS SNI = %q", got)
+	}
+
+	// Six initial TLS fakes are followed by fakedsplit altorder=0. The real
+	// segments are positions 12 and 25 in the complete output sequence.
+	realFirst, err := parsePacket(packets[12])
+	if err != nil {
+		t.Fatal(err)
+	}
+	realSecond, err := parsePacket(packets[25])
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconstructed := append(append([]byte(nil), realFirst.payload()...), realSecond.payload()...)
+	if !bytes.Equal(reconstructed, originalParsed.payload()) {
+		t.Fatal("real fakedsplit segments do not reconstruct the original ClientHello")
+	}
+	if got := testTCPTimestampValue(t, packets[12]); got != 1000000 {
+		t.Fatalf("real segment timestamp changed to %d", got)
+	}
+	fakeFirst, err := parsePacket(packets[6])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeFirst.payload()) != 2 || !bytes.Equal(fakeFirst.payload(), []byte{0, 0}) {
+		t.Fatalf("first fake split payload = %x", fakeFirst.payload())
+	}
+	if got := testTCPTimestampValue(t, packets[6]); got != 400000 {
+		t.Fatalf("fake split timestamp = %d", got)
+	}
+}
+
+func TestExactALTLeavesUnselectedTLSByteForByteDirect(t *testing.T) {
+	var strategy TrafficStrategy
+	for _, candidate := range BuiltinStrategies() {
+		if candidate.ID == "native-flowseal-1102-youtube-alt" {
+			strategy = candidate
+			break
+		}
+	}
+	plan := TrafficPlan{
+		Revision: 1, CatalogRevision: BuiltinCatalogRevision,
+		Strategies: []TrafficStrategy{strategy},
+		Services: []ServiceRule{{
+			ID: "youtube", DisplayName: "YouTube", DomainSuffixes: []string{"youtube.com"},
+			TCPPorts: []int{443}, UDPPorts: []int{443}, CandidateStrategyIDs: []string{strategy.ID},
+			AllowVPNFallback: true, AllowDirectFallback: true,
+		}},
+		Selections: []ServiceSelection{{ServiceID: "youtube", StrategyID: strategy.ID}},
+		Routes:     []ServiceRoute{{ServiceID: "youtube", Kind: ServiceRouteZapret}},
+	}
+	processor, err := NewProcessor(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := testIPv4TCPPacketWithTimestampTo(t, "203.0.113.77", "store.steampowered.com")
+	decision := processor.Process(original)
+	if decision.Transformed || decision.ServiceID != "" || len(decision.Packets) != 1 || !bytes.Equal(decision.Packets[0], original) {
+		t.Fatalf("unselected TLS was changed: %+v", decision)
 	}
 }
 
@@ -1079,6 +1389,7 @@ type fakePacketBackend struct {
 	mu       sync.Mutex
 	input    []backendPacket
 	output   [][]byte
+	batches  int
 	closed   bool
 	received chan struct{}
 }
@@ -1106,6 +1417,19 @@ func (b *fakePacketBackend) Send(packet []byte, _ *PacketAddress) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.output = append(b.output, append([]byte(nil), packet...))
+	return nil
+}
+
+func (b *fakePacketBackend) SendBatch(packets [][]byte, addresses []PacketAddress) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(packets) != len(addresses) {
+		return errors.New("mismatched test batch")
+	}
+	b.batches++
+	for _, packet := range packets {
+		b.output = append(b.output, append([]byte(nil), packet...))
+	}
 	return nil
 }
 
@@ -1140,9 +1464,57 @@ func TestEngineOwnsOneBackendLoopAndReinjectsDecision(t *testing.T) {
 	}
 	backend.mu.Lock()
 	outputs := len(backend.output)
+	batches := backend.batches
 	backend.mu.Unlock()
 	if outputs < 3 {
 		t.Fatalf("backend outputs = %d", outputs)
+	}
+	if batches != 1 {
+		t.Fatalf("backend batch calls = %d, want 1", batches)
+	}
+	stats := engine.Stats()
+	if stats.CapturedPackets != 1 || stats.BatchCalls != 1 || stats.ReinjectedPackets != uint64(outputs) || stats.MaxDecisionOutputs != uint64(outputs) {
+		t.Fatalf("engine stats = %+v, outputs=%d", stats, outputs)
+	}
+}
+
+func TestProcessorThrottlesOnlyAStormingStrategy(t *testing.T) {
+	strategy := testStrategy("burst", 1)
+	strategy.TCP = []PacketAction{{Kind: ActionFake, Payload: "tls_client_hello", Repeats: 48}}
+	strategy.Cost.SyntheticPackets = 48
+	plan := testPlan()
+	plan.Strategies = []TrafficStrategy{strategy}
+	plan.Services[0].CandidateStrategyIDs = []string{strategy.ID}
+	plan.Selections = []ServiceSelection{{ServiceID: "discord", StrategyID: strategy.ID}}
+	processor, err := NewProcessor(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0)
+	processor.now = func() time.Time { return now }
+	packet := testIPv4TCPPacket(t, "discord.com")
+	throttled := false
+	for attempt := 0; attempt < 32; attempt++ {
+		decision := processor.Process(packet)
+		if strings.Contains(decision.Reason, "output budget exceeded") {
+			throttled = true
+			if decision.Transformed || len(decision.Packets) != 1 || !bytes.Equal(decision.Packets[0], packet) {
+				t.Fatalf("throttled decision = %+v", decision)
+			}
+			break
+		}
+	}
+	if !throttled {
+		t.Fatal("strategy packet storm was not throttled")
+	}
+	counters := processor.Counters()["discord"]
+	if counters.Throttled != 1 || counters.Passed == 0 {
+		t.Fatalf("throttled counters = %+v", counters)
+	}
+	now = now.Add(strategyOutputCooldown + time.Second)
+	decision := processor.Process(packet)
+	if !decision.Transformed || strings.Contains(decision.Reason, "output budget exceeded") {
+		t.Fatalf("strategy did not recover after cooldown: %+v", decision)
 	}
 }
 
@@ -1169,6 +1541,62 @@ func testIPv4TCPPacketTo(t *testing.T, destination, host string) []byte {
 	copy(packet[40:], payload)
 	calculateChecksums(packet)
 	return packet
+}
+
+func testIPv4TCPPacketWithTimestampTo(t *testing.T, destination, host string) []byte {
+	t.Helper()
+	payload := fakeTLSClientHelloForServerName(host)
+	const tcpHeaderLength = 32
+	packet := make([]byte, 20+tcpHeaderLength+len(payload))
+	packet[0] = 0x45
+	packet[8] = 64
+	packet[9] = 6
+	packet[12], packet[13], packet[14], packet[15] = 10, 0, 0, 1
+	destinationBytes := netip.MustParseAddr(destination).As4()
+	copy(packet[16:20], destinationBytes[:])
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	binary.BigEndian.PutUint16(packet[4:6], 0x1234)
+	binary.BigEndian.PutUint16(packet[20:22], 50000)
+	binary.BigEndian.PutUint16(packet[22:24], 443)
+	binary.BigEndian.PutUint32(packet[24:28], 1000)
+	packet[32] = (tcpHeaderLength / 4) << 4
+	packet[33] = 0x18
+	// NOP, NOP, Timestamp(kind=8,len=10), TSval, TSecr.
+	copy(packet[40:52], []byte{1, 1, 8, 10, 0, 0x0f, 0x42, 0x40, 0, 0, 0, 0})
+	copy(packet[52:], payload)
+	calculateChecksums(packet)
+	return packet
+}
+
+func testTCPTimestampValue(t *testing.T, packet []byte) uint32 {
+	t.Helper()
+	parsed, err := parsePacket(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := packet[parsed.transportOffset+20 : parsed.payloadOffset]
+	for offset := 0; offset < len(options); {
+		switch options[offset] {
+		case 0:
+			t.Fatal("TCP timestamp option is absent")
+		case 1:
+			offset++
+			continue
+		}
+		if offset+2 > len(options) {
+			t.Fatal("malformed TCP options")
+		}
+		length := int(options[offset+1])
+		if length < 2 || offset+length > len(options) {
+			t.Fatal("malformed TCP option length")
+		}
+		if options[offset] == 8 && length == 10 {
+			return binary.BigEndian.Uint32(options[offset+2 : offset+6])
+		}
+		offset += length
+	}
+	t.Fatal("TCP timestamp option is absent")
+	return 0
 }
 
 func testIPv4UDPPacket(destination string, port int, payload []byte) []byte {

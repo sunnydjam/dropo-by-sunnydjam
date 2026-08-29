@@ -30,6 +30,11 @@ type TCPRedirectTarget struct {
 	Route     ServiceRouteKind
 }
 
+// TCPRelayDialer chooses the terminal path from already validated, immutable
+// redirect metadata. It is intentionally typed so the relay cannot execute or
+// compose an external strategy command.
+type TCPRelayDialer func(context.Context, TCPRedirectTarget) (net.Conn, error)
+
 type tcpRedirectKey struct {
 	localIP          netip.Addr
 	originalRemoteIP netip.Addr
@@ -58,8 +63,8 @@ func (registry *TCPRedirectRegistry) Register(target TCPRedirectTarget) error {
 	if registry == nil || !target.Flow.valid() || target.Flow.Network != NetworkTCP {
 		return errors.New("valid TCP redirect flow is required")
 	}
-	if target.Route != ServiceRouteVPN || target.ServiceID == "" {
-		return errors.New("TCP redirect target must be a named VPN service")
+	if (target.Route != ServiceRouteVPN && target.Route != ServiceRouteZapret) || target.ServiceID == "" {
+		return errors.New("TCP redirect target must be a named VPN or Zapret service")
 	}
 	if target.Host != "" && normalizeHost(target.Host) == "" {
 		return errors.New("TCP redirect host is invalid")
@@ -195,11 +200,11 @@ func (registry *TCPRedirectRegistry) pruneLocked(now time.Time) {
 }
 
 // TCPRelay accepts only reflected, pre-registered flows and forwards each one
-// through Dropo's loopback sing-box SOCKS endpoint. It does not own WinDivert.
+// through its bounded typed terminal dialer. It does not own WinDivert.
 type TCPRelay struct {
 	listener net.Listener
 	registry *TCPRedirectRegistry
-	proxy    string
+	dialer   TCPRelayDialer
 	logger   func(string)
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -215,13 +220,33 @@ func StartTCPRelay(registry *TCPRedirectRegistry, proxyAddress string, logger fu
 	if err := validateLoopbackProxyAddress(proxyAddress); err != nil {
 		return nil, err
 	}
+	return StartTCPRelayWithDialer(registry, func(ctx context.Context, target TCPRedirectTarget) (net.Conn, error) {
+		host := target.Host
+		if host == "" {
+			host = target.Flow.Destination.String()
+		}
+		destination := net.JoinHostPort(host, strconv.Itoa(int(target.Flow.DestinationPort)))
+		return DialLoopbackSOCKS5(ctx, proxyAddress, destination)
+	}, logger)
+}
+
+// StartTCPRelayWithDialer starts the same pre-registered reflection relay with
+// an in-process terminal selector. The caller must reject every unsupported
+// route; no implicit direct fallback is performed here.
+func StartTCPRelayWithDialer(registry *TCPRedirectRegistry, dialer TCPRelayDialer, logger func(string)) (*TCPRelay, error) {
+	if registry == nil {
+		return nil, errors.New("TCP redirect registry is required")
+	}
+	if dialer == nil {
+		return nil, errors.New("TCP relay dialer is required")
+	}
 	listener, err := net.Listen("tcp4", "0.0.0.0:0")
 	if err != nil {
 		return nil, fmt.Errorf("listen TCP redirect relay: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	relay := &TCPRelay{
-		listener: listener, registry: registry, proxy: proxyAddress, logger: logger,
+		listener: listener, registry: registry, dialer: dialer, logger: logger,
 		ctx: ctx, cancel: cancel, sem: make(chan struct{}, maxConcurrentTCPRelays),
 	}
 	relay.wg.Add(1)
@@ -273,7 +298,7 @@ func (relay *TCPRelay) acceptLoop() {
 			go func() {
 				defer relay.wg.Done()
 				defer func() { <-relay.sem }()
-				if err := relayTCPConnection(relay.ctx, connection, target, relay.proxy); err != nil && relay.ctx.Err() == nil {
+				if err := relayTCPConnection(relay.ctx, connection, target, relay.dialer); err != nil && relay.ctx.Err() == nil {
 					relay.log(fmt.Sprintf("service=%s destination=%s failed: %v", target.ServiceID, target.Flow.Destination, err))
 				}
 			}()
@@ -284,14 +309,9 @@ func (relay *TCPRelay) acceptLoop() {
 	}
 }
 
-func relayTCPConnection(ctx context.Context, client net.Conn, target TCPRedirectTarget, proxyAddress string) error {
+func relayTCPConnection(ctx context.Context, client net.Conn, target TCPRedirectTarget, dialer TCPRelayDialer) error {
 	defer client.Close()
-	host := target.Host
-	if host == "" {
-		host = target.Flow.Destination.String()
-	}
-	destination := net.JoinHostPort(host, strconv.Itoa(int(target.Flow.DestinationPort)))
-	upstream, err := DialLoopbackSOCKS5(ctx, proxyAddress, destination)
+	upstream, err := dialer(ctx, target)
 	if err != nil {
 		return err
 	}

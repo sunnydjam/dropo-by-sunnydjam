@@ -40,7 +40,7 @@ func TestNativeVPNOnlyCaptureLeavesUnrelatedHandshakesInKernel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"udp.DstPort == 53", "198.18.0.0", "66.22.192.0", "tcp.SrcPort == 32000", "tcp.DstPort == 443", "udp.DstPort >= 19294", "udp.DstPort <= 19344", "udp.DstPort >= 50000", "udp.DstPort <= 50099"} {
+	for _, required := range []string{"udp.DstPort == 53", "198.18.0.0", "66.22.192.0", "tcp.SrcPort == 32000", "tcp.DstPort == 443", "udp.DstPort >= 19294", "udp.DstPort <= 19344", "udp.DstPort >= 50000", "udp.DstPort <= 50100"} {
 		if !strings.Contains(filter, required) {
 			t.Fatalf("VPN-only filter is missing %q: %s", required, filter)
 		}
@@ -49,6 +49,38 @@ func TestNativeVPNOnlyCaptureLeavesUnrelatedHandshakesInKernel(t *testing.T) {
 		if strings.Contains(filter, forbidden) {
 			t.Fatalf("VPN-only filter captures unrelated protocol evidence %q: %s", forbidden, filter)
 		}
+	}
+}
+
+func TestNativeSelectiveCaptureCatalogUsesOnlyNonDirectPolicies(t *testing.T) {
+	settings := GlobalAppSettings{FreeAccessMethods: DefaultFreeAccessServiceMethodState()}
+	if catalog := nativeSelectiveCaptureCatalogForSettings(settings); len(catalog) != 0 {
+		t.Fatalf("all-direct settings produced capture services: %+v", catalog)
+	}
+
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	catalog := nativeSelectiveCaptureCatalogForSettings(settings)
+	if len(catalog) != 1 || catalog[0].ID != "youtube" {
+		t.Fatalf("YouTube-only Zapret catalog = %+v", catalog)
+	}
+	if len(catalog[0].ProcessDiscoveryUDPPortRanges) != 0 {
+		t.Fatalf("YouTube unexpectedly enabled UDP process discovery: %+v", catalog[0])
+	}
+
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodVPN
+	catalog = nativeSelectiveCaptureCatalogForSettings(settings)
+	discordFound := false
+	for _, rule := range catalog {
+		if rule.ID != "discord" {
+			continue
+		}
+		discordFound = true
+		if len(rule.ProcessDiscoveryUDPPortRanges) != 2 || rule.ProcessDiscoveryUDPPortRanges[1].Last != 50100 {
+			t.Fatalf("Discord discovery range = %+v", rule.ProcessDiscoveryUDPPortRanges)
+		}
+	}
+	if !discordFound {
+		t.Fatalf("Discord VPN policy is absent from capture catalog: %+v", catalog)
 	}
 }
 

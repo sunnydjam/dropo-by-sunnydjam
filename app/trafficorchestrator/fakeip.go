@@ -16,11 +16,13 @@ type FakeIPTarget struct {
 	Address   netip.Addr
 	Host      string
 	ServiceID string
+	Route     ServiceRouteKind
 }
 
-// FakeIPDirectory gives selected domain-only VPN services a destination that
-// can be matched before TCP connect without capturing global HTTPS traffic.
-// It owns no DNS listener and performs no system mutation.
+// FakeIPDirectory gives selected domain-only VPN services and exact Zapret
+// bootstrap hosts a destination that can be matched before TCP connect without
+// capturing global HTTPS traffic. It owns no DNS listener and performs no
+// system mutation.
 type FakeIPDirectory struct {
 	mu        sync.Mutex
 	routing   atomic.Pointer[fakeIPRouting]
@@ -29,8 +31,9 @@ type FakeIPDirectory struct {
 }
 
 type fakeIPRouting struct {
-	classifier *Classifier
-	routes     map[string]ServiceRouteKind
+	classifier       *Classifier
+	routes           map[string]ServiceRouteKind
+	zapretExactHosts map[string]string
 }
 
 func NewFakeIPDirectory(plan TrafficPlan) (*FakeIPDirectory, error) {
@@ -52,7 +55,18 @@ func compileFakeIPRouting(plan TrafficPlan) (*fakeIPRouting, error) {
 	for _, route := range plan.Routes {
 		routes[route.ServiceID] = route.Kind
 	}
-	return &fakeIPRouting{classifier: classifier, routes: routes}, nil
+	zapretExactHosts := make(map[string]string)
+	for _, service := range plan.Services {
+		if routes[service.ID] != ServiceRouteZapret {
+			continue
+		}
+		for _, host := range service.ExactHosts {
+			if normalized := normalizeHost(host); normalized != "" {
+				zapretExactHosts[normalized] = service.ID
+			}
+		}
+	}
+	return &fakeIPRouting{classifier: classifier, routes: routes, zapretExactHosts: zapretExactHosts}, nil
 }
 
 // ApplyPlan swaps domain classification and terminal routes together while
@@ -70,8 +84,10 @@ func (directory *FakeIPDirectory) ApplyPlan(plan TrafficPlan) error {
 }
 
 // ResolveHost returns a stable session-local fake IPv4 address only when the
-// immutable classifier positively identifies a service whose route is VPN.
-// Direct/work rules retain their normal higher priority.
+// immutable classifier positively identifies a selected VPN domain or an exact
+// Zapret bootstrap host. Restricting Zapret to exact hosts prevents a suffix
+// rule from taking over unrelated shared-provider/native traffic. Direct/work
+// rules retain their normal higher priority.
 func (directory *FakeIPDirectory) ResolveHost(host string) (FakeIPTarget, bool) {
 	if directory == nil {
 		return FakeIPTarget{}, false
@@ -87,13 +103,21 @@ func (directory *FakeIPDirectory) ResolveHost(host string) (FakeIPTarget, bool) 
 	classification := routing.classifier.Classify(FlowEvidence{
 		Network: NetworkTCP, Destination: "198.18.0.1", Port: 443, Host: host,
 	})
-	if !classification.Matched || routing.routes[classification.ServiceID] != ServiceRouteVPN {
+	route := routing.routes[classification.ServiceID]
+	if !classification.Matched || (route != ServiceRouteVPN && route != ServiceRouteZapret) {
+		return FakeIPTarget{}, false
+	}
+	if route == ServiceRouteZapret && routing.zapretExactHosts[host] != classification.ServiceID {
 		return FakeIPTarget{}, false
 	}
 
 	directory.mu.Lock()
 	defer directory.mu.Unlock()
 	if target, ok := directory.byHost[host]; ok {
+		target.ServiceID = classification.ServiceID
+		target.Route = route
+		directory.byHost[host] = target
+		directory.byAddress[target.Address] = target
 		return target, true
 	}
 	if len(directory.byHost) >= maxFakeIPMappings {
@@ -103,7 +127,7 @@ func (directory *FakeIPDirectory) ResolveHost(host string) (FakeIPTarget, bool) 
 	if !ok {
 		return FakeIPTarget{}, false
 	}
-	target := FakeIPTarget{Address: address, Host: host, ServiceID: classification.ServiceID}
+	target := FakeIPTarget{Address: address, Host: host, ServiceID: classification.ServiceID, Route: route}
 	directory.byHost[host] = target
 	directory.byAddress[address] = target
 	return target, true
@@ -118,7 +142,17 @@ func (directory *FakeIPDirectory) LookupAddress(address netip.Addr) (FakeIPTarge
 	target, ok := directory.byAddress[address.Unmap()]
 	if ok {
 		routing := directory.routing.Load()
-		ok = routing != nil && routing.routes[target.ServiceID] == ServiceRouteVPN
+		if routing == nil {
+			ok = false
+		} else {
+			route := routing.routes[target.ServiceID]
+			ok = route == ServiceRouteVPN || (route == ServiceRouteZapret && routing.zapretExactHosts[target.Host] == target.ServiceID)
+			if ok {
+				target.Route = route
+				directory.byHost[target.Host] = target
+				directory.byAddress[target.Address] = target
+			}
+		}
 	}
 	return target, ok
 }
@@ -154,6 +188,9 @@ func validateFakeIPTarget(target FakeIPTarget) error {
 	}
 	if normalizeHost(target.Host) == "" || target.ServiceID == "" {
 		return errors.New("fake-IP target host and service are required")
+	}
+	if target.Route != ServiceRouteVPN && target.Route != ServiceRouteZapret {
+		return errors.New("fake-IP target route must be VPN or Zapret")
 	}
 	return nil
 }

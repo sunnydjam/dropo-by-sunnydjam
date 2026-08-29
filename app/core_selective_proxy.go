@@ -16,23 +16,22 @@ type selectiveProxyRoutingLease interface {
 	DomainCount() int
 }
 
-func buildSelectiveProxyPAC(proxyAddress string, suffixes, directSuffixes map[string]struct{}) (string, []string, error) {
-	proxyAddress = strings.TrimSpace(proxyAddress)
-	if proxyAddress == "" {
-		return "", nil, fmt.Errorf("selective proxy address is empty")
+func buildSelectiveProxyPAC(vpnProxyAddress, zapretProxyAddress string, vpnSuffixes, zapretSuffixes, directSuffixes map[string]struct{}) (string, []string, error) {
+	vpnProxyAddress = strings.TrimSpace(vpnProxyAddress)
+	zapretProxyAddress = strings.TrimSpace(zapretProxyAddress)
+	vpnOrdered := orderedDomainSuffixes(vpnSuffixes)
+	zapretOrdered := orderedDomainSuffixes(zapretSuffixes)
+	if len(vpnOrdered) > 0 && vpnProxyAddress == "" {
+		return "", nil, fmt.Errorf("selective VPN proxy address is empty")
 	}
-	ordered := make([]string, 0, len(suffixes))
-	for suffix := range suffixes {
-		suffix = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(suffix)), ".")
-		if suffix != "" {
-			ordered = append(ordered, suffix)
-		}
+	if len(zapretOrdered) > 0 && zapretProxyAddress == "" {
+		return "", nil, fmt.Errorf("selective Zapret proxy address is empty")
 	}
-	sort.Strings(ordered)
-	if len(ordered) == 0 {
+	if len(vpnOrdered)+len(zapretOrdered) == 0 {
 		return "", nil, nil
 	}
-	conditions := pacDomainConditions(ordered)
+	vpnConditions := pacDomainConditions(vpnOrdered)
+	zapretConditions := pacDomainConditions(zapretOrdered)
 	directOrdered := orderedDomainSuffixes(directSuffixes)
 	directConditions := pacDomainConditions(directOrdered)
 	script := "function FindProxyForURL(url, host) {\n" +
@@ -41,10 +40,31 @@ func buildSelectiveProxyPAC(proxyAddress string, suffixes, directSuffixes map[st
 	if len(directConditions) > 0 {
 		script += "  if (" + strings.Join(directConditions, " ||\n      ") + ") return \"DIRECT\";\n"
 	}
-	script += "  if (" + strings.Join(conditions, " ||\n      ") + ") return \"PROXY " + proxyAddress + "\";\n" +
-		"  return \"DIRECT\";\n" +
-		"}\n"
-	return script, ordered, nil
+	if len(vpnConditions) > 0 {
+		script += "  if (" + strings.Join(vpnConditions, " ||\n      ") + ") return \"PROXY " + vpnProxyAddress + "\";\n"
+	}
+	if len(zapretConditions) > 0 {
+		// PAC sends only TLS CONNECT traffic to the scoped relay. Plain HTTP is
+		// left direct instead of turning the relay into a general forward proxy.
+		script += "  if (url.substring(0, 6).toLowerCase() === \"https:\" && (" + strings.Join(zapretConditions, " ||\n      ") + ")) return \"PROXY " + zapretProxyAddress + "\";\n"
+	}
+	script += "  return \"DIRECT\";\n" + "}\n"
+	all := append(append([]string(nil), vpnOrdered...), zapretOrdered...)
+	sort.Strings(all)
+	return script, uniqueOrderedStrings(all), nil
+}
+
+func uniqueOrderedStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	result := values[:0]
+	for _, value := range values {
+		if len(result) == 0 || result[len(result)-1] != value {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func orderedDomainSuffixes(suffixes map[string]struct{}) []string {

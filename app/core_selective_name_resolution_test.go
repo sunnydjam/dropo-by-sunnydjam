@@ -63,7 +63,15 @@ func TestSelectiveFakeHostsOverlayIsExactScopedAndReversible(t *testing.T) {
 	}
 }
 
-func TestSelectiveFakeHostMappingsFollowTypedVPNRoute(t *testing.T) {
+func TestSelectiveHostsCleanupPersistsFakeOnlyOverlayRemoval(t *testing.T) {
+	input := []byte("# keep\r\n198.18.1.10 updates.discord.com # dropo-selective-vpn-fake\r\n")
+	output, changed := restoreSelectiveHostsContent(input)
+	if changed != 1 || string(output) != "# keep\r\n" {
+		t.Fatalf("fake-only cleanup changed=%d output=%q", changed, output)
+	}
+}
+
+func TestSelectiveFakeHostMappingsFollowTypedRoute(t *testing.T) {
 	plan := traffic.TrafficPlan{
 		Revision: 1, CatalogRevision: "overlay-test",
 		Services: []traffic.ServiceRule{{
@@ -76,7 +84,7 @@ func TestSelectiveFakeHostMappingsFollowTypedVPNRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mappings := selectedVPNFakeHostMappings(plan, directory)
+	mappings := selectedFakeHostMappings(plan, directory)
 	if len(mappings) != 1 || mappings[0].Host != "updates.discord.com" || !strings.HasPrefix(mappings[0].Address, "198.") {
 		t.Fatalf("VPN bootstrap mappings = %#v", mappings)
 	}
@@ -85,7 +93,29 @@ func TestSelectiveFakeHostMappingsFollowTypedVPNRoute(t *testing.T) {
 	if err := directory.ApplyPlan(plan); err != nil {
 		t.Fatal(err)
 	}
-	if mappings := selectedVPNFakeHostMappings(plan, directory); len(mappings) != 0 {
+	if mappings := selectedFakeHostMappings(plan, directory); len(mappings) != 0 {
 		t.Fatalf("direct route retained fake mappings: %#v", mappings)
+	}
+}
+
+func TestSelectiveFakeHostMappingsIncludeExactZapretBootstrapOnly(t *testing.T) {
+	plan := traffic.TrafficPlan{
+		Revision: 1, CatalogRevision: "overlay-zapret-test",
+		Services: []traffic.ServiceRule{{
+			ID: "discord", DisplayName: "Discord", ExactHosts: []string{"updates.discord.com"},
+			DomainSuffixes: []string{"discord.com"}, TCPPorts: []int{443},
+		}},
+		Routes: []traffic.ServiceRoute{{ServiceID: "discord", Kind: traffic.ServiceRouteZapret}},
+	}
+	directory, err := traffic.NewFakeIPDirectory(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings := selectedFakeHostMappings(plan, directory)
+	if len(mappings) != 1 || mappings[0].Host != "updates.discord.com" {
+		t.Fatalf("Zapret bootstrap mappings = %#v", mappings)
+	}
+	if _, ok := directory.ResolveHost("images.discord.com"); ok {
+		t.Fatal("suffix-only Zapret host was primed")
 	}
 }

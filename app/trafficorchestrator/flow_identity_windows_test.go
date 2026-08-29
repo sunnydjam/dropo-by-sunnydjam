@@ -115,6 +115,42 @@ func TestWindowsFlowIdentityResolverRefreshesFreshTableOnNewTCPMiss(t *testing.T
 	}
 }
 
+func TestWindowsFlowIdentityResolverRefreshesFreshTableOnNewUDPMiss(t *testing.T) {
+	now := time.Unix(101, 0)
+	tuple := FlowTuple{
+		Network: NetworkUDP, Source: netip.MustParseAddr("192.0.2.1"), SourcePort: 50001,
+		Destination: netip.MustParseAddr("203.0.113.9"), DestinationPort: 50000,
+	}
+	kind := ownerTableKind{network: NetworkUDP}
+	loads := 0
+	resolver := &windowsFlowIdentityResolver{
+		now: func() time.Time { return now },
+		loadTable: func(got ownerTableKind) (map[FlowTuple]uint32, error) {
+			loads++
+			if got != kind {
+				t.Fatalf("owner table kind = %+v, want %+v", got, kind)
+			}
+			return map[FlowTuple]uint32{ownerLookupTuple(tuple): 78}, nil
+		},
+		processName: func(pid uint32) string {
+			if pid != 78 {
+				t.Fatalf("process PID = %d, want 78", pid)
+			}
+			return "Discord.exe"
+		},
+		tables: map[ownerTableKind]ownerTableSnapshot{
+			kind: {loaded: now, owners: map[FlowTuple]uint32{}},
+		},
+		flows: make(map[FlowTuple]cachedProcessIdentity), processes: make(map[uint32]cachedProcessIdentity),
+	}
+	if got := resolver.ResolveProcessName(tuple); got != "Discord.exe" {
+		t.Fatalf("process name = %q, want Discord.exe", got)
+	}
+	if loads != 1 {
+		t.Fatalf("owner table reloads = %d, want one bounded refresh", loads)
+	}
+}
+
 func TestWindowsFlowIdentityResolverFindsCurrentUDPProcess(t *testing.T) {
 	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
