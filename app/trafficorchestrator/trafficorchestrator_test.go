@@ -620,7 +620,7 @@ func TestValidateStrategyRejectsUnboundedActions(t *testing.T) {
 		t.Fatal("expected fields from another action kind to be rejected")
 	}
 	strategy = testStrategy("bad-sequence-delta", 1)
-	strategy.TCP[0].SequenceDelta = maxPacketPosition + 1
+	strategy.TCP[0].SequenceDelta = maxSequenceDelta + 1
 	if err := ValidateStrategy(strategy); err == nil {
 		t.Fatal("expected unbounded sequence delta to be rejected")
 	}
@@ -650,7 +650,7 @@ func TestFlowseal1102YouTubeALTUsesExactTypedRecipe(t *testing.T) {
 	if strategy.ID == "" {
 		t.Fatal("exact YouTube General ALT strategy is missing")
 	}
-	if strategy.Revision != 4 || len(strategy.TCP) != 2 || len(strategy.UDP) != 1 {
+	if strategy.Revision != 5 || len(strategy.TCP) != 2 || len(strategy.UDP) != 1 {
 		t.Fatalf("General ALT shape = %+v", strategy)
 	}
 	fake, split := strategy.TCP[0], strategy.TCP[1]
@@ -676,17 +676,26 @@ func TestFlowseal1102DiscordALTUsesExactTypedRecipe(t *testing.T) {
 	if strategy.ID == "" {
 		t.Fatal("exact Discord General ALT strategy is missing")
 	}
-	if strategy.Revision != 4 || len(strategy.TCP) != 3 || len(strategy.UDP) != 2 || strategy.Cost.SyntheticPackets != 36 {
+	if strategy.Revision != 5 || len(strategy.TCP) != 7 || len(strategy.UDP) != 2 {
 		t.Fatalf("Discord General ALT shape = %+v", strategy)
 	}
-	if fake := strategy.TCP[0]; fake.Payload != "stun_decoy" || fake.PadTo != 100 || fake.Repeats != 6 || len(fake.Ports) != 1 || fake.Ports[0] != 443 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
-		t.Fatalf("Discord STUN fake = %+v", fake)
+	if fake := strategy.TCP[0]; fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || len(fake.Ports) != 5 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
+		t.Fatalf("Discord media TLS fake = %+v", fake)
 	}
-	if fake := strategy.TCP[1]; fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
-		t.Fatalf("Discord TLS fake = %+v", fake)
+	if split := strategy.TCP[1]; split.Kind != ActionFakeDataSplit || split.Position != 1 || split.FakePattern != FakePatternZero || split.Repeats != 6 {
+		t.Fatalf("Discord media fake data split = %+v", split)
 	}
-	if split := strategy.TCP[2]; split.Kind != ActionFakeDataSplit || split.Position != 1 || split.FakePattern != FakePatternZero || split.Repeats != 6 {
-		t.Fatalf("Discord fake data split = %+v", split)
+	if fake := strategy.TCP[2]; fake.Payload != "stun_decoy" || fake.PadTo != 100 || fake.Repeats != 6 || len(fake.Ports) != 2 || fake.TCPFooling != TCPFoolingTimestampOrBadSum {
+		t.Fatalf("Discord web STUN fake = %+v", fake)
+	}
+	if fake := strategy.TCP[3]; fake.Payload != "tls_google" || fake.PadTo != 681 || fake.Repeats != 6 || len(fake.Payloads) != 1 || fake.Payloads[0] != "tls-client-hello" {
+		t.Fatalf("Discord web TLS fake = %+v", fake)
+	}
+	if split := strategy.TCP[4]; split.Kind != ActionFakeDataSplit || split.Position != 1 || split.FakePattern != FakePatternZero || split.Repeats != 6 || split.Payloads[0] != "tls-client-hello" {
+		t.Fatalf("Discord web TLS fake data split = %+v", split)
+	}
+	if fake := strategy.TCP[5]; fake.Payload != "tls_max" || fake.PadTo != 664 || fake.Payloads[0] != "http-request" {
+		t.Fatalf("Discord web HTTP fake = %+v", fake)
 	}
 	if udp := strategy.UDP[0]; udp.Payload != "quic_google" || udp.PadTo != 1200 || udp.Repeats != 6 || len(udp.Ports) != 1 || udp.Ports[0] != 443 {
 		t.Fatalf("Discord QUIC fake = %+v", udp)
@@ -694,6 +703,96 @@ func TestFlowseal1102DiscordALTUsesExactTypedRecipe(t *testing.T) {
 	if udp := strategy.UDP[1]; udp.Payload != "discord_active" || udp.PadTo != 1200 || udp.Repeats != 6 || len(udp.PortRanges) != 2 || udp.PortRanges[0] != (PortRange{First: 19294, Last: 19344}) || udp.PortRanges[1] != (PortRange{First: 50000, Last: 50100}) {
 		t.Fatalf("Discord media fake = %+v", udp)
 	}
+}
+
+func TestFlowseal1102CatalogContainsEveryScopedProfile(t *testing.T) {
+	counts := map[string]int{"native-flowseal-1102-youtube-": 0, "native-discord-flowseal-1102-": 0}
+	for _, strategy := range BuiltinStrategies() {
+		for prefix := range counts {
+			if strings.HasPrefix(strategy.ID, prefix) {
+				counts[prefix]++
+				if strategy.Revision != 5 {
+					t.Fatalf("%s revision = %d, want typed profile revision 5", strategy.ID, strategy.Revision)
+				}
+			}
+		}
+	}
+	for prefix, count := range counts {
+		if count != 22 {
+			t.Fatalf("%s profile count = %d, want 22", prefix, count)
+		}
+	}
+}
+
+func TestFlowseal1102HostFakeSplitPreservesRealTLSStream(t *testing.T) {
+	strategy := builtinStrategyByID(t, "native-flowseal-1102-youtube-alt12")
+	original := testIPv4TCPPacket(t, "www.youtube.com")
+	parsed, err := parsePacket(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, start, end := locateTLSServerName(parsed.payload(), true)
+	packets, transformed, err := applyStrategy(parsed, strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transformed || (len(packets) != 4 && len(packets) != 5) {
+		t.Fatalf("hostfakesplit produced %d packets, transformed=%v", len(packets), transformed)
+	}
+	payloads := make([][]byte, len(packets))
+	for index, packet := range packets {
+		part, parseErr := parsePacket(packet)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		payloads[index] = append([]byte(nil), part.payload()...)
+	}
+	if !bytes.Equal(payloads[0], parsed.payload()[:start]) || !bytes.Equal(payloads[2], parsed.payload()[start:end]) {
+		t.Fatal("real hostfakesplit segments do not reconstruct the original TLS stream")
+	}
+	if end < len(parsed.payload()) && (len(payloads) != 5 || !bytes.Equal(payloads[4], parsed.payload()[end:])) {
+		t.Fatal("hostfakesplit trailing real segment does not match the original TLS stream")
+	}
+	if bytes.Equal(payloads[1], parsed.payload()[start:end]) || !bytes.Equal(payloads[1], payloads[3]) || len(payloads[1]) != end-start {
+		t.Fatal("hostfakesplit fake host segments are not bounded distinct replacements")
+	}
+}
+
+func TestFlowseal1102MultisplitUsesEmbeddedOverlapPattern(t *testing.T) {
+	strategy := builtinStrategyByID(t, "native-flowseal-1102-youtube-general")
+	original := testIPv4TCPPacket(t, "www.youtube.com")
+	parsed, err := parsePacket(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packets, transformed, err := applyStrategy(parsed, strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transformed || len(packets) != 2 {
+		t.Fatalf("multisplit produced %d packets, transformed=%v", len(packets), transformed)
+	}
+	first, err := parsePacket(packets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.payload()) != 682 || !bytes.Equal(first.payload()[:681], flowseal1102GoogleTLS) || first.payload()[681] != parsed.payload()[0] {
+		t.Fatal("multisplit first segment does not contain the exact 681-byte Google overlap followed by real byte 1")
+	}
+	if first.tcpSequence != parsed.tcpSequence-681 {
+		t.Fatalf("overlap sequence = %d, want %d", first.tcpSequence, parsed.tcpSequence-681)
+	}
+}
+
+func builtinStrategyByID(t *testing.T, id string) TrafficStrategy {
+	t.Helper()
+	for _, strategy := range BuiltinStrategies() {
+		if strategy.ID == id {
+			return strategy
+		}
+	}
+	t.Fatalf("built-in strategy %q is missing", id)
+	return TrafficStrategy{}
 }
 
 func TestDiscordDiscoveryRangesParticipateInClassification(t *testing.T) {

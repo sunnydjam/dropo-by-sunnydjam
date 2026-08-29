@@ -1,10 +1,10 @@
 {
-  "version": 13,
-  "updated": "2026-08-29",
-  "note": "Per-service native DPI-bypass ladders. blockType: 'dpi' uses the local packet engine; 'vpn' uses the ordered VPN-source fallback. Strategy names describe Dropo's typed packet actions; research provenance is kept in THIRD_PARTY_NOTICES.md.",
+	"version": 14,
+	"updated": "2026-08-30",
+	"note": "Per-service native DPI-bypass ladders. Flowseal 1.10.2 profiles use scoped typed packet actions; global IP/game filters are never imported. ALT5 keeps only its safely classifiable data phase because service identity is unavailable on a browser SYN.",
   "services": {
     "discord": {
-      "source": "Flowseal zapret-discord-youtube 1.10.2 profiles adapted to typed bounded actions; General ALT is an exact native priority profile, remaining profiles are staged adaptations",
+		"source": "All 22 Flowseal zapret-discord-youtube 1.10.2 profiles adapted to typed bounded service rules; General ALT is the live-tested priority profile and ALT5 is data-phase-only for isolation safety",
       "blockType": "dpi",
       "methods": [
         { "tag": "flowseal-1102-discord-alt", "label": "Flowseal 1.10.2 ALT exact — Discord", "technique": "fakedsplit-ts", "nativeStrategy": "native-discord-flowseal-1102-alt", "repeats": 6, "quic": "google" },
@@ -36,7 +36,7 @@
       ]
     },
     "youtube": {
-      "source": "Flowseal zapret-discord-youtube 1.10.2 profiles adapted to typed bounded actions; General ALT is an exact native priority profile, remaining profiles are staged adaptations",
+		"source": "All 22 Flowseal zapret-discord-youtube 1.10.2 profiles adapted to typed bounded service rules; General ALT is the live-tested priority profile and ALT5 is data-phase-only for isolation safety",
       "blockType": "dpi",
       "methods": [
         { "tag": "flowseal-1102-youtube-alt", "label": "Flowseal 1.10.2 ALT exact — YouTube", "technique": "fakedsplit-ts", "nativeStrategy": "native-flowseal-1102-youtube-alt", "repeats": 6, "quic": "google" },

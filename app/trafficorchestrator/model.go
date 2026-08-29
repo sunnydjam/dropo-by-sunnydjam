@@ -19,6 +19,7 @@ const (
 	ActionPass            PacketActionKind = "pass"
 	ActionFake            PacketActionKind = "fake"
 	ActionFakeDataSplit   PacketActionKind = "fake_data_split"
+	ActionHostFakeSplit   PacketActionKind = "host_fake_split"
 	ActionSplit           PacketActionKind = "split"
 	ActionDisorder        PacketActionKind = "disorder"
 	ActionTTL             PacketActionKind = "ttl"
@@ -73,6 +74,7 @@ type PacketAction struct {
 	TTL            int              `json:"ttl,omitempty"`
 	Repeats        int              `json:"repeats,omitempty"`
 	Payload        string           `json:"payload,omitempty"`
+	Payloads       []string         `json:"payloads,omitempty"`
 	PadTo          int              `json:"padTo,omitempty"`
 	InvalidSum     bool             `json:"invalidChecksum,omitempty"`
 	Ports          []int            `json:"ports,omitempty"`
@@ -81,6 +83,8 @@ type PacketAction struct {
 	TimestampDelta int              `json:"timestampDelta,omitempty"`
 	IPv4ID         IPv4IDMode       `json:"ipv4Id,omitempty"`
 	FakePattern    FakePatternKind  `json:"fakePattern,omitempty"`
+	HostTemplate   string           `json:"hostTemplate,omitempty"`
+	AlternateOrder bool             `json:"alternateOrder,omitempty"`
 }
 
 // StrategyConstraints limits where a strategy may be applied.

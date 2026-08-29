@@ -13,6 +13,7 @@ const (
 	maxSyntheticPackets  = 48
 	maxBufferedFlowBytes = 256 * 1024
 	maxPacketPosition    = 64 * 1024
+	maxSequenceDelta     = 16 * 1024 * 1024
 	maxPacketPositions   = 6
 	maxSyntheticPayload  = 4096
 )
@@ -205,13 +206,16 @@ func validateAction(network Network, action PacketAction) error {
 	if err := validateActionPortRanges(action.PortRanges); err != nil {
 		return err
 	}
+	if err := validateActionPayloads(action.Payloads); err != nil {
+		return err
+	}
 	switch action.Kind {
 	case ActionPass:
-		if action.Position != 0 || len(action.Positions) != 0 || action.SequenceDelta != 0 || action.Overlap != 0 || action.TTL != 0 || action.Repeats != 0 || action.Payload != "" || action.PadTo != 0 || action.InvalidSum || actionHasGenerationMetadata(action) {
+		if action.Position != 0 || len(action.Positions) != 0 || action.SequenceDelta != 0 || action.Overlap != 0 || action.TTL != 0 || action.Repeats != 0 || action.Payload != "" || len(action.Payloads) != 0 || action.PadTo != 0 || action.InvalidSum || action.HostTemplate != "" || action.AlternateOrder || actionHasGenerationMetadata(action) {
 			return errors.New("pass action cannot contain transformation fields")
 		}
 	case ActionFake:
-		if action.Position != 0 || len(action.Positions) != 0 || action.Overlap != 0 || action.TTL != 0 || action.FakePattern != "" {
+		if action.Position != 0 || len(action.Positions) != 0 || action.Overlap != 0 || action.TTL != 0 || action.FakePattern != "" || action.HostTemplate != "" || action.AlternateOrder {
 			return errors.New("fake action contains fields for another action kind")
 		}
 		if action.Repeats < 1 || action.Repeats > maxSyntheticPackets {
@@ -221,7 +225,7 @@ func validateAction(network Network, action PacketAction) error {
 			return errors.New("fake payload is required")
 		}
 		switch action.Payload {
-		case "original", "tls_client_hello", "tls_google", "stun_decoy", "quic_initial", "quic_decoy", "quic_google", "discord_active", "protocol_decoy", "zero":
+		case "original", "tls_client_hello", "tls_auto_google", "tls_auto_ya", "tls_default", "tls_google", "tls_4pda", "tls_max", "tls_sochi", "stun_decoy", "stun2_decoy", "quic_initial", "quic_decoy", "quic_google", "discord_active", "protocol_decoy", "zero":
 		default:
 			return fmt.Errorf("unsupported fake payload %q", action.Payload)
 		}
@@ -231,8 +235,8 @@ func validateAction(network Network, action PacketAction) error {
 		if action.Payload == "zero" && action.PadTo == 0 {
 			return errors.New("zero fake payload requires padTo")
 		}
-		if action.SequenceDelta < -maxPacketPosition || action.SequenceDelta > maxPacketPosition {
-			return fmt.Errorf("sequenceDelta must be within %d..%d", -maxPacketPosition, maxPacketPosition)
+		if action.SequenceDelta < -maxSequenceDelta || action.SequenceDelta > maxSequenceDelta {
+			return fmt.Errorf("sequenceDelta must be within %d..%d", -maxSequenceDelta, maxSequenceDelta)
 		}
 		if network != NetworkTCP && action.SequenceDelta != 0 {
 			return errors.New("sequenceDelta is TCP-only")
@@ -267,10 +271,32 @@ func validateAction(network Network, action PacketAction) error {
 		if action.FakePattern != FakePatternZero {
 			return fmt.Errorf("unsupported fake data split pattern %q", action.FakePattern)
 		}
-		if action.SequenceDelta != 0 || action.Overlap != 0 || action.TTL != 0 || action.Payload != "" || action.PadTo != 0 || action.InvalidSum {
+		if action.SequenceDelta < -maxSequenceDelta || action.SequenceDelta > maxSequenceDelta {
+			return fmt.Errorf("sequenceDelta must be within %d..%d", -maxSequenceDelta, maxSequenceDelta)
+		}
+		if action.Overlap != 0 || action.TTL != 0 || action.Payload != "" || action.PadTo != 0 || action.HostTemplate != "" || action.AlternateOrder {
 			return errors.New("fake data split contains fields for another action kind")
 		}
 		if err := validateGenerationMetadata(network, action, true); err != nil {
+			return err
+		}
+	case ActionHostFakeSplit:
+		if network != NetworkTCP {
+			return errors.New("host fake split is TCP-only")
+		}
+		if action.Position != 0 || len(action.Positions) != 0 || action.Overlap != 0 || action.TTL != 0 || action.Payload != "" || action.PadTo != 0 || action.FakePattern != "" {
+			return errors.New("host fake split contains fields for another action kind")
+		}
+		if action.Repeats < 1 || action.Repeats > maxSyntheticPackets/4 {
+			return fmt.Errorf("host fake split repeats must be within 1..%d", maxSyntheticPackets/4)
+		}
+		if host := normalizeHost(action.HostTemplate); host == "" || host != strings.ToLower(strings.TrimSpace(action.HostTemplate)) {
+			return errors.New("host fake split requires a normalized host template")
+		}
+		if action.SequenceDelta < -maxSequenceDelta || action.SequenceDelta > maxSequenceDelta {
+			return fmt.Errorf("sequenceDelta must be within %d..%d", -maxSequenceDelta, maxSequenceDelta)
+		}
+		if err := validateGenerationMetadata(network, action, false); err != nil {
 			return err
 		}
 	case ActionSplit, ActionDisorder:
@@ -294,14 +320,26 @@ func validateAction(network Network, action PacketAction) error {
 				return fmt.Errorf("position %d: %w", index, err)
 			}
 		}
-		if action.SequenceDelta != 0 || action.Overlap != 0 || action.TTL != 0 || action.Repeats != 0 || action.Payload != "" || action.PadTo != 0 || action.InvalidSum || actionHasGenerationMetadata(action) {
+		if action.Overlap < 0 || action.Overlap > maxPacketPosition {
+			return fmt.Errorf("overlap must be within 0..%d", maxPacketPosition)
+		}
+		if (action.Overlap == 0) != (strings.TrimSpace(action.Payload) == "") {
+			return errors.New("split overlap and overlap payload must be set together")
+		}
+		if action.Payload != "" && !supportedPatternPayload(action.Payload) {
+			return fmt.Errorf("unsupported split overlap payload %q", action.Payload)
+		}
+		if action.SequenceDelta != 0 || action.TTL != 0 || action.Repeats != 0 || action.PadTo != 0 || action.InvalidSum || action.TCPFooling != "" || action.TimestampDelta != 0 || action.FakePattern != "" || action.HostTemplate != "" || action.AlternateOrder {
 			return fmt.Errorf("%s action contains fields for another action kind", action.Kind)
+		}
+		if action.IPv4ID != "" && action.IPv4ID != IPv4IDZero {
+			return fmt.Errorf("unsupported IPv4 ID mode %q", action.IPv4ID)
 		}
 	case ActionTTL:
 		if action.TTL < 1 || action.TTL > 255 {
 			return errors.New("ttl must be within 1..255")
 		}
-		if action.Position != 0 || len(action.Positions) != 0 || action.SequenceDelta != 0 || action.Overlap != 0 || action.Repeats != 0 || action.Payload != "" || action.PadTo != 0 || action.InvalidSum || actionHasGenerationMetadata(action) {
+		if action.Position != 0 || len(action.Positions) != 0 || action.SequenceDelta != 0 || action.Overlap != 0 || action.Repeats != 0 || action.Payload != "" || len(action.Payloads) != 0 || action.PadTo != 0 || action.InvalidSum || action.HostTemplate != "" || action.AlternateOrder || actionHasGenerationMetadata(action) {
 			return errors.New("ttl action contains fields for another action kind")
 		}
 	case ActionSequenceOverlap:
@@ -311,20 +349,48 @@ func validateAction(network Network, action PacketAction) error {
 		if action.Overlap < 1 || action.Overlap > maxPacketPosition {
 			return fmt.Errorf("overlap must be within 1..%d", maxPacketPosition)
 		}
-		if action.Position != 0 || len(action.Positions) != 0 || action.SequenceDelta != 0 || action.TTL != 0 || action.Repeats != 0 || action.Payload != "" || action.PadTo != 0 || action.InvalidSum || actionHasGenerationMetadata(action) {
+		if action.Position != 0 || len(action.Positions) != 0 || action.SequenceDelta != 0 || action.TTL != 0 || action.Repeats != 0 || action.Payload != "" || len(action.Payloads) != 0 || action.PadTo != 0 || action.InvalidSum || action.HostTemplate != "" || action.AlternateOrder || actionHasGenerationMetadata(action) {
 			return errors.New("sequence overlap contains fields for another action kind")
 		}
 	case ActionRepeat:
 		if action.Repeats < 1 || action.Repeats > maxSyntheticPackets {
 			return fmt.Errorf("repeats must be within 1..%d", maxSyntheticPackets)
 		}
-		if action.Position != 0 || len(action.Positions) != 0 || action.SequenceDelta != 0 || action.Overlap != 0 || action.TTL != 0 || action.Payload != "" || action.PadTo != 0 || action.InvalidSum || actionHasGenerationMetadata(action) {
+		if action.Position != 0 || len(action.Positions) != 0 || action.SequenceDelta != 0 || action.Overlap != 0 || action.TTL != 0 || action.Payload != "" || len(action.Payloads) != 0 || action.PadTo != 0 || action.InvalidSum || action.HostTemplate != "" || action.AlternateOrder || actionHasGenerationMetadata(action) {
 			return errors.New("repeat action contains fields for another action kind")
 		}
 	default:
 		return fmt.Errorf("unsupported action kind %q", action.Kind)
 	}
 	return nil
+}
+
+func validateActionPayloads(payloads []string) error {
+	if len(payloads) > 8 {
+		return errors.New("an action may target at most 8 payload fingerprints")
+	}
+	seen := make(map[string]struct{}, len(payloads))
+	for _, payload := range payloads {
+		switch payload {
+		case "http-request", "tls-client-hello", "quic-initial", "stun", "discord-media", "wireguard-initiation", "wireguard-cookie":
+		default:
+			return fmt.Errorf("unsupported action payload fingerprint %q", payload)
+		}
+		if _, duplicate := seen[payload]; duplicate {
+			return fmt.Errorf("duplicate action payload fingerprint %q", payload)
+		}
+		seen[payload] = struct{}{}
+	}
+	return nil
+}
+
+func supportedPatternPayload(payload string) bool {
+	switch payload {
+	case "zero", "tls_google", "tls_4pda", "tls_max", "tls_sochi", "stun_decoy", "stun2_decoy":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateActionPorts(ports []int) error {
@@ -403,7 +469,7 @@ func validatePacketPosition(position PacketPosition) error {
 		return nil
 	}
 	switch position.Anchor {
-	case "tls-sni-start", "tls-sni-middle", "tls-sni-end":
+	case "tls-sni-start", "tls-sni-middle", "tls-sni-middle-sld", "tls-sni-end", "tls-sni-extension-start":
 	default:
 		return fmt.Errorf("unsupported anchor %q", position.Anchor)
 	}

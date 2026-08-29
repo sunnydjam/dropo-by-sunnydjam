@@ -184,6 +184,37 @@ func TestServiceStrategiesAreCuratedPerServiceFromFile(t *testing.T) {
 	}
 }
 
+func TestFlowseal1102CatalogExposesEveryProfileForBothServices(t *testing.T) {
+	profiles := []string{
+		"alt", "alt13", "general", "alt2", "alt3", "alt4", "alt5", "alt6", "alt7", "alt8", "alt9",
+		"alt10", "alt11", "alt12", "exp", "fake-tls-auto", "fake-tls-auto-alt", "fake-tls-auto-alt2",
+		"fake-tls-auto-alt3", "simple-fake", "simple-fake-alt", "simple-fake-alt2",
+	}
+	methods := DefaultServiceBypassMethods()
+	for service, prefix := range map[string]string{
+		"youtube": "native-flowseal-1102-youtube-",
+		"discord": "native-discord-flowseal-1102-",
+	} {
+		available := make(map[string]bool, len(methods[service]))
+		flowsealCount := 0
+		for _, method := range methods[service] {
+			if strings.HasPrefix(method.NativeStrategyID, prefix) {
+				available[method.NativeStrategyID] = true
+				flowsealCount++
+			}
+		}
+		if flowsealCount != len(profiles) {
+			t.Fatalf("%s exposes %d Flowseal profiles, want %d", service, flowsealCount, len(profiles))
+		}
+		for _, profile := range profiles {
+			id := prefix + profile
+			if !available[id] {
+				t.Errorf("%s is missing adapted strategy %q", service, id)
+			}
+		}
+	}
+}
+
 func TestEveryDpiServiceHasRankedMethods(t *testing.T) {
 	for _, svc := range DefaultFreeAccessServices {
 		if bt := serviceBlockType(svc.Tag); svc.RequiresVPN || bt == "vpn" || bt == "proxy" {

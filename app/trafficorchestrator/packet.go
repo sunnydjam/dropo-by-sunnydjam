@@ -184,40 +184,63 @@ func (p parsedPacket) flowTuple() FlowTuple {
 }
 
 func extractHTTPHost(payload []byte) string {
+	host, _, _ := locateHTTPHost(payload)
+	return host
+}
+
+// locateHTTPHost returns the normalized Host header and the byte range occupied
+// by the hostname itself. The range deliberately excludes surrounding spaces
+// and an optional :port suffix so host-fake splitting never alters HTTP syntax.
+func locateHTTPHost(payload []byte) (string, int, int) {
 	if len(payload) < 16 {
-		return ""
+		return "", 0, 0
 	}
 	firstEnd := bytesIndex(payload, []byte("\r\n"))
 	if firstEnd <= 0 {
-		return ""
+		return "", 0, 0
 	}
 	requestLine := string(payload[:firstEnd])
 	parts := strings.Split(requestLine, " ")
 	if len(parts) != 3 || !strings.HasPrefix(parts[2], "HTTP/") {
-		return ""
+		return "", 0, 0
 	}
 	for cursor := firstEnd + 2; cursor < len(payload); {
 		relativeEnd := bytesIndex(payload[cursor:], []byte("\r\n"))
 		if relativeEnd < 0 {
-			return ""
+			return "", 0, 0
 		}
 		if relativeEnd == 0 {
 			break
 		}
-		line := string(payload[cursor : cursor+relativeEnd])
+		lineBytes := payload[cursor : cursor+relativeEnd]
+		line := string(lineBytes)
 		if colon := strings.IndexByte(line, ':'); colon > 0 && strings.EqualFold(strings.TrimSpace(line[:colon]), "host") {
-			host := strings.TrimSpace(line[colon+1:])
+			valueStart := colon + 1
+			for valueStart < len(lineBytes) && (lineBytes[valueStart] == ' ' || lineBytes[valueStart] == '\t') {
+				valueStart++
+			}
+			valueEnd := len(lineBytes)
+			for valueEnd > valueStart && (lineBytes[valueEnd-1] == ' ' || lineBytes[valueEnd-1] == '\t') {
+				valueEnd--
+			}
+			host := string(lineBytes[valueStart:valueEnd])
 			if parsed, err := netip.ParseAddrPort(host); err == nil {
-				return parsed.Addr().String()
+				address := parsed.Addr().String()
+				return address, cursor + valueStart, cursor + valueStart + len(address)
 			}
 			if index := strings.LastIndexByte(host, ':'); index > 0 && strings.Count(host, ":") == 1 {
 				host = host[:index]
+				valueEnd = valueStart + index
 			}
-			return normalizeHost(host)
+			normalized := normalizeHost(host)
+			if normalized == "" {
+				return "", 0, 0
+			}
+			return normalized, cursor + valueStart, cursor + valueEnd
 		}
 		cursor += relativeEnd + 2
 	}
-	return ""
+	return "", 0, 0
 }
 
 func extractTLSServerName(payload []byte) string {

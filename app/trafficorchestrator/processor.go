@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -612,6 +613,14 @@ func applyStrategy(parsed parsedPacket, strategy TrafficStrategy) ([][]byte, boo
 			// order, so the original unsplit packet must not be appended again.
 			originals = nil
 			transformed = true
+		case ActionHostFakeSplit:
+			packets, err := makeHostFakeSplitPackets(parsed, action)
+			if err != nil {
+				return nil, false, err
+			}
+			outputs = append(outputs, packets...)
+			originals = nil
+			transformed = true
 		case ActionSplit, ActionDisorder:
 			if parsed.network != NetworkTCP {
 				return nil, false, fmt.Errorf("%s applied to non-TCP packet", action.Kind)
@@ -620,7 +629,7 @@ func applyStrategy(parsed parsedPacket, strategy TrafficStrategy) ([][]byte, boo
 			if err != nil {
 				return nil, false, err
 			}
-			segments, err := splitTCPPacketAtPositions(parsed, positions)
+			segments, err := splitTCPPacketAtPositionsWithAction(parsed, positions, action)
 			if err != nil {
 				return nil, false, err
 			}
@@ -662,6 +671,24 @@ func applyStrategy(parsed parsedPacket, strategy TrafficStrategy) ([][]byte, boo
 }
 
 func actionMatchesPacket(action PacketAction, parsed parsedPacket) bool {
+	if len(action.Payloads) > 0 {
+		fingerprints := parsed.flowEvidence().Fingerprints
+		matched := false
+		for _, required := range action.Payloads {
+			for _, fingerprint := range fingerprints {
+				if required == fingerprint {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
 	if len(action.Ports) == 0 && len(action.PortRanges) == 0 {
 		return true
 	}
@@ -718,10 +745,24 @@ func makeFakePacket(parsed parsedPacket, action PacketAction, ttl int) ([]byte, 
 	switch action.Payload {
 	case "tls_client_hello":
 		payload = fakeTLSClientHelloLike(parsed.payload())
+	case "tls_auto_google":
+		payload = fakeTLSClientHelloLikeForServerName(parsed.payload(), "www.google.com")
+	case "tls_auto_ya":
+		payload = fakeTLSClientHelloLikeForServerName(parsed.payload(), "ya.ru")
+	case "tls_default":
+		payload = fakeTLSClientHelloForServerName("www.iana.org")
 	case "tls_google":
 		payload = append([]byte(nil), flowseal1102GoogleTLS...)
+	case "tls_4pda":
+		payload = append([]byte(nil), flowseal1102TLS4PDA...)
+	case "tls_max":
+		payload = append([]byte(nil), flowseal1102TLSMax...)
+	case "tls_sochi":
+		payload = append([]byte(nil), flowseal1102TLSSochi...)
 	case "stun_decoy":
 		payload = append([]byte(nil), flowseal1102STUN...)
+	case "stun2_decoy":
+		payload = append([]byte(nil), flowseal1102STUN2...)
 	case "quic_initial":
 		payload = fakeQUICInitial(parsed.payload())
 	case "quic_decoy":
@@ -752,10 +793,6 @@ func makeFakePacket(parsed parsedPacket, action PacketAction, ttl int) ([]byte, 
 	}
 	if ttl > 0 {
 		setPacketTTL(packet, updated, ttl)
-	}
-	if action.SequenceDelta != 0 && updated.network == NetworkTCP {
-		sequence := uint32(int64(updated.tcpSequence) + int64(action.SequenceDelta))
-		binary.BigEndian.PutUint32(packet[updated.transportOffset+4:updated.transportOffset+8], sequence)
 	}
 	invalidFallback, err := applyGeneratedPacketMetadata(packet, updated, action, true)
 	if err != nil {
@@ -810,7 +847,7 @@ func makeFakeDataSplitPackets(parsed parsedPacket, action PacketAction) ([][]byt
 			return nil, err
 		}
 		calculateChecksums(fake)
-		if invalidFallback {
+		if action.InvalidSum || invalidFallback {
 			corruptTransportChecksum(fake, fakeParsed)
 		}
 		fakeSegments[index] = fake
@@ -840,10 +877,18 @@ func applyGeneratedPacketMetadata(packet []byte, parsed parsedPacket, action Pac
 		binary.BigEndian.PutUint16(packet[4:6], 0)
 	}
 	if !synthetic || action.TCPFooling == "" {
+		if synthetic && action.SequenceDelta != 0 && parsed.network == NetworkTCP {
+			sequence := uint32(int64(parsed.tcpSequence) + int64(action.SequenceDelta))
+			binary.BigEndian.PutUint32(packet[parsed.transportOffset+4:parsed.transportOffset+8], sequence)
+		}
 		return false, nil
 	}
 	if parsed.network != NetworkTCP {
 		return false, errors.New("TCP fooling applied to non-TCP packet")
+	}
+	if action.SequenceDelta != 0 {
+		sequence := uint32(int64(parsed.tcpSequence) + int64(action.SequenceDelta))
+		binary.BigEndian.PutUint32(packet[parsed.transportOffset+4:parsed.transportOffset+8], sequence)
 	}
 	switch action.TCPFooling {
 	case TCPFoolingTimestamp:
@@ -934,12 +979,13 @@ func resolvePacketPositions(payload []byte, action PacketAction) ([]int, error) 
 		positions = append(positions, action.Position)
 	}
 	var sniStart, sniEnd int
+	var sniHost string
 	var hasSNI bool
 	for _, position := range action.Positions {
 		resolved := position.Absolute
 		if position.Anchor != "" {
 			if !hasSNI {
-				_, sniStart, sniEnd = locateTLSServerName(payload, true)
+				sniHost, sniStart, sniEnd = locateTLSServerName(payload, true)
 				hasSNI = sniStart > 0 && sniEnd > sniStart
 			}
 			if !hasSNI {
@@ -950,8 +996,14 @@ func resolvePacketPositions(payload []byte, action PacketAction) ([]int, error) 
 				resolved = sniStart
 			case "tls-sni-middle":
 				resolved = sniStart + (sniEnd-sniStart)/2
+			case "tls-sni-middle-sld":
+				resolved = sniStart + middleSLDOffset(sniHost)
 			case "tls-sni-end":
 				resolved = sniEnd
+			case "tls-sni-extension-start":
+				// The first SNI name starts nine bytes after the extension type:
+				// type(2), length(2), list length(2), name type(1), name length(2).
+				resolved = sniStart - 9
 			}
 			resolved += position.Offset
 		}
@@ -970,11 +1022,28 @@ func resolvePacketPositions(payload []byte, action PacketAction) ([]int, error) 
 	return unique, nil
 }
 
+func middleSLDOffset(host string) int {
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return len(host) / 2
+	}
+	sld := labels[len(labels)-2]
+	start := strings.LastIndex(host[:max(0, len(host)-len(labels[len(labels)-1])-1)], sld)
+	if start < 0 {
+		return len(host) / 2
+	}
+	return start + len(sld)/2
+}
+
 func splitTCPPacket(parsed parsedPacket, position int) ([][]byte, error) {
 	return splitTCPPacketAtPositions(parsed, []int{position})
 }
 
 func splitTCPPacketAtPositions(parsed parsedPacket, positions []int) ([][]byte, error) {
+	return splitTCPPacketAtPositionsWithAction(parsed, positions, PacketAction{})
+}
+
+func splitTCPPacketAtPositionsWithAction(parsed parsedPacket, positions []int, action PacketAction) ([][]byte, error) {
 	payload := parsed.payload()
 	if len(positions) == 0 {
 		return nil, errors.New("no TCP split positions")
@@ -992,19 +1061,170 @@ func splitTCPPacketAtPositions(parsed parsedPacket, positions []int) ([][]byte, 
 	segments := make([][]byte, 0, len(parts))
 	offset := 0
 	for index, part := range parts {
-		packet, updated, err := resizePacketPayload(parsed, part)
+		segmentPayload := append([]byte(nil), part...)
+		sequenceOffset := offset
+		if index == 0 && action.Overlap > 0 {
+			pattern, patternErr := repeatedFlowsealPattern(action.Payload, action.Overlap)
+			if patternErr != nil {
+				return nil, patternErr
+			}
+			segmentPayload = append(pattern, segmentPayload...)
+			sequenceOffset -= action.Overlap
+		}
+		packet, updated, err := resizePacketPayload(parsed, segmentPayload)
 		if err != nil {
 			return nil, err
 		}
-		binary.BigEndian.PutUint32(packet[updated.transportOffset+4:updated.transportOffset+8], parsed.tcpSequence+uint32(offset))
+		binary.BigEndian.PutUint32(packet[updated.transportOffset+4:updated.transportOffset+8], uint32(int64(parsed.tcpSequence)+int64(sequenceOffset)))
 		if index < len(parts)-1 {
 			packet[updated.tcpFlagsOffset] &^= 0x09 // FIN + PSH are kept only on the last segment.
+		}
+		if _, err := applyGeneratedPacketMetadata(packet, updated, action, false); err != nil {
+			return nil, err
 		}
 		calculateChecksums(packet)
 		segments = append(segments, packet)
 		offset += len(part)
 	}
 	return segments, nil
+}
+
+func repeatedFlowsealPattern(name string, length int) ([]byte, error) {
+	if length < 1 {
+		return nil, errors.New("pattern length must be positive")
+	}
+	var source []byte
+	switch name {
+	case "zero":
+		source = []byte{0}
+	case "tls_google":
+		source = flowseal1102GoogleTLS
+	case "tls_4pda":
+		source = flowseal1102TLS4PDA
+	case "tls_max":
+		source = flowseal1102TLSMax
+	case "tls_sochi":
+		source = flowseal1102TLSSochi
+	case "stun_decoy":
+		source = flowseal1102STUN
+	case "stun2_decoy":
+		source = flowseal1102STUN2
+	default:
+		return nil, fmt.Errorf("unknown Flowseal pattern %q", name)
+	}
+	result := make([]byte, length)
+	for index := range result {
+		result[index] = source[index%len(source)]
+	}
+	return result, nil
+}
+
+func makeHostFakeSplitPackets(parsed parsedPacket, action PacketAction) ([][]byte, error) {
+	if parsed.network != NetworkTCP {
+		return nil, errors.New("host fake split requires TCP")
+	}
+	payload := parsed.payload()
+	host, start, end := locateHTTPHost(payload)
+	if host == "" {
+		host, start, end = locateTLSServerName(payload, true)
+	}
+	if host == "" || start < 1 || end <= start || end > len(payload) {
+		return nil, errors.New("host fake split requires a complete HTTP Host or TLS SNI")
+	}
+	fakeHost := flowsealFakeHost(host, action.HostTemplate, parsed.tcpSequence)
+	if len(fakeHost) != end-start {
+		return nil, errors.New("host fake split did not preserve hostname length")
+	}
+
+	realBefore, err := makeTCPPayloadSegment(parsed, payload[:start], 0, false, action, false)
+	if err != nil {
+		return nil, err
+	}
+	realHost, err := makeTCPPayloadSegment(parsed, payload[start:end], start, end == len(payload), action, false)
+	if err != nil {
+		return nil, err
+	}
+	var realAfter []byte
+	if end < len(payload) {
+		realAfter, err = makeTCPPayloadSegment(parsed, payload[end:], end, true, action, false)
+		if err != nil {
+			return nil, err
+		}
+	}
+	fake, err := makeTCPPayloadSegment(parsed, fakeHost, start, false, action, true)
+	if err != nil {
+		return nil, err
+	}
+	appendFake := func(result *[][]byte) {
+		for repeat := 0; repeat < action.Repeats; repeat++ {
+			*result = append(*result, append([]byte(nil), fake...))
+		}
+	}
+	result := make([][]byte, 0, action.Repeats*2+3)
+	result = append(result, realBefore)
+	appendFake(&result)
+	if action.AlternateOrder {
+		if realAfter != nil {
+			result = append(result, realAfter)
+		}
+		result = append(result, realHost)
+		return result, nil
+	}
+	result = append(result, realHost)
+	appendFake(&result)
+	if realAfter != nil {
+		result = append(result, realAfter)
+	}
+	return result, nil
+}
+
+func makeTCPPayloadSegment(parsed parsedPacket, payload []byte, sequenceOffset int, logicalLast bool, action PacketAction, synthetic bool) ([]byte, error) {
+	packet, updated, err := resizePacketPayload(parsed, payload)
+	if err != nil {
+		return nil, err
+	}
+	binary.BigEndian.PutUint32(packet[updated.transportOffset+4:updated.transportOffset+8], uint32(int64(parsed.tcpSequence)+int64(sequenceOffset)))
+	if !logicalLast {
+		packet[updated.tcpFlagsOffset] &^= 0x09
+	}
+	updated, err = parsePacket(packet)
+	if err != nil {
+		return nil, err
+	}
+	invalidFallback, err := applyGeneratedPacketMetadata(packet, updated, action, synthetic)
+	if err != nil {
+		return nil, err
+	}
+	calculateChecksums(packet)
+	if synthetic && (action.InvalidSum || invalidFallback) {
+		corruptTransportChecksum(packet, updated)
+	}
+	return packet, nil
+}
+
+func flowsealFakeHost(original, template string, seed uint32) []byte {
+	originalLength := len(original)
+	template = normalizeHost(template)
+	if originalLength == 0 || template == "" {
+		return nil
+	}
+	if len(template) >= originalLength {
+		return []byte(template[len(template)-originalLength:])
+	}
+	if len(template)+1 == originalLength {
+		return []byte("." + template)
+	}
+	prefixLength := originalLength - len(template) - 1
+	alphabet := "0123456789abcdefghijklmnopqrstuvwxyz"
+	result := make([]byte, originalLength)
+	state := seed ^ uint32(originalLength*0x45d9f3b)
+	for index := 0; index < prefixLength; index++ {
+		state = state*1664525 + 1013904223
+		result[index] = alphabet[int(state%uint32(len(alphabet)))]
+	}
+	result[prefixLength] = '.'
+	copy(result[prefixLength+1:], template)
+	return result
 }
 
 func makeOverlapPacket(parsed parsedPacket, overlap int) ([]byte, error) {
@@ -1054,11 +1274,15 @@ func fakeTLSClientHelloForServerName(host string) []byte {
 }
 
 func fakeTLSClientHelloLike(original []byte) []byte {
+	return fakeTLSClientHelloLikeForServerName(original, "www.google.com")
+}
+
+func fakeTLSClientHelloLikeForServerName(original []byte, serverName string) []byte {
 	seed := byte(len(original))
 	for index, value := range original {
 		seed ^= value + byte(index*17)
 	}
-	return fakeTLSClientHelloForServerNameAndSession("www.google.com", tlsClientHelloSessionID(original), seed)
+	return fakeTLSClientHelloForServerNameAndSession(serverName, tlsClientHelloSessionID(original), seed)
 }
 
 func fakeTLSClientHelloForServerNameAndSession(host string, sessionID []byte, seed byte) []byte {

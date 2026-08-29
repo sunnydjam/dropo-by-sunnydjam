@@ -97,6 +97,49 @@ func TestSelectiveRuntimeLeavesSteamAndGameTrafficByteForByteDirect(t *testing.T
 	}
 }
 
+func TestEveryFlowseal1102StrategyKeepsSteamDirect(t *testing.T) {
+	original := testIPv4TCPPacketTo(t, "66.22.200.1", "store.steampowered.com")
+	resolver := &fixedFlowIdentityResolver{name: `C:\Program Files (x86)\Steam\bin\cef\cef.win64\steamwebhelper.exe`}
+	for _, strategy := range BuiltinStrategies() {
+		serviceID := ""
+		domain := ""
+		switch {
+		case len(strategy.ID) > len("native-flowseal-1102-youtube-") && strategy.ID[:len("native-flowseal-1102-youtube-")] == "native-flowseal-1102-youtube-":
+			serviceID, domain = "youtube", "youtube.com"
+		case len(strategy.ID) > len("native-discord-flowseal-1102-") && strategy.ID[:len("native-discord-flowseal-1102-")] == "native-discord-flowseal-1102-":
+			serviceID, domain = "discord", "discord.com"
+		default:
+			continue
+		}
+		t.Run(strategy.ID, func(t *testing.T) {
+			plan := TrafficPlan{
+				Revision: 1, CatalogRevision: BuiltinCatalogRevision,
+				Strategies: []TrafficStrategy{strategy},
+				Services: []ServiceRule{{
+					ID: serviceID, DisplayName: serviceID, DomainSuffixes: []string{domain}, TCPPorts: []int{443},
+					Fingerprints: []string{"tls-client-hello"}, CandidateStrategyIDs: []string{strategy.ID},
+				}},
+				Selections: []ServiceSelection{{ServiceID: serviceID, StrategyID: strategy.ID}},
+				Routes:     []ServiceRoute{{ServiceID: serviceID, Kind: ServiceRouteZapret}},
+				DirectRules: []DirectRule{{
+					ID: "steam-direct", ProcessNames: []string{"steam.exe", "steamwebhelper.exe"},
+				}},
+			}
+			processor, err := NewProcessorWithIdentityResolver(plan, resolver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := processor.Process(original)
+			if decision.Dropped || decision.Transformed || len(decision.Packets) != 1 || !bytes.Equal(decision.Packets[0], original) {
+				t.Fatalf("strategy changed direct Steam traffic: %+v", decision)
+			}
+			if decision.Reason != "reserved for direct rule steam-direct" {
+				t.Fatalf("direct reason = %q", decision.Reason)
+			}
+		})
+	}
+}
+
 func TestSelectiveRuntimePassesUnselectedDNSByteForByte(t *testing.T) {
 	plan := fakeIPTestPlan()
 	directory, err := NewFakeIPDirectory(plan)
