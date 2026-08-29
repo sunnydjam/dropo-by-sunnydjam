@@ -21,17 +21,12 @@ $AppDir = Join-Path $RepoRoot "app"
 $MobileCoreDir = Join-Path $AppDir "mobile\dropocore"
 $FlutterDir = Join-Path $RepoRoot "flutter_app"
 $ReleaseRoot = Join-Path $RepoRoot "release"
+$DevEnvironmentScript = Join-Path $ScriptRoot "dev-environment.ps1"
+. $DevEnvironmentScript
+$ToolchainRoot = Get-DropoToolchainRoot -RepositoryRoot $RepoRoot
 
-# Keep the release gate usable on a clean Windows workstation where Dropo's
-# verified repository-local toolchain is installed but Go is intentionally not
-# added to the user's global PATH.
-if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-    $repositoryGoBin = Join-Path $RepoRoot ".toolchain\go-1.25.13\go\bin"
-    $repositoryGoExe = Join-Path $repositoryGoBin "go.exe"
-    if (Test-Path -LiteralPath $repositoryGoExe -PathType Leaf) {
-        $env:Path = "$repositoryGoBin;$env:Path"
-    }
-}
+# Keep the release gate usable without changing the user's global PATH.
+Add-DropoGoSdkToPath -ToolchainRoot $ToolchainRoot
 
 function Invoke-Step {
     param(
@@ -102,9 +97,9 @@ function Get-FlutterCommand {
         return $flutter.Source
     }
 
-    $repositoryFlutter = Join-Path $RepoRoot ".toolchain\flutter\bin\flutter.bat"
-    if (Test-Path -LiteralPath $repositoryFlutter -PathType Leaf) {
-        return $repositoryFlutter
+    $toolchainFlutter = Join-Path $ToolchainRoot "flutter\bin\flutter.bat"
+    if (Test-Path -LiteralPath $toolchainFlutter -PathType Leaf) {
+        return $toolchainFlutter
     }
 
     $localFlutter = "E:\flutter-sdk\flutter\bin\flutter.bat"

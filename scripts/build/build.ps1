@@ -34,17 +34,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$DevEnvironmentScript = Join-Path $ScriptRoot "tools\dev-environment.ps1"
+. $DevEnvironmentScript
+$ToolchainRoot = Get-DropoToolchainRoot -RepositoryRoot $ScriptRoot
 
-# Local developer toolchains are intentionally kept outside PATH so they do
-# not affect the rest of Windows. Make the repository-local Go SDK available
-# to every Go invocation in this build when no system installation exists.
-if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-    $repositoryGoBin = Join-Path $ScriptRoot ".toolchain\go-1.25.13\go\bin"
-    $repositoryGoExe = Join-Path $repositoryGoBin "go.exe"
-    if (Test-Path -LiteralPath $repositoryGoExe -PathType Leaf) {
-        $env:Path = "$repositoryGoBin;$env:Path"
-    }
-}
+# Local developer toolchains stay outside PATH so they do not affect the rest
+# of Windows. Make Dropo's configured Go SDK available to this build only.
+Add-DropoGoSdkToPath -ToolchainRoot $ToolchainRoot
 
 # Read version from version.json
 function Get-VersionInfo {
@@ -572,9 +568,9 @@ function Get-InnoSetupCommand {
         }
         return $env:DROPO_INNO_ISCC_PATH
     }
-    $repositoryInno = Join-Path $ScriptRoot ".toolchain\inno\ISCC.exe"
-    if (Test-Path -LiteralPath $repositoryInno -PathType Leaf) {
-        return $repositoryInno
+    $toolchainInno = Join-Path $ToolchainRoot "inno\ISCC.exe"
+    if (Test-Path -LiteralPath $toolchainInno -PathType Leaf) {
+        return $toolchainInno
     }
     foreach ($candidate in @(
         (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
@@ -1214,9 +1210,9 @@ function Get-FlutterCommand {
         return $flutter.Source
     }
 
-    $repositoryFlutter = Join-Path $ScriptRoot ".toolchain\flutter\bin\flutter.bat"
-    if (Test-Path -LiteralPath $repositoryFlutter -PathType Leaf) {
-        return $repositoryFlutter
+    $toolchainFlutter = Join-Path $ToolchainRoot "flutter\bin\flutter.bat"
+    if (Test-Path -LiteralPath $toolchainFlutter -PathType Leaf) {
+        return $toolchainFlutter
     }
 
     $localFlutter = "E:\flutter-sdk\flutter\bin\flutter.bat"

@@ -2,6 +2,23 @@
 
 Утилиты для разработки и ручной проверки маршрутизации dropo.
 
+## Среда разработки Windows
+
+Flutter, Go, Visual Studio Build Tools и Inno Setup следует хранить отдельно от
+репозитория. Укажите их общий каталог пользовательской переменной окружения:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+    "DROPO_TOOLCHAIN_ROOT",
+    "E:\Development\Toolchains\Dropo",
+    "User"
+)
+```
+
+После изменения откройте новое окно терминала. Скрипты сборки ищут Go, Flutter
+и Inno Setup в этом каталоге, затем используют системные установки. Локальная
+папка `.toolchain` поддерживается только как обратный совместимый вариант.
+
 ## preflight-release.ps1
 
 Главный релизный gate. Скрипт запускает Go- и Flutter-проверки, собирает релиз,
