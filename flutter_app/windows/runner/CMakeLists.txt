@@ -20,6 +20,14 @@ add_executable(${BINARY_NAME} WIN32
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
 
+# Keep the Windows runner byte-for-byte reproducible for a fixed source
+# revision. MSVC otherwise writes the current link time into both the PE header
+# and debug directory, which also changes the bound launcher and release
+# archive hashes on every rebuild.
+target_link_options(${BINARY_NAME} PRIVATE
+  "$<$<OR:$<CONFIG:Release>,$<CONFIG:Profile>>:/Brepro>"
+)
+
 # Add preprocessor definitions for the build version.
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION=\"${FLUTTER_VERSION}\"")
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_MAJOR=${FLUTTER_VERSION_MAJOR}")
