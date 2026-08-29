@@ -28,6 +28,7 @@ const (
 	serviceStrategyCacheVersion    = 3
 	serviceHostlistDirName         = "service-hostlists"
 	serviceStrategyProbeRetryDelay = 300 * time.Millisecond
+	provenDiscordALTMethodTag      = "flowseal-1102-discord-alt"
 	// Keep subscription-backed discovery short so blocked services return to a
 	// known-good VPN immediately. Without a subscription, firstRunServiceSearch
 	// expands this into a cancellable full-catalog campaign.
@@ -63,6 +64,36 @@ const (
 	serviceStrategyStateWorking  = "working"
 	serviceStrategyStateFallback = "fallback"
 )
+
+// shouldHoldDiscordStrategyForLiveValidation distinguishes a transient,
+// synthetic Discord probe failure from evidence that the proven ALT strategy
+// is unusable. Discord's web/API endpoints occasionally time out even while
+// its Electron client and voice transport work. In that case keep the priority
+// candidate active and let the realtime monitor decide from actual application
+// traffic. The candidate is deliberately not cached as working here: only
+// sustained bidirectional Discord media may persist it.
+func shouldHoldDiscordStrategyForLiveValidation(tag string, method ServiceBypassMethod, failureDetail string) bool {
+	if tag != "discord" || method.Tag != provenDiscordALTMethodTag {
+		return false
+	}
+	detail := strings.ToLower(strings.TrimSpace(failureDetail))
+	if detail == "" {
+		return false
+	}
+	for _, transient := range []string{
+		"context deadline exceeded",
+		"i/o timeout",
+		"timed out",
+		"request canceled",
+		"connection reset",
+		"unexpected eof",
+	} {
+		if strings.Contains(detail, transient) {
+			return true
+		}
+	}
+	return false
+}
 
 // currentNetworkFingerprint invalidates selections when the active network
 // changes. A working DPI strategy is a property of the current network path.
@@ -1366,6 +1397,16 @@ func (a *App) firstRunServiceSearch(
 				a.removeServiceStrategyCacheEntry(tag)
 			}
 			a.writeLog(fmt.Sprintf("[FreeAccess] %s: %s did not pass every required target: %s", tag, selections[tag].Method.Label, failureDetail))
+			if shouldHoldDiscordStrategyForLiveValidation(tag, selections[tag].Method, failureDetail) {
+				a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
+				if !a.switchServiceRoute(tag, "direct") {
+					return pending, fmt.Errorf("activate provisional Discord strategy for live validation")
+				}
+				a.writeLog(fmt.Sprintf("[FreeAccess] discord: synthetic web/API probe was inconclusive; retaining priority method %s for live app/voice validation without caching it", selections[tag].Method.Label))
+				detail := "Синтетическая проверка Discord завершилась нестабильным таймаутом; приоритетная ALT оставлена для проверки реальным приложением и voice. Как рабочая стратегия пока не сохранена"
+				a.emitBackgroundStrategyService(tag, selections[tag].Method, false, false, false, "voice-check", detail, round, len(ladders[tag]))
+				continue
+			}
 			if round+1 < len(ladders[tag]) {
 				detail := "Не пройдена обязательная проверка: " + failureDetail + "; пробуем следующую стратегию"
 				a.emitBackgroundStrategyService(tag, selections[tag].Method, false, false, true, "retrying", detail, round, len(ladders[tag]))

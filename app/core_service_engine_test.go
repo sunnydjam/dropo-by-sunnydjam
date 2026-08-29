@@ -211,6 +211,60 @@ func TestDiscordWebPrecheckIsNotCachedAsWorkingVoice(t *testing.T) {
 	}
 }
 
+func TestDiscordPriorityALTDefersTransientProbeFailuresToLiveValidation(t *testing.T) {
+	priority := ServiceBypassMethod{Tag: provenDiscordALTMethodTag}
+	tests := []struct {
+		name     string
+		tag      string
+		method   ServiceBypassMethod
+		detail   string
+		wantHold bool
+	}{
+		{
+			name:     "Chromium TLS deadline",
+			tag:      "discord",
+			method:   priority,
+			detail:   "discord.com/api/v10/gateway: Chromium TLS handshake: context deadline exceeded",
+			wantHold: true,
+		},
+		{
+			name:     "response body cancellation",
+			tag:      "discord",
+			method:   priority,
+			detail:   "response body validation: request canceled",
+			wantHold: true,
+		},
+		{
+			name:     "another Discord strategy still advances",
+			tag:      "discord",
+			method:   ServiceBypassMethod{Tag: "flowseal-1102-discord-alt13"},
+			detail:   "context deadline exceeded",
+			wantHold: false,
+		},
+		{
+			name:     "YouTube still advances",
+			tag:      "youtube",
+			method:   ServiceBypassMethod{Tag: "flowseal-1102-youtube-alt"},
+			detail:   "context deadline exceeded",
+			wantHold: false,
+		},
+		{
+			name:     "hard HTTP failure still advances",
+			tag:      "discord",
+			method:   priority,
+			detail:   "unexpected HTTP status 503",
+			wantHold: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldHoldDiscordStrategyForLiveValidation(test.tag, test.method, test.detail); got != test.wantHold {
+				t.Fatalf("hold = %v, want %v for %q", got, test.wantHold, test.detail)
+			}
+		})
+	}
+}
+
 func TestWindowsUnifiedServiceGroupIsDeterministicSelector(t *testing.T) {
 	group := BuildServiceRouteGroup("bypass-youtube", []string{"direct", "auto-select"})
 	if group["type"] != "selector" || group["default"] != "direct" {
