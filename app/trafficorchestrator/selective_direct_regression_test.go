@@ -2,6 +2,7 @@ package trafficorchestrator
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -137,6 +138,43 @@ func TestEveryFlowseal1102StrategyKeepsSteamDirect(t *testing.T) {
 				t.Fatalf("direct reason = %q", decision.Reason)
 			}
 		})
+	}
+}
+
+func TestDiscordProcessTLSDiscoveryTransformsOnlyDiscordOnAlternativePort(t *testing.T) {
+	strategy := builtinStrategyByID(t, "native-discord-flowseal-1102-alt")
+	plan := TrafficPlan{
+		Revision: 1, CatalogRevision: BuiltinCatalogRevision,
+		Strategies: []TrafficStrategy{strategy},
+		Services: []ServiceRule{{
+			ID: "discord", DisplayName: "Discord", DomainSuffixes: []string{"discord.media"},
+			ProcessNames: []string{"Discord.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
+			TCPPorts: []int{443, 2087}, ProcessDiscoveryTCPPorts: []int{2087},
+			CandidateStrategyIDs: []string{strategy.ID}, AllowDirectFallback: true,
+		}},
+		Selections: []ServiceSelection{{ServiceID: "discord", StrategyID: strategy.ID}},
+		Routes:     []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteZapret}},
+	}
+	original := testIPv4TCPPacketTo(t, "162.159.128.235", "shared.cloudflare.example")
+	binary.BigEndian.PutUint16(original[22:24], 2087)
+	calculateChecksums(original)
+
+	gameProcessor, err := NewProcessorWithIdentityResolver(plan, &fixedFlowIdentityResolver{name: `E:\Games\OtherGame.exe`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gameDecision := gameProcessor.Process(original)
+	if gameDecision.Dropped || gameDecision.Transformed || len(gameDecision.Packets) != 1 || !bytes.Equal(gameDecision.Packets[0], original) {
+		t.Fatalf("unrelated process on Discord discovery port changed: %+v", gameDecision)
+	}
+
+	discordProcessor, err := NewProcessorWithIdentityResolver(plan, &fixedFlowIdentityResolver{name: `C:\Users\u\AppData\Local\Discord\Discord.exe`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discordDecision := discordProcessor.Process(original)
+	if discordDecision.Dropped || !discordDecision.Transformed || discordDecision.ServiceID != "discord" || discordDecision.Route != ServiceRouteZapret {
+		t.Fatalf("Discord TLS on 2087 was not transformed: %+v", discordDecision)
 	}
 }
 

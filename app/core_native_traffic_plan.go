@@ -185,6 +185,7 @@ func nativeServiceRule(service FreeAccessService, strategyIDs []string) traffic.
 	}
 	if service.Tag == "discord" {
 		rule.TCPPorts = append(rule.TCPPorts, normalizedDiscordTCPPorts(nil)...)
+		rule.ProcessDiscoveryTCPPorts = discordProcessDiscoveryTCPPorts()
 		rule.ProcessDiscoveryUDPPortRanges = discordProcessDiscoveryUDPPortRanges()
 		rule.Fingerprints = []string{"stun", "discord-media"}
 	}
@@ -203,6 +204,10 @@ func nativeServiceRule(service FreeAccessService, strategyIDs []string) traffic.
 		})
 	}
 	return rule
+}
+
+func discordProcessDiscoveryTCPPorts() []int {
+	return []int{2053, 2083, 2087, 2096, 8443}
 }
 
 func discordProcessDiscoveryUDPPortRanges() []traffic.PortRange {

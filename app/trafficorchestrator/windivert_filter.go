@@ -98,13 +98,20 @@ func BuildSelectiveWinDivertFilterForModeAndZapretProxy(services []ServiceRule, 
 		ports   string
 	}
 	rules := make(map[captureRule]struct{})
+	processTCPDiscovery := make(map[int]struct{})
 	processUDPDiscovery := make(map[PortRange]struct{})
 	for _, service := range services {
+		if err := validateProcessDiscoveryTCPPorts(service); err != nil {
+			return "", fmt.Errorf("service %q: %w", service.ID, err)
+		}
 		if err := validateProcessDiscoveryUDPPortRanges(service); err != nil {
 			return "", fmt.Errorf("service %q: %w", service.ID, err)
 		}
 		if service.ProcessMatchPolicy != ProcessMatchIdentity || len(service.ProcessNames) == 0 {
 			continue
+		}
+		for _, port := range service.ProcessDiscoveryTCPPorts {
+			processTCPDiscovery[port] = struct{}{}
 		}
 		for _, portRange := range service.ProcessDiscoveryUDPPortRanges {
 			processUDPDiscovery[portRange] = struct{}{}
@@ -193,6 +200,21 @@ func BuildSelectiveWinDivertFilterForModeAndZapretProxy(services []ServiceRule, 
 		parts = append(parts, fmt.Sprintf(
 			"(outbound and !loopback and !impostor and tcp and tcp.SrcPort >= %d and tcp.SrcPort <= %d and (%s))",
 			zapretSourcePorts.First, zapretSourcePorts.Last, winDivertTCPEvidenceFilter,
+		))
+	}
+	discoveryTCPPorts := make([]int, 0, len(processTCPDiscovery))
+	for port := range processTCPDiscovery {
+		discoveryTCPPorts = append(discoveryTCPPorts, port)
+	}
+	sort.Ints(discoveryTCPPorts)
+	if len(discoveryTCPPorts) > 0 {
+		portClause, portErr := winDivertPortClause(NetworkTCP, discoveryTCPPorts)
+		if portErr != nil {
+			return "", portErr
+		}
+		parts = append(parts, fmt.Sprintf(
+			"(outbound and !loopback and !impostor and tcp and %s and (%s))",
+			portClause, winDivertTCPEvidenceFilter,
 		))
 	}
 	parts = append(parts,

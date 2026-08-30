@@ -25,7 +25,7 @@ func TestNativeSelectiveCaptureCatalogIsBounded(t *testing.T) {
 	for _, rule := range catalog {
 		if rule.ID == "discord" {
 			discordFound = true
-			if len(rule.UDPPorts) != 0 || len(rule.ProcessDiscoveryUDPPortRanges) != 2 || rule.ProcessMatchPolicy != traffic.ProcessMatchIdentity || rule.IPMatchPolicy != traffic.IPMatchRequireContext {
+			if len(rule.UDPPorts) != 0 || len(rule.ProcessDiscoveryTCPPorts) != 5 || len(rule.ProcessDiscoveryUDPPortRanges) != 2 || rule.ProcessMatchPolicy != traffic.ProcessMatchIdentity || rule.IPMatchPolicy != traffic.IPMatchRequireContext {
 				t.Fatalf("Discord capture rule is not process-scoped dynamic UDP: %+v", rule)
 			}
 		}
@@ -40,12 +40,12 @@ func TestNativeVPNOnlyCaptureLeavesUnrelatedHandshakesInKernel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"udp.DstPort == 53", "198.18.0.0", "66.22.192.0", "tcp.SrcPort == 32000", "tcp.DstPort == 443", "udp.DstPort >= 19294", "udp.DstPort <= 19344", "udp.DstPort >= 50000", "udp.DstPort <= 50100"} {
+	for _, required := range []string{"udp.DstPort == 53", "198.18.0.0", "66.22.192.0", "tcp.SrcPort == 32000", "tcp.DstPort == 443", "tcp.DstPort == 2087", "udp.DstPort >= 19294", "udp.DstPort <= 19344", "udp.DstPort >= 50000", "udp.DstPort <= 50100"} {
 		if !strings.Contains(filter, required) {
 			t.Fatalf("VPN-only filter is missing %q: %s", required, filter)
 		}
 	}
-	for _, forbidden := range []string{"tcp.Payload", "udp.PayloadLength", "tcp.PayloadLength", "tcp.Syn", "!tcp.Ack"} {
+	for _, forbidden := range []string{"udp.PayloadLength", "tcp.DstPort == 27015", "tcp.DstPort == 27036", "tcp.Syn", "!tcp.Ack"} {
 		if strings.Contains(filter, forbidden) {
 			t.Fatalf("VPN-only filter captures unrelated protocol evidence %q: %s", forbidden, filter)
 		}

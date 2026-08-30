@@ -184,6 +184,7 @@ type ServiceRule struct {
 	ProcessMatchPolicy            ProcessMatchPolicy `json:"processMatchPolicy,omitempty"`
 	TCPPorts                      []int              `json:"tcpPorts,omitempty"`
 	UDPPorts                      []int              `json:"udpPorts,omitempty"`
+	ProcessDiscoveryTCPPorts      []int              `json:"processDiscoveryTcpPorts,omitempty"`
 	ProcessDiscoveryUDPPortRanges []PortRange        `json:"processDiscoveryUdpPortRanges,omitempty"`
 	Fingerprints                  []string           `json:"fingerprints,omitempty"`
 	ProbeTargets                  []ProbeTarget      `json:"probeTargets,omitempty"`

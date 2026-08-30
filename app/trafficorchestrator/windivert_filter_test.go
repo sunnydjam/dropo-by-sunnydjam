@@ -127,6 +127,56 @@ func TestSelectiveWinDivertFilterAddsOnlyBoundedProcessUDPDiscovery(t *testing.T
 	}
 }
 
+func TestSelectiveWinDivertFilterAddsOnlyBoundedProcessTCPDiscovery(t *testing.T) {
+	services := []ServiceRule{{
+		ID: "discord", DisplayName: "Discord", DomainSuffixes: []string{"discord.media"},
+		ProcessNames: []string{"Discord.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
+		TCPPorts:                 []int{80, 443, 2053, 2083, 2087, 2096, 8443},
+		ProcessDiscoveryTCPPorts: []int{2053, 2083, 2087, 2096, 8443},
+	}}
+	filter, err := BuildSelectiveWinDivertFilterForMode(services, 32123, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"tcp.DstPort == 2053", "tcp.DstPort == 2087", "tcp.DstPort == 8443",
+		"tcp.PayloadLength >= 4", "tcp.Payload[0] == 0x16",
+	} {
+		if !strings.Contains(filter, required) {
+			t.Fatalf("bounded process TCP discovery is missing %q: %s", required, filter)
+		}
+	}
+	for _, forbidden := range []string{"tcp.DstPort == 80", "tcp.DstPort == 443", "tcp.DstPort == 27015", "tcp.Syn", "!tcp.Ack"} {
+		if strings.Contains(filter, forbidden) {
+			t.Fatalf("process TCP discovery widened capture with %q: %s", forbidden, filter)
+		}
+	}
+}
+
+func TestSelectiveWinDivertFilterRejectsUnsafeProcessTCPDiscovery(t *testing.T) {
+	tests := []ServiceRule{
+		{
+			ID: "no-process", DisplayName: "No process", DomainSuffixes: []string{"example.com"},
+			TCPPorts: []int{2087}, ProcessDiscoveryTCPPorts: []int{2087},
+		},
+		{
+			ID: "shared-web", DisplayName: "Shared web", DomainSuffixes: []string{"example.com"},
+			ProcessNames: []string{"example.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
+			TCPPorts: []int{443}, ProcessDiscoveryTCPPorts: []int{443},
+		},
+		{
+			ID: "not-a-service-port", DisplayName: "Missing port", DomainSuffixes: []string{"example.com"},
+			ProcessNames: []string{"example.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
+			TCPPorts: []int{443}, ProcessDiscoveryTCPPorts: []int{2087},
+		},
+	}
+	for _, service := range tests {
+		if _, err := BuildSelectiveWinDivertFilterForMode([]ServiceRule{service}, 32123, false); err == nil {
+			t.Fatalf("unsafe process TCP discovery accepted for %s", service.ID)
+		}
+	}
+}
+
 func TestSelectiveWinDivertFilterRejectsUnboundedProcessUDPDiscovery(t *testing.T) {
 	services := []ServiceRule{{
 		ID: "discord", DisplayName: "Discord", DomainSuffixes: []string{"discord.media"},

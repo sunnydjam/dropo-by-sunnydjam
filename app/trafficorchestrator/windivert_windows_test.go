@@ -108,7 +108,7 @@ func TestSelectiveWinDivertFilterCompilesWithBundledRuntime(t *testing.T) {
 	filter, err := BuildSelectiveWinDivertFilter([]ServiceRule{{
 		ID: "discord", ProcessNames: []string{"Discord.exe"}, ProcessMatchPolicy: ProcessMatchIdentity,
 		IPCIDRs: []string{"66.22.192.0/18", "2001:4860:4860::/48"}, IPMatchPolicy: IPMatchRequireContext,
-		TCPPorts: []int{80, 443},
+		TCPPorts: []int{80, 443, 2087}, ProcessDiscoveryTCPPorts: []int{2087},
 	}}, 32123)
 	if err != nil {
 		t.Fatal(err)

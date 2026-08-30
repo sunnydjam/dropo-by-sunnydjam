@@ -536,6 +536,9 @@ func validateServiceRule(service ServiceRule, strategies map[string]TrafficStrat
 	if err := validatePorts(NetworkUDP, service.UDPPorts); err != nil {
 		return err
 	}
+	if err := validateProcessDiscoveryTCPPorts(service); err != nil {
+		return err
+	}
 	if err := validateProcessDiscoveryUDPPortRanges(service); err != nil {
 		return err
 	}
@@ -562,6 +565,31 @@ func validateServiceRule(service ServiceRule, strategies map[string]TrafficStrat
 			return fmt.Errorf("duplicate probe id %q", target.ID)
 		}
 		seenTargets[target.ID] = struct{}{}
+	}
+	return nil
+}
+
+func validateProcessDiscoveryTCPPorts(service ServiceRule) error {
+	if len(service.ProcessDiscoveryTCPPorts) == 0 {
+		return nil
+	}
+	if service.ProcessMatchPolicy != ProcessMatchIdentity || len(service.ProcessNames) == 0 {
+		return errors.New("process TCP discovery ports require process identity")
+	}
+	if len(service.ProcessDiscoveryTCPPorts) > 16 {
+		return errors.New("too many process TCP discovery ports")
+	}
+	if err := validatePorts(NetworkTCP, service.ProcessDiscoveryTCPPorts); err != nil {
+		return fmt.Errorf("process TCP discovery: %w", err)
+	}
+	allowed := intSet(service.TCPPorts)
+	for _, port := range service.ProcessDiscoveryTCPPorts {
+		if port == 80 || port == 443 {
+			return fmt.Errorf("process TCP discovery cannot capture shared web port %d", port)
+		}
+		if _, ok := allowed[port]; !ok {
+			return fmt.Errorf("process TCP discovery port %d is absent from service TCP ports", port)
+		}
 	}
 	return nil
 }

@@ -1,7 +1,7 @@
 package trafficorchestrator
 
 // BuiltinCatalogRevision changes whenever packet semantics or ordering changes.
-const BuiltinCatalogRevision = "dropo-native-windows-10-flowseal-1.10.2-proven-alt"
+const BuiltinCatalogRevision = "dropo-native-windows-11-discord-process-tls"
 
 // BuiltinStrategies returns the bounded strategy ladder implemented by the
 // Dropo packet engine. It contains data only: no shell arguments, Lua or
