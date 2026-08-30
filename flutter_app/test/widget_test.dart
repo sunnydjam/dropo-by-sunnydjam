@@ -241,8 +241,9 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Повторить (эксп.)'), findsOneWidget);
+    expect(find.text('Zapret (эксп.)'), findsOneWidget);
     expect(
-      find.textContaining('Авто Discord экспериментально'),
+      find.textContaining('Discord Zapret экспериментален'),
       findsOneWidget,
     );
     await tester.tap(find.byKey(const ValueKey<String>('zapret-auto-discord')));
@@ -345,6 +346,10 @@ void main() {
         findsOneWidget,
       );
       expect(
+        find.textContaining('для voice/video рекомендуется VPN'),
+        findsOneWidget,
+      );
+      expect(
         tester.widget<Text>(find.text('Сервисы и маршруты')).style?.color,
         const Color(0xFFE8F3EF),
       );
@@ -395,6 +400,10 @@ void main() {
       expect(bridge.lastMethod, 'vpn');
       expect(
         find.byKey(const ValueKey<String>('service-route-discord-vpn')),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Рекомендуемый стабильный маршрут'),
         findsOneWidget,
       );
       expect(

@@ -1,4 +1,4 @@
-## Dropo by sunnydjam {{TAG}}
+## Dropo by sunnydjam v3.0.26
 
 Стабильный Windows-выпуск независимого fork на основе
 [Droponevedimka/dropo](https://github.com/Droponevedimka/dropo). Основной режим —
@@ -9,8 +9,8 @@
 
 | Платформа | Файл | Ссылка | Назначение |
 | --- | --- | --- | --- |
-| Windows 10/11 x64 | `dropo-Windows-Setup-x64.exe` | [Установщик](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/{{TAG}}/dropo-Windows-Setup-x64.exe) | Рекомендуемая установка с защищённым runtime-каталогом и обновлением поверх предыдущей версии. |
-| Windows 10/11 x64 | `dropo-Windows-Portable-x64.zip` | [Portable](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/{{TAG}}/dropo-Windows-Portable-x64.zip) | Версия без установки; настройки сохраняются в AppData. |
+| Windows 10/11 x64 | `dropo-Windows-Setup-x64.exe` | [Установщик](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.26/dropo-Windows-Setup-x64.exe) | Рекомендуемая установка с защищённым runtime-каталогом и обновлением поверх предыдущей версии. |
+| Windows 10/11 x64 | `dropo-Windows-Portable-x64.zip` | [Portable](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.26/dropo-Windows-Portable-x64.zip) | Версия без установки; настройки сохраняются в AppData. |
 
 Windows installer SHA-256: `__WINDOWS_INSTALLER_SHA256_PENDING_LOCAL_UPLOAD__`
 
@@ -51,7 +51,7 @@ Discord web/API, gateway и voice/media — разные сетевые плос
 Dropo намеренно не применяет стратегию ко всему общему Cloudflare/CDN IP: это
 могло бы затронуть Steam, игры и посторонние сайты. Поэтому Discord Zapret
 оставлен для ручных экспериментов, а стабильным маршрутом выпуска является VPN.
-Подробности: [EXPERIMENTAL_ZAPRET.md](https://github.com/sunnydjam/dropo-by-sunnydjam/blob/{{TAG}}/EXPERIMENTAL_ZAPRET.md).
+Подробности: [EXPERIMENTAL_ZAPRET.md](https://github.com/sunnydjam/dropo-by-sunnydjam/blob/v3.0.26/EXPERIMENTAL_ZAPRET.md).
 
 ### Проверка и ограничения
 
@@ -63,4 +63,4 @@ Dropo намеренно не применяет стратегию ко все�
 - Android не входит в этот Windows-выпуск.
 
 Происхождение fork и сохранённая MIT-лицензия описаны в
-[FORK_NOTICE.md](https://github.com/sunnydjam/dropo-by-sunnydjam/blob/{{TAG}}/FORK_NOTICE.md).
+[FORK_NOTICE.md](https://github.com/sunnydjam/dropo-by-sunnydjam/blob/v3.0.26/FORK_NOTICE.md).

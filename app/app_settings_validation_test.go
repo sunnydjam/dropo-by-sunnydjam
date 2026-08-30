@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestSaveAppConfigRejectsUnsupportedValues(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
@@ -83,5 +86,47 @@ func TestStorageMigratesLegacyDisabledServiceToVisibleDirectPolicy(t *testing.T)
 	}
 	if !settings.FreeAccessServices["youtube"] {
 		t.Fatal("legacy hidden service flag was not normalized after migration")
+	}
+}
+
+func TestFreshWindowsSettingsUseReleaseRecommendedRoutes(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows release defaults")
+	}
+	storage := NewStorage(t.TempDir())
+	if err := storage.Init(); err != nil {
+		t.Fatal(err)
+	}
+	methods := storage.GetAppSettings().FreeAccessMethods
+	if methods["youtube"] != FreeAccessMethodZapret {
+		t.Fatalf("fresh YouTube route = %q, want Zapret", methods["youtube"])
+	}
+	if methods["discord"] != FreeAccessMethodVPN {
+		t.Fatalf("fresh Discord route = %q, want VPN", methods["discord"])
+	}
+	for _, tag := range []string{"meta", "openai"} {
+		if methods[tag] != FreeAccessMethodVPN {
+			t.Fatalf("fresh %s route = %q, want VPN", tag, methods[tag])
+		}
+	}
+	for _, tag := range []string{"telegram", "twitch", "spotify"} {
+		if methods[tag] != FreeAccessMethodDirect {
+			t.Fatalf("fresh %s route = %q, want Direct", tag, methods[tag])
+		}
+	}
+}
+
+func TestReleaseDefaultsDoNotOverwriteSavedExplicitRoutes(t *testing.T) {
+	storage := NewStorage(t.TempDir())
+	if err := storage.Init(); err != nil {
+		t.Fatal(err)
+	}
+	storage.data.App.FreeAccessMethods["youtube"] = FreeAccessMethodVPN
+	storage.data.App.FreeAccessMethods["discord"] = FreeAccessMethodZapret
+	storage.normalizeAppSettings()
+
+	methods := storage.GetAppSettings().FreeAccessMethods
+	if methods["youtube"] != FreeAccessMethodVPN || methods["discord"] != FreeAccessMethodZapret {
+		t.Fatalf("saved explicit routes were replaced: %+v", methods)
 	}
 }

@@ -5225,7 +5225,7 @@ class _DropoHomePageState extends State<DropoHomePage>
             : 'Стратегия Zapret для ${_homeRouteName(service)} сохранена';
         connectionHint = result['searchStarted'] == true
             ? experimentalDiscordAuto
-                  ? 'Discord voice проверяется по живому медиапотоку. Для стабильного использования пока рекомендуется ручная стратегия.'
+                  ? 'Discord Zapret экспериментален: web/API не подтверждают voice/video. Для стабильного голосового чата выберите VPN.'
                   : 'Проверка стратегий идёт в фоне; рабочий вариант сохранится для текущей сети.'
             : result['restarted'] == true
             ? 'Подключение автоматически переподключено.'
@@ -6702,12 +6702,14 @@ class _HomeRouteServiceRow extends StatelessWidget {
                 if (!_isMobileShell)
                   Tooltip(
                     message: service.zapretSupported
-                        ? 'Встроенный обход блокировки'
+                        ? service.tag == 'discord'
+                              ? 'Эксперимент: web/API могут работать, voice/video не гарантируются'
+                              : 'Встроенный обход блокировки'
                         : 'Zapret недоступен для этого сервиса',
                     child: _homeRouteButton(
                       service,
                       'zapret',
-                      'Zapret',
+                      service.tag == 'discord' ? 'Zapret (эксп.)' : 'Zapret',
                       selected,
                       supported: service.zapretSupported,
                     ),
@@ -6831,8 +6833,8 @@ class _HomeZapretStrategyControls extends StatelessWidget {
           if (experimentalAuto) ...[
             const SizedBox(height: 3),
             const Text(
-              'Авто Discord экспериментально; ручной режим пока стабильнее.',
-              maxLines: 2,
+              'Discord Zapret экспериментален: web/API могут открыться, но voice/video не гарантируются. Для голосового чата рекомендуется VPN.',
+              maxLines: 3,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(color: Color(0xFFFFC979), fontSize: 10),
             ),
@@ -12375,11 +12377,15 @@ class _ServiceCatalogRow extends StatelessWidget {
                     ),
                     Tooltip(
                       message: service.zapretSupported
-                          ? 'Использовать только встроенный обход Zapret'
+                          ? service.tag == 'discord'
+                                ? 'Эксперимент: Discord web/API могут работать, voice/video не гарантируются'
+                                : 'Использовать только встроенный обход Zapret'
                           : 'Zapret доступен для этого сервиса только в Windows',
                       child: _ServiceRoutePolicyButton(
                         key: ValueKey('service-route-${service.tag}-zapret'),
-                        label: 'Обход (Zapret)',
+                        label: service.tag == 'discord'
+                            ? 'Zapret (эксп.)'
+                            : 'Обход (Zapret)',
                         selected: routeValue == 'zapret',
                         enabled: enabled && service.zapretSupported,
                         onPressed: () =>
@@ -12388,6 +12394,21 @@ class _ServiceCatalogRow extends StatelessWidget {
                     ),
                   ],
                 ),
+                if (service.tag == 'discord') ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    routeValue == 'vpn'
+                        ? 'Рекомендуемый стабильный маршрут для Discord web, приложения и voice/video.'
+                        : 'Discord Zapret остаётся экспериментальным; для voice/video рекомендуется VPN.',
+                    style: TextStyle(
+                      color: routeValue == 'vpn'
+                          ? const Color(0xFF9FE3C2)
+                          : const Color(0xFFFFC979),
+                      fontSize: 10,
+                      height: 1.25,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),

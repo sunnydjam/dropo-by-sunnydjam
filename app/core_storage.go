@@ -258,7 +258,7 @@ func (s *Storage) createDefaultSettings() *SettingsFile {
 			FreeAccessEnabled:   true, // enabled by default
 			FreeAccessReverse:   false,
 			FreeAccessServices:  DefaultFreeAccessServiceState(), // retained for legacy settings decoding
-			FreeAccessMethods:   DefaultFreeAccessServiceMethodState(),
+			FreeAccessMethods:   FreshInstallFreeAccessServiceMethodState(),
 			ZapretStrategyModes: DefaultZapretStrategyModeState(),
 			ZapretStrategies:    map[string]string{},
 			DisableFreeAccess:   false,

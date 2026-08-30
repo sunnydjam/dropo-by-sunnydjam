@@ -21,9 +21,16 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	if !settings.FreeAccessEnabled {
 		t.Fatal("free access state should remain enabled for legacy UI/API compatibility")
 	}
+	wantMethods := DefaultFreeAccessServiceMethodState()
+	if runtime.GOOS == "windows" {
+		wantMethods["youtube"] = FreeAccessMethodZapret
+		wantMethods["discord"] = FreeAccessMethodVPN
+		wantMethods["meta"] = FreeAccessMethodVPN
+		wantMethods["openai"] = FreeAccessMethodVPN
+	}
 	for _, service := range DefaultFreeAccessServices {
-		if got := FreeAccessServiceMethod(settings, service.Tag); got != FreeAccessMethodDirect {
-			t.Fatalf("default route policy for %s = %q, want direct", service.Tag, got)
+		if got := FreeAccessServiceMethod(settings, service.Tag); got != wantMethods[service.Tag] {
+			t.Fatalf("default route policy for %s = %q, want %q", service.Tag, got, wantMethods[service.Tag])
 		}
 	}
 	if !settings.Notifications {
@@ -132,7 +139,12 @@ func TestSettingsAPIsPersistFreeAccessPolicy(t *testing.T) {
 			settings.DisableFreeAccess, settings.FreeAccessEnabled, settings.FreeAccessReverse)
 	}
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
-	if !planContainsString(plan.DirectServices, "youtube") || len(plan.TransparentServices) != 0 {
+	if runtime.GOOS == "windows" {
+		if !planContainsString(plan.TransparentServices, "youtube") || !planContainsString(plan.ProxyServices, "discord") ||
+			!planContainsString(plan.ProxyServices, "meta") || !planContainsString(plan.ProxyServices, "openai") {
+			t.Fatalf("disable-free plan = %+v, want explicit release routes preserved", plan)
+		}
+	} else if !planContainsString(plan.DirectServices, "youtube") || len(plan.TransparentServices) != 0 {
 		t.Fatalf("disable-free plan = %+v, want explicit default-direct service routes", plan)
 	}
 
@@ -214,21 +226,21 @@ func TestAppSettingsMapsAreIsolatedAndFailedWritesRollback(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
 
 	detached := app.storage.GetAppSettings()
-	detached.FreeAccessMethods["discord"] = FreeAccessMethodVPN
+	detached.FreeAccessMethods["discord"] = FreeAccessMethodZapret
 	detached.FreeAccessServices["youtube"] = false
 	stored := app.storage.GetAppSettings()
-	if stored.FreeAccessMethods["discord"] == FreeAccessMethodVPN || !FreeAccessServiceEnabled(stored, "youtube") {
+	if stored.FreeAccessMethods["discord"] == FreeAccessMethodZapret || !FreeAccessServiceEnabled(stored, "youtube") {
 		t.Fatal("GetAppSettings leaked mutable maps into storage")
 	}
 
 	detached = app.storage.GetAppSettings()
-	detached.FreeAccessMethods["discord"] = FreeAccessMethodVPN
+	detached.FreeAccessMethods["discord"] = FreeAccessMethodZapret
 	if err := app.storage.UpdateAppSettings(detached); err != nil {
 		t.Fatalf("update app settings failed: %v", err)
 	}
 	detached.FreeAccessMethods["discord"] = FreeAccessMethodDirect
-	if got := app.storage.GetAppSettings().FreeAccessMethods["discord"]; got != FreeAccessMethodVPN {
-		t.Fatalf("UpdateAppSettings retained caller map: got %q, want vpn", got)
+	if got := app.storage.GetAppSettings().FreeAccessMethods["discord"]; got != FreeAccessMethodZapret {
+		t.Fatalf("UpdateAppSettings retained caller map: got %q, want zapret", got)
 	}
 
 	beforeFailure := app.storage.GetAppSettings()

@@ -150,11 +150,19 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 			t.Fatalf("generated config without subscription must not route through %q", ServiceBypassGroupTag(serviceTag))
 		}
 	}
-	if !containsDomainSuffixRouteRule(config, "openai.com", "direct") {
+	if runtime.GOOS == "windows" {
+		if !containsDomainSuffixRouteRule(config, "openai.com", NoRouteOutboundTag) {
+			t.Fatal("fresh explicit ChatGPT VPN route must fail closed when no subscription exists")
+		}
+	} else if !containsDomainSuffixRouteRule(config, "openai.com", "direct") {
 		t.Fatal("AI services must stay direct when no VPN subscription exists")
 	}
-	if !containsDNSDomainSuffixServer(config, "openai.com", "dns-direct") {
-		t.Fatal("AI services must use direct DNS when no VPN subscription exists")
+	expectedOpenAIDNS := "dns-direct"
+	if runtime.GOOS == "windows" {
+		expectedOpenAIDNS = "dns-remote"
+	}
+	if !containsDNSDomainSuffixServer(config, "openai.com", expectedOpenAIDNS) {
+		t.Fatalf("AI services DNS route is missing: want %s", expectedOpenAIDNS)
 	}
 
 	candidates := getOutboundCandidates(config, SmartBypassGroupTag)
@@ -187,7 +195,21 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 	if containsDNSDomainSuffixServer(config, "telegram.org", "dns-remote") {
 		t.Fatal("generated config without subscription must not force telegram.org through dns-remote")
 	}
-	for _, domain := range []string{"youtubei.googleapis.com", "googlevideo.com", "ytstatic.com", "linkedin.com", "facetime.apple.com", "viber.com", "snapchat.com", "tiktok.com"} {
+	for _, domain := range []string{"youtubei.googleapis.com", "googlevideo.com", "ytstatic.com"} {
+		expectedRoute := "direct"
+		expectedDNS := "dns-direct"
+		if runtime.GOOS == "windows" {
+			expectedRoute = ServiceBypassGroupTag("youtube")
+			expectedDNS = "dns-remote"
+		}
+		if !containsDomainSuffixRouteRule(config, domain, expectedRoute) {
+			t.Fatalf("generated config route for %s = missing, want %s", domain, expectedRoute)
+		}
+		if !containsDNSDomainSuffixServer(config, domain, expectedDNS) {
+			t.Fatalf("generated config DNS for %s = missing, want %s", domain, expectedDNS)
+		}
+	}
+	for _, domain := range []string{"linkedin.com", "facetime.apple.com", "viber.com", "snapchat.com", "tiktok.com"} {
 		tag := expectedServiceTagForDomain(domain)
 		if tag == "" {
 			t.Fatalf("test fixture has no expected service for %s", domain)
@@ -199,7 +221,11 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 			t.Fatalf("generated config does not resolve %s through dns-direct", domain)
 		}
 	}
-	if !containsScopedIPProcessRoute(config, "66.22.192.0/18", "Discord.exe", "direct") {
+	expectedDiscordMediaRoute := "direct"
+	if runtime.GOOS == "windows" {
+		expectedDiscordMediaRoute = NoRouteOutboundTag
+	}
+	if !containsScopedIPProcessRoute(config, "66.22.192.0/18", "Discord.exe", expectedDiscordMediaRoute) {
 		t.Fatal("generated config must scope the Discord media range to the Discord process")
 	}
 	if !containsProcessRouteRule(config, "Discord.exe", discordRealtimeGroupTag) {
@@ -1416,6 +1442,11 @@ func TestApplyServiceFreeFallbackUsesVPNWhenSubscriptionAvailable(t *testing.T) 
 			},
 		},
 	})
+	settings := app.storage.GetAppSettings()
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodDirect
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
 
 	app.applyServiceFreeFallback("youtube", 3)
 
