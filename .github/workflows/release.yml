@@ -1,10 +1,9 @@
-name: Create Release Record
+name: Publish Windows Release
 
-# GitHub Actions creates the immutable tag and information page only after the
-# clean-Windows package workflow has passed. Verified Windows/Android artifacts
-# are uploaded separately; no signing keys are stored in Actions.
+# Publish only packages produced by the successful clean-Windows gate. The
+# release page, checksums and downloadable assets are created as one operation;
+# no signing keys are stored in Actions.
 on:
-  workflow_dispatch: {}
   workflow_run:
     workflows: ["Windows package release gate"]
     types: [completed]
@@ -15,10 +14,11 @@ permissions:
 jobs:
   release-record:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'Dzhamuha-develop'
     runs-on: windows-latest
     permissions:
+      actions: read
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Reject generated contributor metadata
         shell: pwsh
@@ -35,6 +35,19 @@ jobs:
       - name: Verify release contains the latest blocked lists
         shell: pwsh
         run: .\scripts\filters\update-blocked-lists.ps1 -CheckOnly
+
+      - name: Download verified Windows packages
+        shell: pwsh
+        run: |
+          gh run download "${{ github.event.workflow_run.id }}" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --name "dropo-windows-packages" `
+            --dir "release-assets"
+          $installer = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Setup-x64.exe")
+          $portable = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Portable-x64.zip")
+          if ($installer.Count -ne 1 -or $portable.Count -ne 1) {
+            throw "Expected exactly one verified installer and portable archive"
+          }
 
       - name: Read version and check existing release
         id: version
@@ -67,6 +80,18 @@ jobs:
           $notes = [IO.File]::ReadAllText($templatePath, $strictUtf8)
           $notes = $notes.Replace("{{TAG}}", $tag)
           $notes = $notes.Replace("{{REPOSITORY}}", $repo)
+          $installerHashFile = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Setup-x64.exe.sha256")
+          $portableHashFile = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Portable-x64.zip.sha256")
+          if ($installerHashFile.Count -ne 1 -or $portableHashFile.Count -ne 1) {
+            throw "Verified package SHA-256 files are missing or ambiguous"
+          }
+          $installerHash = ((Get-Content $installerHashFile[0].FullName -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          $portableHash = ((Get-Content $portableHashFile[0].FullName -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($installerHash -notmatch '^[0-9a-f]{64}$' -or $portableHash -notmatch '^[0-9a-f]{64}$') {
+            throw "Verified package SHA-256 value is invalid"
+          }
+          $notes = $notes.Replace("__WINDOWS_INSTALLER_SHA256_PENDING_LOCAL_UPLOAD__", $installerHash)
+          $notes = $notes.Replace("__WINDOWS_PORTABLE_SHA256_PENDING_LOCAL_UPLOAD__", $portableHash)
           if ($notes -match '\?{3,}' -or $notes -notmatch '[А-Яа-яЁё]') {
             throw "Release notes failed the UTF-8/Cyrillic integrity check."
           }
@@ -77,6 +102,12 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          target_commitish: ${{ github.event.workflow_run.head_sha || github.sha }}
+          target_commitish: ${{ github.event.workflow_run.head_sha }}
           name: dropo ${{ steps.version.outputs.tag }}
           body_path: release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/**/dropo-Windows-Setup-x64.exe
+            release-assets/**/dropo-Windows-Setup-x64.exe.sha256
+            release-assets/**/dropo-Windows-Portable-x64.zip
+            release-assets/**/dropo-Windows-Portable-x64.zip.sha256

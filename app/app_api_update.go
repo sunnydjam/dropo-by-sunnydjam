@@ -58,11 +58,6 @@ func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
 		return map[string]interface{}{"success": false, "error": err.Error()}
 	}
 
-	// Остановить VPN если запущен
-	if a.isVPNRunning() {
-		a.Stop()
-	}
-
 	a.AddToLogBuffer("Downloading update...")
 
 	// Download the update
@@ -95,6 +90,14 @@ func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
 			"success": false,
 			"error":   "Failed to stage installer securely: " + err.Error(),
 		}
+	}
+
+	// Keep the current route alive until the complete installer has been
+	// downloaded, size-checked, hashed and moved into protected storage. Users
+	// who need Dropo to reach GitHub would otherwise lose the update transport
+	// before the first byte was downloaded.
+	if a.isVPNRunning() {
+		a.Stop()
 	}
 	if err := startInstalledUpdate(stagedFile, updateInfo.FileSize, updateInfo.SHA256); err != nil {
 		return map[string]interface{}{
@@ -173,8 +176,9 @@ func renderUpdateScript(scriptDir, tempFile, execPath, execDir, expectedSHA256 s
 Start-Sleep -Seconds 2
 $package = %s
 %s
-$process = Start-Process -FilePath $package -ArgumentList "--from-update" -PassThru
+$process = Start-Process -FilePath $package -ArgumentList @("--from-update", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS") -PassThru
 $process.WaitForExit()
+if ($process.ExitCode -ne 0) { throw "Update installer exited with code $($process.ExitCode)" }
 Remove-Item -LiteralPath $package -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $PSCommandPath -Force
 `, psQuote(tempFile), hashCheck)

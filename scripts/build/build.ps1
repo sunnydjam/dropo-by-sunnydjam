@@ -19,6 +19,10 @@ param(
     # Local/offline rebuild aid: reuse an existing Flutter Windows Release
     # output while still rebuilding and signing the Go core and launcher.
     [switch]$ReuseFlutterWindowsOutput,
+    # Resolve Flutter dependencies exclusively from the configured local pub
+    # cache, then compile with --no-pub. Useful while testing VPN changes that
+    # temporarily make pub.dev unreachable.
+    [switch]$UseCachedFlutterPackages,
     # Local/offline signing aid. Production CI leaves this disabled and uses
     # the configured RFC3161 timestamp server.
     [switch]$SkipWindowsTimestamp,
@@ -29,7 +33,10 @@ param(
     [switch]$RequireWindowsSigning,
     # Development-only escape hatch. Public/reproducible packages must always
     # be built from a clean commit.
-    [switch]$AllowDirtySource
+    [switch]$AllowDirtySource,
+    # Local development only: verify the already-pinned blocked catalog and do
+    # not contact GitHub. Publication builds must leave this disabled.
+    [switch]$UseBundledFilters
 )
 
 $ErrorActionPreference = "Stop"
@@ -718,7 +725,14 @@ function Build-Application {
     # Every build, including AppOnly/CI builds, verifies the repository-owned
     # blocked catalog and refreshes it when upstream published a new release.
     # End-user startup never downloads routing data.
-    & (Join-Path $ScriptRoot "scripts\filters\update-blocked-lists.ps1") -RepositoryRoot $ScriptRoot -SingBoxPath $SingBoxExe
+    $filterUpdateArguments = @{
+        RepositoryRoot = $ScriptRoot
+        SingBoxPath    = $SingBoxExe
+    }
+    if ($UseBundledFilters) {
+        $filterUpdateArguments.Offline = $true
+    }
+    & (Join-Path $ScriptRoot "scripts\filters\update-blocked-lists.ps1") @filterUpdateArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Bundled blocked-list update failed with exit code $LASTEXITCODE"
     }
@@ -809,7 +823,26 @@ function Build-Application {
                 }
             }
             Write-Host "Building Flutter Windows UI..." -ForegroundColor Gray
-            & $FlutterCmd build windows --release --build-name $AppVersion --build-number 1 --dart-define "DROPO_CORE_ENDPOINT=http://127.0.0.1:17890" --dart-define "DROPO_APP_VERSION=$AppVersion" --dart-define "DROPO_BUILD_HASH=$BuildHash"
+            $flutterBuildArguments = @(
+                "build",
+                "windows",
+                "--release",
+                "--build-name", $AppVersion,
+                "--build-number", "1",
+                "--dart-define", "DROPO_CORE_ENDPOINT=http://127.0.0.1:17890",
+                "--dart-define", "DROPO_APP_VERSION=$AppVersion",
+                "--dart-define", "DROPO_BUILD_HASH=$BuildHash"
+            )
+            if ($UseCachedFlutterPackages) {
+                Write-Host "Resolving Flutter packages from the local cache..." -ForegroundColor Gray
+                & $FlutterCmd pub get --offline
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "[ERROR] Flutter offline dependency resolution failed." -ForegroundColor Red
+                    exit 1
+                }
+                $flutterBuildArguments += "--no-pub"
+            }
+            & $FlutterCmd @flutterBuildArguments
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "[ERROR] Flutter Windows build failed." -ForegroundColor Red
                 exit 1

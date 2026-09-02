@@ -86,9 +86,20 @@ func stageInstalledUpdate(downloadPath, version string, expectedSize int64, expe
 	return target, nil
 }
 
-// startInstalledUpdate delegates the protected setup executable to Explorer.
-// Explorer starts it with the interactive user's token, so the installer owns
-// the UAC prompt and can later restart the UI unelevated.
+func installedUpdateArguments() []string {
+	return []string{
+		"--from-update",
+		"/VERYSILENT",
+		"/SUPPRESSMSGBOXES",
+		"/NORESTART",
+		"/CLOSEAPPLICATIONS",
+	}
+}
+
+// startInstalledUpdate starts only the already verified executable from the
+// ACL-protected installation tree. Installed builds normally use the elevated
+// background core, so Setup can update in place without another prompt. If the
+// background core was disabled, Windows may still show its normal UAC consent.
 func startInstalledUpdate(packagePath string, expectedSize int64, expectedSHA256 string) error {
 	packagePath = filepath.Clean(packagePath)
 	if !strings.EqualFold(filepath.Ext(packagePath), ".exe") {
@@ -97,5 +108,10 @@ func startInstalledUpdate(packagePath string, expectedSize int64, expectedSHA256
 	if err := verifyFileSHA256AndSize(packagePath, expectedSHA256, expectedSize); err != nil {
 		return fmt.Errorf("update package is unavailable or changed: %w", err)
 	}
-	return exec.Command("explorer.exe", packagePath).Start()
+	command := exec.Command(packagePath, installedUpdateArguments()...)
+	command.Dir = filepath.Dir(packagePath)
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start verified update installer: %w", err)
+	}
+	return nil
 }

@@ -63,7 +63,9 @@ jobs:
             throw "Desktop Go coverage fell below 30%: $coverage"
           }
           go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw "Desktop Go vet failed" }
           go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+          if ($LASTEXITCODE -ne 0) { throw "Desktop govulncheck failed" }
       - name: Launcher and Android Go bridge tests
         shell: pwsh
         run: |
@@ -76,6 +78,7 @@ jobs:
             throw "Launcher coverage fell below 15%: $coverage"
           }
           go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw "Launcher Go vet failed" }
           Pop-Location
           Push-Location app/mobile/dropocore
           $coveragePath = Join-Path $env:RUNNER_TEMP "dropocore.coverage"
@@ -86,10 +89,13 @@ jobs:
             throw "Android core coverage fell below 45%: $coverage"
           }
           go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw "Android core Go vet failed" }
           Pop-Location
           Push-Location app/mobile/dropoandroid
           go test ./...
+          if ($LASTEXITCODE -ne 0) { throw "Android bridge Go tests failed" }
           go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw "Android bridge Go vet failed" }
           Pop-Location
 
   flutter-tests:
@@ -105,8 +111,11 @@ jobs:
         working-directory: flutter_app
         run: |
           flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw "Flutter dependency resolution failed" }
           flutter analyze
+          if ($LASTEXITCODE -ne 0) { throw "Flutter analysis failed" }
           flutter test
+          if ($LASTEXITCODE -ne 0) { throw "Flutter tests failed" }
 
   go-race:
     runs-on: ubuntu-latest

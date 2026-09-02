@@ -599,7 +599,9 @@ void main() {
     expect(decision, isTrue);
   });
 
-  testWidgets('cold start exposes an available update action', (tester) async {
+  testWidgets('cold start starts an installed Windows update automatically', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(1280, 860);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -616,6 +618,11 @@ void main() {
       bridge.updateCheckCalls,
       1,
       reason: 'each successful Windows initialization must check once',
+    );
+    expect(
+      bridge.updateInstallCalls,
+      1,
+      reason: 'an installed Windows release must update without another click',
     );
 
     await tester.pump(const Duration(seconds: 12));
@@ -908,6 +915,45 @@ void main() {
     expect(info.hasUpdate, isFalse);
   });
 
+  test('automatic update policy is limited to installed self-updates', () {
+    UpdateInfo info({required bool selfUpdate, bool hasUpdate = true}) {
+      return UpdateInfo.fromJson({
+        'success': true,
+        'hasUpdate': hasUpdate,
+        'currentVersion': '3.0.26',
+        'latestVersion': '3.0.27',
+        'releaseURL': 'https://github.com/example/release',
+        'downloadURL': 'https://github.com/example/asset',
+        'assetName': selfUpdate
+            ? 'dropo-Windows-Setup-x64.exe'
+            : 'dropo-Windows-Portable-x64.zip',
+        'fileSize': 123456,
+        'platform': 'windows',
+        'selfUpdate': selfUpdate,
+      });
+    }
+
+    expect(
+      shouldAutomaticallyInstallUpdate(info(selfUpdate: true), enabled: true),
+      isTrue,
+    );
+    expect(
+      shouldAutomaticallyInstallUpdate(info(selfUpdate: false), enabled: true),
+      isFalse,
+    );
+    expect(
+      shouldAutomaticallyInstallUpdate(info(selfUpdate: true), enabled: false),
+      isFalse,
+    );
+    expect(
+      shouldAutomaticallyInstallUpdate(
+        info(selfUpdate: true, hasUpdate: false),
+        enabled: true,
+      ),
+      isFalse,
+    );
+  });
+
   test('core compatibility rejects a stale build on the local bridge', () {
     const info = <String, dynamic>{
       'bridge': 'dropo-core',
@@ -961,6 +1007,7 @@ void main() {
 
 class _UpdateAvailableBridge extends MockCoreBridge {
   int updateCheckCalls = 0;
+  int updateInstallCalls = 0;
 
   @override
   Future<UpdateInfo> checkUpdates() async {
@@ -979,6 +1026,15 @@ class _UpdateAvailableBridge extends MockCoreBridge {
       'platform': 'windows',
       'selfUpdate': true,
     });
+  }
+
+  @override
+  Future<Map<String, dynamic>> installUpdate() async {
+    updateInstallCalls += 1;
+    return {
+      'success': false,
+      'error': 'Test bridge stops before replacing the running test process',
+    };
   }
 }
 

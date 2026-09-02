@@ -70,7 +70,8 @@ Name: "{autodesktop}\dropo"; Filename: "{app}\dropo.exe"; WorkingDir: "{app}"; T
 [Run]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""dropo-background-core"" /F"; Flags: runhidden waituntilterminated logoutput 64bit; Check: IsWin64
 Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""dropo-background-core"" /SC ONLOGON /RL HIGHEST /TR ""\""{app}\resources\dropo-core.exe\"" --listen 127.0.0.1:17890 --no-tray"""; Flags: runhidden waituntilterminated logoutput 64bit; Check: ShouldCreateBackgroundTask
-Filename: "{app}\dropo.exe"; Description: "Запустить dropo"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\dropo.exe"; Description: "Запустить dropo"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: not IsFromUpdate
+Filename: "{sys}\explorer.exe"; Parameters: """{app}\dropo.exe"""; WorkingDir: "{app}"; Flags: nowait; Check: IsFromUpdate
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM dropo-ui.exe"; Flags: runhidden waituntilterminated; RunOnceId: "StopDropoUI"
@@ -103,6 +104,18 @@ begin
   Result := False;
   for ParameterIndex := 1 to ParamCount do
     if Pos('/tasks=', LowerCase(ParamStr(ParameterIndex))) = 1 then begin
+      Result := True;
+      exit;
+    end;
+end;
+
+function IsFromUpdate(): Boolean;
+var
+  ParameterIndex: Integer;
+begin
+  Result := False;
+  for ParameterIndex := 1 to ParamCount do
+    if CompareText(ParamStr(ParameterIndex), '--from-update') = 0 then begin
       Result := True;
       exit;
     end;

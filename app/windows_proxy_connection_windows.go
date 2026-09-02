@@ -32,12 +32,20 @@ type internetPerConnectionOption struct {
 	value  uintptr
 }
 
+// WinINet returns string options as allocated UTF-16 pointers. Keep that union
+// member typed as a pointer so Go's checkptr/vet rules never have to recreate a
+// pointer from an integer after the syscall.
+type internetPerConnectionStringOption struct {
+	option uint32
+	value  *uint16
+}
+
 type internetPerConnectionOptionList struct {
 	size        uint32
 	connection  *uint16
 	optionCount uint32
 	optionError uint32
-	options     *internetPerConnectionOption
+	options     unsafe.Pointer
 }
 
 type windowsConnectionProxyState struct {
@@ -75,25 +83,25 @@ func readWindowsConnectionProxyState() (windowsConnectionProxyState, error) {
 
 func queryWindowsConnectionDWORD(optionID uint32) (uint32, error) {
 	option := internetPerConnectionOption{option: optionID}
-	if err := queryWindowsConnectionOption(&option); err != nil {
+	if err := queryWindowsConnectionOption(unsafe.Pointer(&option)); err != nil {
 		return 0, err
 	}
 	return uint32(option.value), nil
 }
 
 func queryWindowsConnectionString(optionID uint32) (string, error) {
-	option := internetPerConnectionOption{option: optionID}
-	if err := queryWindowsConnectionOption(&option); err != nil {
+	option := internetPerConnectionStringOption{option: optionID}
+	if err := queryWindowsConnectionOption(unsafe.Pointer(&option)); err != nil {
 		return "", err
 	}
-	if option.value == 0 {
+	if option.value == nil {
 		return "", nil
 	}
-	defer globalFree.Call(option.value)
-	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(option.value))), nil
+	defer globalFree.Call(uintptr(unsafe.Pointer(option.value)))
+	return windows.UTF16PtrToString(option.value), nil
 }
 
-func queryWindowsConnectionOption(option *internetPerConnectionOption) error {
+func queryWindowsConnectionOption(option unsafe.Pointer) error {
 	if option == nil {
 		return errors.New("WinINet per-connection option is nil")
 	}
@@ -112,6 +120,7 @@ func queryWindowsConnectionOption(option *internetPerConnectionOption) error {
 	if result == 0 {
 		return winInetProxyCallError("InternetQueryOptionW", callErr)
 	}
+	runtime.KeepAlive(option)
 	return nil
 }
 
@@ -135,7 +144,7 @@ func applyWindowsConnectionProxyState(state windowsConnectionProxyState) error {
 	list := internetPerConnectionOptionList{
 		size:        uint32(unsafe.Sizeof(internetPerConnectionOptionList{})),
 		optionCount: uint32(len(options)),
-		options:     &options[0],
+		options:     unsafe.Pointer(&options[0]),
 	}
 	result, _, callErr := internetSetOption.Call(
 		0,

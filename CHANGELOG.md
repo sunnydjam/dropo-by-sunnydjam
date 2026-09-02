@@ -2,6 +2,37 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.27 — 2026-09-03
+
+### VPN compatibility and diagnostics
+
+- added desktop support for VLESS HTTPUpgrade transports and preserved their
+  host/path parameters when importing links and subscriptions;
+- direct input now accepts a newline-delimited bundle of proxy links and keeps
+  every supported node available for explicit selection;
+- exposed VPN-source health in the application status instead of reporting a
+  configured but unreachable source as healthy;
+- kept the active VPN route online while an update is downloaded and verified,
+  so users who need Dropo to reach GitHub do not lose the transfer midway.
+
+### Automatic Windows updates
+
+- installed Windows builds automatically download stable updates from this
+  repository when update checks are enabled;
+- the exact release asset is validated by declared size and GitHub SHA-256
+  before the active connection is stopped;
+- verified updates run through a silent in-place installer and relaunch Dropo;
+- portable Windows and Android builds remain download-notification only and
+  never overwrite their own files automatically;
+- release CI and the Windows package gate now follow `Dzhamuha-develop`, the
+  actual release branch.
+
+### Build reliability
+
+- added explicit offline switches for the pinned blocked-list bundle and cached
+  Flutter packages without weakening the normal publication gate;
+- expanded transport, subscription and updater regression coverage.
+
 ## 3.0.26 — 2026-08-30
 
 ### Stable routing profile

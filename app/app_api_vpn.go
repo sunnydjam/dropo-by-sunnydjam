@@ -32,30 +32,50 @@ func (a *App) GetStatus() map[string]interface{} {
 	a.waitForInit()
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	running := a.isRunning
+	connecting := a.isStarting
+	singboxPath := a.singboxPath
+	logPath := a.logPath
+	tempLogPath := a.tempLogPath
+	a.mu.Unlock()
 
 	configPath := ""
 	hasConfig := false
+	routingMode := DefaultRoutingMode
 	if a.storage != nil {
 		configPath = a.storage.ActiveConfigFilePath()
 		hasConfig = a.storage.ActiveProfileHasConfig()
-		if a.isRunning && fileExists(configPath) {
+		routingMode = NormalizeRoutingMode(a.storage.GetAppSettings().RoutingMode)
+		if running && fileExists(configPath) {
 			hasConfig = true
 		}
 	}
 	networkMode := a.currentNetworkModeStatus()
+	healthKnown, sourceAvailable, sourceError := a.vpnSourceAvailabilitySnapshot()
+	fullVPNSourceFailed, fullVPNError := fullVPNSourceFailure(
+		running,
+		routingMode,
+		healthKnown,
+		sourceAvailable,
+		sourceError,
+	)
+	hasError := a.hasError.Load() || fullVPNSourceFailed
 
 	return map[string]interface{}{
-		"running":                   a.isRunning,
-		"connected":                 a.isRunning,
-		"connecting":                a.isStarting,
-		"hasError":                  a.hasError.Load(),
+		"running":                   running,
+		"connected":                 running,
+		"connecting":                connecting,
+		"hasError":                  hasError,
+		"error":                     fullVPNError,
+		"routingMode":               string(routingMode),
+		"vpnSourceHealthKnown":      healthKnown,
+		"vpnSourceAvailable":        sourceAvailable,
 		"configPath":                configPath,
-		"singboxPath":               a.singboxPath,
+		"singboxPath":               singboxPath,
 		"configExists":              hasConfig,
-		"singboxExists":             a.singboxPath != "" && fileExists(a.singboxPath),
-		"logPath":                   a.logPath,
-		"tempLogPath":               a.tempLogPath,
+		"singboxExists":             singboxPath != "" && fileExists(singboxPath),
+		"logPath":                   logPath,
+		"tempLogPath":               tempLogPath,
 		"networkMode":               string(networkMode.Active),
 		"requestedNetworkMode":      string(networkMode.Requested),
 		"networkModeFallback":       networkMode.Fallback,

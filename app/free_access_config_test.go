@@ -2421,6 +2421,54 @@ func TestBuildConfigWithVLESSXHTTPUsesXrayBridge(t *testing.T) {
 	}
 }
 
+func TestBuildConfigWithVLESSHTTPUpgradeUsesXrayBridge(t *testing.T) {
+	basePath := t.TempDir()
+	storage := NewStorage(basePath)
+	if err := storage.Init(); err != nil {
+		t.Fatalf("storage init failed: %v", err)
+	}
+
+	filtersPath := filepath.Join(basePath, "bin", FiltersFolder)
+	if err := os.MkdirAll(filtersPath, 0755); err != nil {
+		t.Fatalf("create filters dir failed: %v", err)
+	}
+	for _, filter := range FilterFiles {
+		if err := os.WriteFile(filepath.Join(filtersPath, filter.Name), []byte("test"), 0644); err != nil {
+			t.Fatalf("write filter %s failed: %v", filter.Name, err)
+		}
+	}
+
+	link := "vless://11111111-1111-1111-1111-111111111111@edge.example:443?security=tls&type=httpupgrade&path=%2Ftransport&host=upgrade.example&sni=origin.example&fp=chrome#httpupgrade-test"
+	setTestServiceMethod(t, storage, "openai", FreeAccessMethodVPN)
+	builder := NewConfigBuilderForStorage(storage)
+	if err := builder.BuildConfig(link); err != nil {
+		t.Fatalf("BuildConfig with HTTPUpgrade failed: %v", err)
+	}
+
+	profile, err := storage.GetActiveProfile()
+	if err != nil {
+		t.Fatalf("get active profile failed: %v", err)
+	}
+	config, err := storage.GetProfileConfig(profile.ID)
+	if err != nil {
+		t.Fatalf("get profile config failed: %v", err)
+	}
+	if !containsOutboundType(config, "vpn-source-source-1", "socks") {
+		t.Fatalf("sing-box config does not expose HTTPUpgrade bridge as socks outbound")
+	}
+	if !containsProcessDirectRule(config, XrayExeName) {
+		t.Fatalf("generated HTTPUpgrade config does not bypass %s process traffic directly", XrayExeName)
+	}
+
+	xrayConfig, err := storage.GetProfileXrayConfig(profile.ID)
+	if err != nil {
+		t.Fatalf("get xray config failed: %v", err)
+	}
+	if !containsXrayNetwork(xrayConfig, "httpupgrade") {
+		t.Fatalf("xray bridge config does not contain HTTPUpgrade outbound: %#v", xrayConfig)
+	}
+}
+
 func TestTunRouteExcludesProxyAndXrayEndpoints(t *testing.T) {
 	config := map[string]interface{}{
 		"inbounds": []interface{}{
@@ -2499,6 +2547,12 @@ func TestSplitProxyConfigsFiltersNonVLESSXHTTP(t *testing.T) {
 			Server:  "vless.example",
 		},
 		{
+			Type:    "vless",
+			Network: "httpupgrade",
+			Name:    "vless-httpupgrade",
+			Server:  "upgrade.example",
+		},
+		{
 			Type:    "trojan",
 			Network: "xhttp",
 			Name:    "trojan-xhttp",
@@ -2518,8 +2572,8 @@ func TestSplitProxyConfigsFiltersNonVLESSXHTTP(t *testing.T) {
 		},
 	})
 
-	if len(result.XrayBridge) != 1 || result.XrayBridge[0].Name != "vless-xhttp" {
-		t.Fatalf("xray bridge proxies = %#v, want only vless-xhttp", result.XrayBridge)
+	if len(result.XrayBridge) != 2 || result.XrayBridge[0].Name != "vless-xhttp" || result.XrayBridge[1].Name != "vless-httpupgrade" {
+		t.Fatalf("xray bridge proxies = %#v, want VLESS xhttp and httpupgrade", result.XrayBridge)
 	}
 	if len(result.SingBox) != 1 || result.SingBox[0].Name != "trojan-tcp" {
 		t.Fatalf("sing-box proxies = %#v, want only trojan-tcp", result.SingBox)

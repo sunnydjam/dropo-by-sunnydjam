@@ -34,7 +34,15 @@ func NormalizeTransport(transport string) string {
 }
 
 func RequiresXrayBridge(proxy ProxyConfig) bool {
-	return proxy.Type == "vless" && NormalizeTransport(proxy.Network) == "xhttp"
+	if proxy.Type != "vless" {
+		return false
+	}
+	switch NormalizeTransport(proxy.Network) {
+	case "xhttp", "httpupgrade":
+		return true
+	default:
+		return false
+	}
 }
 
 func IsTransportSupported(transport string) bool {
@@ -81,7 +89,7 @@ func SplitProxyConfigs(proxies []ProxyConfig) ProxySplitResult {
 	result.AllFiltered = supportedCount == 0 && len(result.Filtered) > 0
 	if len(result.Filtered) > 0 {
 		if result.AllFiltered {
-			result.Message = "Все серверы в подписке используют неподдерживаемый транспорт. Поддерживаются sing-box транспорты и VLESS xhttp через Xray-core."
+			result.Message = "Все серверы в подписке используют неподдерживаемый транспорт. Поддерживаются sing-box транспорты и VLESS xhttp/httpupgrade через Xray-core."
 		} else {
 			result.Message = "Некоторые серверы (" + joinStrings(filteredInfo, ", ") + ") используют неподдерживаемый транспорт и были пропущены."
 		}

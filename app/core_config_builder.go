@@ -141,29 +141,15 @@ func (b *ConfigBuilder) TestSubscription(subscriptionURL string) (*SubscriptionT
 	}
 
 	// Определяем тип: это подписка URL или прямая ссылка
-	isDirectLink := strings.HasPrefix(subscriptionURL, "vless://") ||
-		strings.HasPrefix(subscriptionURL, "trojan://") ||
-		strings.HasPrefix(subscriptionURL, "ss://") ||
-		strings.HasPrefix(subscriptionURL, "vmess://")
-
-	var proxies []ProxyConfig
-	var err error
-
-	if isDirectLink {
-		// Парсим как одну ссылку
-		proxy, err := b.fetcher.ParseSingleLink(subscriptionURL)
-		if err != nil {
+	isDirectLink := isDirectProxyLink(strings.TrimSpace(subscriptionURL))
+	proxies, err := b.fetcher.ParseSource(subscriptionURL)
+	if err != nil {
+		if isDirectLink {
 			result.Error = fmt.Sprintf("Ошибка парсинга ссылки: %v", err)
-			return result, nil
-		}
-		proxies = []ProxyConfig{proxy}
-	} else {
-		// Парсим как подписку URL
-		proxies, err = b.fetcher.FetchAndParse(subscriptionURL)
-		if err != nil {
+		} else {
 			result.Error = fmt.Sprintf("Ошибка загрузки подписки: %v", err)
-			return result, nil
 		}
+		return result, nil
 	}
 
 	// Filter unsupported transports (e.g., xhttp which is Xray-only)

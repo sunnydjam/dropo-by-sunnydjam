@@ -1015,6 +1015,9 @@ func collectXrayEndpointHosts(xrayConfig map[string]interface{}) []string {
 		if xhttpSettings, ok := stream["xhttpSettings"].(map[string]interface{}); ok {
 			hosts = appendEndpointHost(hosts, xhttpSettings["host"])
 		}
+		if httpUpgradeSettings, ok := stream["httpupgradeSettings"].(map[string]interface{}); ok {
+			hosts = appendEndpointHost(hosts, httpUpgradeSettings["host"])
+		}
 		if wsSettings, ok := stream["wsSettings"].(map[string]interface{}); ok {
 			if headers, ok := wsSettings["headers"].(map[string]interface{}); ok {
 				hosts = appendEndpointHost(hosts, headers["Host"])
@@ -1582,11 +1585,14 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 
 func (b *ConfigBuilderForStorage) fetchVPNSourceNodes(source VPNSource) ([]ProxyConfig, error) {
 	if source.Kind == VPNSourceDirect || isDirectProxyLink(source.URI) {
-		node, err := b.fetcher.ParseSingleLink(source.URI)
+		nodes, err := b.fetcher.ParseSubscription(source.URI)
 		if err != nil {
 			return nil, err
 		}
-		return []ProxyConfig{node}, nil
+		if len(nodes) == 0 {
+			return nil, fmt.Errorf("source contains no supported proxy links")
+		}
+		return nodes, nil
 	}
 	return b.fetcher.FetchAndParse(source.URI)
 }

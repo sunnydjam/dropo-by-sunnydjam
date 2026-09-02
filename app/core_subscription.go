@@ -89,6 +89,25 @@ func (f *SubscriptionFetcher) FetchAndParse(subscriptionURL string) ([]ProxyConf
 	return f.ParseSubscription(string(body))
 }
 
+// ParseSource accepts either a remote HTTPS subscription or one or more
+// newline-delimited direct proxy links. Treating a pasted bundle as a single
+// URL makes every line after the first one part of that node's display name,
+// silently discarding the remaining nodes.
+func (f *SubscriptionFetcher) ParseSource(source string) ([]ProxyConfig, error) {
+	source = strings.TrimSpace(source)
+	if isDirectProxyLink(source) {
+		proxies, err := f.ParseSubscription(source)
+		if err != nil {
+			return nil, err
+		}
+		if len(proxies) == 0 {
+			return nil, fmt.Errorf("source contains no supported proxy links")
+		}
+		return proxies, nil
+	}
+	return f.FetchAndParse(source)
+}
+
 func validateSubscriptionURL(rawURL string) error {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -605,6 +624,18 @@ func buildTransport(p *ProxyConfig) map[string]interface{} {
 		}
 		if p.Host != "" {
 			transport["host"] = []string{p.Host}
+		}
+	case "httpupgrade":
+		// sing-box HTTPUpgrade uses a scalar Host value, unlike HTTP where
+		// host is a list and WebSocket where it lives under headers. Dropping
+		// these subscription parameters sends the upgrade request to the
+		// server's default virtual host, which commonly answers with 200 OK
+		// instead of switching protocols.
+		if p.Path != "" {
+			transport["path"] = p.Path
+		}
+		if p.Host != "" {
+			transport["host"] = p.Host
 		}
 	}
 

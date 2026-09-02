@@ -64,6 +64,14 @@ bool? debugMobileShellOverride;
 bool get _isMobileShell =>
     debugMobileShellOverride ?? (Platform.isAndroid || Platform.isIOS);
 
+@visibleForTesting
+bool shouldAutomaticallyInstallUpdate(
+  UpdateInfo update, {
+  required bool enabled,
+}) {
+  return enabled && update.success && update.hasUpdate && update.selfUpdate;
+}
+
 ButtonStyle _withClickCursor(ButtonStyle style) {
   return style.copyWith(
     mouseCursor: WidgetStateProperty.resolveWith<MouseCursor?>((states) {
@@ -3849,17 +3857,29 @@ class _DropoHomePageState extends State<DropoHomePage>
         }
         final checked = result;
         if (checked != null && checked.success) {
+          final autoInstall = shouldAutomaticallyInstallUpdate(
+            checked,
+            enabled: appConfig.checkUpdates,
+          );
           setState(() {
             updateInfo = checked;
             if (checked.hasUpdate && !connectionBusy && !uiBusy) {
-              statusMessage = 'Доступна версия ${checked.latestVersion}';
-              connectionHint = checked.selfUpdate
+              statusMessage = autoInstall
+                  ? 'Автоматически обновляем до ${checked.latestVersion}'
+                  : 'Доступна версия ${checked.latestVersion}';
+              connectionHint = autoInstall
+                  ? 'Сначала загрузим и проверим установщик, затем перезапустим dropo.'
+                  : checked.selfUpdate
                   ? 'Нажмите «Обновить и перезапустить».'
                   : checked.platform.toLowerCase() == 'windows'
                   ? 'Скачайте portable-архив и замените папку приложения.'
                   : 'Нажмите «Скачать APK» для установки обновления.';
             }
           });
+          if (autoInstall) {
+            await _performAutomaticUpdate(checked);
+            return;
+          }
           if (checked.hasUpdate) {
             _showUpdateSnackBar(checked, manual: false);
           }
@@ -4766,7 +4786,34 @@ class _DropoHomePageState extends State<DropoHomePage>
     return '';
   }
 
-  Future<void> _performUpdate(UpdateInfo result) async {
+  Future<void> _performAutomaticUpdate(UpdateInfo result) async {
+    // A settings save or another short UI operation can overlap the delayed
+    // startup check. Wait for that operation instead of silently dropping the
+    // automatic update. The release remains visible for a manual retry if the
+    // UI stays busy for an unusually long time.
+    for (var attempt = 0; attempt < 60; attempt++) {
+      if (!mounted || quitting || !appConfig.checkUpdates) {
+        return;
+      }
+      if (!uiBusy) {
+        await _performUpdate(result, requireConfirmation: false);
+        return;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+    if (mounted) {
+      setState(() {
+        statusMessage = 'Доступна версия ${result.latestVersion}';
+        connectionHint = 'Нажмите «Обновить и перезапустить».';
+      });
+      _showUpdateSnackBar(result, manual: false);
+    }
+  }
+
+  Future<void> _performUpdate(
+    UpdateInfo result, {
+    bool requireConfirmation = true,
+  }) async {
     if (!result.success || !result.hasUpdate || uiBusy || quitting) {
       return;
     }
@@ -4838,48 +4885,50 @@ class _DropoHomePageState extends State<DropoHomePage>
       return;
     }
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) => _AppDialog(
-        title: 'Обновить dropo до ${result.latestVersion}?',
-        icon: Icons.system_update_alt,
-        width: 520,
-        centered: true,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              'Приложение скачает установщик через российский сервер, проверит размер и SHA-256, запустит обновление и перезапустится.',
-              style: TextStyle(color: Color(0xFFD8E4E0), height: 1.35),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: _ActionButton(
-                    label: 'Отмена',
-                    icon: Icons.close,
-                    secondary: true,
-                    onPressed: () => Navigator.of(dialogContext).pop(false),
+    if (requireConfirmation) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => _AppDialog(
+          title: 'Обновить dropo до ${result.latestVersion}?',
+          icon: Icons.system_update_alt,
+          width: 520,
+          centered: true,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Приложение скачает установщик из GitHub Releases, проверит размер и SHA-256, запустит обновление и перезапустится.',
+                style: TextStyle(color: Color(0xFFD8E4E0), height: 1.35),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: _ActionButton(
+                      label: 'Отмена',
+                      icon: Icons.close,
+                      secondary: true,
+                      onPressed: () => Navigator.of(dialogContext).pop(false),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _ActionButton(
-                    label: 'Обновить',
-                    icon: Icons.restart_alt,
-                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _ActionButton(
+                      label: 'Обновить',
+                      icon: Icons.restart_alt,
+                      onPressed: () => Navigator.of(dialogContext).pop(true),
+                    ),
                   ),
-                ),
-              ],
-            ),
-          ],
+                ],
+              ),
+            ],
+          ),
         ),
-      ),
-    );
-    if (confirmed != true || !mounted) {
-      return;
+      );
+      if (confirmed != true || !mounted) {
+        return;
+      }
     }
 
     await _runBusy(() async {
@@ -5867,7 +5916,7 @@ class _DropoHomePageState extends State<DropoHomePage>
             ),
             const SizedBox(height: 8),
             const Text(
-              'Официальная сборка dropo. Скачивайте приложение только из основного репозитория или через российский сервер обновлений.',
+              'Официальная сборка Dropo by sunnydjam. Скачивайте приложение только из GitHub Releases основного репозитория.',
               style: TextStyle(color: Color(0xFF9BB0AB), height: 1.35),
             ),
           ],
@@ -9455,7 +9504,7 @@ class _AboutSection extends StatelessWidget {
             icon: Icons.verified_user_outlined,
             title: 'Официальная сборка',
             body:
-                'Скачивайте приложение только из основного репозитория или через российский сервер обновлений.',
+                'Скачивайте приложение только из GitHub Releases основного репозитория.',
           ),
         ],
       ),
@@ -11778,8 +11827,9 @@ class _SettingsDialogState extends State<_SettingsDialog> {
           title: 'Обновления',
           children: [
             _SwitchSetting(
-              title: 'Проверять обновления',
-              description: 'Уведомлять о новых версиях',
+              title: 'Автоматические обновления',
+              description:
+                  'Установленная Windows-версия скачивает проверенные стабильные релизы из GitHub и перезапускается автоматически',
               value: config.checkUpdates,
               onChanged: canUseLiveSafe
                   ? (value) =>
@@ -11792,8 +11842,8 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                 description: widget.updateInfo!.selfUpdate
                     ? 'Скачать, проверить и перезапустить dropo'
                     : widget.updateInfo!.platform.toLowerCase() == 'windows'
-                    ? 'Скачать portable-архив через российский сервер'
-                    : 'Скачать APK через российский сервер',
+                    ? 'Скачать portable-архив из GitHub Releases'
+                    : 'Скачать APK из GitHub Releases',
                 label: widget.updateInfo!.selfUpdate
                     ? 'Обновить'
                     : widget.updateInfo!.platform.toLowerCase() == 'windows'
@@ -11804,7 +11854,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
               ),
             _ButtonSetting(
               title: 'Проверить сейчас',
-              description: 'Проверить российский сервер обновлений',
+              description: 'Проверить стабильные релизы GitHub',
               label: 'Проверить',
               icon: Icons.system_update_alt,
               onPressed: canUseLiveSafe ? widget.onCheckUpdates : null,

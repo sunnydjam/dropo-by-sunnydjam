@@ -90,6 +90,9 @@ type App struct {
 	vpnSourceManual             string
 	vpnSourceLastSwitch         time.Time
 	vpnSourceHealth             map[string]vpnSourceHealthState
+	vpnSourceHealthKnown        bool
+	vpnSourceAvailable          bool
+	vpnSourceHealthError        string
 	frontendQuitRequested       atomic.Bool
 	initializedReady            atomic.Bool
 	shutdownRequested           atomic.Bool

@@ -11,7 +11,7 @@ import (
 // TestSubscription tests a subscription URL and returns available proxies
 func (a *App) TestSubscription(url string) map[string]interface{} {
 	fetcher := NewSubscriptionFetcher()
-	proxies, err := fetcher.FetchAndParse(url)
+	proxies, err := fetcher.ParseSource(url)
 	if err != nil {
 		return map[string]interface{}{
 			"success": false,

@@ -300,7 +300,16 @@ func TestMakeUpdateScriptForSingleExecutable(t *testing.T) {
 	if filepath.Ext(scriptPath) != ".ps1" {
 		t.Fatalf("script path = %q, want .ps1", scriptPath)
 	}
-	for _, part := range []string{"--from-update", "WaitForExit", "Remove-Item"} {
+	for _, part := range []string{
+		"--from-update",
+		"/VERYSILENT",
+		"/SUPPRESSMSGBOXES",
+		"/NORESTART",
+		"/CLOSEAPPLICATIONS",
+		"WaitForExit",
+		"ExitCode",
+		"Remove-Item",
+	} {
 		if !strings.Contains(script, part) {
 			t.Fatalf("single-executable update script missing %q:\n%s", part, script)
 		}

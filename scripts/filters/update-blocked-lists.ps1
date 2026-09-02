@@ -1,5 +1,9 @@
 param(
     [switch]$CheckOnly,
+    # Verify the repository-owned catalog against its pinned metadata without
+    # contacting GitHub. Intended for local development builds when the active
+    # network path is unavailable; publication builds keep the online check.
+    [switch]$Offline,
     [string]$RepositoryRoot,
     [string]$SingBoxPath
 )
@@ -177,6 +181,23 @@ function Test-CurrentBundle {
         }
     }
     return $true
+}
+
+if ($Offline) {
+    if (-not (Test-Path -LiteralPath $VersionPath -PathType Leaf)) {
+        throw "Bundled blocked-list metadata is missing: $VersionPath"
+    }
+    try {
+        $pinnedVersion = Get-Content -LiteralPath $VersionPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "Bundled blocked-list metadata is invalid: $($_.Exception.Message)"
+    }
+    $pinnedTag = [string]$pinnedVersion.filters_version
+    if ([string]::IsNullOrWhiteSpace($pinnedTag) -or -not (Test-CurrentBundle -LatestTag $pinnedTag)) {
+        throw "Bundled blocked lists do not match their pinned metadata. Run the online updater before building."
+    }
+    Write-Host "[FILTERS] Bundled blocked lists passed offline integrity verification ($pinnedTag)." -ForegroundColor Green
+    exit 0
 }
 
 Write-Host "[FILTERS] Checking the latest Re-filter release..." -ForegroundColor Yellow

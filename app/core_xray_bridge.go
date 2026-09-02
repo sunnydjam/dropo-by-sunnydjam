@@ -424,6 +424,16 @@ func (p ProxyConfig) ToXrayOutbound(tag string) map[string]interface{} {
 		}
 		stream["xhttpSettings"] = xhttpSettings
 	}
+	if network == "httpupgrade" {
+		httpUpgradeSettings := map[string]interface{}{}
+		if p.Path != "" {
+			httpUpgradeSettings["path"] = p.Path
+		}
+		if p.Host != "" {
+			httpUpgradeSettings["host"] = p.Host
+		}
+		stream["httpupgradeSettings"] = httpUpgradeSettings
+	}
 
 	outbound["streamSettings"] = stream
 	return outbound

@@ -14,6 +14,7 @@ const (
 	vpnSourceRecoveryThreshold   = 3
 	vpnSourceCircuitOpen         = 2 * time.Minute
 	vpnSourceSwitchCooldown      = 20 * time.Second
+	vpnSourceUnavailableMessage  = "VPN-источник не прошёл проверку. Проверьте параметры профиля или обновите VPN-подписку."
 )
 
 type vpnSourceHealthState struct {
@@ -76,11 +77,13 @@ func (a *App) selectFirstHealthyVPNSource(ctx context.Context, generation uint64
 			return ""
 		}
 		if healthy && a.switchVPNSourceForMonitor(ctx, generation, tag) {
+			a.setVPNSourceAvailabilityForMonitor(generation, true, "")
 			a.writeLog(fmt.Sprintf("[VPNSources] active source=%s; fallback order contains %d source(s)", tag, len(tags)))
 			return tag
 		}
 		a.writeLog(fmt.Sprintf("[VPNSources] source %s failed its selected-node health check; trying next source", tag))
 	}
+	a.setVPNSourceAvailabilityForMonitor(generation, false, vpnSourceUnavailableMessage)
 	a.writeLog("[VPNSources] no selected source node passed health check; service routing will use its direct/local fallback policy")
 	return ""
 }
@@ -125,6 +128,9 @@ func (a *App) startVPNSourceMonitor() {
 	a.vpnSourceHealth = make(map[string]vpnSourceHealthState)
 	a.vpnSourceManual = ""
 	a.vpnSourceLastSwitch = time.Time{}
+	a.vpnSourceHealthKnown = false
+	a.vpnSourceAvailable = false
+	a.vpnSourceHealthError = ""
 	a.vpnSourceMonitorMu.Unlock()
 	go a.runVPNSourceMonitor(ctx, generation)
 }
@@ -183,6 +189,9 @@ func (a *App) stopVPNSourceMonitor() {
 	a.vpnSourceManual = ""
 	a.vpnSourceLastSwitch = time.Time{}
 	a.vpnSourceHealth = nil
+	a.vpnSourceHealthKnown = false
+	a.vpnSourceAvailable = false
+	a.vpnSourceHealthError = ""
 	a.vpnSourceMonitorMu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -215,6 +224,7 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 		return
 	}
 	if healthy {
+		a.setVPNSourceAvailabilityForMonitor(generation, true, "")
 		a.maybeRecoverPreferredVPNSource(ctx, generation, tags, active, now)
 		return
 	}
@@ -249,10 +259,12 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 			return
 		}
 		if candidateHealthy && a.switchVPNSourceForMonitor(ctx, generation, tag) {
+			a.setVPNSourceAvailabilityForMonitor(generation, true, "")
 			a.writeLog(fmt.Sprintf("[VPNSources] failed over from %s to %s; no sibling node was selected", active, tag))
 			return
 		}
 	}
+	a.setVPNSourceAvailabilityForMonitor(generation, false, vpnSourceUnavailableMessage)
 	a.writeLog(fmt.Sprintf("[VPNSources] active source %s failed and no next source is healthy", active))
 }
 
@@ -331,6 +343,40 @@ func (a *App) recordVPNSourceHealthForMonitor(generation uint64, tag string, hea
 	state := nextVPNSourceHealthState(a.vpnSourceHealth[tag], healthy, now)
 	a.vpnSourceHealth[tag] = state
 	return state, true
+}
+
+func (a *App) setVPNSourceAvailabilityForMonitor(generation uint64, available bool, message string) bool {
+	a.vpnSourceMonitorMu.Lock()
+	defer a.vpnSourceMonitorMu.Unlock()
+	if a.vpnSourceMonitorCancel == nil || a.vpnSourceMonitorGeneration != generation {
+		return false
+	}
+	a.vpnSourceHealthKnown = true
+	a.vpnSourceAvailable = available
+	if available {
+		message = ""
+	}
+	a.vpnSourceHealthError = message
+	return true
+}
+
+func (a *App) vpnSourceAvailabilitySnapshot() (known bool, available bool, message string) {
+	if a == nil {
+		return false, false, ""
+	}
+	a.vpnSourceMonitorMu.Lock()
+	defer a.vpnSourceMonitorMu.Unlock()
+	return a.vpnSourceHealthKnown, a.vpnSourceAvailable, a.vpnSourceHealthError
+}
+
+func fullVPNSourceFailure(running bool, routingMode RoutingMode, healthKnown, sourceAvailable bool, message string) (bool, string) {
+	if !running || NormalizeRoutingMode(routingMode) != RoutingModeAllTraffic || !healthKnown || sourceAvailable {
+		return false, ""
+	}
+	if message == "" {
+		message = vpnSourceUnavailableMessage
+	}
+	return true, message
 }
 
 func (a *App) vpnSourceCanAttemptForMonitor(generation uint64, tag string, now time.Time) (bool, bool) {
