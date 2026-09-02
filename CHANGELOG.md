@@ -31,6 +31,8 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 - added explicit offline switches for the pinned blocked-list bundle and cached
   Flutter packages without weakening the normal publication gate;
+- updated the inherited Android bridge to gRPC `1.83.1`, which contains the
+  upstream fix for HTTP/2 DATA-frame fragmentation memory exhaustion;
 - expanded transport, subscription and updater regression coverage.
 
 ## 3.0.26 — 2026-08-30
