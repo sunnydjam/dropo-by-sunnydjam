@@ -89,7 +89,12 @@ function Invoke-WindowsInstallSmoke {
             # before the relaunch fix. A plain silent reinstall is not this path.
             $passArgs += @("--from-update", "/CLOSEAPPLICATIONS")
         }
-        $process = Start-Process -FilePath $SetupPath -ArgumentList $passArgs -WindowStyle Hidden -Wait -PassThru
+        # Start-Process -Wait waits for descendants too, including the reopened
+        # UI that must stay alive. Wait only for Setup itself, with a time limit.
+        $process = Start-Process -FilePath $SetupPath -ArgumentList $passArgs -WindowStyle Hidden -PassThru
+        if (-not $process.WaitForExit(180000)) {
+            throw "Installer smoke pass $pass did not exit within 180 seconds."
+        }
         if ($process.ExitCode -ne 0) {
             throw "Installer smoke pass $pass failed with exit code $($process.ExitCode)."
         }
