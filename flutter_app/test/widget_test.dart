@@ -38,37 +38,38 @@ void main() {
     },
   );
 
-  testWidgets('dropo Flutter shell keeps the compact map dashboard controls', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(1280, 860);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets(
+    'dropo Flutter shell keeps navigation and a clear connection action',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 860);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(const DropoApp());
-    await tester.pump();
+      await tester.pumpWidget(const DropoApp());
+      await tester.pump();
 
-    expect(find.text('Dr'), findsOneWidget);
-    expect(find.text('opo'), findsOneWidget);
-    expect(find.byIcon(Icons.menu), findsOneWidget);
-    expect(find.byIcon(Icons.public), findsOneWidget);
-    expect(find.byIcon(Icons.settings), findsOneWidget);
+      expect(find.text('Dr'), findsOneWidget);
+      expect(find.text('opo'), findsOneWidget);
+      expect(find.byIcon(Icons.menu), findsOneWidget);
+      expect(find.byIcon(Icons.public), findsOneWidget);
+      expect(find.byIcon(Icons.settings), findsOneWidget);
 
-    await tester.tap(find.byIcon(Icons.menu));
-    await tester.pump(const Duration(milliseconds: 240));
+      await tester.tap(find.byIcon(Icons.menu));
+      await tester.pump(const Duration(milliseconds: 240));
 
-    expect(find.text('Подключение'), findsOneWidget);
-    expect(find.text('Профили'), findsWidgets);
-    expect(find.text('Настройки'), findsOneWidget);
-    expect(find.text('Статистика'), findsOneWidget);
-    expect(find.text('Логи'), findsOneWidget);
-    expect(find.text('О приложении'), findsOneWidget);
-    expect(find.text('Выход'), findsOneWidget);
-    expect(find.text('vdev'), findsOneWidget);
-    expect(find.textContaining('Компоненты готовы:'), findsNothing);
-    expect(find.byType(CircularProgressIndicator), findsWidgets);
-  });
+      expect(find.text('Подключение'), findsOneWidget);
+      expect(find.text('Профили'), findsWidgets);
+      expect(find.text('Настройки'), findsOneWidget);
+      expect(find.text('Статистика'), findsOneWidget);
+      expect(find.text('Логи'), findsOneWidget);
+      expect(find.text('О приложении'), findsOneWidget);
+      expect(find.text('Выход'), findsOneWidget);
+      expect(find.text('vdev'), findsOneWidget);
+      expect(find.textContaining('Компоненты готовы:'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsWidgets);
+    },
+  );
 
   testWidgets('compact Windows home and settings render without overflow', (
     tester,
@@ -164,15 +165,20 @@ void main() {
       const ValueKey<String>('remove-home-route-google'),
     );
     expect(remove, findsOneWidget);
+    await tester.ensureVisible(remove);
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(remove);
     await tester.pump(const Duration(milliseconds: 800));
     expect(
       find.byKey(const ValueKey<String>('home-route-google-direct')),
       findsNothing,
     );
-    await tester.tap(
-      find.byKey(const ValueKey<String>('toggle-home-route-services')),
+    final disclosure = find.byKey(
+      const ValueKey<String>('toggle-home-route-services'),
     );
+    await tester.ensureVisible(disclosure);
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(disclosure);
     await tester.pump(const Duration(milliseconds: 300));
     expect(
       find.byKey(const ValueKey<String>('home-route-youtube-direct')),
@@ -206,7 +212,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect((await bridge.routingMode())['mode'], 'all_traffic');
-    expect(find.text('Весь трафик идёт через VPN'), findsOneWidget);
+    expect(find.text('Выбран режим: Всё через VPN'), findsOneWidget);
+    expect(find.text('Весь трафик идёт через VPN'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -236,6 +243,11 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 800));
 
+    final details = find.byKey(const ValueKey('home-route-details-discord'));
+    await tester.ensureVisible(details);
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(details);
+    await tester.pump(const Duration(milliseconds: 300));
     expect(
       find.byKey(const ValueKey<String>('home-zapret-strategy-discord')),
       findsOneWidget,
@@ -246,7 +258,12 @@ void main() {
       find.textContaining('Discord Zapret экспериментален'),
       findsOneWidget,
     );
-    await tester.tap(find.byKey(const ValueKey<String>('zapret-auto-discord')));
+    final autoStrategy = find.byKey(
+      const ValueKey<String>('zapret-auto-discord'),
+    );
+    await tester.ensureVisible(autoStrategy);
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(autoStrategy);
     await tester.pump(const Duration(milliseconds: 800));
     expect(bridge.lastStrategyMode, 'auto');
 
@@ -262,7 +279,7 @@ void main() {
     expect(bridge.lastStrategyMode, 'manual');
     expect(bridge.lastStrategyTag, 'flowseal-1102-discord-alt13');
     expect(
-      find.text('Активна вручную: Flowseal 1.10.2 ALT13 — Discord'),
+      find.text('Выбрана вручную: Flowseal 1.10.2 ALT13 — Discord'),
       findsOneWidget,
     );
     expect(find.text('Авто (эксп.)'), findsOneWidget);
@@ -290,6 +307,11 @@ void main() {
       find.byKey(const ValueKey<String>('toggle-home-route-services')),
     );
     await tester.pump(const Duration(milliseconds: 300));
+    final details = find.byKey(const ValueKey('home-route-details-discord'));
+    await tester.ensureVisible(details);
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(details);
+    await tester.pump(const Duration(milliseconds: 300));
     expect(
       find.text('Результат: подходящая стратегия не найдена'),
       findsOneWidget,
@@ -314,10 +336,15 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(seconds: 2));
-      await tester.tap(find.byIcon(Icons.settings));
+      await tester.tap(find.byKey(const ValueKey('nav-services')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
+      await tester.enterText(
+        find.byKey(const ValueKey('service-search')),
+        'discord',
+      );
+      await tester.pumpAndSettle();
       final routeField = find.byKey(
         const ValueKey<String>('service-route-discord-direct'),
       );
@@ -346,11 +373,11 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.textContaining('для voice/video рекомендуется VPN'),
+        find.textContaining('для стабильного voice/video рекомендуется VPN'),
         findsOneWidget,
       );
       expect(
-        tester.widget<Text>(find.text('Сервисы и маршруты')).style?.color,
+        tester.widget<Text>(find.text('Сервисы')).style?.color,
         const Color(0xFFE8F3EF),
       );
       expect(
@@ -403,13 +430,10 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.textContaining('Рекомендуемый стабильный маршрут'),
+        find.textContaining('для стабильного voice/video рекомендуется VPN'),
         findsOneWidget,
       );
-      expect(
-        find.textContaining('Маршрут для Discord сохранён'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('Маршрут сохранён'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
   );
@@ -432,10 +456,15 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(seconds: 2));
-      await tester.tap(find.byIcon(Icons.settings));
+      await tester.tap(find.byKey(const ValueKey('nav-services')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
+      await tester.enterText(
+        find.byKey(const ValueKey('service-search')),
+        'discord',
+      );
+      await tester.pump(const Duration(milliseconds: 600));
       final routeField = find.byKey(
         const ValueKey<String>('service-route-discord-direct'),
       );
@@ -509,23 +538,33 @@ void main() {
       await tester.pump(const Duration(milliseconds: 600));
 
       expect(find.text('Сервисы и маршруты'), findsOneWidget);
-      expect(find.text('Авто'), findsWidgets);
-      expect(find.text('Через VPN'), findsWidgets);
-      expect(find.text('Напрямую'), findsWidgets);
-      final androidZapret = find.byKey(
-        const ValueKey<String>('service-route-discord-zapret'),
+      final servicesLink = find.widgetWithText(TextButton, 'Открыть');
+      // The settings section links to the single catalog editor.
+      final link = find.ancestor(
+        of: find.text('Сервисы и маршруты'),
+        matching: find.byWidgetPredicate(
+          (w) => w.runtimeType.toString() == '_ButtonSetting',
+        ),
       );
-      expect(androidZapret, findsOneWidget);
+      final button = find.descendant(of: link, matching: find.text('Открыть'));
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(servicesLink, findsNothing);
+      await tester.enterText(
+        find.byKey(const ValueKey('service-search')),
+        'discord',
+      );
+      await tester.pumpAndSettle();
+      final vpn = find.byKey(const ValueKey('service-route-discord-vpn'));
+      await tester.ensureVisible(vpn);
+      await tester.pumpAndSettle();
+      expect(find.text('Авто'), findsWidgets);
+      expect(find.text('VPN'), findsWidgets);
+      expect(find.text('Напрямую'), findsWidgets);
       expect(
-        tester
-            .widget<OutlinedButton>(
-              find.descendant(
-                of: androidZapret,
-                matching: find.byType(OutlinedButton),
-              ),
-            )
-            .onPressed,
-        isNull,
+        find.byKey(const ValueKey('service-route-discord-zapret')),
+        findsNothing,
       );
 
       await tester.tap(
@@ -564,7 +603,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
-      await tester.tap(find.byIcon(Icons.power_settings_new));
+      await tester.tap(find.byKey(const ValueKey('home-connect')));
       await tester.pump();
 
       expect(
@@ -694,7 +733,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(find.textContaining('может занять до часа'), findsNothing);
-      expect(find.text('Подбирается · попытка 1/4'), findsOneWidget);
+      expect(find.textContaining('попытка 1/4'), findsWidgets);
+      expect(find.textContaining('проверяем voice'), findsOneWidget);
       final discordTop = tester.getTopLeft(find.text('Discord').first).dy;
       final youtubeTop = tester.getTopLeft(find.text('YouTube').first).dy;
       expect(discordTop, lessThan(youtubeTop));
@@ -728,7 +768,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.textContaining('попытка 1/4'), findsWidgets);
-      expect(find.text('Подбирается · попытка 2/4'), findsOneWidget);
+      expect(find.textContaining('попытка 2/4'), findsWidgets);
 
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();

@@ -19,6 +19,15 @@ Flutter, Go, Visual Studio Build Tools и Inno Setup следует хранит
 и Inno Setup в этом каталоге, затем используют системные установки. Локальная
 папка `.toolchain` поддерживается только как обратный совместимый вариант.
 
+Для отдельной локальной тестовой Windows-сборки без удаления предыдущих сборок:
+
+```powershell
+.\scripts\build\build.ps1 -Build -AllowDirtySource -KeepExistingBuilds -UseBundledFilters -UseCachedFlutterPackages
+```
+
+Запускать из корня репозитория. `-AllowDirtySource` предназначен только для
+проверки незакоммиченных изменений, не для публикации релиза.
+
 ## preflight-release.ps1
 
 Главный релизный gate. Скрипт запускает Go- и Flutter-проверки, собирает релиз,

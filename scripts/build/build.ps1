@@ -34,6 +34,8 @@ param(
     # Development-only escape hatch. Public/reproducible packages must always
     # be built from a clean commit.
     [switch]$AllowDirtySource,
+    # Keep known-good release folders while producing a local test build.
+    [switch]$KeepExistingBuilds,
     # Local development only: verify the already-pinned blocked catalog and do
     # not contact GitHub. Publication builds must leave this disabled.
     [switch]$UseBundledFilters
@@ -743,7 +745,7 @@ function Build-Application {
 
     # Keep release/ clean: every new build removes ALL previous build containers
     # (any version/hash) and any stray archives, so only the current build remains.
-    if (Test-Path $ReleaseDir) {
+    if (-not $KeepExistingBuilds -and (Test-Path $ReleaseDir)) {
         $oldBuilds = Get-ChildItem -Path $ReleaseDir -Directory | Where-Object { $_.Name -match "^dropo-.+-[0-9a-f]+$" }
         foreach ($oldBuild in $oldBuilds) {
             Write-Host "[CLEAN] Removing old build: $($oldBuild.Name)" -ForegroundColor Yellow

@@ -7,6 +7,10 @@ import 'dart:ui' show AppExitResponse;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+part 'vpn_sources.dart';
+part 'home_dashboard.dart';
+part 'service_routes.dart';
+
 const String _coreEndpoint = String.fromEnvironment(
   'DROPO_CORE_ENDPOINT',
   defaultValue: 'http://127.0.0.1:17890',
@@ -244,6 +248,8 @@ abstract class CoreBridge {
   Future<VpnConflictInfo> externalVpnConflicts();
   Future<Map<String, dynamic>> downloadDependencies();
   Future<List<VpnSourceInfo>> vpnSources();
+  Future<List<PublicVpnProviderInfo>> publicVpnProviders();
+  Future<Map<String, dynamic>> addPublicVpnSource(String id, bool consent);
   Future<Map<String, dynamic>> addVpnSource(String name, String uri);
   Future<Map<String, dynamic>> removeVpnSource(String id);
   Future<Map<String, dynamic>> setVpnSourceNode(String id, int nodeIndex);
@@ -737,6 +743,9 @@ class HttpCoreBridge implements CoreBridge {
   @override
   Future<List<VpnSourceInfo>> vpnSources() async {
     final result = await callMap('GetVPNSources');
+    if (result['success'] == false || result['sources'] is! List) {
+      throw StateError('Не удалось получить источники VPN');
+    }
     final raw = result['sources'];
     return raw is List
         ? raw.map(_asMap).map(VpnSourceInfo.fromJson).toList(growable: false)
@@ -753,23 +762,63 @@ class HttpCoreBridge implements CoreBridge {
   }
 
   @override
+  Future<List<PublicVpnProviderInfo>> publicVpnProviders() async {
+    final result = await callMap('GetPublicVPNProviders');
+    if (result['success'] == false) {
+      throw StateError(result['error']?.toString() ?? 'Каталог недоступен');
+    }
+    final raw = result['providers'];
+    return raw is List
+        ? raw
+              .map(_asMap)
+              .map(PublicVpnProviderInfo.fromJson)
+              .toList(growable: false)
+        : const [];
+  }
+
+  @override
+  Future<Map<String, dynamic>> addPublicVpnSource(String id, bool consent) {
+    return callMap(
+      'AddPublicVPNSource',
+      args: [id, consent],
+      timeout: const Duration(minutes: 3),
+    );
+  }
+
+  @override
   Future<Map<String, dynamic>> removeVpnSource(String id) {
-    return callMap('RemoveVPNSource', args: [id]);
+    return callMap(
+      'RemoveVPNSource',
+      args: [id],
+      timeout: const Duration(minutes: 3),
+    );
   }
 
   @override
   Future<Map<String, dynamic>> setVpnSourceNode(String id, int nodeIndex) {
-    return callMap('SetVPNSourceNode', args: [id, nodeIndex]);
+    return callMap(
+      'SetVPNSourceNode',
+      args: [id, nodeIndex],
+      timeout: const Duration(minutes: 3),
+    );
   }
 
   @override
   Future<Map<String, dynamic>> setVpnSourceEnabled(String id, bool enabled) {
-    return callMap('SetVPNSourceEnabled', args: [id, enabled]);
+    return callMap(
+      'SetVPNSourceEnabled',
+      args: [id, enabled],
+      timeout: const Duration(minutes: 3),
+    );
   }
 
   @override
   Future<Map<String, dynamic>> moveVpnSource(String id, int newIndex) {
-    return callMap('MoveVPNSource', args: [id, newIndex]);
+    return callMap(
+      'MoveVPNSource',
+      args: [id, newIndex],
+      timeout: const Duration(minutes: 3),
+    );
   }
 
   @override
@@ -1404,6 +1453,18 @@ class ChannelCoreBridge implements CoreBridge {
       saveSubscription(uri);
 
   @override
+  Future<List<PublicVpnProviderInfo>> publicVpnProviders() async => const [];
+
+  @override
+  Future<Map<String, dynamic>> addPublicVpnSource(
+    String id,
+    bool consent,
+  ) async => {
+    'success': false,
+    'error': 'Каталог бесплатных источников пока доступен на Windows',
+  };
+
+  @override
   Future<Map<String, dynamic>> removeVpnSource(String id) =>
       saveSubscription('');
 
@@ -1629,6 +1690,24 @@ class ChannelCoreBridge implements CoreBridge {
 }
 
 class MockCoreBridge implements CoreBridge {
+  @override
+  Future<List<PublicVpnProviderInfo>> publicVpnProviders() async => const [
+    PublicVpnProviderInfo(
+      id: 'demo-public',
+      name: 'Бесплатный резерв · демо',
+      description: 'Тестовый каталог без подключения к реальным серверам.',
+      website: 'https://example.com',
+    ),
+  ];
+
+  @override
+  Future<Map<String, dynamic>> addPublicVpnSource(
+    String id,
+    bool consent,
+  ) async => {
+    'success': false,
+    'error': 'В деморежиме подключение к публичным серверам недоступно',
+  };
   bool _connected = false;
   String _subscriptionUrl = '';
   final Map<String, String> _routeMethods = <String, String>{};
@@ -2484,6 +2563,9 @@ class VpnSourceInfo {
     required this.nodeNames,
     required this.lastUpdated,
     required this.lastError,
+    this.publicCatalogId = '',
+    this.usingCache = false,
+    this.active = false,
   });
 
   final String id;
@@ -2495,6 +2577,10 @@ class VpnSourceInfo {
   final List<String> nodeNames;
   final String lastUpdated;
   final String lastError;
+  final String publicCatalogId;
+  final bool usingCache;
+  final bool active;
+  bool get isPublic => publicCatalogId.isNotEmpty;
 
   factory VpnSourceInfo.fromJson(Map<String, dynamic> json) {
     return VpnSourceInfo(
@@ -2507,6 +2593,9 @@ class VpnSourceInfo {
       nodeNames: _asStringList(json['node_names']),
       lastUpdated: json['last_updated']?.toString() ?? '',
       lastError: json['last_error']?.toString() ?? '',
+      publicCatalogId: json['public_catalog_id']?.toString() ?? '',
+      usingCache: json['using_cache'] == true,
+      active: json['active'] == true,
     );
   }
 }
@@ -3424,12 +3513,19 @@ class _DropoHomePageState extends State<DropoHomePage>
   AppConfig appConfig = AppConfig.defaults;
   List<RouteService> routes = fallbackRoutes;
   List<WireGuardInfo> wireGuards = const [];
+  List<VpnSourceInfo> homeSources = const [];
+  bool homeSourcesLoaded = false;
+  bool homeSourcesFailed = false;
+  bool homeSourcesLoading = false;
+  DateTime? homeSourcesCheckedAt;
+  int homeSourcesRequest = 0;
   List<ProfileInfo> profiles = const [];
   List<String> logs = const [];
   TrafficStatsInfo menuStats = TrafficStatsInfo.empty;
   bool booting = true;
   bool online = false;
   bool uiBusy = false;
+  bool sectionBusy = false;
   bool quitting = false;
   String quitProgressMessage = '';
   bool sideMenuExpanded = false;
@@ -3472,7 +3568,8 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   bool get _usesPushEvents => widget.bridge.prefersPushEvents;
 
-  bool get controlsDisabled => booting || uiBusy || quitting || !online;
+  bool get controlsDisabled =>
+      booting || uiBusy || sectionBusy || quitting || !online;
 
   bool get _mobileNeedsSubscription =>
       _isMobileShell && !status.connected && !subscription.hasSubscription;
@@ -3720,6 +3817,12 @@ class _DropoHomePageState extends State<DropoHomePage>
       setState(() {
         refreshFailureCount = 0;
         online = true;
+        if (status.connected != loadedStatus.connected) {
+          homeSourcesLoaded = false;
+          homeSourcesCheckedAt = null;
+          homeSourcesLoading = false;
+          homeSourcesRequest++;
+        }
         status = loadedStatus;
         logs = loadedLogs;
         subscription = loadedSubscription;
@@ -3758,6 +3861,8 @@ class _DropoHomePageState extends State<DropoHomePage>
           }
         }
       });
+      // Optional presentation data must not delay the connection-ready gate.
+      unawaited(_refreshHomeSources(force: all));
     } catch (error) {
       if (!mounted) {
         return;
@@ -3777,6 +3882,52 @@ class _DropoHomePageState extends State<DropoHomePage>
         connectionHint = message;
         connectionHintDanger = true;
       });
+    }
+  }
+
+  Future<void> _refreshHomeSources({bool force = false}) async {
+    if (!mounted || quitting || !online) return;
+    if (!force &&
+        (homeSourcesLoading ||
+            (homeSourcesCheckedAt != null &&
+                DateTime.now().difference(homeSourcesCheckedAt!) <
+                    const Duration(seconds: 10)))) {
+      return;
+    }
+    final request = ++homeSourcesRequest;
+    final requestedProfile = activeProfile?.id;
+    final requestedConnected = status.connected;
+    setState(() {
+      homeSourcesLoading = true;
+      if (force) homeSourcesLoaded = false;
+    });
+    try {
+      final loaded = await widget.bridge.vpnSources().timeout(
+        const Duration(seconds: 3),
+      );
+      if (!mounted || quitting || request != homeSourcesRequest) return;
+      if (requestedProfile != activeProfile?.id ||
+          requestedConnected != status.connected) {
+        homeSourcesCheckedAt = null;
+        return;
+      }
+      setState(() {
+        homeSources = loaded;
+        homeSourcesLoaded = true;
+        homeSourcesFailed = false;
+        homeSourcesCheckedAt = DateTime.now();
+      });
+    } catch (_) {
+      if (!mounted || quitting || request != homeSourcesRequest) return;
+      setState(() {
+        homeSourcesLoaded = false;
+        homeSourcesFailed = true;
+        homeSourcesCheckedAt = DateTime.now();
+      });
+    } finally {
+      if (mounted && request == homeSourcesRequest) {
+        setState(() => homeSourcesLoading = false);
+      }
     }
   }
 
@@ -4081,6 +4232,12 @@ class _DropoHomePageState extends State<DropoHomePage>
     final errorText = payload['error']?.toString() ?? '';
     final message = payload['message']?.toString() ?? '';
 
+    if (status.connected != connected || connecting || disconnecting) {
+      homeSourcesRequest++;
+      homeSourcesLoaded = false;
+      homeSourcesLoading = false;
+      homeSourcesCheckedAt = null;
+    }
     status = status.copyWith(
       connected: connected,
       running: payload['running'] == true || connected,
@@ -4131,7 +4288,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
 
     if (connected) {
-      statusMessage = 'VPN активен';
+      statusMessage = 'Подключено';
       connectionHint = '';
       connectionHintDanger = false;
       routeProbeActive = false;
@@ -5333,8 +5490,8 @@ class _DropoHomePageState extends State<DropoHomePage>
       setState(() {
         appConfig = appConfig.copyWith(routingMode: mode);
         statusMessage = mode == 'all_traffic'
-            ? 'Весь трафик идёт через VPN'
-            : 'Включены маршруты выбранных сервисов';
+            ? 'Сохранён режим «Всё через VPN»'
+            : 'Сохранён режим «По сервисам»';
         connectionHint = result['restarted'] == true
             ? 'Соединение автоматически переподключено.'
             : '';
@@ -5424,7 +5581,7 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   String _statusLabel() {
     if (!online) {
-      return 'dropo-core offline';
+      return 'Нет связи с ядром';
     }
     if (status.hasError) {
       return status.error.trim().isEmpty ? 'Требуется внимание' : 'Ошибка VPN';
@@ -5436,16 +5593,22 @@ class _DropoHomePageState extends State<DropoHomePage>
       return 'Подключаем VPN';
     }
     if (connectionBusy) {
-      return status.connected ? 'VPN работает' : 'Подключаем VPN';
+      return status.connected ? 'Подключение активно' : 'Подключаем VPN';
     }
     if (status.connected) {
-      return 'VPN активен';
+      return 'Подключено';
     }
     return 'Отключено';
   }
 
   Widget _buildHomeDashboard(bool isBusy, String hintMessage) {
-    final normalizedHint = hintMessage.trim();
+    final normalizedHint = hintMessage.trim().isNotEmpty
+        ? hintMessage.trim()
+        : status.hasError
+        ? (status.error.trim().isEmpty
+              ? 'Откройте диагностику подключения для подробностей.'
+              : status.error.trim())
+        : '';
     final mobileNeedsSubscription = _mobileNeedsSubscription;
     final powerEnabled =
         !controlsDisabled && !connectionBusy && !mobileNeedsSubscription;
@@ -5465,6 +5628,7 @@ class _DropoHomePageState extends State<DropoHomePage>
             connectionBusy ||
             quitting ||
             status.hasError ||
+            connectionHintDanger ||
             !online ||
             externalVpnConflictBlocked ||
             depsProgress.trim().isNotEmpty);
@@ -5472,33 +5636,18 @@ class _DropoHomePageState extends State<DropoHomePage>
       key: const ValueKey('home'),
       mainAxisSize: MainAxisSize.min,
       children: [
-        _LogoMark(
-          connected: status.connected,
-          connecting: isBusy,
-          error: status.hasError || (!online && !booting),
-        ),
-        const SizedBox(height: 12),
-        _Badges(
-          subscription: subscription,
-          wireGuardCount: wireGuards.length,
-          onSubscription: controlsDisabled ? null : _openSubscription,
-          onWireGuard: controlsDisabled ? null : _openWireGuard,
-        ),
-        const SizedBox(height: 12),
-        _PowerButton(
-          connected: status.connected,
+        const _HomeBrand(),
+        const SizedBox(height: 24),
+        _HomeConnectionPanel(
+          status: status,
+          online: online,
+          booting: booting,
           busy: isBusy,
+          disconnecting: busyTasks.containsKey('vpn-disconnect'),
+          routingMode: appConfig.routingMode,
           enabled: powerEnabled,
           onPressed: _toggleConnection,
           onDisabledPressed: disabledPowerAction,
-        ),
-        const SizedBox(height: 12),
-        _ConnectionStatus(
-          connected: status.connected,
-          connecting: isBusy,
-          online: online,
-          hasError: status.hasError,
-          text: statusMessage,
         ),
         const SizedBox(height: 8),
         _ConnectionHint(
@@ -5515,7 +5664,18 @@ class _DropoHomePageState extends State<DropoHomePage>
           expectedCount: routeProbeExpectedCount,
           items: routeProbeProgress.values.toList(growable: false),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 16),
+        _HomeSourcePanel(
+          sources: homeSources,
+          loaded: homeSourcesLoaded,
+          failed: homeSourcesFailed,
+          connected:
+              online && status.connected && !connectionBusy && !status.hasError,
+          online: online,
+          hasSubscription: subscription.hasSubscription,
+          onManage: controlsDisabled ? null : _openSubscription,
+        ),
+        const SizedBox(height: 16),
         _HomeRouteControls(
           services: routes
               .where(
@@ -5527,6 +5687,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           expanded: homeRoutesExpanded,
           routingMode: appConfig.routingMode,
           hasSubscription: subscription.hasSubscription,
+          connected: online && status.connected,
           onExpandedChanged: (expanded) =>
               setState(() => homeRoutesExpanded = expanded),
           onRoutingModeChanged: _setHomeRoutingMode,
@@ -5554,21 +5715,75 @@ class _DropoHomePageState extends State<DropoHomePage>
             status: status.dependencies,
             onDownload: controlsDisabled ? null : _downloadDependencies,
           ),
-        if (status.connected) ...[
-          const SizedBox(height: 10),
-          _HomeBottomBlocks(
-            routes: routes,
-            subscription: subscription,
-            wireGuards: wireGuards,
-            strategyProgress: routeProbeProgress,
+        const SizedBox(height: 8),
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 12,
+          runSpacing: 8,
+          children: [
+            TextButton.icon(
+              key: const ValueKey('home-all-services'),
+              onPressed: quitting || sectionBusy
+                  ? null
+                  : () => unawaited(_selectMenuSection('services')),
+              icon: const Icon(Icons.apps_outlined, size: 18),
+              label: const Text('Все сервисы'),
+            ),
+            TextButton.icon(
+              key: const ValueKey('home-diagnostics'),
+              onPressed: quitting
+                  ? null
+                  : () => unawaited(_selectMenuSection('logs')),
+              icon: const Icon(Icons.description_outlined, size: 18),
+              label: const Text('Диагностика подключения'),
+            ),
+            TextButton.icon(
+              key: const ValueKey('home-work-networks'),
+              onPressed: controlsDisabled ? null : _openWireGuard,
+              icon: const Icon(Icons.hub_outlined, size: 18),
+              label: Text(
+                wireGuards.isEmpty
+                    ? 'Рабочие сети'
+                    : 'Рабочие сети: ${wireGuards.length}',
+              ),
+            ),
+          ],
+        ),
+        if (hintDanger && !booting && !online && !quitting)
+          TextButton.icon(
+            key: const ValueKey('home-retry-core'),
+            onPressed: () => unawaited(_bootstrap()),
+            icon: const Icon(Icons.refresh),
+            label: const Text('Повторить подключение к ядру'),
           ),
-        ],
       ],
     );
   }
 
   Widget _buildMenuSection() {
     switch (activeMenuSection) {
+      case 'services':
+        return ServiceRoutesPage(
+          key: const ValueKey('services-section'),
+          bridge: widget.bridge,
+          routeSnapshot: online ? routes : null,
+          connected: status.connected,
+          enabled: online && !quitting && !uiBusy && !connectionBusy,
+          routingMode: appConfig.routingMode,
+          onBusyChanged: _setSectionBusy,
+          onChanged: () => unawaited(_refresh(all: true)),
+        );
+      case 'sources':
+        return VpnSourcesDialog(
+          key: const ValueKey('sources-section'),
+          bridge: widget.bridge,
+          subscription: subscription,
+          embedded: true,
+          enabled: online && !quitting && !uiBusy && !connectionBusy,
+          sourceSnapshot: homeSourcesLoaded && online ? homeSources : null,
+          onBusyChanged: _setSectionBusy,
+          onChanged: () => unawaited(_refresh(all: true)),
+        );
       case 'profiles':
         return _ProfilesDialog(
           key: const ValueKey('profiles-section'),
@@ -5596,6 +5811,7 @@ class _DropoHomePageState extends State<DropoHomePage>
             }
           },
           onDownloadDependencies: () => unawaited(_downloadDependencies()),
+          onOpenServices: () => unawaited(_selectMenuSection('services')),
         );
       case 'dropo_space':
         return _AndroidCompatibilityPage(
@@ -5641,13 +5857,15 @@ class _DropoHomePageState extends State<DropoHomePage>
         ? connectionHint
         : depsProgress;
     final useMobileNavigation = _isMobileShell;
+    final mobileNavExtra =
+        math.max(0.0, MediaQuery.textScalerOf(context).scale(11) - 11) * 1.5;
     final strategyBannerMessage = strategyTransitionNotice.trim().isNotEmpty
         ? strategyTransitionNotice.trim()
         : '';
     return Scaffold(
       body: Stack(
         children: [
-          const Positioned.fill(child: _GradientBackdrop()),
+          const Positioned.fill(child: ColoredBox(color: Color(0xFF101617))),
           SafeArea(
             child: AnimatedPadding(
               duration: const Duration(milliseconds: 180),
@@ -5657,16 +5875,14 @@ class _DropoHomePageState extends State<DropoHomePage>
               child: Center(
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
-                    maxWidth: activeMenuSection == 'home'
-                        ? (status.connected ? 720 : 372)
-                        : 720,
+                    maxWidth: activeMenuSection == 'home' ? 704 : 720,
                   ),
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(
                       12,
                       8,
                       12,
-                      useMobileNavigation ? 108 : 34,
+                      useMobileNavigation ? 108 + mobileNavExtra : 34,
                     ),
                     child: AnimatedSwitcher(
                       duration: const Duration(milliseconds: 180),
@@ -5688,7 +5904,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           Positioned(
             left: useMobileNavigation ? 0 : (sideMenuExpanded ? 190 : 76),
             right: 0,
-            bottom: useMobileNavigation ? 88 : 12,
+            bottom: useMobileNavigation ? 88 + mobileNavExtra : 12,
             child: SafeArea(
               top: false,
               child: Center(
@@ -5703,16 +5919,16 @@ class _DropoHomePageState extends State<DropoHomePage>
               bottom: 0,
               child: _SideMenu(
                 expanded: sideMenuExpanded,
-                disabled: quitting,
+                disabled: quitting || sectionBusy,
                 activeSection: activeMenuSection,
                 status: status,
                 onToggle: () {
                   setState(() => sideMenuExpanded = !sideMenuExpanded);
                 },
-                onHome: () {
-                  setState(() => activeMenuSection = 'home');
-                },
+                onHome: () => unawaited(_selectMenuSection('home')),
                 connectionActive: status.connected,
+                onServices: () => unawaited(_selectMenuSection('services')),
+                onSources: () => unawaited(_selectMenuSection('sources')),
                 onProfiles: () => unawaited(_selectMenuSection('profiles')),
                 onSettings: () => unawaited(_selectMenuSection('settings')),
                 onStats: () => unawaited(_selectMenuSection('stats')),
@@ -5731,10 +5947,8 @@ class _DropoHomePageState extends State<DropoHomePage>
                 child: _MobileBottomNav(
                   activeSection: activeMenuSection,
                   connectionActive: status.connected,
-                  disabled: quitting,
-                  onHome: () {
-                    setState(() => activeMenuSection = 'home');
-                  },
+                  disabled: quitting || sectionBusy,
+                  onHome: () => unawaited(_selectMenuSection('home')),
                   onSettings: () => unawaited(_selectMenuSection('settings')),
                   onMore: _openMobileMoreMenu,
                 ),
@@ -5790,7 +6004,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _openMobileMoreMenu() async {
-    if (quitting) {
+    if (quitting || sectionBusy) {
       return;
     }
     final selected = await showModalBottomSheet<String>(
@@ -5835,13 +6049,18 @@ class _DropoHomePageState extends State<DropoHomePage>
       return status.connected ? 'Отключение' : 'Подключение';
     }
     if (!online) {
-      return 'Bridge';
+      return 'Связь с ядром';
     }
+    if (status.hasError || connectionHintDanger) return 'Требуется внимание';
     return 'Готово';
   }
 
+  void _setSectionBusy(bool value) {
+    if (mounted) setState(() => sectionBusy = value);
+  }
+
   Future<void> _selectMenuSection(String section) async {
-    if (!mounted) {
+    if (!mounted || quitting || sectionBusy) {
       return;
     }
     setState(() => activeMenuSection = section);
@@ -5859,22 +6078,15 @@ class _DropoHomePageState extends State<DropoHomePage>
           setState(() => menuStats = loaded);
         }
       } catch (_) {}
+    } else if (section == 'home') {
+      await _refresh(all: true);
     } else if (section == 'logs') {
       await _refresh();
     }
   }
 
   Future<void> _openSubscription() async {
-    final changed = await showDialog<bool>(
-      context: context,
-      builder: (context) => _SubscriptionDialog(
-        bridge: widget.bridge,
-        subscription: subscription,
-      ),
-    );
-    if (changed == true) {
-      await _refresh(all: true);
-    }
+    await _selectMenuSection('sources');
   }
 
   Future<void> _openWireGuard() async {
@@ -5900,7 +6112,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         icon: Icons.info_outline,
         child: Column(
           children: [
-            const _LogoMark(connected: false, connecting: false, error: false),
+            const _HomeBrand(),
             const SizedBox(height: 12),
             _FactRow(label: 'Версия', value: status.version.fullVersion),
             _LinkFactRow(
@@ -5926,1384 +6138,6 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 }
 
-class _GradientBackdrop extends StatefulWidget {
-  const _GradientBackdrop();
-
-  @override
-  State<_GradientBackdrop> createState() => _GradientBackdropState();
-}
-
-class _GradientBackdropState extends State<_GradientBackdrop>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController controller;
-  List<Path> landPaths = const [];
-
-  @override
-  void initState() {
-    super.initState();
-    controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 90),
-    )..repeat();
-    unawaited(_loadWorldMap());
-  }
-
-  Future<void> _loadWorldMap() async {
-    try {
-      final source = await rootBundle.loadString(
-        'assets/maps/ne_110m_land.geojson',
-      );
-      final paths = _WorldMapData.fromGeoJson(source);
-      if (!mounted) {
-        return;
-      }
-      setState(() => landPaths = paths);
-    } catch (_) {
-      // The animated network still works if the optional map asset is missing.
-    }
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        return CustomPaint(
-          painter: _WorldNetworkPainter(controller.value, landPaths),
-          child: const SizedBox.expand(),
-        );
-      },
-    );
-  }
-}
-
-class _WorldMapData {
-  const _WorldMapData._();
-
-  static List<Path> fromGeoJson(String source) {
-    final decoded = jsonDecode(source);
-    final features = decoded is Map ? decoded['features'] : null;
-    if (features is! List) {
-      return const [];
-    }
-    final paths = <Path>[];
-    for (final feature in features) {
-      if (feature is! Map) {
-        continue;
-      }
-      _addGeometry(feature['geometry'], paths);
-    }
-    return List<Path>.unmodifiable(paths);
-  }
-
-  static void _addGeometry(Object? geometry, List<Path> paths) {
-    if (geometry is! Map) {
-      return;
-    }
-    final type = geometry['type']?.toString();
-    final coordinates = geometry['coordinates'];
-    if (type == 'Polygon') {
-      _addPolygon(coordinates, paths);
-    } else if (type == 'MultiPolygon' && coordinates is List) {
-      for (final polygon in coordinates) {
-        _addPolygon(polygon, paths);
-      }
-    }
-  }
-
-  static void _addPolygon(Object? polygon, List<Path> paths) {
-    if (polygon is! List) {
-      return;
-    }
-    final path = Path()..fillType = PathFillType.evenOdd;
-    var hasRing = false;
-    for (final ring in polygon) {
-      if (ring is! List || ring.length < 3) {
-        continue;
-      }
-      var started = false;
-      for (final point in ring) {
-        if (point is! List || point.length < 2) {
-          continue;
-        }
-        final lon = _toDouble(point[0]);
-        final lat = _toDouble(point[1]);
-        if (lon == null || lat == null) {
-          continue;
-        }
-        final offset = _normalize(lon, lat);
-        if (!started) {
-          path.moveTo(offset.dx, offset.dy);
-          started = true;
-          hasRing = true;
-        } else {
-          path.lineTo(offset.dx, offset.dy);
-        }
-      }
-      if (started) {
-        path.close();
-      }
-    }
-    if (hasRing) {
-      paths.add(path);
-    }
-  }
-
-  static Offset _normalize(double lon, double lat) {
-    return Offset((lon + 180.0) / 360.0, (90.0 - lat) / 180.0);
-  }
-
-  static double? _toDouble(Object? value) {
-    if (value is num) {
-      return value.toDouble();
-    }
-    return double.tryParse(value?.toString() ?? '');
-  }
-}
-
-class _WorldNetworkPainter extends CustomPainter {
-  _WorldNetworkPainter(this.phase, this.landPaths);
-
-  final double phase;
-  final List<Path> landPaths;
-
-  static final List<_CityPoint> _cities = [
-    _CityPoint('Washington', -77.03, 38.9),
-    _CityPoint('Ottawa', -75.69, 45.42),
-    _CityPoint('Mexico City', -99.13, 19.43),
-    _CityPoint('London', -0.12, 51.5),
-    _CityPoint('Paris', 2.35, 48.86),
-    _CityPoint('Berlin', 13.4, 52.52),
-    _CityPoint('Madrid', -3.7, 40.42),
-    _CityPoint('Rome', 12.5, 41.9),
-    _CityPoint('Moscow', 37.62, 55.75),
-    _CityPoint('Ankara', 32.86, 39.93),
-    _CityPoint('Cairo', 31.24, 30.04),
-    _CityPoint('Nairobi', 36.82, -1.29),
-    _CityPoint('Pretoria', 28.19, -25.75),
-    _CityPoint('Riyadh', 46.68, 24.71),
-    _CityPoint('Delhi', 77.2, 28.61),
-    _CityPoint('Beijing', 116.41, 39.9),
-    _CityPoint('Bangkok', 100.5, 13.75),
-    _CityPoint('Singapore', 103.85, 1.29),
-    _CityPoint('Seoul', 126.98, 37.56),
-    _CityPoint('Tokyo', 139.69, 35.68),
-    _CityPoint('Jakarta', 106.85, -6.21),
-    _CityPoint('Canberra', 149.13, -35.28),
-    _CityPoint('Wellington', 174.78, -41.29),
-    _CityPoint('Brasilia', -47.88, -15.79),
-    _CityPoint('Buenos Aires', -58.38, -34.6),
-    _CityPoint('Santiago', -70.67, -33.45),
-    _CityPoint('Stockholm', 18.07, 59.33),
-    _CityPoint('Warsaw', 21.01, 52.23),
-    _CityPoint('Athens', 23.73, 37.98),
-    _CityPoint('Tehran', 51.39, 35.69),
-    _CityPoint('Islamabad', 73.05, 33.68),
-    _CityPoint('Kuala Lumpur', 101.69, 3.14),
-    _CityPoint('Manila', 120.98, 14.6),
-    _CityPoint('Hanoi', 105.85, 21.03),
-    _CityPoint('Lima', -77.04, -12.05),
-    _CityPoint('Bogota', -74.08, 4.71),
-    _CityPoint('Lagos', 3.38, 6.52),
-    _CityPoint('Addis Ababa', 38.76, 8.98),
-  ];
-
-  static final List<List<int>> _links = [
-    [0, 1],
-    [0, 2],
-    [0, 3],
-    [1, 3],
-    [2, 23],
-    [3, 4],
-    [3, 8],
-    [4, 5],
-    [4, 7],
-    [5, 8],
-    [6, 7],
-    [7, 10],
-    [8, 9],
-    [8, 14],
-    [9, 10],
-    [10, 11],
-    [10, 13],
-    [11, 12],
-    [13, 14],
-    [14, 15],
-    [14, 17],
-    [15, 16],
-    [16, 17],
-    [17, 18],
-    [18, 19],
-    [19, 20],
-    [20, 21],
-    [21, 22],
-    [22, 23],
-    [23, 24],
-    [23, 25],
-    [24, 25],
-    [3, 22],
-    [18, 20],
-    [3, 26],
-    [5, 27],
-    [7, 28],
-    [9, 29],
-    [29, 30],
-    [16, 33],
-    [16, 31],
-    [31, 32],
-    [32, 19],
-    [23, 34],
-    [34, 35],
-    [35, 2],
-    [10, 36],
-    [36, 37],
-    [37, 14],
-    [28, 13],
-  ];
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final bg = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [Color(0xFF0D1122), Color(0xFF102722), Color(0xFF20172A)],
-        stops: [0, 0.52, 1],
-      ).createShader(rect);
-    canvas.drawRect(rect, bg);
-
-    final tileWidth = size.width * 1.28;
-    final drift = (phase * tileWidth) % tileWidth;
-    final worldHeight = size.height * 0.68;
-    final worldTop = size.height * 0.16;
-    for (final offset in [-tileWidth, 0.0, tileWidth]) {
-      final world = Rect.fromLTWH(
-        offset + drift,
-        worldTop,
-        tileWidth,
-        worldHeight,
-      );
-      _drawWorld(canvas, world);
-      _drawLinks(canvas, world);
-      _drawCities(canvas, world);
-    }
-    _drawAmbientSparkles(canvas, size);
-    _drawGrid(canvas, size);
-    _drawVignette(canvas, rect);
-  }
-
-  void _drawWorld(Canvas canvas, Rect world) {
-    if (landPaths.isEmpty) {
-      return;
-    }
-    final landPaint = Paint()
-      ..style = PaintingStyle.fill
-      ..color = const Color(0xFF31416F).withValues(alpha: 0.17);
-    final rimPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1 / world.width
-      ..color = const Color(0xFF8BD3FF).withValues(alpha: 0.07);
-    canvas.save();
-    canvas.translate(world.left, world.top);
-    canvas.scale(world.width, world.height);
-    for (final path in landPaths) {
-      canvas.drawPath(path, landPaint);
-      canvas.drawPath(path, rimPaint);
-    }
-    canvas.restore();
-  }
-
-  void _drawCities(Canvas canvas, Rect world) {
-    for (var i = 0; i < _cities.length; i++) {
-      final city = _cities[i];
-      final p = _project(city.lon, city.lat, world);
-      if (p.dx < -20 || p.dx > world.right + 20) {
-        continue;
-      }
-      final blink = (math.sin((phase * math.pi * 4.0) + i * 0.77) + 1) * 0.5;
-      final glow = Paint()
-        ..style = PaintingStyle.fill
-        ..color = const Color(
-          0xFF36D399,
-        ).withValues(alpha: 0.08 + blink * 0.20);
-      final star = Paint()
-        ..style = PaintingStyle.fill
-        ..color = const Color(
-          0xFFBAF7D0,
-        ).withValues(alpha: 0.68 + blink * 0.30);
-      canvas.drawCircle(p, 5.5 + blink * 4.2, glow);
-      _drawStar(canvas, p, 3.0 + blink * 0.9, 1.05 + blink * 0.35, star);
-    }
-  }
-
-  void _drawLinks(Canvas canvas, Rect world) {
-    final linkPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1
-      ..color = const Color(0xFF60A5FA).withValues(alpha: 0.13);
-    final pulsePaint = Paint()
-      ..style = PaintingStyle.fill
-      ..color = const Color(0xFFBAF7D0);
-    for (var i = 0; i < _links.length; i++) {
-      final a = _cities[_links[i][0]];
-      final b = _cities[_links[i][1]];
-      final start = _project(a.lon, a.lat, world);
-      final end = _project(b.lon, b.lat, world);
-      final mid = Offset(
-        (start.dx + end.dx) / 2,
-        math.min(start.dy, end.dy) - 34 - (i % 3) * 10,
-      );
-      final path = Path()
-        ..moveTo(start.dx, start.dy)
-        ..quadraticBezierTo(mid.dx, mid.dy, end.dx, end.dy);
-      canvas.drawPath(path, linkPaint);
-      for (var pulseIndex = 0; pulseIndex < 4; pulseIndex++) {
-        final t = (phase * 2.2 + i * 0.11 + pulseIndex * 0.21) % 1.0;
-        final pulse = _quadratic(start, mid, end, t);
-        pulsePaint.color = const Color(
-          0xFFBAF7D0,
-        ).withValues(alpha: 0.24 + pulseIndex * 0.11);
-        canvas.drawCircle(pulse, 0.85 + pulseIndex * 0.18, pulsePaint);
-      }
-    }
-  }
-
-  void _drawAmbientSparkles(Canvas canvas, Size size) {
-    final paint = Paint()..style = PaintingStyle.fill;
-    for (var i = 0; i < 78; i++) {
-      final x = ((i * 73) % 100) / 100.0 * size.width;
-      final y = (0.24 + ((i * 37) % 54) / 100.0) * size.height;
-      final blink = (math.sin(phase * math.pi * 6.0 + i * 1.31) + 1.0) * 0.5;
-      if (blink < 0.22) {
-        continue;
-      }
-      paint.color = const Color(0xFFBAF7D0).withValues(alpha: blink * 0.13);
-      _drawStar(canvas, Offset(x, y), 1.4 + blink * 1.1, 0.58, paint);
-    }
-  }
-
-  void _drawStar(
-    Canvas canvas,
-    Offset center,
-    double outerRadius,
-    double innerRadius,
-    Paint paint,
-  ) {
-    final path = Path();
-    for (var i = 0; i < 10; i++) {
-      final radius = i.isEven ? outerRadius : innerRadius;
-      final angle = -math.pi / 2 + i * math.pi / 5;
-      final p = Offset(
-        center.dx + math.cos(angle) * radius,
-        center.dy + math.sin(angle) * radius,
-      );
-      if (i == 0) {
-        path.moveTo(p.dx, p.dy);
-      } else {
-        path.lineTo(p.dx, p.dy);
-      }
-    }
-    path.close();
-    canvas.drawPath(path, paint);
-  }
-
-  Offset _project(double lon, double lat, Rect world) {
-    final x = world.left + ((lon + 180) / 360) * world.width;
-    final y = world.top + ((90 - lat) / 180) * world.height;
-    return Offset(x, y);
-  }
-
-  Offset _quadratic(Offset a, Offset b, Offset c, double t) {
-    final u = 1 - t;
-    return Offset(
-      u * u * a.dx + 2 * u * t * b.dx + t * t * c.dx,
-      u * u * a.dy + 2 * u * t * b.dy + t * t * c.dy,
-    );
-  }
-
-  void _drawGrid(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.035)
-      ..strokeWidth = 1;
-    const step = 34.0;
-    for (double x = 0; x < size.width; x += step) {
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
-    }
-    for (double y = 0; y < size.height; y += step) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
-    }
-  }
-
-  void _drawVignette(Canvas canvas, Rect rect) {
-    final paint = Paint()
-      ..shader = RadialGradient(
-        center: const Alignment(0.05, -0.05),
-        radius: 0.86,
-        colors: [
-          Colors.transparent,
-          const Color(0xFF080A14).withValues(alpha: 0.50),
-        ],
-      ).createShader(rect);
-    canvas.drawRect(rect, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _WorldNetworkPainter oldDelegate) {
-    return oldDelegate.phase != phase || oldDelegate.landPaths != landPaths;
-  }
-}
-
-class _CityPoint {
-  const _CityPoint(this.name, this.lon, this.lat);
-
-  final String name;
-  final double lon;
-  final double lat;
-}
-
-class _LogoMark extends StatelessWidget {
-  const _LogoMark({
-    required this.connected,
-    required this.connecting,
-    required this.error,
-  });
-
-  final bool connected;
-  final bool connecting;
-  final bool error;
-
-  @override
-  Widget build(BuildContext context) {
-    final gradient = error
-        ? const LinearGradient(colors: [Color(0xFFEF4444), Color(0xFF991B1B)])
-        : connected
-        ? const LinearGradient(colors: [Color(0xFF22C55E), Color(0xFF15803D)])
-        : connecting
-        ? const LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFD97706)])
-        : const LinearGradient(
-            colors: [Color(0xFF1F8C78), Color(0xFF2F625B), Color(0xFFEF8F69)],
-          );
-    final mark = AnimatedContainer(
-      duration: const Duration(milliseconds: 260),
-      width: 72,
-      height: 72,
-      decoration: BoxDecoration(
-        gradient: gradient,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color:
-                (connected
-                        ? const Color(0xFF22C55E)
-                        : connecting
-                        ? const Color(0xFFF59E0B)
-                        : const Color(0xFF148F72))
-                    .withValues(alpha: 0.34),
-            blurRadius: 42,
-            offset: const Offset(0, 16),
-          ),
-        ],
-        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
-      ),
-      child: const Stack(
-        alignment: Alignment.center,
-        children: [
-          Positioned(
-            top: 13,
-            child: Text(
-              'Dr',
-              style: TextStyle(fontSize: 27, fontWeight: FontWeight.w900),
-            ),
-          ),
-          Positioned(
-            bottom: 13,
-            child: Text(
-              'opo',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w900,
-                color: Color(0xFFC8F8D4),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-    return mark;
-  }
-}
-
-class _Badges extends StatelessWidget {
-  const _Badges({
-    required this.subscription,
-    required this.wireGuardCount,
-    required this.onSubscription,
-    required this.onWireGuard,
-  });
-
-  final SubscriptionInfo subscription;
-  final int wireGuardCount;
-  final VoidCallback? onSubscription;
-  final VoidCallback? onWireGuard;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        _Badge(
-          icon: Icons.vpn_key,
-          label: 'VPN-подписки',
-          danger: !subscription.hasSubscription,
-          onPressed: onSubscription,
-        ),
-        const SizedBox(width: 8),
-        _Badge(
-          icon: Icons.hub,
-          label: 'Рабочие сети',
-          danger: wireGuardCount == 0,
-          onPressed: onWireGuard,
-        ),
-      ],
-    );
-  }
-}
-
-class _HomeRouteControls extends StatelessWidget {
-  const _HomeRouteControls({
-    required this.services,
-    required this.enabled,
-    required this.expanded,
-    required this.routingMode,
-    required this.hasSubscription,
-    required this.onExpandedChanged,
-    required this.onRoutingModeChanged,
-    required this.onPolicyChanged,
-    required this.onZapretStrategyChanged,
-    required this.onAdd,
-    required this.onRemove,
-  });
-
-  final List<RouteService> services;
-  final bool enabled;
-  final bool expanded;
-  final String routingMode;
-  final bool hasSubscription;
-  final ValueChanged<bool> onExpandedChanged;
-  final ValueChanged<String> onRoutingModeChanged;
-  final void Function(RouteService service, String policy) onPolicyChanged;
-  final void Function(RouteService service, String mode, String strategyTag)
-  onZapretStrategyChanged;
-  final VoidCallback? onAdd;
-  final void Function(RouteService service, bool visible) onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final ordered = List<RouteService>.from(services);
-    const primaryOrder = <String>['youtube', 'discord', 'meta', 'openai'];
-    ordered.sort((left, right) {
-      final leftIndex = primaryOrder.indexOf(left.tag);
-      final rightIndex = primaryOrder.indexOf(right.tag);
-      if (leftIndex >= 0 || rightIndex >= 0) {
-        if (leftIndex < 0) return 1;
-        if (rightIndex < 0) return -1;
-        return leftIndex.compareTo(rightIndex);
-      }
-      return left.name.compareTo(right.name);
-    });
-
-    return Container(
-      key: const ValueKey('home-route-controls'),
-      width: double.infinity,
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF101C19).withValues(alpha: 0.9),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'Режим подключения',
-            style: TextStyle(
-              color: Color(0xFFE8F3EF),
-              fontSize: 13,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: _HomeRoutingModeButton(
-                  key: const ValueKey('home-routing-selected'),
-                  icon: Icons.account_tree_outlined,
-                  label: 'По сервисам',
-                  selected: routingMode != 'all_traffic',
-                  enabled: enabled,
-                  onPressed: () => onRoutingModeChanged('blocked_only'),
-                ),
-              ),
-              const SizedBox(width: 7),
-              Expanded(
-                child: Tooltip(
-                  message: hasSubscription
-                      ? 'Направить весь трафик через VPN'
-                      : 'Сначала добавьте VPN-подписку',
-                  child: _HomeRoutingModeButton(
-                    key: const ValueKey('home-routing-all-vpn'),
-                    icon: Icons.shield_outlined,
-                    label: 'Всё через VPN',
-                    selected: routingMode == 'all_traffic',
-                    enabled: enabled,
-                    onPressed: () => onRoutingModeChanged('all_traffic'),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Divider(height: 1, color: Colors.white12),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              const Icon(Icons.alt_route, size: 16, color: Color(0xFF75E3AD)),
-              const SizedBox(width: 7),
-              const Expanded(
-                child: Text(
-                  'Маршруты сервисов',
-                  style: TextStyle(
-                    color: Color(0xFFE8F3EF),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              TextButton(
-                key: const ValueKey('toggle-home-route-services'),
-                onPressed: () => onExpandedChanged(!expanded),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(expanded ? 'Скрыть' : 'Показать'),
-                    const SizedBox(width: 3),
-                    Icon(
-                      expanded ? Icons.expand_less : Icons.expand_more,
-                      size: 18,
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          if (expanded) ...[
-            if (routingMode == 'all_traffic')
-              const Padding(
-                padding: EdgeInsets.fromLTRB(4, 5, 4, 2),
-                child: Text(
-                  'Политики ниже сохранены для режима «По сервисам».',
-                  style: TextStyle(color: Color(0xFFA8BAB5), fontSize: 11),
-                ),
-              ),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                key: const ValueKey('add-home-route-service'),
-                onPressed: onAdd,
-                icon: const Icon(Icons.add, size: 16),
-                label: const Text('Добавить сервис'),
-              ),
-            ),
-            ...ordered.map(
-              (service) => _HomeRouteServiceRow(
-                service: service,
-                enabled: enabled,
-                onPolicyChanged: (policy) => onPolicyChanged(service, policy),
-                onZapretStrategyChanged: (mode, strategyTag) =>
-                    onZapretStrategyChanged(service, mode, strategyTag),
-                onRemove: isPrimaryHomeRouteService(service.tag)
-                    ? null
-                    : () => onRemove(service, false),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _HomeRoutingModeButton extends StatelessWidget {
-  const _HomeRoutingModeButton({
-    super.key,
-    required this.icon,
-    required this.label,
-    required this.selected,
-    required this.enabled,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final bool enabled;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return OutlinedButton.icon(
-      onPressed: enabled ? onPressed : null,
-      icon: Icon(icon, size: 16),
-      label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
-      style: OutlinedButton.styleFrom(
-        minimumSize: const Size(0, 38),
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        foregroundColor: selected
-            ? const Color(0xFF08140F)
-            : const Color(0xFFD8E4E0),
-        backgroundColor: selected
-            ? const Color(0xFF75E3AD)
-            : Colors.transparent,
-        side: BorderSide(
-          color: selected ? const Color(0xFF75E3AD) : const Color(0xFF3C554E),
-        ),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      ),
-    );
-  }
-}
-
-class _HomeRouteServiceRow extends StatelessWidget {
-  const _HomeRouteServiceRow({
-    required this.service,
-    required this.enabled,
-    required this.onPolicyChanged,
-    required this.onZapretStrategyChanged,
-    required this.onRemove,
-  });
-
-  final RouteService service;
-  final bool enabled;
-  final ValueChanged<String> onPolicyChanged;
-  final void Function(String mode, String strategyTag) onZapretStrategyChanged;
-  final VoidCallback? onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final selected = _normalizedHomeRoutePolicy(service);
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(9, 8, 7, 8),
-        decoration: BoxDecoration(
-          color: const Color(0xFF172824),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFF314B43)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _homeRouteName(service),
-                    style: const TextStyle(
-                      color: Color(0xFFE8F3EF),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-                if (onRemove != null)
-                  IconButton(
-                    key: ValueKey('remove-home-route-${service.tag}'),
-                    tooltip: 'Убрать с главной',
-                    onPressed: enabled ? onRemove : null,
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints.tightFor(
-                      width: 28,
-                      height: 28,
-                    ),
-                    padding: EdgeInsets.zero,
-                    icon: const Icon(Icons.close, size: 15),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 5),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                if (_isMobileShell)
-                  _homeRouteButton(service, 'auto', 'Авто', selected),
-                _homeRouteButton(service, 'direct', 'Напрямую', selected),
-                _homeRouteButton(service, 'vpn', 'VPN', selected),
-                if (!_isMobileShell)
-                  Tooltip(
-                    message: service.zapretSupported
-                        ? service.tag == 'discord'
-                              ? 'Эксперимент: web/API могут работать, voice/video не гарантируются'
-                              : 'Встроенный обход блокировки'
-                        : 'Zapret недоступен для этого сервиса',
-                    child: _homeRouteButton(
-                      service,
-                      'zapret',
-                      service.tag == 'discord' ? 'Zapret (эксп.)' : 'Zapret',
-                      selected,
-                      supported: service.zapretSupported,
-                    ),
-                  ),
-              ],
-            ),
-            if (selected == 'zapret' &&
-                service.zapretStrategyOptions.isNotEmpty) ...[
-              const SizedBox(height: 9),
-              _HomeZapretStrategyControls(
-                service: service,
-                enabled: enabled,
-                onChanged: onZapretStrategyChanged,
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _homeRouteButton(
-    RouteService service,
-    String policy,
-    String label,
-    String selected, {
-    bool supported = true,
-  }) {
-    return _ServiceRoutePolicyButton(
-      key: ValueKey('home-route-${service.tag}-$policy'),
-      label: label,
-      selected: selected == policy,
-      enabled: enabled && supported,
-      onPressed: () => onPolicyChanged(policy),
-    );
-  }
-}
-
-class _HomeZapretStrategyControls extends StatelessWidget {
-  const _HomeZapretStrategyControls({
-    required this.service,
-    required this.enabled,
-    required this.onChanged,
-  });
-
-  final RouteService service;
-  final bool enabled;
-  final void Function(String mode, String strategyTag) onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final manual = service.zapretStrategyMode == 'manual';
-    final experimentalAuto = service.tag == 'discord';
-    final options = service.zapretStrategyOptions;
-    final selectedTag =
-        options.any((option) => option.tag == service.zapretSelectedStrategy)
-        ? service.zapretSelectedStrategy
-        : options.first.tag;
-    final effective = service.zapretEffectiveStrategyLabel.isEmpty
-        ? 'ещё не определена'
-        : service.zapretEffectiveStrategyLabel;
-
-    return Container(
-      key: ValueKey('home-zapret-strategy-${service.tag}'),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0E1D19),
-        borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: const Color(0xFF2A493F)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'Стратегия Zapret',
-                  style: TextStyle(
-                    color: Color(0xFFDDEBE6),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              Flexible(
-                child: TextButton.icon(
-                  key: ValueKey('zapret-auto-${service.tag}'),
-                  onPressed: enabled ? () => onChanged('auto', '') : null,
-                  icon: const Icon(Icons.auto_fix_high, size: 15),
-                  label: Text(
-                    experimentalAuto
-                        ? manual
-                              ? 'Авто (эксп.)'
-                              : 'Повторить (эксп.)'
-                        : manual
-                        ? 'Авто'
-                        : 'Подобрать заново',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          Text(
-            manual
-                ? 'Активна вручную: $effective'
-                : service.zapretStrategyNotFound
-                ? 'Результат: подходящая стратегия не найдена'
-                : experimentalAuto
-                ? 'Авто (эксперимент): проверяется $effective'
-                : 'Рабочая: $effective',
-            style: TextStyle(
-              color: !manual && service.zapretStrategyNotFound
-                  ? const Color(0xFFFF9C92)
-                  : const Color(0xFFA8BAB5),
-              fontSize: 10,
-            ),
-          ),
-          if (experimentalAuto) ...[
-            const SizedBox(height: 3),
-            const Text(
-              'Discord Zapret экспериментален: web/API могут открыться, но voice/video не гарантируются. Для голосового чата рекомендуется VPN.',
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: Color(0xFFFFC979), fontSize: 10),
-            ),
-          ],
-          const SizedBox(height: 5),
-          DropdownButtonFormField<String>(
-            key: ValueKey('zapret-manual-${service.tag}'),
-            initialValue: manual ? selectedTag : null,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'Выбрать вручную',
-              isDense: true,
-              border: OutlineInputBorder(),
-              contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 8),
-            ),
-            items: options
-                .map(
-                  (option) => DropdownMenuItem<String>(
-                    value: option.tag,
-                    child: Text(
-                      option.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11),
-                    ),
-                  ),
-                )
-                .toList(growable: false),
-            onChanged: enabled
-                ? (value) {
-                    if (value != null) onChanged('manual', value);
-                  }
-                : null,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AddHomeRouteServiceSheet extends StatelessWidget {
-  const _AddHomeRouteServiceSheet({required this.services});
-
-  final List<RouteService> services;
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(context).height * 0.72,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(18, 4, 18, 12),
-              child: Text(
-                'Добавить сервис на главную',
-                style: TextStyle(
-                  color: Color(0xFFE8F3EF),
-                  fontSize: 16,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-            Expanded(
-              child: ListView.separated(
-                padding: const EdgeInsets.fromLTRB(10, 0, 10, 16),
-                itemCount: services.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 4),
-                itemBuilder: (context, index) {
-                  final service = services[index];
-                  return ListTile(
-                    key: ValueKey('add-home-route-${service.tag}'),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    tileColor: const Color(0xFF172824),
-                    title: Text(
-                      _homeRouteName(service),
-                      style: const TextStyle(color: Color(0xFFE8F3EF)),
-                    ),
-                    trailing: const Icon(Icons.add_circle_outline),
-                    onTap: () => Navigator.of(context).pop(service),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _HomeBottomBlocks extends StatelessWidget {
-  const _HomeBottomBlocks({
-    required this.routes,
-    required this.subscription,
-    required this.wireGuards,
-    required this.strategyProgress,
-  });
-
-  final List<RouteService> routes;
-  final SubscriptionInfo subscription;
-  final List<WireGuardInfo> wireGuards;
-  final Map<String, RouteProbeProgress> strategyProgress;
-
-  @override
-  Widget build(BuildContext context) {
-    final isMobile = _isMobileShell;
-    final bypassRoutes = routes
-        .where(
-          (route) =>
-              _isBypassRoute(route) ||
-              (strategyProgress[route.tag]?.pending ?? false),
-        )
-        .toList(growable: false);
-    final visibleRoutes = List<RouteService>.from(
-      bypassRoutes.isEmpty ? routes : bypassRoutes,
-    );
-    final originalOrder = <String, int>{
-      for (var index = 0; index < visibleRoutes.length; index++)
-        visibleRoutes[index].tag: index,
-    };
-    visibleRoutes.sort((left, right) {
-      final leftActive = strategyProgress[left.tag]?.pending ?? false;
-      final rightActive = strategyProgress[right.tag]?.pending ?? false;
-      if (leftActive != rightActive) {
-        return leftActive ? -1 : 1;
-      }
-      return (originalOrder[left.tag] ?? 0).compareTo(
-        originalOrder[right.tag] ?? 0,
-      );
-    });
-    final routeRows = visibleRoutes
-        .where((route) => route.name.trim().isNotEmpty)
-        .map((route) {
-          final progress = strategyProgress[route.tag];
-          final selecting = progress?.pending ?? false;
-          final attemptLabel = progress == null
-              ? ''
-              : progress.attempt > 0
-              ? ' · попытка ${progress.attempt}${progress.attemptTotal > 0 ? '/${progress.attemptTotal}' : ''}'
-              : '';
-          return _HomeInfoRow(
-            label: route.name,
-            value: selecting
-                ? 'Подбирается$attemptLabel'
-                : '${route.method}${_formatRouteDelay(route.delayMs)}',
-            busy: selecting,
-          );
-        })
-        .toList(growable: false);
-    final subscriptionRows = subscription.hasSubscription
-        ? <Widget>[
-            _HomeInfoRow(
-              label: 'VPN-подписки',
-              value: subscription.proxyCount > 0
-                  ? '${subscription.proxyCount} proxy'
-                  : 'добавлена',
-            ),
-            if (subscription.url.trim().isNotEmpty)
-              _HomeInfoNote(_shortSubscriptionUrl(subscription.url)),
-          ]
-        : const <Widget>[_HomeInfoNote('Подписок добавленных нет')];
-    final networkRows = wireGuards.isEmpty
-        ? const <Widget>[_HomeInfoNote('Рабочие сети не добавлены')]
-        : wireGuards
-              .map(
-                (network) => _HomeInfoRow(
-                  label: network.name.isEmpty ? network.tag : network.name,
-                  value: network.endpoint.isEmpty ? 'готова' : network.endpoint,
-                ),
-              )
-              .toList(growable: false);
-
-    if (isMobile) {
-      return Column(
-        children: [
-          SizedBox(
-            height: 138,
-            child: _HomeInfoBlock(
-              icon: Icons.route,
-              title: 'Маршруты',
-              children: routeRows.isEmpty
-                  ? const [_HomeInfoNote('Маршруты ещё уточняются')]
-                  : routeRows,
-            ),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            height: 112,
-            child: _HomeInfoBlock(
-              icon: Icons.vpn_key,
-              title: 'VPN-подписки',
-              children: subscriptionRows,
-            ),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            height: 112,
-            child: _HomeInfoBlock(
-              icon: Icons.hub,
-              title: 'Рабочие сети',
-              children: networkRows,
-            ),
-          ),
-        ],
-      );
-    }
-
-    return SizedBox(
-      height: 184,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            flex: 2,
-            child: _HomeInfoBlock(
-              icon: Icons.route,
-              title: 'Стратегии обхода',
-              children: routeRows.isEmpty
-                  ? const [_HomeInfoNote('Маршруты ещё уточняются')]
-                  : routeRows,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: _HomeInfoBlock(
-              icon: Icons.vpn_key,
-              title: 'VPN-подписки',
-              children: subscriptionRows,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: _HomeInfoBlock(
-              icon: Icons.hub,
-              title: 'Рабочие сети',
-              children: networkRows,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _formatRouteDelay(int delayMs) {
-    if (delayMs <= 0) {
-      return ' · ping -';
-    }
-    return ' · $delayMs мс';
-  }
-
-  bool _isBypassRoute(RouteService route) {
-    final method = route.method.trim().toLowerCase();
-    if (route.requiresVpn) {
-      return true;
-    }
-    return method.isNotEmpty &&
-        method != 'direct' &&
-        !method.startsWith('direct ');
-  }
-
-  String _shortSubscriptionUrl(String value) {
-    final trimmed = value.trim();
-    final uri = Uri.tryParse(trimmed);
-    if (uri != null && uri.host.isNotEmpty) {
-      return uri.host;
-    }
-    if (trimmed.length <= 24) {
-      return trimmed;
-    }
-    return '${trimmed.substring(0, 21)}...';
-  }
-}
-
-class _HomeInfoBlock extends StatelessWidget {
-  const _HomeInfoBlock({
-    required this.icon,
-    required this.title,
-    required this.children,
-  });
-
-  final IconData icon;
-  final String title;
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF121B24).withValues(alpha: 0.78),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.11)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 13, color: const Color(0xFFBAF7D0)),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFFE5EEF8),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w400,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Expanded(
-            child: Scrollbar(
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.start,
-                  children: children,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _HomeInfoRow extends StatelessWidget {
-  const _HomeInfoRow({
-    required this.label,
-    required this.value,
-    this.busy = false,
-  });
-
-  final String label;
-  final String value;
-  final bool busy;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 5),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.68),
-                fontSize: 9.5,
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          if (busy) ...[
-            const SizedBox(
-              width: 10,
-              height: 10,
-              child: CircularProgressIndicator(
-                strokeWidth: 1.5,
-                color: Color(0xFFFCD34D),
-              ),
-            ),
-            const SizedBox(width: 5),
-          ],
-          Flexible(
-            child: Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.right,
-              style: TextStyle(
-                color: busy ? const Color(0xFFFCD34D) : const Color(0xFFBAF7D0),
-                fontSize: 9.5,
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _HomeInfoNote extends StatelessWidget {
-  const _HomeInfoNote(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Text(
-        text,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          color: Colors.white.withValues(alpha: 0.50),
-          fontSize: 9.5,
-          fontWeight: FontWeight.w400,
-        ),
-      ),
-    );
-  }
-}
-
 class _NetworkModePill extends StatelessWidget {
   const _NetworkModePill({required this.status, required this.expanded});
 
@@ -7319,7 +6153,14 @@ class _NetworkModePill extends StatelessWidget {
       message: 'Сетевой режим: $label',
       child: Container(
         width: double.infinity,
-        height: expanded ? 48 : 42,
+        height: expanded
+            ? 48 +
+                  math.max(
+                        0.0,
+                        MediaQuery.textScalerOf(context).scale(11) - 11,
+                      ) *
+                      3
+            : 42,
         padding: EdgeInsets.symmetric(horizontal: expanded ? 10 : 0),
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.24),
@@ -7368,248 +6209,6 @@ class _NetworkModePill extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _Badge extends StatelessWidget {
-  const _Badge({
-    required this.icon,
-    required this.label,
-    this.onPressed,
-    this.danger = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback? onPressed;
-  final bool danger;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = danger ? const Color(0xFFFCA5A5) : const Color(0xFF86EFAC);
-    final background = danger
-        ? const Color(0xFF3A1518)
-        : const Color(0xFF123A2B);
-    return MouseRegion(
-      cursor: onPressed == null
-          ? SystemMouseCursors.basic
-          : SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: onPressed,
-        child: SizedBox(
-          width: 136,
-          height: 34,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(
-              color: background.withValues(alpha: 0.88),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: color.withValues(alpha: 0.34)),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, size: 14, color: color),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w400,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _PowerButton extends StatefulWidget {
-  const _PowerButton({
-    required this.connected,
-    required this.busy,
-    required this.enabled,
-    required this.onPressed,
-    this.onDisabledPressed,
-  });
-
-  final bool connected;
-  final bool busy;
-  final bool enabled;
-  final VoidCallback? onPressed;
-  final VoidCallback? onDisabledPressed;
-
-  @override
-  State<_PowerButton> createState() => _PowerButtonState();
-}
-
-class _PowerButtonState extends State<_PowerButton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController controller;
-  bool hovering = false;
-
-  @override
-  void initState() {
-    super.initState();
-    controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final activeColor = widget.connected
-        ? const Color(0xFF22C55E)
-        : widget.busy
-        ? const Color(0xFFF59E0B)
-        : const Color(0xFF4A5568);
-    final canTap = widget.enabled || widget.onDisabledPressed != null;
-    return MouseRegion(
-      cursor: canTap
-          ? SystemMouseCursors.click
-          : (widget.busy
-                ? SystemMouseCursors.progress
-                : SystemMouseCursors.basic),
-      onEnter: (_) => setState(() => hovering = true),
-      onExit: (_) => setState(() => hovering = false),
-      child: GestureDetector(
-        onTap: widget.enabled ? widget.onPressed : widget.onDisabledPressed,
-        child: AnimatedScale(
-          duration: const Duration(milliseconds: 140),
-          scale: widget.enabled ? 1 : 0.99,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 260),
-            width: 116,
-            height: 116,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: widget.connected
-                    ? const [Color(0xFF1A4D2E), Color(0xFF0D2818)]
-                    : widget.busy
-                    ? const [Color(0xFF3B2A15), Color(0xFF17140F)]
-                    : const [Color(0xFF1C2F2D), Color(0xFF111B1B)],
-              ),
-              border: Border.all(
-                color: activeColor.withValues(alpha: widget.busy ? 0.34 : 0.45),
-                width: 3,
-              ),
-              boxShadow: [
-                const BoxShadow(
-                  color: Colors.black54,
-                  blurRadius: 30,
-                  offset: Offset(12, 12),
-                ),
-                BoxShadow(
-                  color: activeColor.withValues(
-                    alpha: widget.connected || widget.busy ? 0.26 : 0.08,
-                  ),
-                  blurRadius: 52,
-                ),
-              ],
-            ),
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                if (widget.busy)
-                  RotationTransition(
-                    turns: controller,
-                    child: SizedBox(
-                      width: 58,
-                      height: 58,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 3,
-                        color: const Color(0xFF8EE7B6),
-                        backgroundColor: Colors.white.withValues(alpha: 0.12),
-                      ),
-                    ),
-                  )
-                else
-                  AnimatedBuilder(
-                    animation: controller,
-                    builder: (context, child) {
-                      final angle = hovering && widget.enabled
-                          ? math.sin(controller.value * math.pi * 2) *
-                                (math.pi / 9)
-                          : 0.0;
-                      return Transform.rotate(angle: angle, child: child);
-                    },
-                    child: Icon(
-                      Icons.power_settings_new,
-                      size: 50,
-                      color: activeColor,
-                      shadows: widget.connected
-                          ? [
-                              const Shadow(
-                                color: Color(0xAA22C55E),
-                                blurRadius: 16,
-                              ),
-                            ]
-                          : null,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ConnectionStatus extends StatelessWidget {
-  const _ConnectionStatus({
-    required this.connected,
-    required this.connecting,
-    required this.online,
-    required this.hasError,
-    required this.text,
-  });
-
-  final bool connected;
-  final bool connecting;
-  final bool online;
-  final bool hasError;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = !online || hasError
-        ? const Color(0xFFFCA5A5)
-        : connecting
-        ? const Color(0xFFF59E0B)
-        : connected
-        ? const Color(0xFF22C55E)
-        : const Color(0xFF8892B0);
-    return AnimatedDefaultTextStyle(
-      duration: const Duration(milliseconds: 180),
-      style: TextStyle(
-        color: color,
-        fontSize: 15,
-        fontWeight: FontWeight.w700,
-        shadows: connected || connecting
-            ? [Shadow(color: color.withValues(alpha: 0.45), blurRadius: 18)]
-            : null,
-      ),
-      child: Text(text, textAlign: TextAlign.center),
     );
   }
 }
@@ -8260,6 +6859,8 @@ class _SideMenu extends StatelessWidget {
     required this.status,
     required this.onToggle,
     required this.onHome,
+    required this.onServices,
+    required this.onSources,
     required this.onProfiles,
     required this.onSettings,
     required this.onStats,
@@ -8275,6 +6876,8 @@ class _SideMenu extends StatelessWidget {
   final CoreStatus status;
   final VoidCallback onToggle;
   final VoidCallback onHome;
+  final VoidCallback onServices;
+  final VoidCallback onSources;
   final VoidCallback onProfiles;
   final VoidCallback onSettings;
   final VoidCallback onStats;
@@ -8287,8 +6890,13 @@ class _SideMenu extends StatelessWidget {
     return SafeArea(
       right: false,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        width: expanded ? 184 : 68,
+        duration: Duration.zero,
+        width: expanded
+            ? math.min(
+                280.0,
+                184 + (MediaQuery.textScalerOf(context).scale(12) - 12) * 6,
+              )
+            : 68,
         margin: const EdgeInsets.fromLTRB(10, 10, 0, 10),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
         decoration: BoxDecoration(
@@ -8306,56 +6914,82 @@ class _SideMenu extends StatelessWidget {
         child: Column(
           children: [
             _MenuToggleButton(expanded: expanded, onPressed: onToggle),
-            _SideMenuButton(
-              icon: Icons.public,
-              label: 'Подключение',
-              description: 'Главный экран',
-              expanded: expanded,
-              active: activeSection == 'home',
-              live: connectionActive,
-              onPressed: disabled ? null : onHome,
+            Expanded(
+              child: SingleChildScrollView(
+                primary: false,
+                child: Column(
+                  children: [
+                    _SideMenuButton(
+                      icon: Icons.public,
+                      label: 'Подключение',
+                      description: 'Главный экран',
+                      expanded: expanded,
+                      active: activeSection == 'home',
+                      live: connectionActive,
+                      onPressed: disabled ? null : onHome,
+                    ),
+                    _SideMenuButton(
+                      key: const ValueKey('nav-services'),
+                      icon: Icons.apps_outlined,
+                      label: 'Сервисы',
+                      description: 'Маршруты и избранное',
+                      expanded: expanded,
+                      active: activeSection == 'services',
+                      onPressed: disabled ? null : onServices,
+                    ),
+                    _SideMenuButton(
+                      key: const ValueKey('nav-sources'),
+                      icon: Icons.vpn_key_outlined,
+                      label: 'Источники VPN',
+                      description: 'Подписки и бесплатный резерв',
+                      expanded: expanded,
+                      active: activeSection == 'sources',
+                      onPressed: disabled ? null : onSources,
+                    ),
+                    _SideMenuButton(
+                      icon: Icons.account_circle,
+                      label: 'Профили',
+                      description: 'Список VPN-профилей',
+                      expanded: expanded,
+                      active: activeSection == 'profiles',
+                      onPressed: disabled ? null : onProfiles,
+                    ),
+                    _SideMenuButton(
+                      icon: Icons.settings,
+                      label: 'Настройки',
+                      description: 'Параметры приложения',
+                      expanded: expanded,
+                      active: activeSection == 'settings',
+                      onPressed: disabled ? null : onSettings,
+                    ),
+                    _SideMenuButton(
+                      icon: Icons.query_stats,
+                      label: 'Статистика',
+                      description: 'Трафик и сессии',
+                      expanded: expanded,
+                      active: activeSection == 'stats',
+                      onPressed: disabled ? null : onStats,
+                    ),
+                    _SideMenuButton(
+                      icon: Icons.article,
+                      label: 'Логи',
+                      description: 'События ядра',
+                      expanded: expanded,
+                      active: activeSection == 'logs',
+                      onPressed: disabled ? null : onLogs,
+                    ),
+                    _SideMenuButton(
+                      icon: Icons.info_outline,
+                      label: 'О приложении',
+                      description: 'Версия и ссылки',
+                      expanded: expanded,
+                      active: activeSection == 'about',
+                      onPressed: disabled ? null : onAbout,
+                    ),
+                  ],
+                ),
+              ),
             ),
-            _SideMenuButton(
-              icon: Icons.account_circle,
-              label: 'Профили',
-              description: 'Список VPN-профилей',
-              expanded: expanded,
-              active: activeSection == 'profiles',
-              onPressed: disabled ? null : onProfiles,
-            ),
-            _SideMenuButton(
-              icon: Icons.settings,
-              label: 'Настройки',
-              description: 'Маршруты и диагностика',
-              expanded: expanded,
-              active: activeSection == 'settings',
-              onPressed: disabled ? null : onSettings,
-            ),
-            _SideMenuButton(
-              icon: Icons.query_stats,
-              label: 'Статистика',
-              description: 'Трафик и сессии',
-              expanded: expanded,
-              active: activeSection == 'stats',
-              onPressed: disabled ? null : onStats,
-            ),
-            _SideMenuButton(
-              icon: Icons.article,
-              label: 'Логи',
-              description: 'События ядра',
-              expanded: expanded,
-              active: activeSection == 'logs',
-              onPressed: disabled ? null : onLogs,
-            ),
-            _SideMenuButton(
-              icon: Icons.info_outline,
-              label: 'О приложении',
-              description: 'Версия и ссылки',
-              expanded: expanded,
-              active: activeSection == 'about',
-              onPressed: disabled ? null : onAbout,
-            ),
-            const Spacer(),
             _NetworkModePill(status: status, expanded: expanded),
             const SizedBox(height: 8),
             _SideMenuButton(
@@ -8394,7 +7028,9 @@ class _MobileBottomNav extends StatelessWidget {
   Widget build(BuildContext context) {
     final moreActive = activeSection != 'home' && activeSection != 'settings';
     return Container(
-      height: 64,
+      height:
+          64 +
+          math.max(0.0, MediaQuery.textScalerOf(context).scale(11) - 11) * 1.5,
       padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
         color: const Color(0xFF111629).withValues(alpha: 0.94),
@@ -8591,6 +7227,20 @@ class _MobileMoreSheet extends StatelessWidget {
                   _NetworkModePill(status: status, expanded: true),
                   const SizedBox(height: 8),
                   _MobileMoreItem(
+                    icon: Icons.apps_outlined,
+                    label: 'Сервисы',
+                    description: 'Маршруты и избранное',
+                    active: activeSection == 'services',
+                    onPressed: () => onSelect('services'),
+                  ),
+                  _MobileMoreItem(
+                    icon: Icons.vpn_key_outlined,
+                    label: 'Источники VPN',
+                    description: 'Подписки и бесплатный резерв',
+                    active: activeSection == 'sources',
+                    onPressed: () => onSelect('sources'),
+                  ),
+                  _MobileMoreItem(
                     icon: Icons.account_circle,
                     label: 'Профили',
                     description: 'VPN-профили',
@@ -8674,9 +7324,9 @@ class _MobileMoreItem extends StatelessWidget {
         onTap: onPressed,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
-          height: 52,
+          constraints: const BoxConstraints(minHeight: 52),
           margin: const EdgeInsets.only(bottom: 6),
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
             color: active
                 ? const Color(0xFF1F8C78).withValues(alpha: 0.20)
@@ -8694,6 +7344,7 @@ class _MobileMoreItem extends StatelessWidget {
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -8947,6 +7598,7 @@ class _LiveStatusDotState extends State<_LiveStatusDot>
 
 class _SideMenuButton extends StatelessWidget {
   const _SideMenuButton({
+    super.key,
     required this.icon,
     required this.label,
     required this.expanded,
@@ -8980,9 +7632,18 @@ class _SideMenuButton extends StatelessWidget {
       child: GestureDetector(
         onTap: onPressed,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
+          // Content switches immediately; interpolating the old compact height
+          // clips expanded labels, especially with accessibility text scaling.
+          duration: Duration.zero,
           width: double.infinity,
-          height: expanded ? 52 : 44,
+          height: expanded
+              ? 52 +
+                    math.max(
+                          0.0,
+                          MediaQuery.textScalerOf(context).scale(12) - 12,
+                        ) *
+                        3
+              : 44,
           margin: const EdgeInsets.only(bottom: 6),
           padding: EdgeInsets.symmetric(horizontal: expanded ? 10 : 0),
           decoration: BoxDecoration(
@@ -9484,9 +8145,7 @@ class _AboutSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Center(
-            child: _LogoMark(connected: false, connecting: false, error: false),
-          ),
+          const Center(child: _HomeBrand()),
           const SizedBox(height: 14),
           _FactRow(label: 'Версия', value: status.version.fullVersion),
           _LinkFactRow(
@@ -11489,6 +10148,7 @@ class _SettingsDialog extends StatefulWidget {
     required this.onCheckUpdates,
     required this.onInstallUpdate,
     required this.onDownloadDependencies,
+    required this.onOpenServices,
     this.embedded = false,
     this.onChanged,
   });
@@ -11500,6 +10160,7 @@ class _SettingsDialog extends StatefulWidget {
   final VoidCallback onCheckUpdates;
   final VoidCallback onInstallUpdate;
   final VoidCallback onDownloadDependencies;
+  final VoidCallback onOpenServices;
   final bool embedded;
   final ValueChanged<AppConfig>? onChanged;
 
@@ -11511,39 +10172,6 @@ class _SettingsDialogState extends State<_SettingsDialog> {
   late AppConfig config = widget.initialConfig;
   String statusText = '';
   bool saving = false;
-  List<RouteService> serviceCatalog = const [];
-  bool serviceCatalogLoading = false;
-  String serviceCatalogError = '';
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_loadServiceCatalog());
-  }
-
-  Future<void> _loadServiceCatalog() async {
-    setState(() {
-      serviceCatalogLoading = true;
-      serviceCatalogError = '';
-    });
-    List<RouteService> services = const [];
-    String errorText = '';
-    try {
-      services = await widget.bridge.routes(live: false);
-    } catch (error) {
-      services = fallbackRoutes;
-      errorText = _cleanError(error);
-    }
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      serviceCatalog = services;
-      serviceCatalogLoading = false;
-      serviceCatalogError = errorText;
-    });
-  }
-
   Future<void> _saveGeneral(AppConfig updated) async {
     final previous = config;
     setState(() {
@@ -11607,12 +10235,8 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     }
     final total = _asInt(result['total']);
     final failed = _asInt(result['failedCount']);
-    final checkedServices = _servicesFromQuickCheck(result['services']);
     setState(() {
       saving = false;
-      if (checkedServices.isNotEmpty) {
-        serviceCatalog = _mergeCheckedServices(serviceCatalog, checkedServices);
-      }
       statusText = result['android'] == true
           ? result['success'] == true
                 ? 'Проверка Android завершена: $total сервисов доступны.'
@@ -11620,98 +10244,6 @@ class _SettingsDialogState extends State<_SettingsDialog> {
           : result['success'] == true
           ? 'Проверка завершена: $total сервисов доступны.'
           : 'Проверка завершена с предупреждениями: ошибок $failed из $total.';
-    });
-  }
-
-  List<RouteService> _servicesFromQuickCheck(Object? raw) {
-    if (raw is! List) {
-      return const [];
-    }
-    return raw
-        .map(_asMap)
-        .where((item) => (item['tag']?.toString() ?? '').isNotEmpty)
-        .map((item) {
-          final methodTag = item['methodTag']?.toString() ?? '';
-          final methodLabel = item['methodLabel']?.toString() ?? methodTag;
-          return RouteService(
-            tag: item['tag']?.toString() ?? '',
-            name: item['name']?.toString() ?? item['tag']?.toString() ?? '',
-            method: methodLabel,
-            requiresVpn:
-                methodTag.toLowerCase() == 'vpn' ||
-                methodLabel.toLowerCase().contains('vpn'),
-            delayMs: _asInt(
-              item['latencyMs'] ?? item['latencyMS'] ?? item['ping'],
-            ),
-          );
-        })
-        .toList(growable: false);
-  }
-
-  List<RouteService> _mergeCheckedServices(
-    List<RouteService> current,
-    List<RouteService> checked,
-  ) {
-    final byTag = <String, RouteService>{
-      for (final service in checked) service.tag: service,
-    };
-    if (current.isEmpty) {
-      return checked;
-    }
-    return current
-        .map((service) {
-          final checkedService = byTag[service.tag];
-          if (checkedService == null) {
-            return service;
-          }
-          return service.copyWith(
-            method: checkedService.method.isEmpty
-                ? null
-                : checkedService.method,
-            requiresVpn: checkedService.requiresVpn,
-            delayMs: checkedService.delayMs,
-          );
-        })
-        .toList(growable: false);
-  }
-
-  Future<void> _setServiceRoutePolicy(
-    RouteService service,
-    String policy,
-  ) async {
-    setState(() {
-      saving = true;
-      statusText = 'Сохраняем маршрут для ${service.name}...';
-    });
-
-    Map<String, dynamic> result;
-    List<RouteService>? updatedServices;
-    try {
-      result = await widget.bridge.setFreeAccessServiceMethod(
-        service.tag,
-        policy,
-      );
-      if (result['success'] != false) {
-        updatedServices = await widget.bridge.routes(live: false);
-      }
-    } catch (error) {
-      result = {'success': false, 'error': _cleanError(error)};
-    }
-
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      saving = false;
-      if (updatedServices != null) {
-        serviceCatalog = updatedServices;
-        serviceCatalogError = '';
-      }
-      statusText = result['success'] == false
-          ? result['error']?.toString() ?? 'Не удалось сохранить маршрут'
-          : result['restarted'] == true
-          ? 'Маршрут для ${service.name} сохранён, VPN автоматически переподключён.'
-          : 'Маршрут для ${service.name} сохранён и применится при следующем старте VPN.';
     });
   }
 
@@ -11956,31 +10488,15 @@ class _SettingsDialogState extends State<_SettingsDialog> {
           ],
         ),
         _SettingsGroup(
-          title: isMobile ? 'Маршруты Android' : 'Бесплатный доступ',
+          title: 'Сервисы',
           children: [
-            if (isMobile)
-              const _InfoBand(
-                icon: Icons.route,
-                title: 'Маршрутизация',
-                body:
-                    'На Android доступны Авто, Напрямую и Через VPN. Обход Zapret выполняется только встроенным Windows-движком.',
-              )
-            else
-              const _InfoBand(
-                icon: Icons.route,
-                title: 'Явные маршруты',
-                body:
-                    'Zapret и VPN применяются только к сервисам, для которых выбран соответствующий режим. Остальной трафик идёт напрямую.',
-              ),
-            _ServiceCatalogTable(
-              bridge: widget.bridge,
-              services: serviceCatalog,
-              loading: serviceCatalogLoading,
-              error: serviceCatalogError,
-              policyEditingEnabled: !saving && (!isMobile || !vpnRunning),
-              allowAutomaticPolicy: isMobile,
-              onPolicyChanged: (service, policy) =>
-                  unawaited(_setServiceRoutePolicy(service, policy)),
+            _ButtonSetting(
+              title: 'Сервисы и маршруты',
+              description:
+                  'Полный каталог, выбор маршрутов и закрепление на главной.',
+              label: 'Открыть',
+              icon: Icons.apps_outlined,
+              onPressed: saving ? null : widget.onOpenServices,
             ),
           ],
         ),
@@ -12065,125 +10581,6 @@ class _SettingsDialogState extends State<_SettingsDialog> {
   }
 }
 
-class _ServiceCatalogTable extends StatelessWidget {
-  const _ServiceCatalogTable({
-    required this.bridge,
-    required this.services,
-    required this.loading,
-    required this.error,
-    required this.policyEditingEnabled,
-    required this.allowAutomaticPolicy,
-    required this.onPolicyChanged,
-  });
-
-  final CoreBridge bridge;
-  final List<RouteService> services;
-  final bool loading;
-  final String error;
-  final bool policyEditingEnabled;
-  final bool allowAutomaticPolicy;
-  final void Function(RouteService service, String policy)? onPolicyChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final rows = services
-        .where((service) => service.name.trim().isNotEmpty)
-        .toList(growable: false);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 7),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF15211F),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF344A44)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.dns_outlined,
-                size: 16,
-                color: Color(0xFFBAF7D0),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'Сервисы и маршруты',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFFE8F3EF),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              if (loading)
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-            ],
-          ),
-          if (error.isNotEmpty) ...[
-            const SizedBox(height: 7),
-            Text(
-              'Каталог не загрузился: $error',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Color(0xFFFCA5A5),
-                fontSize: 10.5,
-                height: 1.25,
-              ),
-            ),
-          ],
-          const SizedBox(height: 8),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 260),
-            child: Scrollbar(
-              child: SingleChildScrollView(
-                child: Column(
-                  children: rows.isEmpty
-                      ? const [_ServiceCatalogEmptyRow()]
-                      : rows
-                            .map(
-                              (service) => _ServiceCatalogRow(
-                                service: service,
-                                enabled: policyEditingEnabled,
-                                allowAutomaticPolicy: allowAutomaticPolicy,
-                                onPolicyChanged: onPolicyChanged,
-                              ),
-                            )
-                            .toList(growable: false),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          _ActionButton(
-            label: 'Добавить ещё сервис',
-            icon: Icons.add_link,
-            compact: true,
-            secondary: true,
-            onPressed: () => _showRequestServiceDialog(context),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _showRequestServiceDialog(BuildContext context) {
-    return showDialog<void>(
-      context: context,
-      builder: (context) => _RequestServiceDialog(bridge: bridge),
-    );
-  }
-}
-
 class _RequestServiceDialog extends StatelessWidget {
   const _RequestServiceDialog({required this.bridge});
 
@@ -12260,227 +10657,6 @@ class _RequestServiceDialog extends StatelessWidget {
   }
 }
 
-class _ServiceCatalogEmptyRow extends StatelessWidget {
-  const _ServiceCatalogEmptyRow();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 10),
-      child: Text(
-        'Загрузка каталога...',
-        style: TextStyle(color: Color(0xFF7F918C), fontSize: 11),
-      ),
-    );
-  }
-}
-
-class _ServiceCatalogRow extends StatelessWidget {
-  const _ServiceCatalogRow({
-    required this.service,
-    required this.enabled,
-    required this.allowAutomaticPolicy,
-    required this.onPolicyChanged,
-  });
-
-  final RouteService service;
-  final bool enabled;
-  final bool allowAutomaticPolicy;
-  final void Function(RouteService service, String policy)? onPolicyChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final domains = _compactTargets(service.domainSuffixes);
-    final ipText = service.ipCidrs.isEmpty
-        ? 'IP: CDN/динамические'
-        : 'IP: ${_compactTargets(service.ipCidrs)}';
-    final selectedMethod = service.selectedMethod.trim().toLowerCase();
-    final routeValue = switch (selectedMethod) {
-      'auto' when allowAutomaticPolicy => 'auto',
-      'vpn' => 'vpn',
-      'zapret' when service.zapretSupported => 'zapret',
-      'direct' => 'direct',
-      _
-          when service.requiresVpn ||
-              service.method.toLowerCase().contains('vpn') =>
-        'vpn',
-      _ => 'direct',
-    };
-    final pingText = service.delayMs > 0
-        ? 'ping ${service.delayMs} ms'
-        : 'ping -';
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0E1816),
-        borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: const Color(0xFF2D423C)),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            service.requiresVpn ? Icons.vpn_lock : Icons.route,
-            size: 16,
-            color: service.requiresVpn
-                ? const Color(0xFF93C5FD)
-                : const Color(0xFFBAF7D0),
-          ),
-          const SizedBox(width: 9),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        service.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Color(0xFFE8F3EF),
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 7,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: service.delayMs > 0
-                            ? const Color(0xFF36D399).withValues(alpha: 0.12)
-                            : Colors.white.withValues(alpha: 0.06),
-                        borderRadius: BorderRadius.circular(999),
-                        border: Border.all(
-                          color: service.delayMs > 0
-                              ? const Color(0xFF36D399).withValues(alpha: 0.24)
-                              : Colors.white.withValues(alpha: 0.08),
-                        ),
-                      ),
-                      child: Text(
-                        pingText,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: service.delayMs > 0
-                              ? const Color(0xFFBAF7D0)
-                              : const Color(0xFF8EA19D),
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  domains.isEmpty ? 'Домены: -' : 'Домены: $domains',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFF8EA19D),
-                    fontSize: 10,
-                    height: 1.25,
-                  ),
-                ),
-                Text(
-                  ipText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFF71837F),
-                    fontSize: 10,
-                    height: 1.25,
-                  ),
-                ),
-                const SizedBox(height: 7),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    if (allowAutomaticPolicy)
-                      _ServiceRoutePolicyButton(
-                        key: ValueKey('service-route-${service.tag}-auto'),
-                        label: 'Авто',
-                        selected: routeValue == 'auto',
-                        enabled: enabled,
-                        onPressed: () => onPolicyChanged?.call(service, 'auto'),
-                      ),
-                    _ServiceRoutePolicyButton(
-                      key: ValueKey('service-route-${service.tag}-direct'),
-                      label: 'Напрямую',
-                      selected: routeValue == 'direct',
-                      enabled: enabled,
-                      onPressed: () => onPolicyChanged?.call(service, 'direct'),
-                    ),
-                    _ServiceRoutePolicyButton(
-                      key: ValueKey('service-route-${service.tag}-vpn'),
-                      label: 'Через VPN',
-                      selected: routeValue == 'vpn',
-                      enabled: enabled,
-                      onPressed: () => onPolicyChanged?.call(service, 'vpn'),
-                    ),
-                    Tooltip(
-                      message: service.zapretSupported
-                          ? service.tag == 'discord'
-                                ? 'Эксперимент: Discord web/API могут работать, voice/video не гарантируются'
-                                : 'Использовать только встроенный обход Zapret'
-                          : 'Zapret доступен для этого сервиса только в Windows',
-                      child: _ServiceRoutePolicyButton(
-                        key: ValueKey('service-route-${service.tag}-zapret'),
-                        label: service.tag == 'discord'
-                            ? 'Zapret (эксп.)'
-                            : 'Обход (Zapret)',
-                        selected: routeValue == 'zapret',
-                        enabled: enabled && service.zapretSupported,
-                        onPressed: () =>
-                            onPolicyChanged?.call(service, 'zapret'),
-                      ),
-                    ),
-                  ],
-                ),
-                if (service.tag == 'discord') ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    routeValue == 'vpn'
-                        ? 'Рекомендуемый стабильный маршрут для Discord web, приложения и voice/video.'
-                        : 'Discord Zapret остаётся экспериментальным; для voice/video рекомендуется VPN.',
-                    style: TextStyle(
-                      color: routeValue == 'vpn'
-                          ? const Color(0xFF9FE3C2)
-                          : const Color(0xFFFFC979),
-                      fontSize: 10,
-                      height: 1.25,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  static String _compactTargets(List<String> values) {
-    if (values.isEmpty) {
-      return '';
-    }
-    const visibleCount = 4;
-    final visible = values.take(visibleCount).join(', ');
-    final extra = values.length - visibleCount;
-    if (extra <= 0) {
-      return visible;
-    }
-    return '$visible +$extra';
-  }
-}
-
 class _ServiceRoutePolicyButton extends StatelessWidget {
   const _ServiceRoutePolicyButton({
     super.key,
@@ -12488,12 +10664,14 @@ class _ServiceRoutePolicyButton extends StatelessWidget {
     required this.selected,
     required this.enabled,
     required this.onPressed,
+    this.comfortable = false,
   });
 
   final String label;
   final bool selected;
   final bool enabled;
   final VoidCallback onPressed;
+  final bool comfortable;
 
   @override
   Widget build(BuildContext context) {
@@ -12515,12 +10693,17 @@ class _ServiceRoutePolicyButton extends StatelessWidget {
     return OutlinedButton(
       onPressed: enabled && !selected ? onPressed : null,
       style: ButtonStyle(
-        minimumSize: const WidgetStatePropertyAll(Size(0, 30)),
-        padding: const WidgetStatePropertyAll(
-          EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        minimumSize: WidgetStatePropertyAll(Size(0, comfortable ? 44 : 30)),
+        padding: WidgetStatePropertyAll(
+          EdgeInsets.symmetric(
+            horizontal: comfortable ? 12 : 9,
+            vertical: comfortable ? 10 : 5,
+          ),
         ),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        visualDensity: VisualDensity.compact,
+        visualDensity: comfortable
+            ? VisualDensity.standard
+            : VisualDensity.compact,
         foregroundColor: WidgetStatePropertyAll(foreground),
         backgroundColor: WidgetStatePropertyAll(background),
         side: WidgetStatePropertyAll(BorderSide(color: border)),
@@ -12530,7 +10713,10 @@ class _ServiceRoutePolicyButton extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800),
+        style: TextStyle(
+          fontSize: comfortable ? 13 : 10.5,
+          fontWeight: FontWeight.w800,
+        ),
       ),
     );
   }
@@ -12781,370 +10967,6 @@ class _ButtonSetting extends StatelessWidget {
         icon: icon,
         compact: true,
         onPressed: onPressed,
-      ),
-    );
-  }
-}
-
-class _SubscriptionDialog extends StatefulWidget {
-  const _SubscriptionDialog({required this.bridge, required this.subscription});
-
-  final CoreBridge bridge;
-  final SubscriptionInfo subscription;
-
-  @override
-  State<_SubscriptionDialog> createState() => _SubscriptionDialogState();
-}
-
-class _SubscriptionDialogState extends State<_SubscriptionDialog> {
-  final controller = TextEditingController();
-  final nameController = TextEditingController();
-  String statusText = '';
-  String statusKind = '';
-  bool busy = false;
-  List<VpnSourceInfo> sources = const [];
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_loadSources());
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    nameController.dispose();
-    super.dispose();
-  }
-
-  bool _looksDirectLink(String value) {
-    final lower = value.trim().toLowerCase();
-    return lower.startsWith('vless://') ||
-        lower.startsWith('trojan://') ||
-        lower.startsWith('ss://') ||
-        lower.startsWith('vmess://') ||
-        lower.startsWith('hysteria2://') ||
-        lower.startsWith('hy2://') ||
-        lower.startsWith('tuic://');
-  }
-
-  Future<void> _loadSources() async {
-    try {
-      final loaded = await widget.bridge.vpnSources();
-      if (mounted) setState(() => sources = loaded);
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          statusKind = 'error';
-          statusText = _cleanError(error);
-        });
-      }
-    }
-  }
-
-  Future<void> _paste() async {
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    if (data?.text != null) {
-      controller.text = data!.text!;
-    }
-  }
-
-  Future<void> _test() async {
-    final value = controller.text.trim();
-    if (value.isEmpty) {
-      setState(() {
-        statusKind = 'error';
-        statusText = 'Вставьте ссылку на подписку или прямой proxy.';
-      });
-      return;
-    }
-    setState(() {
-      busy = true;
-      statusKind = 'loading';
-      statusText = 'Проверяем источник и первый рекомендуемый узел...';
-    });
-    final result = await widget.bridge.testSubscription(value);
-    if (!mounted) {
-      return;
-    }
-    final ok = result['success'] == true;
-    if (!ok) {
-      setState(() {
-        busy = false;
-        statusKind = 'error';
-        statusText =
-            result['error']?.toString() ?? 'Подключение не прошло проверку';
-      });
-      return;
-    }
-
-    setState(() => statusText = 'Проверка успешна. Добавляем VPN-источник...');
-    final defaultName = _looksDirectLink(value)
-        ? 'VPN key ${sources.length + 1}'
-        : 'Subscription ${sources.length + 1}';
-    final saved = await widget.bridge.addVpnSource(
-      nameController.text.trim().isEmpty
-          ? defaultName
-          : nameController.text.trim(),
-      value,
-    );
-    if (!mounted) {
-      return;
-    }
-    if (saved['success'] == false) {
-      setState(() {
-        busy = false;
-        statusKind = 'error';
-        statusText = saved['error']?.toString() ?? 'Не удалось сохранить';
-      });
-      return;
-    }
-
-    setState(() {
-      busy = false;
-      statusKind = 'success';
-      statusText =
-          'Источник добавлен. По умолчанию выбран первый узел поставщика.';
-      controller.clear();
-      nameController.clear();
-    });
-    await _loadSources();
-  }
-
-  Future<void> _changeSource(
-    Future<Map<String, dynamic>> Function() operation,
-    String progress,
-  ) async {
-    setState(() {
-      busy = true;
-      statusKind = 'loading';
-      statusText = progress;
-    });
-    final result = await operation();
-    if (!mounted) {
-      return;
-    }
-    if (result['success'] == false) {
-      setState(() {
-        busy = false;
-        statusKind = 'error';
-        statusText = result['error']?.toString() ?? 'Не удалось сохранить';
-      });
-      return;
-    }
-    setState(() {
-      busy = false;
-      statusKind = 'success';
-      statusText = 'Цепочка VPN-источников обновлена.';
-    });
-    await _loadSources();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _AppDialog(
-      title: 'VPN-источники',
-      icon: Icons.link,
-      width: 640,
-      centered: true,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'Fallback идёт сверху вниз между источниками. Внутри подписки автоматически используется только выбранный узел.',
-            style: TextStyle(color: Color(0xFF8892B0), fontSize: 12),
-          ),
-          if (sources.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            const _StatsSectionTitle('Fallback chain'),
-            for (var i = 0; i < sources.length; i++)
-              _VpnSourceTile(
-                source: sources[i],
-                index: i,
-                total: sources.length,
-                busy: busy,
-                onEnabled: (enabled) => _changeSource(
-                  () =>
-                      widget.bridge.setVpnSourceEnabled(sources[i].id, enabled),
-                  'Обновляем состояние источника...',
-                ),
-                onNode: (node) => _changeSource(
-                  () => widget.bridge.setVpnSourceNode(sources[i].id, node),
-                  'Переключаем выбранный узел...',
-                ),
-                onMove: (newIndex) => _changeSource(
-                  () => widget.bridge.moveVpnSource(sources[i].id, newIndex),
-                  'Меняем порядок fallback...',
-                ),
-                onRemove: () => _changeSource(
-                  () => widget.bridge.removeVpnSource(sources[i].id),
-                  'Удаляем VPN-источник...',
-                ),
-              ),
-          ],
-          const SizedBox(height: 12),
-          TextField(
-            controller: nameController,
-            decoration: _fieldDecoration(
-              hint: 'Название источника (необязательно)',
-            ),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: controller,
-            minLines: 1,
-            maxLines: 4,
-            decoration: _fieldDecoration(
-              hint: 'https://... или vless://...',
-              suffixIcon: IconButton(
-                onPressed: busy ? null : _paste,
-                icon: const Icon(Icons.content_paste),
-                tooltip: 'Вставить из буфера',
-                mouseCursor: busy
-                    ? SystemMouseCursors.basic
-                    : SystemMouseCursors.click,
-              ),
-            ),
-          ),
-          if (statusText.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            _StatusBox(kind: statusKind, text: statusText),
-          ],
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: _DialogAction(
-                  label: 'Отмена',
-                  icon: Icons.close,
-                  onPressed: busy
-                      ? null
-                      : () => Navigator.of(context).pop(false),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _DialogAction(
-                  label: 'Проверить и добавить',
-                  icon: Icons.fact_check,
-                  primary: true,
-                  onPressed: busy ? null : _test,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _VpnSourceTile extends StatelessWidget {
-  const _VpnSourceTile({
-    required this.source,
-    required this.index,
-    required this.total,
-    required this.busy,
-    required this.onEnabled,
-    required this.onNode,
-    required this.onMove,
-    required this.onRemove,
-  });
-
-  final VpnSourceInfo source;
-  final int index;
-  final int total;
-  final bool busy;
-  final ValueChanged<bool> onEnabled;
-  final ValueChanged<int> onNode;
-  final ValueChanged<int> onMove;
-  final VoidCallback onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final count = source.nodeCount > 0 ? source.nodeCount : 1;
-    final selected = source.selectedNode.clamp(0, count - 1);
-    String nodeName(int node) => node < source.nodeNames.length
-        ? source.nodeNames[node]
-        : 'Узел ${node + 1}';
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Text(
-                '${index + 1}',
-                style: const TextStyle(
-                  color: Color(0xFF86EFAC),
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  source.name,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-              ),
-              Switch.adaptive(
-                value: !source.disabled,
-                onChanged: busy ? null : onEnabled,
-              ),
-              IconButton(
-                icon: const Icon(Icons.arrow_upward, size: 18),
-                onPressed: busy || index == 0 ? null : () => onMove(index - 1),
-              ),
-              IconButton(
-                icon: const Icon(Icons.arrow_downward, size: 18),
-                onPressed: busy || index + 1 >= total
-                    ? null
-                    : () => onMove(index + 1),
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline, size: 18),
-                onPressed: busy ? null : onRemove,
-              ),
-            ],
-          ),
-          if (count > 1)
-            DropdownButtonFormField<int>(
-              initialValue: selected,
-              decoration: _fieldDecoration(hint: 'Выбранный узел'),
-              items: [
-                for (var i = 0; i < count; i++)
-                  DropdownMenuItem(
-                    value: i,
-                    child: Text(nodeName(i), overflow: TextOverflow.ellipsis),
-                  ),
-              ],
-              onChanged: busy
-                  ? null
-                  : (value) {
-                      if (value != null) onNode(value);
-                    },
-            )
-          else
-            Text(
-              source.kind == 'direct' ? 'Отдельный ключ' : nodeName(0),
-              style: const TextStyle(color: Color(0xFF8A9B97), fontSize: 11),
-            ),
-          if (source.lastError.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                source.lastError,
-                style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 10),
-              ),
-            ),
-        ],
       ),
     );
   }

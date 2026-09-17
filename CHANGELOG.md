@@ -2,6 +2,33 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.28 — 2026-09-17
+
+### Interface and navigation
+
+- clear connection states and one source panel distinguishing saved priority
+  from the active session; collapsible quick routes remain on Home;
+- separate Services and VPN Sources pages, domain/name search, pinned services,
+  and a single route editor instead of duplicate settings;
+- stale/offline states no longer claim an active route; writes lock conflicting
+  navigation and recover controls on failure;
+- accessible layouts tested at 100/150/200% text scale; native widget screenshots
+  and 67 Flutter regression tests, without starting another VPN core.
+
+### Optional public VPN fallback
+
+- public VPN Checker RU catalog requires opt-in consent and stays after personal
+  sources, including when its URL was imported manually;
+- exactly one selected node per source; no automatic sweep of sibling nodes;
+- manual node selection survives updated labels; cached lists retain their
+  original update time and show an offline warning;
+- removing the final source no longer restores an obsolete subscription URL;
+- public providers are third parties: reachability, privacy and speed are not
+  guaranteed. Existing service policies and direct-first traffic rules remain.
+
+Installed Windows 3.0.27 can obtain this release through the existing updater.
+Discord Zapret remains experimental; selective VPN is recommended for voice.
+
 ## 3.0.27 — 2026-09-03
 
 ### VPN compatibility and diagnostics

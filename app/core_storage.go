@@ -652,6 +652,9 @@ func (s *Storage) UpdateProfileVPNSources(id int, sources []VPNSource, wireGuard
 			continue
 		}
 		s.data.Profiles[index].VPNSources = append([]VPNSource(nil), sources...)
+		// This is an explicit replacement, not a legacy profile migration. In
+		// particular, removing the last source must not resurrect its old URL.
+		s.data.Profiles[index].SubscriptionURL = ""
 		s.data.Profiles[index].WireGuardConfigs = wireGuardConfigs
 		normalizeProfileVPNSources(&s.data.Profiles[index])
 		return s.saveInternal()
@@ -1474,6 +1477,9 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfile(profileID int, subscript
 // Provider order chooses node zero by default; source failover order is kept in
 // the generated selector and never expands to sibling nodes automatically.
 func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig) error {
+	normalized := ProfileData{VPNSources: append([]VPNSource(nil), sources...)}
+	normalizeProfileVPNSources(&normalized)
+	sources = normalized.VPNSources
 	fmt.Printf("[BuildConfigForProfile] Called with profileID=%d, %d WireGuard configs\n", profileID, len(wireGuardConfigs))
 	for i, wg := range wireGuardConfigs {
 		fmt.Printf("[BuildConfigForProfile] WireGuard[%d]: tag=%s, dns=%s, allowedIPs=%v\n", i, wg.Tag, wg.DNS, wg.AllowedIPs)
@@ -1518,8 +1524,13 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 		}
 		enabledSources++
 		nodes, fetchErr := b.fetchVPNSourceNodes(*source)
+		usingCache := false
 		if fetchErr != nil && len(source.CachedNodes) > 0 {
 			nodes, fetchErr = b.parseCachedVPNNodes(source.CachedNodes)
+			usingCache = fetchErr == nil
+		}
+		if source.PublicCatalogID != "" {
+			nodes = usablePublicVPNNodes(nodes)
 		}
 		if fetchErr != nil || len(nodes) == 0 {
 			if fetchErr == nil {
@@ -1529,7 +1540,13 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 			sourceErrors = append(sourceErrors, source.ID+": "+fetchErr.Error())
 			continue
 		}
+		lastUpdated := source.LastUpdated
 		markVPNSourceUpdated(source, nodes, nil)
+		if usingCache {
+			source.UsingCache = true
+			source.LastUpdated = lastUpdated
+			source.LastError = "Не удалось обновить список. Используется сохранённая копия."
+		}
 		selected := nodes[source.SelectedNode]
 		selected.Tag = "vpn-source-" + source.ID
 		split := SplitProxyConfigs([]ProxyConfig{selected})
@@ -1547,6 +1564,7 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 	}
 	xrayBridge := BuildXrayBridgeConfig(xrayCandidates)
 	proxies = append(proxies, xrayBridge.SingBoxProxies...)
+	orderVPNSourceProxies(proxies, updatedSources)
 	if err := b.storage.UpdateProfileXrayConfig(profileID, xrayBridge.XrayConfig); err != nil {
 		return err
 	}

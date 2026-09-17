@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -18,19 +20,21 @@ const (
 // only SelectedNode participates in routing. Failover advances to the next
 // enabled VPNSource, never silently to another node of this source.
 type VPNSource struct {
-	ID             string        `json:"id"`
-	Name           string        `json:"name"`
-	Kind           VPNSourceKind `json:"kind"`
-	URI            string        `json:"uri"`
-	Disabled       bool          `json:"disabled,omitempty"`
-	SelectedNode   int           `json:"selected_node"`
-	SelectedNodeID string        `json:"selected_node_id,omitempty"`
-	NodeCount      int           `json:"node_count,omitempty"`
-	NodeNames      []string      `json:"node_names,omitempty"`
-	NodeIDs        []string      `json:"node_ids,omitempty"`
-	CachedNodes    []string      `json:"cached_nodes,omitempty"`
-	LastUpdated    string        `json:"last_updated,omitempty"`
-	LastError      string        `json:"last_error,omitempty"`
+	ID              string        `json:"id"`
+	Name            string        `json:"name"`
+	Kind            VPNSourceKind `json:"kind"`
+	PublicCatalogID string        `json:"public_catalog_id,omitempty"`
+	URI             string        `json:"uri"`
+	Disabled        bool          `json:"disabled,omitempty"`
+	SelectedNode    int           `json:"selected_node"`
+	SelectedNodeID  string        `json:"selected_node_id,omitempty"`
+	NodeCount       int           `json:"node_count,omitempty"`
+	NodeNames       []string      `json:"node_names,omitempty"`
+	NodeIDs         []string      `json:"node_ids,omitempty"`
+	CachedNodes     []string      `json:"cached_nodes,omitempty"`
+	LastUpdated     string        `json:"last_updated,omitempty"`
+	LastError       string        `json:"last_error,omitempty"`
+	UsingCache      bool          `json:"using_cache,omitempty"`
 }
 
 func newVPNSource(id, name, uri string) (VPNSource, error) {
@@ -111,6 +115,7 @@ func normalizeProfileVPNSources(profile *ProfileData) {
 			source.SelectedNode = 0
 		}
 	}
+	orderPublicVPNFallbacks(profile.VPNSources)
 	profile.SubscriptionURL = ""
 	profile.ProxyCount = 0
 	profile.LastUpdated = ""
@@ -147,6 +152,19 @@ func markVPNSourceUpdated(source *VPNSource, nodes []ProxyConfig, err error) {
 		source.LastError = err.Error()
 		return
 	}
+	// Migrate old fingerprints (which included display labels) using the saved
+	// key before replacing the cache. Manual selection must survive refreshed
+	// country/latency labels and provider reordering.
+	if source.SelectedNodeID != "" {
+		for index, id := range source.NodeIDs {
+			if id == source.SelectedNodeID && index < len(source.CachedNodes) {
+				if node, parseErr := (&SubscriptionFetcher{}).ParseSingleLink(source.CachedNodes[index]); parseErr == nil {
+					source.SelectedNodeID = vpnNodeFingerprint(node)
+				}
+				break
+			}
+		}
+	}
 	source.NodeCount = len(nodes)
 	source.NodeNames = make([]string, 0, len(nodes))
 	source.NodeIDs = make([]string, 0, len(nodes))
@@ -180,13 +198,38 @@ func markVPNSourceUpdated(source *VPNSource, nodes []ProxyConfig, err error) {
 	}
 	source.LastUpdated = time.Now().Format("2006-01-02 15:04:05")
 	source.LastError = ""
+	source.UsingCache = false
+}
+
+// Xray-backed nodes are constructed separately from native sing-box nodes.
+// Restore source order afterwards so bootstrap cannot prefer a public native
+// node over a personal XHTTP subscription while health checks are pending.
+func orderVPNSourceProxies(proxies []ProxyConfig, sources []VPNSource) {
+	positions := make(map[string]int, len(sources))
+	for index, source := range sources {
+		positions["vpn-source-"+source.ID] = index
+	}
+	position := func(tag string) int {
+		if index, ok := positions[tag]; ok {
+			return index
+		}
+		return len(sources)
+	}
+	sort.SliceStable(proxies, func(i, j int) bool {
+		return position(proxies[i].Tag) < position(proxies[j].Tag)
+	})
 }
 
 func vpnNodeFingerprint(node ProxyConfig) string {
-	identity := strings.TrimSpace(node.Raw)
-	if identity == "" {
-		identity = fmt.Sprintf("%s|%s|%d|%s", node.Type, strings.ToLower(strings.TrimSpace(node.Server)), node.ServerPort, strings.TrimSpace(node.Name))
+	if node.Raw != "" {
+		if parsed, err := (&SubscriptionFetcher{}).ParseSingleLink(node.Raw); err == nil {
+			node = parsed
+		}
 	}
-	digest := sha256.Sum256([]byte(identity))
+	node.Raw, node.Name, node.Tag = "", "", ""
+	node.Server = strings.ToLower(strings.TrimSpace(node.Server))
+	node.Network = NormalizeTransport(node.Network)
+	identity, _ := json.Marshal(node)
+	digest := sha256.Sum256(identity)
 	return fmt.Sprintf("%x", digest[:12])
 }

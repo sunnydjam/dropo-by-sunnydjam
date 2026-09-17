@@ -15,10 +15,12 @@ func (a *App) GetVPNSources() map[string]interface{} {
 	if err != nil {
 		return map[string]interface{}{"success": false, "error": err.Error()}
 	}
-	return map[string]interface{}{
-		"success": true, "sources": publicVPNSources(profile.VPNSources),
-		"activeSource": a.activeVPNSource(),
+	active := a.activeVPNSource()
+	views := publicVPNSources(profile.VPNSources)
+	for _, view := range views {
+		view["active"] = a.isVPNRunning() && active == "vpn-source-"+view["id"].(string)
 	}
+	return map[string]interface{}{"success": true, "sources": views, "activeSource": active}
 }
 
 func (a *App) AddVPNSource(name, uri string) map[string]interface{} {
@@ -26,6 +28,13 @@ func (a *App) AddVPNSource(name, uri string) map[string]interface{} {
 		source, err := newVPNSource(nextVPNSourceID(profile.VPNSources), name, uri)
 		if err != nil {
 			return err
+		}
+		if provider, public := publicVPNProviderForURI(uri); public {
+			for _, existing := range profile.VPNSources {
+				if known, ok := publicVPNProviderForURI(existing.URI); ok && known.ID == provider.ID {
+					return fmt.Errorf("бесплатный источник уже добавлен")
+				}
+			}
 		}
 		profile.VPNSources = append(profile.VPNSources, source)
 		return nil
@@ -53,11 +62,14 @@ func (a *App) SetVPNSourceNode(id string, nodeIndex int) map[string]interface{} 
 			if source.ID != id {
 				continue
 			}
-			if nodeIndex < 0 || (source.NodeCount > 0 && nodeIndex >= source.NodeCount) {
+			if nodeIndex < 0 || nodeIndex >= source.NodeCount {
 				return fmt.Errorf("node index %d is outside source range", nodeIndex)
 			}
 			source.SelectedNode = nodeIndex
 			source.SelectedNodeID = ""
+			if nodeIndex < len(source.NodeIDs) {
+				source.SelectedNodeID = source.NodeIDs[nodeIndex]
+			}
 			return nil
 		}
 		return fmt.Errorf("VPN source %q not found", id)
@@ -92,6 +104,11 @@ func (a *App) MoveVPNSource(id string, newIndex int) map[string]interface{} {
 		}
 		if oldIndex < 0 {
 			return fmt.Errorf("VPN source %q not found", id)
+		}
+		_, movingPublic := publicVPNProviderForURI(profile.VPNSources[oldIndex].URI)
+		_, targetPublic := publicVPNProviderForURI(profile.VPNSources[newIndex].URI)
+		if movingPublic != targetPublic {
+			return fmt.Errorf("бесплатный источник используется только после ваших подписок")
 		}
 		source := profile.VPNSources[oldIndex]
 		profile.VPNSources = append(profile.VPNSources[:oldIndex], profile.VPNSources[oldIndex+1:]...)
@@ -154,6 +171,7 @@ func publicVPNSources(sources []VPNSource) []map[string]interface{} {
 	for _, source := range sources {
 		result = append(result, map[string]interface{}{
 			"id": source.ID, "name": source.Name, "kind": source.Kind,
+			"public_catalog_id": source.PublicCatalogID, "using_cache": source.UsingCache,
 			"disabled": source.Disabled, "selected_node": source.SelectedNode,
 			"selected_node_id": source.SelectedNodeID, "node_count": source.NodeCount,
 			"node_names":   append([]string(nil), source.NodeNames...),
