@@ -82,6 +82,8 @@ function Invoke-WindowsInstallSmoke {
     )
     foreach ($pass in 1..2) {
         $passArgs = @($setupArgs)
+        $setupLog = Join-Path $GateRoot "installer-pass-$pass.log"
+        $passArgs += "/LOG=$setupLog"
         if ($pass -eq 1) {
             $passArgs += "/TASKS=autostart,backgroundcore"
         } else {
@@ -110,12 +112,19 @@ function Invoke-WindowsInstallSmoke {
         }
     }
 
-    $expectedUI = [IO.Path]::GetFullPath((Join-Path $installRoot "resources\dropo-ui.exe"))
+    # GetFullPath/Resolve-Path do not expand 8.3 aliases (RUNNER~1). The
+    # process image path can use the long name even when /DIR used the alias.
+    $expectedUI = (Get-Item -LiteralPath (Join-Path $installRoot "resources\dropo-ui.exe")).FullName
+    Write-Host "[GATE] Waiting for updated UI: $expectedUI"
     $deadline = (Get-Date).AddSeconds(45)
     $visibleUI = $null
     do {
         $uiProcesses = @(Get-Process -Name "dropo-ui" -ErrorAction SilentlyContinue |
-            Where-Object { $_.Path -and [string]::Equals($_.Path, $expectedUI, [StringComparison]::OrdinalIgnoreCase) })
+            Where-Object {
+                $_.Path -and [string]::Equals(
+                    (Get-Item -LiteralPath $_.Path -ErrorAction SilentlyContinue).FullName,
+                    $expectedUI, [StringComparison]::OrdinalIgnoreCase)
+            })
         if ($uiProcesses.Count -gt 1) { throw "Silent update opened duplicate UI processes." }
         if ($uiProcesses.Count -eq 1) {
             $uiProcesses[0].Refresh()
@@ -126,7 +135,13 @@ function Invoke-WindowsInstallSmoke {
         }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
-    if (-not $visibleUI) { throw "Silent update did not reopen the installed UI window within 45 seconds." }
+    if (-not $visibleUI) {
+        Get-Process -Name "dropo", "dropo-ui", "dropo-core" -ErrorAction SilentlyContinue |
+            Select-Object Id, Path, SessionId, MainWindowHandle, MainWindowTitle |
+            Format-List | Out-String | Write-Host
+        Get-Content -LiteralPath $setupLog -Tail 60 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        throw "Silent update did not reopen the installed UI window within 45 seconds."
+    }
     Write-Host "[GATE] Silent update reopened one visible installed UI (PID $($visibleUI.Id))." -ForegroundColor Green
 
     $runCommand = (Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "dropo" -ErrorAction SilentlyContinue).dropo
@@ -186,6 +201,7 @@ if ($RequireDefender -and (-not $status -or -not $status.AntivirusEnabled)) {
 
 $gateRoot = Join-Path $env:TEMP ("dropo-release-gate-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $gateRoot | Out-Null
+$gateRoot = (Get-Item -LiteralPath $gateRoot).FullName
 try {
     $installerCopy = Join-Path $gateRoot (Split-Path -Leaf $installer)
     $portableCopy = Join-Path $gateRoot (Split-Path -Leaf $portable)
