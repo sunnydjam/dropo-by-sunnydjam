@@ -6,9 +6,11 @@ import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 part 'vpn_sources.dart';
 part 'home_dashboard.dart';
+part 'atlas_dashboard.dart';
 part 'service_routes.dart';
 
 const String _coreEndpoint = String.fromEnvironment(
@@ -3558,7 +3560,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool startupUpdateCheckScheduled = false;
   bool compatibilityNoticeShowing = false;
   double? updateProgressPercent;
-  bool homeRoutesExpanded = false;
+  bool homeRoutesExpanded = !_isMobileShell;
 
   bool get connectionBusy {
     return busyTasks.keys.any(isConnectionBlockingBusyTask) ||
@@ -5632,6 +5634,97 @@ class _DropoHomePageState extends State<DropoHomePage>
             !online ||
             externalVpnConflictBlocked ||
             depsProgress.trim().isNotEmpty);
+    if (!_isMobileShell) {
+      return _AtlasHomeLayout(
+        connection: _HomeConnectionPanel(
+          atlas: true,
+          status: status,
+          online: online,
+          booting: booting,
+          busy: isBusy,
+          disconnecting: busyTasks.containsKey('vpn-disconnect'),
+          routingMode: appConfig.routingMode,
+          enabled: powerEnabled,
+          onPressed: _toggleConnection,
+        ),
+        source: _HomeSourcePanel(
+          atlas: true,
+          sources: homeSources,
+          loaded: homeSourcesLoaded,
+          failed: homeSourcesFailed,
+          connected:
+              online && status.connected && !connectionBusy && !status.hasError,
+          online: online,
+          hasSubscription: subscription.hasSubscription,
+          onManage: controlsDisabled ? null : _openSubscription,
+        ),
+        notices: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _ConnectionHint(
+              visible: showHint,
+              title: _hintTitle(),
+              message: normalizedHint,
+              danger: hintDanger,
+            ),
+            _RouteProbePanel(
+              visible: routeProbeActive || routeProbeFailed,
+              active: routeProbeActive,
+              failed: routeProbeFailed,
+              expectedCount: routeProbeExpectedCount,
+              items: routeProbeProgress.values.toList(growable: false),
+            ),
+            if (hintDanger && !booting && !online && !quitting)
+              TextButton.icon(
+                key: const ValueKey('home-retry-core'),
+                onPressed: () => unawaited(_bootstrap()),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Повторить подключение к ядру'),
+              ),
+            if (updateInfo?.hasUpdate == true)
+              _UpdateStrip(
+                info: updateInfo!,
+                progressPercent: updateProgressPercent,
+                onUpdate: controlsDisabled || uiBusy
+                    ? null
+                    : () => unawaited(_performUpdate(updateInfo!)),
+              ),
+            if (!booting &&
+                status.dependencies.managed &&
+                !status.dependencies.bundled &&
+                (!status.dependencies.ready || status.dependencies.degraded))
+              _DependencyStrip(
+                status: status.dependencies,
+                onDownload: controlsDisabled ? null : _downloadDependencies,
+              ),
+          ],
+        ),
+        routes: _HomeRouteControls(
+          atlas: true,
+          services: routes
+              .where(
+                (route) =>
+                    route.homeVisible || isPrimaryHomeRouteService(route.tag),
+              )
+              .toList(growable: false),
+          enabled: !controlsDisabled,
+          expanded: homeRoutesExpanded,
+          routingMode: appConfig.routingMode,
+          hasSubscription: subscription.hasSubscription,
+          connected: online && status.connected,
+          onExpandedChanged: (expanded) =>
+              setState(() => homeRoutesExpanded = expanded),
+          onRoutingModeChanged: _setHomeRoutingMode,
+          onPolicyChanged: _setHomeRoutePolicy,
+          onZapretStrategyChanged: _setHomeZapretStrategy,
+          onAdd: controlsDisabled ? null : _openAddHomeRouteService,
+          onRemove: _setHomeRouteVisibility,
+          onAllServices: quitting || sectionBusy
+              ? null
+              : () => unawaited(_selectMenuSection('services')),
+        ),
+      );
+    }
     return Column(
       key: const ValueKey('home'),
       mainAxisSize: MainAxisSize.min,
@@ -5862,6 +5955,31 @@ class _DropoHomePageState extends State<DropoHomePage>
     final strategyBannerMessage = strategyTransitionNotice.trim().isNotEmpty
         ? strategyTransitionNotice.trim()
         : '';
+    if (!useMobileNavigation) {
+      return _AtlasDesktopShell(
+        activeSection: activeMenuSection,
+        disabled: quitting || sectionBusy,
+        onSelect: (section) => unawaited(_selectMenuSection(section)),
+        onWorkNetworks: controlsDisabled ? null : _openWireGuard,
+        onExit: quitting ? null : _quitApp,
+        version: status.version.fullVersion,
+        notice: strategyBannerMessage.isEmpty || !windowVisible
+            ? null
+            : _StrategySearchBanner(
+                message: strategyBannerMessage,
+                transitionNotice: true,
+              ),
+        overlay: quitting
+            ? _QuitProgressOverlay(message: quitProgressMessage)
+            : null,
+        child: activeMenuSection == 'home'
+            ? SingleChildScrollView(
+                key: const ValueKey('home-scroll'),
+                child: _buildHomeDashboard(isBusy, hintMessage),
+              )
+            : _buildMenuSection(),
+      );
+    }
     return Scaffold(
       body: Stack(
         children: [
@@ -7816,7 +7934,7 @@ class _AppDialog extends StatelessWidget {
   }
 }
 
-class _LogsDialog extends StatelessWidget {
+class _LogsDialog extends StatefulWidget {
   const _LogsDialog({
     super.key,
     required this.logs,
@@ -7831,7 +7949,24 @@ class _LogsDialog extends StatelessWidget {
   final bool embedded;
 
   @override
+  State<_LogsDialog> createState() => _LogsDialogState();
+}
+
+class _LogsDialogState extends State<_LogsDialog> {
+  final scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final logs = widget.logs;
+    final onOpenFolder = widget.onOpenFolder;
+    final onCopyDiagnostics = widget.onCopyDiagnostics;
+    final embedded = widget.embedded;
     final isMobile = _isMobileShell;
     final viewportHeight = MediaQuery.sizeOf(context).height;
     final logHeight = isMobile
@@ -7875,7 +8010,7 @@ class _LogsDialog extends StatelessWidget {
               icon: Icons.bug_report,
               compact: true,
               onPressed: () async {
-                final diagnostics = await onCopyDiagnostics!();
+                final diagnostics = await onCopyDiagnostics();
                 await Clipboard.setData(ClipboardData(text: diagnostics));
                 if (context.mounted) {
                   ScaffoldMessenger.maybeOf(context)?.showSnackBar(
@@ -7897,7 +8032,9 @@ class _LogsDialog extends StatelessWidget {
           ),
           child: Scrollbar(
             thumbVisibility: !isMobile,
+            controller: scrollController,
             child: SingleChildScrollView(
+              controller: scrollController,
               primary: false,
               child: SelectionArea(
                 child: SelectableText(
@@ -10411,19 +10548,28 @@ class _SettingsDialogState extends State<_SettingsDialog> {
         _SettingsGroup(
           title: 'Внешний вид',
           children: [
-            _SelectSetting(
-              title: 'Тема',
-              description: 'Оформление приложения',
-              value: config.theme,
-              options: const {
-                'dark': 'Тёмная',
-                'light': 'Светлая',
-                'system': 'Системная',
-              },
-              onChanged: canUseLiveSafe
-                  ? (value) => _saveGeneral(config.copyWith(theme: value))
-                  : null,
-            ),
+            if (!_isMobileShell)
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text('Atlas'),
+                subtitle: Text(
+                  'Тёмное зелёное оформление Windows. Размер текста задаётся в настройках экрана Windows.',
+                ),
+              ),
+            if (_isMobileShell)
+              _SelectSetting(
+                title: 'Тема',
+                description: 'Оформление приложения',
+                value: config.theme,
+                options: const {
+                  'dark': 'Тёмная',
+                  'light': 'Светлая',
+                  'system': 'Системная',
+                },
+                onChanged: canUseLiveSafe
+                    ? (value) => _saveGeneral(config.copyWith(theme: value))
+                    : null,
+              ),
           ],
         ),
         _SettingsGroup(

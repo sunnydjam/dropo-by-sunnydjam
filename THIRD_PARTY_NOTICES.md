@@ -6,6 +6,14 @@
 
 ## Компоненты Windows release
 
+Интерфейс Atlas использует четыре SVG-знака (YouTube, Discord, Instagram,
+OpenAI) из [Simple Icons 14.0.0](https://github.com/simple-icons/simple-icons/tree/14.0.0),
+CC0-1.0. Текст лицензии поставляется в Flutter assets как
+`Simple-Icons-LICENSE.txt`. Товарные знаки принадлежат своим владельцам;
+их использование обозначает сервисы, а не партнёрство или одобрение Dropo.
+Рендерер [flutter_svg](https://pub.dev/packages/flutter_svg) — MIT;
+лицензии Dart/Flutter-зависимостей входят в стандартный Flutter license bundle.
+
 | Компонент | Назначение | Лицензия / источник |
 | --- | --- | --- |
 | WinDivert 2.2.2 | Перехват и reinjection пакетов в собственном Windows engine | [Официальный сайт и документация](https://reqrypt.org/windivert.html), LGPL-3.0-only / GPL-2.0-only; текст лицензии включается в `licenses/WinDivert-LICENSE.txt` |

@@ -84,8 +84,12 @@ function Invoke-WindowsInstallSmoke {
         $passArgs = @($setupArgs)
         if ($pass -eq 1) {
             $passArgs += "/TASKS=autostart,backgroundcore"
+        } else {
+            # Exercise the actual installed updater, including clients released
+            # before the relaunch fix. A plain silent reinstall is not this path.
+            $passArgs += @("--from-update", "/CLOSEAPPLICATIONS")
         }
-        $process = Start-Process -FilePath $SetupPath -ArgumentList $passArgs -Wait -PassThru
+        $process = Start-Process -FilePath $SetupPath -ArgumentList $passArgs -WindowStyle Hidden -Wait -PassThru
         if ($process.ExitCode -ne 0) {
             throw "Installer smoke pass $pass failed with exit code $($process.ExitCode)."
         }
@@ -100,6 +104,25 @@ function Invoke-WindowsInstallSmoke {
             }
         }
     }
+
+    $expectedUI = [IO.Path]::GetFullPath((Join-Path $installRoot "resources\dropo-ui.exe"))
+    $deadline = (Get-Date).AddSeconds(45)
+    $visibleUI = $null
+    do {
+        $uiProcesses = @(Get-Process -Name "dropo-ui" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -and [string]::Equals($_.Path, $expectedUI, [StringComparison]::OrdinalIgnoreCase) })
+        if ($uiProcesses.Count -gt 1) { throw "Silent update opened duplicate UI processes." }
+        if ($uiProcesses.Count -eq 1) {
+            $uiProcesses[0].Refresh()
+            if ($uiProcesses[0].MainWindowHandle -ne [IntPtr]::Zero) {
+                $visibleUI = $uiProcesses[0]
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if (-not $visibleUI) { throw "Silent update did not reopen the installed UI window within 45 seconds." }
+    Write-Host "[GATE] Silent update reopened one visible installed UI (PID $($visibleUI.Id))." -ForegroundColor Green
 
     $runCommand = (Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "dropo" -ErrorAction SilentlyContinue).dropo
     if ([string]::IsNullOrWhiteSpace([string]$runCommand) -or $runCommand -notlike "*$installRoot*") {
@@ -125,7 +148,7 @@ function Invoke-WindowsInstallSmoke {
     if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
         throw "Installer did not create an uninstaller."
     }
-    $process = Start-Process -FilePath $uninstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
+    $process = Start-Process -FilePath $uninstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -WindowStyle Hidden -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         throw "Uninstaller smoke failed with exit code $($process.ExitCode)."
     }

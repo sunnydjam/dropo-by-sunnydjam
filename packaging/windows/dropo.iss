@@ -42,7 +42,9 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=force
 CloseApplicationsFilter=dropo.exe,dropo-ui.exe,dropo-core.exe
-RestartApplications=yes
+; The installer owns the single post-update launch. Restart Manager must not
+; race it by restarting old UI/core commands independently.
+RestartApplications=no
 SetupLogging=yes
 UsePreviousTasks=yes
 VersionInfoVersion={#AppVersion}.0
@@ -71,7 +73,9 @@ Name: "{autodesktop}\dropo"; Filename: "{app}\dropo.exe"; WorkingDir: "{app}"; T
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""dropo-background-core"" /F"; Flags: runhidden waituntilterminated logoutput 64bit; Check: IsWin64
 Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""dropo-background-core"" /SC ONLOGON /RL HIGHEST /TR ""\""{app}\resources\dropo-core.exe\"" --listen 127.0.0.1:17890 --no-tray"""; Flags: runhidden waituntilterminated logoutput 64bit; Check: ShouldCreateBackgroundTask
 Filename: "{app}\dropo.exe"; Description: "Запустить dropo"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: not IsFromUpdate
-Filename: "{sys}\explorer.exe"; Parameters: """{app}\dropo.exe"""; WorkingDir: "{app}"; Flags: nowait; Check: IsFromUpdate
+; Updater hand-off also works for older installed clients using --from-update.
+; Do not add postinstall/skipifsilent: automatic updates have no finish page.
+Filename: "{app}\dropo.exe"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: IsFromUpdate
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM dropo-ui.exe"; Flags: runhidden waituntilterminated; RunOnceId: "StopDropoUI"

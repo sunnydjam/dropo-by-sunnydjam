@@ -271,6 +271,20 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Atlas retains advanced navigation in Settings', (tester) async {
+    await _pumpHome(tester, _HomeBridge());
+    await tester.tap(find.byIcon(Icons.settings));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Профили'), findsOneWidget);
+    expect(find.byKey(const ValueKey('home-work-networks')), findsOneWidget);
+    expect(find.text('Статистика'), findsOneWidget);
+    expect(find.text('Выход'), findsOneWidget);
+    expect(find.text('Atlas'), findsOneWidget);
+    await _tap(tester, 'nav-home');
+    expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   for (final mobile in [false, true]) {
     for (final scale in [1.0, 1.5, 2.0]) {
       testWidgets(
@@ -286,6 +300,7 @@ void main() {
           );
           expect(tester.takeException(), isNull);
           await _tap(tester, 'toggle-home-route-services');
+          if (!mobile) await _tap(tester, 'toggle-home-route-services');
           expect(tester.takeException(), isNull);
           await _tap(tester, 'add-home-route-service');
           expect(find.text('Добавить сервис на главную'), findsOneWidget);
@@ -299,13 +314,40 @@ void main() {
     tester,
   ) async {
     if (!const bool.fromEnvironment('DROPO_UI_CAPTURE')) return;
-    for (final state in ['connected', 'disconnected', 'error', 'public']) {
+    for (final state in [
+      'connected',
+      'disconnected',
+      'error',
+      'public',
+      'compact',
+      'large-text',
+      'all-vpn',
+      'zapret',
+    ]) {
       final bridge = _HomeBridge()
         ..connected = state != 'disconnected' && state != 'error'
         ..error = state == 'error'
         ..activeSource = state == 'public' ? 'public' : 'personal';
+      if (state == 'all-vpn') await bridge.setRoutingMode('all_traffic');
+      if (state == 'zapret') {
+        await bridge.setFreeAccessServiceMethod('youtube', 'zapret');
+      }
       final key = GlobalKey();
-      await _pumpHome(tester, bridge, capture: key);
+      await _pumpHome(
+        tester,
+        bridge,
+        capture: key,
+        size: state == 'compact' || state == 'large-text'
+            ? const Size(960, 640)
+            : const Size(1484, 1016),
+        scale: state == 'large-text' ? 2 : 1,
+      );
+      await tester.runAsync(() async {
+        await precacheImage(
+          const AssetImage('assets/atlas-earth.png'),
+          key.currentContext!,
+        );
+      });
       await tester.pump(const Duration(milliseconds: 500));
       expect(tester.takeException(), isNull);
       await tester.runAsync(() async {

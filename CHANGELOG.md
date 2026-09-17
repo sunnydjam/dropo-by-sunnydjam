@@ -2,6 +2,30 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.29 — 2026-09-17
+
+### Atlas desktop interface
+
+- forest-green desktop theme with a decorative globe, one connection button,
+  horizontal navigation, and a collapsible favourites list;
+- modes and per-service dropdowns remain on Home; advanced strategy details,
+  profiles, work networks and diagnostics remain available;
+- responsive layouts keep the connection action visible in compact windows;
+  source priority is distinct from confirmed active-source state;
+- rejected route writes restore the last confirmed policy, and full-VPN mode
+  clearly marks service policies as saved for selective mode;
+- fixed the diagnostics scrollbar; routing and packet-engine logic unchanged.
+
+### Reopen after installed updates
+
+- silent updates directly launch the newly installed app instead of passing
+  the executable to Explorer; no Finish-page action is required;
+- disabled competing Restart Manager relaunch; the installer owns one launch;
+- added installer-contract tests and a clean-Windows smoke check requiring one
+  visible UI after the same `--from-update` hand-off used by older clients;
+- saved settings and autostart choices are preserved. Portable remains a manual
+  archive update; reopening the window does not force a VPN connection.
+
 ## 3.0.28 — 2026-09-17
 
 ### Interface and navigation

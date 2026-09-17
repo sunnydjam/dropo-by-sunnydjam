@@ -49,23 +49,17 @@ void main() {
       await tester.pumpWidget(const DropoApp());
       await tester.pump();
 
-      expect(find.text('Dr'), findsOneWidget);
-      expect(find.text('opo'), findsOneWidget);
-      expect(find.byIcon(Icons.menu), findsOneWidget);
-      expect(find.byIcon(Icons.public), findsOneWidget);
+      expect(find.text('Dropo'), findsOneWidget);
+      expect(find.text('by sunnydjam'), findsOneWidget);
+      expect(find.byIcon(Icons.menu), findsNothing);
+      expect(find.byKey(const ValueKey('atlas-planet')), findsOneWidget);
       expect(find.byIcon(Icons.settings), findsOneWidget);
-
-      await tester.tap(find.byIcon(Icons.menu));
-      await tester.pump(const Duration(milliseconds: 240));
-
-      expect(find.text('Подключение'), findsOneWidget);
-      expect(find.text('Профили'), findsWidgets);
+      expect(find.text('Главная'), findsOneWidget);
+      expect(find.text('Сервисы'), findsOneWidget);
+      expect(find.text('Источники VPN'), findsOneWidget);
+      expect(find.text('Диагностика'), findsOneWidget);
       expect(find.text('Настройки'), findsOneWidget);
-      expect(find.text('Статистика'), findsOneWidget);
-      expect(find.text('Логи'), findsOneWidget);
       expect(find.text('О приложении'), findsOneWidget);
-      expect(find.text('Выход'), findsOneWidget);
-      expect(find.text('vdev'), findsOneWidget);
       expect(find.textContaining('Компоненты готовы:'), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsWidgets);
     },
@@ -127,38 +121,38 @@ void main() {
       find.byKey(const ValueKey<String>('home-routing-all-vpn')),
       findsOneWidget,
     );
-    expect(
-      find.byKey(const ValueKey<String>('home-route-youtube-direct')),
-      findsNothing,
-    );
-
-    await tester.tap(
-      find.byKey(const ValueKey<String>('toggle-home-route-services')),
-    );
-    await tester.pump(const Duration(milliseconds: 300));
     for (final tag in const ['youtube', 'discord', 'meta', 'openai']) {
       expect(
-        find.byKey(ValueKey<String>('home-route-$tag-direct')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is DropdownButton<String> &&
+              widget.key.toString().contains('home-route-policy-$tag-'),
+        ),
         findsOneWidget,
-      );
-      expect(
-        find.byKey(ValueKey<String>('home-route-$tag-auto')),
-        findsNothing,
       );
     }
 
-    await tester.tap(
-      find.byKey(const ValueKey<String>('add-home-route-service')),
+    final addService = find.byKey(
+      const ValueKey<String>('add-home-route-service'),
     );
+    await tester.ensureVisible(addService);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(addService);
     await tester.pump(const Duration(milliseconds: 500));
     final addGoogle = find.byKey(
       const ValueKey<String>('add-home-route-google'),
     );
-    tester.widget<ListTile>(addGoogle).onTap!();
+    await tester.ensureVisible(addGoogle);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(addGoogle);
     await tester.pump(const Duration(milliseconds: 800));
 
     expect(
-      find.byKey(const ValueKey<String>('home-route-google-direct')),
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is DropdownButton<String> &&
+            widget.key.toString().contains('home-route-policy-google-'),
+      ),
       findsOneWidget,
     );
     final remove = find.byKey(
@@ -170,7 +164,11 @@ void main() {
     await tester.tap(remove);
     await tester.pump(const Duration(milliseconds: 800));
     expect(
-      find.byKey(const ValueKey<String>('home-route-google-direct')),
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is DropdownButton<String> &&
+            widget.key.toString().contains('home-route-policy-google-'),
+      ),
       findsNothing,
     );
     final disclosure = find.byKey(
@@ -212,7 +210,15 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect((await bridge.routingMode())['mode'], 'all_traffic');
-    expect(find.text('Выбран режим: Всё через VPN'), findsOneWidget);
+    expect(
+      find.text('Политики ниже сохранены для режима «По сервисам».'),
+      findsOneWidget,
+    );
+    for (final field in tester.widgetList<DropdownButton<String>>(
+      find.byType(DropdownButton<String>),
+    )) {
+      expect(field.onChanged, isNull);
+    }
     expect(find.text('Весь трафик идёт через VPN'), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -235,11 +241,11 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
     await tester.tap(
-      find.byKey(const ValueKey<String>('toggle-home-route-services')),
+      find.byKey(const ValueKey('home-route-policy-discord-direct')),
     );
-    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(
-      find.byKey(const ValueKey<String>('home-route-discord-zapret')),
+      find.byKey(const ValueKey<String>('home-route-discord-zapret')).last,
     );
     await tester.pump(const Duration(milliseconds: 800));
 
@@ -286,6 +292,56 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+    'Atlas route selection persists once and rolls back a failed write',
+    (tester) async {
+      tester.view.physicalSize = const Size(1120, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _RoutePolicyRecordingBridge();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: DropoHomePage(bridge: bridge),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      Future<void> choose(String current, String next) async {
+        final field = find.byKey(
+          ValueKey('home-route-policy-discord-$current'),
+        );
+        await tester.ensureVisible(field);
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(field);
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.tap(find.byKey(ValueKey('home-route-discord-$next')).last);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 600));
+      }
+
+      await choose('direct', 'vpn');
+      expect(bridge.currentMethod, 'vpn');
+      expect(bridge.policyWrites, 1);
+      bridge.failPolicy = true;
+      await choose('vpn', 'direct');
+      expect(bridge.policyWrites, 2);
+      expect(bridge.currentMethod, 'vpn');
+      expect(
+        tester
+            .widget<DropdownButton<String>>(
+              find.byKey(const ValueKey('home-route-policy-discord-vpn')),
+            )
+            .value,
+        'vpn',
+      );
+      expect(find.textContaining('Тест: маршрут не сохранён'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('home reports when the complete Zapret catalog has failed', (
     tester,
   ) async {
@@ -303,10 +359,6 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
-    await tester.tap(
-      find.byKey(const ValueKey<String>('toggle-home-route-services')),
-    );
-    await tester.pump(const Duration(milliseconds: 300));
     final details = find.byKey(const ValueKey('home-route-details-discord'));
     await tester.ensureVisible(details);
     await tester.pump(const Duration(milliseconds: 200));
@@ -377,7 +429,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        tester.widget<Text>(find.text('Сервисы')).style?.color,
+        tester.widget<Text>(find.text('Сервисы').last).style?.color,
         const Color(0xFFE8F3EF),
       );
       expect(
@@ -400,6 +452,7 @@ void main() {
         isNotNull,
       );
       await tester.ensureVisible(zapretButton);
+      await tester.pump(const Duration(milliseconds: 300));
       await tester.tap(zapretButton);
       await tester.pump(const Duration(milliseconds: 800));
       expect(bridge.lastMethod, 'zapret');
@@ -1164,6 +1217,8 @@ class _RoutePolicyRecordingBridge extends MockCoreBridge {
   final bool strategyNotFound;
   String lastTag = '';
   String lastMethod = '';
+  bool failPolicy = false;
+  int policyWrites = 0;
   String currentMethod = 'direct';
   String strategyMode = 'auto';
   String selectedStrategy = '';
@@ -1209,6 +1264,10 @@ class _RoutePolicyRecordingBridge extends MockCoreBridge {
   ) async {
     lastTag = tag;
     lastMethod = method;
+    policyWrites++;
+    if (failPolicy) {
+      return {'success': false, 'error': 'Тест: маршрут не сохранён'};
+    }
     currentMethod = method;
     return {
       'success': true,

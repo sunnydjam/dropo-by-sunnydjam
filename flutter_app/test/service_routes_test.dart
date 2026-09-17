@@ -150,6 +150,7 @@ Future<void> _tap(WidgetTester tester, String key) async {
 }
 
 Future<void> _search(WidgetTester tester, String query) async {
+  await _tap(tester, 'service-search');
   await tester.enterText(find.byKey(const ValueKey('service-search')), query);
   await tester.pumpAndSettle();
 }
@@ -281,7 +282,7 @@ void main() {
       tester.widget<VpnSourcesDialog>(find.byType(VpnSourcesDialog)).embedded,
       true,
     );
-    await tester.tap(find.byIcon(Icons.public).first);
+    await _tap(tester, 'nav-home');
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
     expect(bridge.policies['discord'], 'vpn');
@@ -350,8 +351,6 @@ void main() {
             await tester.tap(find.text('Сервисы'));
             await tester.pumpAndSettle();
           } else {
-            await tester.tap(find.byIcon(Icons.menu));
-            await tester.pumpAndSettle();
             await _tap(tester, 'nav-services');
           }
           await _search(tester, 'discord');
@@ -384,8 +383,6 @@ void main() {
       ),
       size: const Size(1120, 800),
     );
-    await tester.tap(find.byIcon(Icons.menu));
-    await tester.pumpAndSettle();
     for (final section in ['services', 'sources']) {
       await _tap(tester, 'nav-$section');
       await tester.pumpAndSettle();

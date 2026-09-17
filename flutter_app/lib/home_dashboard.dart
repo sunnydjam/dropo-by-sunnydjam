@@ -99,12 +99,14 @@ class _HomeConnectionPanel extends StatelessWidget {
     required this.enabled,
     required this.onPressed,
     this.onDisabledPressed,
+    this.atlas = false,
   });
   final CoreStatus status;
   final bool online, booting, busy, disconnecting, enabled;
   final String routingMode;
   final VoidCallback onPressed;
   final VoidCallback? onDisabledPressed;
+  final bool atlas;
 
   @override
   Widget build(BuildContext context) {
@@ -139,6 +141,18 @@ class _HomeConnectionPanel extends StatelessWidget {
         ? 'Подключение активно. Доступность сервисов проверяется отдельно.'
         : 'Выберите режим и нажмите «Подключить».';
     final mode = routingMode == 'all_traffic' ? 'Всё через VPN' : 'По сервисам';
+    if (atlas) {
+      return _AtlasConnectionPanel(
+        title: title,
+        accent: accent,
+        connected: connected,
+        sessionActive: status.connected,
+        busy: busy,
+        stopping: stopping,
+        enabled: enabled,
+        onPressed: onPressed,
+      );
+    }
     return _HomePanel(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -242,10 +256,12 @@ class _HomeSourcePanel extends StatelessWidget {
     required this.online,
     required this.hasSubscription,
     required this.onManage,
+    this.atlas = false,
   });
   final List<VpnSourceInfo> sources;
   final bool loaded, failed, connected, online, hasSubscription;
   final VoidCallback? onManage;
+  final bool atlas;
 
   @override
   Widget build(BuildContext context) {
@@ -292,6 +308,26 @@ class _HomeSourcePanel extends StatelessWidget {
       title = 'Добавьте источник VPN';
       detail =
           'Своя подписка или бесплатный резерв. Обход без VPN настраивается в сервисах.';
+    }
+    if (atlas) {
+      final known = source != null && loaded && online && !failed;
+      final node = known ? source.selectedNode : -1;
+      return _AtlasSourceTile(
+        title: known
+            ? (node >= 0 && node < source.nodeNames.length
+                  ? source.nodeNames[node]
+                  : 'Первый поддерживаемый сервер')
+            : title,
+        detail: known
+            ? '${source.name} · ${active ? 'используется сейчас' : 'первый по приоритету'}'
+            : detail,
+        publicNotice: known && source.isPublic
+            ? (active
+                  ? 'Используется бесплатный резерв'
+                  : 'Бесплатный резерв · после личных подписок')
+            : null,
+        onPressed: onManage,
+      );
     }
     return _HomePanel(
       child: _HomeAdaptiveAction(
@@ -362,6 +398,8 @@ class _HomeRouteControls extends StatelessWidget {
     required this.onZapretStrategyChanged,
     required this.onAdd,
     required this.onRemove,
+    this.atlas = false,
+    this.onAllServices,
   });
 
   final List<RouteService> services;
@@ -377,6 +415,8 @@ class _HomeRouteControls extends StatelessWidget {
   onZapretStrategyChanged;
   final VoidCallback? onAdd;
   final void Function(RouteService service, bool visible) onRemove;
+  final bool atlas;
+  final VoidCallback? onAllServices;
 
   @override
   Widget build(BuildContext context) {
@@ -393,6 +433,7 @@ class _HomeRouteControls extends StatelessWidget {
       return left.name.compareTo(right.name);
     });
 
+    if (atlas) return _AtlasRouteControls(controls: this, services: ordered);
     return Container(
       key: const ValueKey('home-route-controls'),
       width: double.infinity,
