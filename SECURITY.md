@@ -16,6 +16,10 @@ contact channel.
 
 ## Supported versions
 
-Until the first public fork release, only the current `Dzhamuha-develop` branch
-receives security fixes. Test builds are provided without warranty under the
-MIT License and may be unsigned.
+Report issues against the latest stable Windows release or the current
+`Dzhamuha-develop` branch. Fixes are developed on that branch and distributed
+in subsequent releases; historical versions do not have separate maintenance
+branches. Android fork releases have not completed the Windows release gate
+and must be evaluated separately. Builds are provided without warranty under
+the MIT License; current Windows packages lack publicly trusted Authenticode
+signatures. Update hashes are integrity checks, not publisher signatures.

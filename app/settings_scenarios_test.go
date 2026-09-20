@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+func TestWindowsServicePolicyAPIPersistsTheDisplayedChoices(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows desktop UI/API contract")
+	}
+	app := newInitializedSettingsScenarioApp(t)
+	for _, method := range []string{FreeAccessMethodDirect, FreeAccessMethodVPN, FreeAccessMethodZapret} {
+		requireAPISuccess(t, app.SetFreeAccessServiceMethod("youtube", method))
+		if got := FreeAccessServiceMethod(app.storage.GetAppSettings(), "youtube"); got != method {
+			t.Fatalf("UI choice %q persisted as %q", method, got)
+		}
+	}
+	// Auto is migration input, not an offered Windows route. Automatic Zapret
+	// strategy selection is a separate API and must not change the route policy.
+	requireAPISuccess(t, app.SetFreeAccessServiceMethod("youtube", FreeAccessMethodAuto))
+	if got := FreeAccessServiceMethod(app.storage.GetAppSettings(), "youtube"); got != FreeAccessMethodDirect {
+		t.Fatalf("legacy auto persisted as %q, want direct", got)
+	}
+	requireAPISuccess(t, app.SetFreeAccessServiceMethod("youtube", FreeAccessMethodZapret))
+	requireAPISuccess(t, app.SetZapretServiceStrategy("youtube", ZapretStrategyModeAuto, ""))
+	if got := FreeAccessServiceMethod(app.storage.GetAppSettings(), "youtube"); got != FreeAccessMethodZapret {
+		t.Fatalf("strategy auto changed service policy to %q", got)
+	}
+}
+
 func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
 

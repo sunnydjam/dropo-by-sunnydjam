@@ -11,7 +11,10 @@ import 'package:flutter_svg/flutter_svg.dart';
 part 'vpn_sources.dart';
 part 'home_dashboard.dart';
 part 'atlas_dashboard.dart';
+part 'compact_shell.dart';
+part 'planet_animation.dart';
 part 'service_routes.dart';
+part 'minimal_settings.dart';
 
 const String _coreEndpoint = String.fromEnvironment(
   'DROPO_CORE_ENDPOINT',
@@ -154,7 +157,9 @@ class DropoApp extends StatelessWidget {
       builder: (context, themeMode, _) => MaterialApp(
         title: 'dropo',
         debugShowCheckedModeBanner: false,
-        themeMode: themeMode,
+        // Atlas is a dark shell on both platforms. Apply the same brightness
+        // to dialogs and Android system bars, not only the home subtree.
+        themeMode: ThemeMode.dark,
         theme: _dropoTheme(Brightness.light),
         darkTheme: _dropoTheme(Brightness.dark),
         builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
@@ -2836,11 +2841,11 @@ String _homeRouteName(RouteService service) {
 String _normalizedHomeRoutePolicy(RouteService service) {
   switch (service.selectedMethod.trim().toLowerCase()) {
     case 'auto':
-      return 'auto';
+      return _isMobileShell ? 'auto' : 'direct';
     case 'vpn':
       return 'vpn';
     case 'zapret':
-      return service.zapretSupported ? 'zapret' : 'auto';
+      return !_isMobileShell && service.zapretSupported ? 'zapret' : 'direct';
     case 'direct':
       return 'direct';
   }
@@ -3530,7 +3535,6 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool sectionBusy = false;
   bool quitting = false;
   String quitProgressMessage = '';
-  bool sideMenuExpanded = false;
   int lastEventId = 0;
   int refreshFailureCount = 0;
   bool autoStartPromptShown = false;
@@ -3560,7 +3564,8 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool startupUpdateCheckScheduled = false;
   bool compatibilityNoticeShowing = false;
   double? updateProgressPercent;
-  bool homeRoutesExpanded = !_isMobileShell;
+  bool homeRoutesExpanded = true;
+  final List<String> _sectionHistory = [];
 
   bool get connectionBusy {
     return busyTasks.keys.any(isConnectionBlockingBusyTask) ||
@@ -5634,227 +5639,143 @@ class _DropoHomePageState extends State<DropoHomePage>
             !online ||
             externalVpnConflictBlocked ||
             depsProgress.trim().isNotEmpty);
-    if (!_isMobileShell) {
-      return _AtlasHomeLayout(
-        connection: _HomeConnectionPanel(
-          atlas: true,
-          status: status,
-          online: online,
-          booting: booting,
-          busy: isBusy,
-          disconnecting: busyTasks.containsKey('vpn-disconnect'),
-          routingMode: appConfig.routingMode,
-          enabled: powerEnabled,
-          onPressed: _toggleConnection,
-        ),
-        source: _HomeSourcePanel(
-          atlas: true,
-          sources: homeSources,
-          loaded: homeSourcesLoaded,
-          failed: homeSourcesFailed,
-          connected:
-              online && status.connected && !connectionBusy && !status.hasError,
-          online: online,
-          hasSubscription: subscription.hasSubscription,
-          onManage: controlsDisabled ? null : _openSubscription,
-        ),
-        notices: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _ConnectionHint(
-              visible: showHint,
-              title: _hintTitle(),
-              message: normalizedHint,
-              danger: hintDanger,
-            ),
-            _RouteProbePanel(
-              visible: routeProbeActive || routeProbeFailed,
-              active: routeProbeActive,
-              failed: routeProbeFailed,
-              expectedCount: routeProbeExpectedCount,
-              items: routeProbeProgress.values.toList(growable: false),
-            ),
-            if (hintDanger && !booting && !online && !quitting)
-              TextButton.icon(
-                key: const ValueKey('home-retry-core'),
-                onPressed: () => unawaited(_bootstrap()),
-                icon: const Icon(Icons.refresh),
-                label: const Text('Повторить подключение к ядру'),
-              ),
-            if (updateInfo?.hasUpdate == true)
-              _UpdateStrip(
-                info: updateInfo!,
-                progressPercent: updateProgressPercent,
-                onUpdate: controlsDisabled || uiBusy
-                    ? null
-                    : () => unawaited(_performUpdate(updateInfo!)),
-              ),
-            if (!booting &&
-                status.dependencies.managed &&
-                !status.dependencies.bundled &&
-                (!status.dependencies.ready || status.dependencies.degraded))
-              _DependencyStrip(
-                status: status.dependencies,
-                onDownload: controlsDisabled ? null : _downloadDependencies,
-              ),
-          ],
-        ),
-        routes: _HomeRouteControls(
-          atlas: true,
-          services: routes
-              .where(
-                (route) =>
-                    route.homeVisible || isPrimaryHomeRouteService(route.tag),
-              )
-              .toList(growable: false),
-          enabled: !controlsDisabled,
-          expanded: homeRoutesExpanded,
-          routingMode: appConfig.routingMode,
-          hasSubscription: subscription.hasSubscription,
-          connected: online && status.connected,
-          onExpandedChanged: (expanded) =>
-              setState(() => homeRoutesExpanded = expanded),
-          onRoutingModeChanged: _setHomeRoutingMode,
-          onPolicyChanged: _setHomeRoutePolicy,
-          onZapretStrategyChanged: _setHomeZapretStrategy,
-          onAdd: controlsDisabled ? null : _openAddHomeRouteService,
-          onRemove: _setHomeRouteVisibility,
-          onAllServices: quitting || sectionBusy
-              ? null
-              : () => unawaited(_selectMenuSection('services')),
-        ),
-      );
-    }
-    return Column(
-      key: const ValueKey('home'),
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const _HomeBrand(),
-        const SizedBox(height: 24),
-        _HomeConnectionPanel(
-          status: status,
-          online: online,
-          booting: booting,
-          busy: isBusy,
-          disconnecting: busyTasks.containsKey('vpn-disconnect'),
-          routingMode: appConfig.routingMode,
-          enabled: powerEnabled,
-          onPressed: _toggleConnection,
-          onDisabledPressed: disabledPowerAction,
-        ),
-        const SizedBox(height: 8),
-        _ConnectionHint(
-          visible: showHint,
-          title: _hintTitle(),
-          message: normalizedHint,
-          danger: hintDanger,
-        ),
-        const SizedBox(height: 8),
-        _RouteProbePanel(
-          visible: routeProbeActive || routeProbeFailed,
-          active: routeProbeActive,
-          failed: routeProbeFailed,
-          expectedCount: routeProbeExpectedCount,
-          items: routeProbeProgress.values.toList(growable: false),
-        ),
-        const SizedBox(height: 16),
-        _HomeSourcePanel(
-          sources: homeSources,
-          loaded: homeSourcesLoaded,
-          failed: homeSourcesFailed,
-          connected:
-              online && status.connected && !connectionBusy && !status.hasError,
-          online: online,
-          hasSubscription: subscription.hasSubscription,
-          onManage: controlsDisabled ? null : _openSubscription,
-        ),
-        const SizedBox(height: 16),
-        _HomeRouteControls(
-          services: routes
-              .where(
-                (route) =>
-                    route.homeVisible || isPrimaryHomeRouteService(route.tag),
-              )
-              .toList(growable: false),
-          enabled: !controlsDisabled && (!_isMobileShell || !status.connected),
-          expanded: homeRoutesExpanded,
-          routingMode: appConfig.routingMode,
-          hasSubscription: subscription.hasSubscription,
-          connected: online && status.connected,
-          onExpandedChanged: (expanded) =>
-              setState(() => homeRoutesExpanded = expanded),
-          onRoutingModeChanged: _setHomeRoutingMode,
-          onPolicyChanged: _setHomeRoutePolicy,
-          onZapretStrategyChanged: _setHomeZapretStrategy,
-          onAdd: controlsDisabled ? null : _openAddHomeRouteService,
-          onRemove: _setHomeRouteVisibility,
-        ),
-        const SizedBox(height: 12),
-        if (updateInfo?.hasUpdate == true) ...[
-          _UpdateStrip(
-            info: updateInfo!,
-            progressPercent: updateProgressPercent,
-            onUpdate: controlsDisabled || uiBusy
-                ? null
-                : () => unawaited(_performUpdate(updateInfo!)),
+    return _AtlasHomeLayout(
+      connection: _HomeConnectionPanel(
+        atlas: true,
+        status: status,
+        online: online,
+        booting: booting,
+        busy: isBusy,
+        disconnecting: busyTasks.containsKey('vpn-disconnect'),
+        routingMode: appConfig.routingMode,
+        enabled: powerEnabled,
+        onPressed: _toggleConnection,
+        onDisabledPressed: disabledPowerAction,
+      ),
+      source: _HomeSourcePanel(
+        atlas: true,
+        sources: homeSources,
+        loaded: homeSourcesLoaded,
+        failed: homeSourcesFailed,
+        connected:
+            online && status.connected && !connectionBusy && !status.hasError,
+        online: online,
+        hasSubscription: subscription.hasSubscription,
+        onManage: controlsDisabled ? null : _openSubscription,
+      ),
+      notices: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _ConnectionHint(
+            visible: showHint,
+            title: _hintTitle(),
+            message: normalizedHint,
+            danger: hintDanger,
           ),
-          const SizedBox(height: 10),
+          _RouteProbePanel(
+            visible: routeProbeActive || routeProbeFailed,
+            active: routeProbeActive,
+            failed: routeProbeFailed,
+            expectedCount: routeProbeExpectedCount,
+            items: routeProbeProgress.values.toList(growable: false),
+          ),
+          if (hintDanger && !booting && !online && !quitting)
+            TextButton.icon(
+              key: const ValueKey('home-retry-core'),
+              onPressed: () => unawaited(_bootstrap()),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Повторить подключение к ядру'),
+            ),
+          if (updateInfo?.hasUpdate == true)
+            _UpdateStrip(
+              info: updateInfo!,
+              progressPercent: updateProgressPercent,
+              onUpdate: controlsDisabled || uiBusy
+                  ? null
+                  : () => unawaited(_performUpdate(updateInfo!)),
+            ),
+          if (!booting &&
+              status.dependencies.managed &&
+              !status.dependencies.bundled &&
+              (!status.dependencies.ready || status.dependencies.degraded))
+            _DependencyStrip(
+              status: status.dependencies,
+              onDownload: controlsDisabled ? null : _downloadDependencies,
+            ),
         ],
-        if (!booting &&
-            status.dependencies.managed &&
-            !status.dependencies.bundled &&
-            (!status.dependencies.ready || status.dependencies.degraded))
-          _DependencyStrip(
-            status: status.dependencies,
-            onDownload: controlsDisabled ? null : _downloadDependencies,
-          ),
-        const SizedBox(height: 8),
-        Wrap(
-          alignment: WrapAlignment.center,
-          spacing: 12,
-          runSpacing: 8,
-          children: [
-            TextButton.icon(
-              key: const ValueKey('home-all-services'),
-              onPressed: quitting || sectionBusy
-                  ? null
-                  : () => unawaited(_selectMenuSection('services')),
-              icon: const Icon(Icons.apps_outlined, size: 18),
-              label: const Text('Все сервисы'),
-            ),
-            TextButton.icon(
-              key: const ValueKey('home-diagnostics'),
-              onPressed: quitting
-                  ? null
-                  : () => unawaited(_selectMenuSection('logs')),
-              icon: const Icon(Icons.description_outlined, size: 18),
-              label: const Text('Диагностика подключения'),
-            ),
-            TextButton.icon(
-              key: const ValueKey('home-work-networks'),
-              onPressed: controlsDisabled ? null : _openWireGuard,
-              icon: const Icon(Icons.hub_outlined, size: 18),
-              label: Text(
-                wireGuards.isEmpty
-                    ? 'Рабочие сети'
-                    : 'Рабочие сети: ${wireGuards.length}',
-              ),
-            ),
-          ],
-        ),
-        if (hintDanger && !booting && !online && !quitting)
-          TextButton.icon(
-            key: const ValueKey('home-retry-core'),
-            onPressed: () => unawaited(_bootstrap()),
-            icon: const Icon(Icons.refresh),
-            label: const Text('Повторить подключение к ядру'),
-          ),
-      ],
+      ),
+      routes: _buildRouteControls(summaryOnly: true),
     );
   }
 
+  Widget _buildRouteControls({bool summaryOnly = false}) => _HomeRouteControls(
+    atlas: true,
+    summaryOnly: summaryOnly,
+    services: routes
+        .where(
+          (route) => route.homeVisible || isPrimaryHomeRouteService(route.tag),
+        )
+        .toList(growable: false),
+    enabled: !controlsDisabled && (!_isMobileShell || !status.connected),
+    expanded: homeRoutesExpanded,
+    routingMode: appConfig.routingMode,
+    hasSubscription: subscription.hasSubscription,
+    connected: online && status.connected,
+    onExpandedChanged: (expanded) =>
+        setState(() => homeRoutesExpanded = expanded),
+    onRoutingModeChanged: _setHomeRoutingMode,
+    onPolicyChanged: _setHomeRoutePolicy,
+    onZapretStrategyChanged: _setHomeZapretStrategy,
+    onAdd: controlsDisabled ? null : _openAddHomeRouteService,
+    onRemove: _setHomeRouteVisibility,
+    onAllServices: quitting || sectionBusy
+        ? null
+        : () => unawaited(_selectMenuSection('service-settings')),
+  );
+
   Widget _buildMenuSection() {
     switch (activeMenuSection) {
+      case 'service-settings':
+        return SingleChildScrollView(
+          key: const ValueKey('service-settings-section'),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _ConnectionHint(
+                    visible: connectionHint.trim().isNotEmpty,
+                    title: _hintTitle(),
+                    message: connectionHint,
+                    danger: connectionHintDanger,
+                  ),
+                  _buildRouteControls(),
+                  const SizedBox(height: 12),
+                  _SettingsLink(
+                    section: 'services',
+                    title: 'Все сервисы',
+                    detail: 'Полный каталог и поиск по доменам',
+                    icon: Icons.search,
+                    onPressed: quitting || sectionBusy
+                        ? null
+                        : () => unawaited(_selectMenuSection('services')),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      case 'settings':
+      case 'advanced':
+      case 'help':
+        return _MinimalSettingsPage(
+          section: activeMenuSection,
+          disabled: quitting || sectionBusy,
+          onSelect: (section) => unawaited(_selectMenuSection(section)),
+          onWorkNetworks: controlsDisabled ? null : _openWireGuard,
+          onExit: quitting ? null : _quitApp,
+        );
       case 'services':
         return ServiceRoutesPage(
           key: const ValueKey('services-section'),
@@ -5887,9 +5808,11 @@ class _DropoHomePageState extends State<DropoHomePage>
           embedded: true,
           onChanged: () => unawaited(_refresh(all: true)),
         );
-      case 'settings':
+      case 'app-settings':
+      case 'technical-settings':
         return _SettingsDialog(
-          key: const ValueKey('settings-section'),
+          key: ValueKey(activeMenuSection),
+          advanced: activeMenuSection == 'technical-settings',
           bridge: widget.bridge,
           initialConfig: appConfig,
           currentStatus: status,
@@ -5949,202 +5872,37 @@ class _DropoHomePageState extends State<DropoHomePage>
     final hintMessage = connectionHint.trim().isNotEmpty
         ? connectionHint
         : depsProgress;
-    final useMobileNavigation = _isMobileShell;
-    final mobileNavExtra =
-        math.max(0.0, MediaQuery.textScalerOf(context).scale(11) - 11) * 1.5;
-    final strategyBannerMessage = strategyTransitionNotice.trim().isNotEmpty
-        ? strategyTransitionNotice.trim()
-        : '';
-    if (!useMobileNavigation) {
-      return _AtlasDesktopShell(
-        activeSection: activeMenuSection,
-        disabled: quitting || sectionBusy,
-        onSelect: (section) => unawaited(_selectMenuSection(section)),
-        onWorkNetworks: controlsDisabled ? null : _openWireGuard,
-        onExit: quitting ? null : _quitApp,
-        version: status.version.fullVersion,
-        notice: strategyBannerMessage.isEmpty || !windowVisible
-            ? null
-            : _StrategySearchBanner(
-                message: strategyBannerMessage,
-                transitionNotice: true,
-              ),
-        overlay: quitting
-            ? _QuitProgressOverlay(message: quitProgressMessage)
-            : null,
-        child: activeMenuSection == 'home'
-            ? SingleChildScrollView(
-                key: const ValueKey('home-scroll'),
-                child: _buildHomeDashboard(isBusy, hintMessage),
-              )
-            : _buildMenuSection(),
-      );
-    }
-    return Scaffold(
-      body: Stack(
-        children: [
-          const Positioned.fill(child: ColoredBox(color: Color(0xFF101617))),
-          SafeArea(
-            child: AnimatedPadding(
-              duration: const Duration(milliseconds: 180),
-              padding: EdgeInsets.only(
-                left: useMobileNavigation ? 0 : (sideMenuExpanded ? 190 : 76),
-              ),
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: activeMenuSection == 'home' ? 704 : 720,
-                  ),
-                  child: Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      12,
-                      8,
-                      12,
-                      useMobileNavigation ? 108 + mobileNavExtra : 34,
-                    ),
-                    child: AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 180),
-                      switchInCurve: Curves.easeOutCubic,
-                      switchOutCurve: Curves.easeInCubic,
-                      child: activeMenuSection == 'home'
-                          ? SingleChildScrollView(
-                              key: const ValueKey('home-scroll'),
-                              padding: const EdgeInsets.symmetric(vertical: 8),
-                              child: _buildHomeDashboard(isBusy, hintMessage),
-                            )
-                          : _buildMenuSection(),
-                    ),
-                  ),
-                ),
-              ),
+    final strategyBannerMessage = strategyTransitionNotice.trim();
+    return _AtlasDesktopShell(
+      activeSection: activeMenuSection,
+      disabled: quitting || sectionBusy,
+      onSelect: (section) => unawaited(_selectMenuSection(section)),
+      onBack: _sectionHistory.isEmpty
+          ? null
+          : () {
+              final previous = _sectionHistory.removeLast();
+              unawaited(_selectMenuSection(previous, remember: false));
+            },
+      onWorkNetworks: controlsDisabled ? null : _openWireGuard,
+      onExit: quitting ? null : _quitApp,
+      version: status.version.fullVersion,
+      notice: strategyBannerMessage.isEmpty || !windowVisible
+          ? null
+          : _StrategySearchBanner(
+              key: ValueKey(strategyBannerMessage),
+              message: strategyBannerMessage,
+              transitionNotice: true,
             ),
-          ),
-          Positioned(
-            left: useMobileNavigation ? 0 : (sideMenuExpanded ? 190 : 76),
-            right: 0,
-            bottom: useMobileNavigation ? 88 + mobileNavExtra : 12,
-            child: SafeArea(
-              top: false,
-              child: Center(
-                child: _VersionStrip(version: status.version.fullVersion),
-              ),
-            ),
-          ),
-          if (!useMobileNavigation)
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              child: _SideMenu(
-                expanded: sideMenuExpanded,
-                disabled: quitting || sectionBusy,
-                activeSection: activeMenuSection,
-                status: status,
-                onToggle: () {
-                  setState(() => sideMenuExpanded = !sideMenuExpanded);
-                },
-                onHome: () => unawaited(_selectMenuSection('home')),
-                connectionActive: status.connected,
-                onServices: () => unawaited(_selectMenuSection('services')),
-                onSources: () => unawaited(_selectMenuSection('sources')),
-                onProfiles: () => unawaited(_selectMenuSection('profiles')),
-                onSettings: () => unawaited(_selectMenuSection('settings')),
-                onStats: () => unawaited(_selectMenuSection('stats')),
-                onLogs: () => unawaited(_selectMenuSection('logs')),
-                onAbout: () => unawaited(_selectMenuSection('about')),
-                onExit: quitting ? null : _quitApp,
-              ),
-            ),
-          if (useMobileNavigation)
-            Positioned(
-              left: 12,
-              right: 12,
-              bottom: 12,
-              child: SafeArea(
-                top: false,
-                child: _MobileBottomNav(
-                  activeSection: activeMenuSection,
-                  connectionActive: status.connected,
-                  disabled: quitting || sectionBusy,
-                  onHome: () => unawaited(_selectMenuSection('home')),
-                  onSettings: () => unawaited(_selectMenuSection('settings')),
-                  onMore: _openMobileMoreMenu,
-                ),
-              ),
-            ),
-          Positioned(
-            left: useMobileNavigation ? 12 : (sideMenuExpanded ? 202 : 88),
-            right: 12,
-            top: 8,
-            child: SafeArea(
-              bottom: false,
-              child: IgnorePointer(
-                child: Center(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 240),
-                    transitionBuilder: (child, animation) => FadeTransition(
-                      opacity: animation,
-                      child: SlideTransition(
-                        position:
-                            Tween<Offset>(
-                              begin: const Offset(0, -0.25),
-                              end: Offset.zero,
-                            ).animate(
-                              CurvedAnimation(
-                                parent: animation,
-                                curve: Curves.easeOutCubic,
-                              ),
-                            ),
-                        child: child,
-                      ),
-                    ),
-                    child: strategyBannerMessage.isEmpty || !windowVisible
-                        ? const SizedBox.shrink()
-                        : _StrategySearchBanner(
-                            key: ValueKey(strategyBannerMessage),
-                            message: strategyBannerMessage,
-                            transitionNotice: strategyTransitionNotice
-                                .trim()
-                                .isNotEmpty,
-                          ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          if (quitting)
-            Positioned.fill(
-              child: _QuitProgressOverlay(message: quitProgressMessage),
-            ),
-        ],
-      ),
+      overlay: quitting
+          ? _QuitProgressOverlay(message: quitProgressMessage)
+          : null,
+      child: activeMenuSection == 'home'
+          ? SingleChildScrollView(
+              key: const ValueKey('home-scroll'),
+              child: _buildHomeDashboard(isBusy, hintMessage),
+            )
+          : _buildMenuSection(),
     );
-  }
-
-  Future<void> _openMobileMoreMenu() async {
-    if (quitting || sectionBusy) {
-      return;
-    }
-    final selected = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withValues(alpha: 0.45),
-      isScrollControlled: true,
-      builder: (context) => _MobileMoreSheet(
-        activeSection: activeMenuSection,
-        status: status,
-        onSelect: (section) => Navigator.of(context).pop(section),
-        onExit: () => Navigator.of(context).pop('exit'),
-      ),
-    );
-    if (!mounted || selected == null) {
-      return;
-    }
-    if (selected == 'exit') {
-      unawaited(_quitApp());
-      return;
-    }
-    unawaited(_selectMenuSection(selected));
   }
 
   String _hintTitle() {
@@ -6177,11 +5935,23 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (mounted) setState(() => sectionBusy = value);
   }
 
-  Future<void> _selectMenuSection(String section) async {
+  Future<void> _selectMenuSection(
+    String section, {
+    bool remember = true,
+  }) async {
     if (!mounted || quitting || sectionBusy) {
       return;
     }
-    setState(() => activeMenuSection = section);
+    setState(() {
+      if (remember && section != activeMenuSection) {
+        if (section == 'home' || section == 'settings') {
+          _sectionHistory.clear();
+        } else {
+          _sectionHistory.add(activeMenuSection);
+        }
+      }
+      activeMenuSection = section;
+    });
     if (section == 'profiles') {
       try {
         final loaded = await widget.bridge.profiles();
@@ -6249,81 +6019,6 @@ class _DropoHomePageState extends State<DropoHomePage>
               'Официальная сборка Dropo by sunnydjam. Скачивайте приложение только из GitHub Releases основного репозитория.',
               style: TextStyle(color: Color(0xFF9BB0AB), height: 1.35),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _NetworkModePill extends StatelessWidget {
-  const _NetworkModePill({required this.status, required this.expanded});
-
-  final CoreStatus status;
-  final bool expanded;
-
-  @override
-  Widget build(BuildContext context) {
-    final label = status.networkLabel.isEmpty
-        ? status.networkMode
-        : status.networkLabel;
-    return Tooltip(
-      message: 'Сетевой режим: $label',
-      child: Container(
-        width: double.infinity,
-        height: expanded
-            ? 48 +
-                  math.max(
-                        0.0,
-                        MediaQuery.textScalerOf(context).scale(11) - 11,
-                      ) *
-                      3
-            : 42,
-        padding: EdgeInsets.symmetric(horizontal: expanded ? 10 : 0),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.24),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: const Color(0xFF36D399).withValues(alpha: 0.20),
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: expanded
-              ? MainAxisAlignment.start
-              : MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.route, size: 17, color: Color(0xFFBAF7D0)),
-            if (expanded) ...[
-              const SizedBox(width: 9),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Режим сети',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Color(0xFF86A39C),
-                        fontSize: 9,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Color(0xFFBAF7D0),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
           ],
         ),
       ),
@@ -6547,7 +6242,7 @@ class _RouteProbePanel extends StatelessWidget {
               Expanded(
                 child: Text(
                   title,
-                  maxLines: 1,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: accent,
@@ -6556,14 +6251,15 @@ class _RouteProbePanel extends StatelessWidget {
                   ),
                 ),
               ),
-              Text(
-                subtitle,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.58),
-                  fontSize: 10,
-                ),
-              ),
             ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.58),
+              fontSize: 10,
+            ),
           ),
           const SizedBox(height: 8),
           Flexible(
@@ -6820,25 +6516,6 @@ class _UpdateStrip extends StatelessWidget {
   }
 }
 
-class _VersionStrip extends StatelessWidget {
-  const _VersionStrip({required this.version});
-
-  final String version;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      'v$version',
-      textAlign: TextAlign.center,
-      style: const TextStyle(
-        color: Color(0xFF7F8A95),
-        fontSize: 11,
-        fontWeight: FontWeight.w600,
-      ),
-    );
-  }
-}
-
 class _MiniStrip extends StatelessWidget {
   const _MiniStrip({
     required this.icon,
@@ -6968,542 +6645,6 @@ class _MenuPageSurfaceState extends State<_MenuPageSurface> {
   }
 }
 
-class _SideMenu extends StatelessWidget {
-  const _SideMenu({
-    required this.expanded,
-    required this.disabled,
-    required this.activeSection,
-    required this.connectionActive,
-    required this.status,
-    required this.onToggle,
-    required this.onHome,
-    required this.onServices,
-    required this.onSources,
-    required this.onProfiles,
-    required this.onSettings,
-    required this.onStats,
-    required this.onLogs,
-    required this.onAbout,
-    required this.onExit,
-  });
-
-  final bool expanded;
-  final bool disabled;
-  final String activeSection;
-  final bool connectionActive;
-  final CoreStatus status;
-  final VoidCallback onToggle;
-  final VoidCallback onHome;
-  final VoidCallback onServices;
-  final VoidCallback onSources;
-  final VoidCallback onProfiles;
-  final VoidCallback onSettings;
-  final VoidCallback onStats;
-  final VoidCallback onLogs;
-  final VoidCallback onAbout;
-  final VoidCallback? onExit;
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      right: false,
-      child: AnimatedContainer(
-        duration: Duration.zero,
-        width: expanded
-            ? math.min(
-                280.0,
-                184 + (MediaQuery.textScalerOf(context).scale(12) - 12) * 6,
-              )
-            : 68,
-        margin: const EdgeInsets.fromLTRB(10, 10, 0, 10),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFF111629).withValues(alpha: 0.82),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.32),
-              blurRadius: 28,
-              offset: const Offset(10, 0),
-            ),
-          ],
-        ),
-        child: Column(
-          children: [
-            _MenuToggleButton(expanded: expanded, onPressed: onToggle),
-            Expanded(
-              child: SingleChildScrollView(
-                primary: false,
-                child: Column(
-                  children: [
-                    _SideMenuButton(
-                      icon: Icons.public,
-                      label: 'Подключение',
-                      description: 'Главный экран',
-                      expanded: expanded,
-                      active: activeSection == 'home',
-                      live: connectionActive,
-                      onPressed: disabled ? null : onHome,
-                    ),
-                    _SideMenuButton(
-                      key: const ValueKey('nav-services'),
-                      icon: Icons.apps_outlined,
-                      label: 'Сервисы',
-                      description: 'Маршруты и избранное',
-                      expanded: expanded,
-                      active: activeSection == 'services',
-                      onPressed: disabled ? null : onServices,
-                    ),
-                    _SideMenuButton(
-                      key: const ValueKey('nav-sources'),
-                      icon: Icons.vpn_key_outlined,
-                      label: 'Источники VPN',
-                      description: 'Подписки и бесплатный резерв',
-                      expanded: expanded,
-                      active: activeSection == 'sources',
-                      onPressed: disabled ? null : onSources,
-                    ),
-                    _SideMenuButton(
-                      icon: Icons.account_circle,
-                      label: 'Профили',
-                      description: 'Список VPN-профилей',
-                      expanded: expanded,
-                      active: activeSection == 'profiles',
-                      onPressed: disabled ? null : onProfiles,
-                    ),
-                    _SideMenuButton(
-                      icon: Icons.settings,
-                      label: 'Настройки',
-                      description: 'Параметры приложения',
-                      expanded: expanded,
-                      active: activeSection == 'settings',
-                      onPressed: disabled ? null : onSettings,
-                    ),
-                    _SideMenuButton(
-                      icon: Icons.query_stats,
-                      label: 'Статистика',
-                      description: 'Трафик и сессии',
-                      expanded: expanded,
-                      active: activeSection == 'stats',
-                      onPressed: disabled ? null : onStats,
-                    ),
-                    _SideMenuButton(
-                      icon: Icons.article,
-                      label: 'Логи',
-                      description: 'События ядра',
-                      expanded: expanded,
-                      active: activeSection == 'logs',
-                      onPressed: disabled ? null : onLogs,
-                    ),
-                    _SideMenuButton(
-                      icon: Icons.info_outline,
-                      label: 'О приложении',
-                      description: 'Версия и ссылки',
-                      expanded: expanded,
-                      active: activeSection == 'about',
-                      onPressed: disabled ? null : onAbout,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            _NetworkModePill(status: status, expanded: expanded),
-            const SizedBox(height: 8),
-            _SideMenuButton(
-              icon: Icons.logout,
-              label: 'Выход',
-              description: 'Закрыть dropo',
-              expanded: expanded,
-              danger: true,
-              onPressed: disabled ? null : onExit,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _MobileBottomNav extends StatelessWidget {
-  const _MobileBottomNav({
-    required this.activeSection,
-    required this.connectionActive,
-    required this.disabled,
-    required this.onHome,
-    required this.onSettings,
-    required this.onMore,
-  });
-
-  final String activeSection;
-  final bool connectionActive;
-  final bool disabled;
-  final VoidCallback onHome;
-  final VoidCallback onSettings;
-  final VoidCallback onMore;
-
-  @override
-  Widget build(BuildContext context) {
-    final moreActive = activeSection != 'home' && activeSection != 'settings';
-    return Container(
-      height:
-          64 +
-          math.max(0.0, MediaQuery.textScalerOf(context).scale(11) - 11) * 1.5,
-      padding: const EdgeInsets.all(6),
-      decoration: BoxDecoration(
-        color: const Color(0xFF111629).withValues(alpha: 0.94),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.38),
-            blurRadius: 26,
-            offset: const Offset(0, 12),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _MobileBottomNavItem(
-              icon: Icons.public,
-              label: 'Главная',
-              active: activeSection == 'home',
-              live: connectionActive,
-              onPressed: disabled ? null : onHome,
-            ),
-          ),
-          const SizedBox(width: 4),
-          Expanded(
-            child: _MobileBottomNavItem(
-              icon: Icons.settings,
-              label: 'Настройки',
-              active: activeSection == 'settings',
-              onPressed: disabled ? null : onSettings,
-            ),
-          ),
-          const SizedBox(width: 4),
-          Expanded(
-            child: _MobileBottomNavItem(
-              icon: Icons.more_horiz,
-              label: 'Еще',
-              active: moreActive,
-              onPressed: disabled ? null : onMore,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _MobileBottomNavItem extends StatelessWidget {
-  const _MobileBottomNavItem({
-    required this.icon,
-    required this.label,
-    required this.active,
-    required this.onPressed,
-    this.live = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final bool active;
-  final bool live;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = onPressed != null;
-    final color = active
-        ? const Color(0xFFBAF7D0)
-        : const Color(0xFFA6B0C9).withValues(alpha: enabled ? 1 : 0.48);
-    return Tooltip(
-      message: label,
-      child: MouseRegion(
-        cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onPressed,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 160),
-            height: double.infinity,
-            decoration: BoxDecoration(
-              color: active
-                  ? const Color(0xFF1F8C78).withValues(alpha: 0.22)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: active
-                    ? const Color(0xFF36D399).withValues(alpha: 0.34)
-                    : Colors.transparent,
-              ),
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Icon(icon, size: 22, color: color),
-                    if (live)
-                      const Positioned(
-                        right: -5,
-                        top: -4,
-                        child: SizedBox(
-                          width: 10,
-                          height: 10,
-                          child: _LiveStatusDot(),
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: color,
-                    fontSize: 11,
-                    fontWeight: active ? FontWeight.w800 : FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MobileMoreSheet extends StatelessWidget {
-  const _MobileMoreSheet({
-    required this.activeSection,
-    required this.status,
-    required this.onSelect,
-    required this.onExit,
-  });
-
-  final String activeSection;
-  final CoreStatus status;
-  final ValueChanged<String> onSelect;
-  final VoidCallback onExit;
-
-  @override
-  Widget build(BuildContext context) {
-    final maxSheetHeight = MediaQuery.sizeOf(context).height * 0.74;
-    return SafeArea(
-      top: false,
-      child: Container(
-        width: double.infinity,
-        margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-        decoration: BoxDecoration(
-          color: const Color(0xFF111629).withValues(alpha: 0.98),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.44),
-              blurRadius: 34,
-              offset: const Offset(0, 18),
-            ),
-          ],
-        ),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: maxSheetHeight),
-          child: Scrollbar(
-            child: SingleChildScrollView(
-              primary: false,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Разделы',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Color(0xFFE5EEF8),
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'Закрыть',
-                        icon: const Icon(Icons.close),
-                        color: const Color(0xFFA6B0C9),
-                        onPressed: () => Navigator.of(context).pop(),
-                      ),
-                    ],
-                  ),
-                  _NetworkModePill(status: status, expanded: true),
-                  const SizedBox(height: 8),
-                  _MobileMoreItem(
-                    icon: Icons.apps_outlined,
-                    label: 'Сервисы',
-                    description: 'Маршруты и избранное',
-                    active: activeSection == 'services',
-                    onPressed: () => onSelect('services'),
-                  ),
-                  _MobileMoreItem(
-                    icon: Icons.vpn_key_outlined,
-                    label: 'Источники VPN',
-                    description: 'Подписки и бесплатный резерв',
-                    active: activeSection == 'sources',
-                    onPressed: () => onSelect('sources'),
-                  ),
-                  _MobileMoreItem(
-                    icon: Icons.account_circle,
-                    label: 'Профили',
-                    description: 'VPN-профили',
-                    active: activeSection == 'profiles',
-                    onPressed: () => onSelect('profiles'),
-                  ),
-                  _MobileMoreItem(
-                    icon: Icons.work_outline,
-                    label: 'Dropo Space',
-                    description: 'Совместимость приложений',
-                    active: activeSection == 'dropo_space',
-                    onPressed: () => onSelect('dropo_space'),
-                  ),
-                  _MobileMoreItem(
-                    icon: Icons.query_stats,
-                    label: 'Статистика',
-                    description: 'Трафик и сессии',
-                    active: activeSection == 'stats',
-                    onPressed: () => onSelect('stats'),
-                  ),
-                  _MobileMoreItem(
-                    icon: Icons.article,
-                    label: 'Логи',
-                    description: 'События ядра',
-                    active: activeSection == 'logs',
-                    onPressed: () => onSelect('logs'),
-                  ),
-                  _MobileMoreItem(
-                    icon: Icons.info_outline,
-                    label: 'О приложении',
-                    description: 'Версия и ссылки',
-                    active: activeSection == 'about',
-                    onPressed: () => onSelect('about'),
-                  ),
-                  const SizedBox(height: 6),
-                  _MobileMoreItem(
-                    icon: Icons.logout,
-                    label: 'Выход',
-                    description: 'Закрыть dropo',
-                    danger: true,
-                    onPressed: onExit,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MobileMoreItem extends StatelessWidget {
-  const _MobileMoreItem({
-    required this.icon,
-    required this.label,
-    required this.description,
-    required this.onPressed,
-    this.active = false,
-    this.danger = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final String description;
-  final bool active;
-  final bool danger;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = danger
-        ? const Color(0xFFFCA5A5)
-        : active
-        ? const Color(0xFFBAF7D0)
-        : const Color(0xFFA6B0C9);
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onPressed,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
-          constraints: const BoxConstraints(minHeight: 52),
-          margin: const EdgeInsets.only(bottom: 6),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          decoration: BoxDecoration(
-            color: active
-                ? const Color(0xFF1F8C78).withValues(alpha: 0.20)
-                : Colors.white.withValues(alpha: danger ? 0.03 : 0.0),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: active
-                  ? const Color(0xFF36D399).withValues(alpha: 0.32)
-                  : Colors.white.withValues(alpha: danger ? 0.06 : 0.0),
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(icon, size: 22, color: color),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: color,
-                        fontSize: 14,
-                        fontWeight: active ? FontWeight.w800 : FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      description,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: color.withValues(alpha: 0.68),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w400,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (!danger && active)
-                const Icon(
-                  Icons.check_circle,
-                  size: 17,
-                  color: Color(0xFF36D399),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _QuitProgressOverlay extends StatelessWidget {
   const _QuitProgressOverlay({required this.message});
 
@@ -7585,246 +6726,6 @@ class _QuitProgressOverlay extends StatelessWidget {
                 ),
               ],
             ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MenuToggleButton extends StatelessWidget {
-  const _MenuToggleButton({required this.expanded, required this.onPressed});
-
-  final bool expanded;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: expanded ? 'Свернуть меню' : 'Развернуть меню',
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          onTap: onPressed,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 160),
-            width: double.infinity,
-            height: expanded ? 48 : 44,
-            margin: const EdgeInsets.only(bottom: 12),
-            padding: EdgeInsets.symmetric(horizontal: expanded ? 10 : 0),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.04),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-            ),
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final showExpanded = expanded && constraints.maxWidth > 112;
-                return Row(
-                  mainAxisAlignment: showExpanded
-                      ? MainAxisAlignment.start
-                      : MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    if (showExpanded) ...[
-                      const Icon(
-                        Icons.keyboard_double_arrow_left,
-                        size: 19,
-                        color: Color(0xFFA6B0C9),
-                      ),
-                      const SizedBox(width: 8),
-                    ],
-                    const Icon(Icons.menu, size: 22, color: Color(0xFFA6B0C9)),
-                    if (showExpanded) ...[
-                      const SizedBox(width: 10),
-                      const Flexible(
-                        child: Text(
-                          'Свернуть',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Color(0xFFA6B0C9),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w400,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                );
-              },
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _LiveStatusDot extends StatefulWidget {
-  const _LiveStatusDot();
-
-  @override
-  State<_LiveStatusDot> createState() => _LiveStatusDotState();
-}
-
-class _LiveStatusDotState extends State<_LiveStatusDot>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController controller;
-
-  @override
-  void initState() {
-    super.initState();
-    controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        final glow = 0.35 + controller.value * 0.45;
-        return Container(
-          width: 12,
-          height: 12,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0xFF22C55E),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFF22C55E).withValues(alpha: glow),
-                blurRadius: 8 + controller.value * 8,
-                spreadRadius: 1 + controller.value * 2,
-              ),
-            ],
-            border: Border.all(color: const Color(0xFF0B101D), width: 2),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _SideMenuButton extends StatelessWidget {
-  const _SideMenuButton({
-    super.key,
-    required this.icon,
-    required this.label,
-    required this.expanded,
-    required this.onPressed,
-    this.description = '',
-    this.active = false,
-    this.danger = false,
-    this.live = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final String description;
-  final bool expanded;
-  final bool active;
-  final VoidCallback? onPressed;
-  final bool danger;
-  final bool live;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = danger
-        ? const Color(0xFFFCA5A5)
-        : active
-        ? const Color(0xFFBAF7D0)
-        : const Color(0xFFA6B0C9);
-    return MouseRegion(
-      cursor: onPressed == null
-          ? SystemMouseCursors.basic
-          : SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: onPressed,
-        child: AnimatedContainer(
-          // Content switches immediately; interpolating the old compact height
-          // clips expanded labels, especially with accessibility text scaling.
-          duration: Duration.zero,
-          width: double.infinity,
-          height: expanded
-              ? 52 +
-                    math.max(
-                          0.0,
-                          MediaQuery.textScalerOf(context).scale(12) - 12,
-                        ) *
-                        3
-              : 44,
-          margin: const EdgeInsets.only(bottom: 6),
-          padding: EdgeInsets.symmetric(horizontal: expanded ? 10 : 0),
-          decoration: BoxDecoration(
-            color: active
-                ? const Color(0xFF1F8C78).withValues(alpha: 0.20)
-                : Colors.white.withValues(alpha: 0.0),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: active
-                  ? const Color(0xFF36D399).withValues(alpha: 0.32)
-                  : Colors.transparent,
-            ),
-          ),
-          child: Row(
-            mainAxisAlignment: expanded
-                ? MainAxisAlignment.start
-                : MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Icon(icon, size: 22, color: color),
-                  if (live)
-                    const Positioned(
-                      right: -3,
-                      bottom: -3,
-                      child: _LiveStatusDot(),
-                    ),
-                ],
-              ),
-              if (expanded) ...[
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: color,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w400,
-                        ),
-                      ),
-                      if (description.isNotEmpty)
-                        Text(
-                          description,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: color.withValues(alpha: 0.58),
-                            fontSize: 9,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ],
           ),
         ),
       ),
@@ -10287,6 +9188,7 @@ class _SettingsDialog extends StatefulWidget {
     required this.onDownloadDependencies,
     required this.onOpenServices,
     this.embedded = false,
+    this.advanced = false,
     this.onChanged,
   });
 
@@ -10299,6 +9201,7 @@ class _SettingsDialog extends StatefulWidget {
   final VoidCallback onDownloadDependencies;
   final VoidCallback onOpenServices;
   final bool embedded;
+  final bool advanced;
   final ValueChanged<AppConfig>? onChanged;
 
   @override
@@ -10309,6 +9212,16 @@ class _SettingsDialogState extends State<_SettingsDialog> {
   late AppConfig config = widget.initialConfig;
   String statusText = '';
   bool saving = false;
+  Future<Map<String, dynamic>> _settingAction(
+    Future<Map<String, dynamic>> Function() action,
+  ) async {
+    try {
+      return await action();
+    } catch (error) {
+      return {'success': false, 'error': _cleanError(error)};
+    }
+  }
+
   Future<void> _saveGeneral(AppConfig updated) async {
     final previous = config;
     setState(() {
@@ -10316,7 +9229,9 @@ class _SettingsDialogState extends State<_SettingsDialog> {
       saving = true;
       statusText = 'Сохраняем настройки...';
     });
-    final result = await widget.bridge.saveAppConfig(updated);
+    final result = await _settingAction(
+      () => widget.bridge.saveAppConfig(updated),
+    );
     if (!mounted) {
       return;
     }
@@ -10343,7 +9258,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
       saving = true;
       statusText = 'Применяем настройки...';
     });
-    final result = await action();
+    final result = await _settingAction(action);
     if (!mounted) {
       return;
     }
@@ -10366,7 +9281,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
       saving = true;
       statusText = 'Запускаем встроенную проверку сервисов...';
     });
-    final result = await widget.bridge.runQuickCheck();
+    final result = await _settingAction(widget.bridge.runQuickCheck);
     if (!mounted) {
       return;
     }
@@ -10374,7 +9289,9 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     final failed = _asInt(result['failedCount']);
     setState(() {
       saving = false;
-      statusText = result['android'] == true
+      statusText = result['error'] != null
+          ? _cleanError(result['error']!)
+          : result['android'] == true
           ? result['success'] == true
                 ? 'Проверка Android завершена: $total сервисов доступны.'
                 : 'Проверка Android завершена с предупреждениями: ошибок $failed из $total.'
@@ -10389,7 +9306,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
       saving = true;
       statusText = 'Снимаем отпечаток блокировок. VPN должен быть отключён...';
     });
-    final result = await widget.bridge.captureFingerprint();
+    final result = await _settingAction(widget.bridge.captureFingerprint);
     if (!mounted) {
       return;
     }
@@ -10425,12 +9342,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          'Настройки приложения',
-          style: TextStyle(color: Color(0xFF8892B0), fontSize: 12),
-        ),
-        const SizedBox(height: 14),
-        if (vpnRunning) ...[
+        if (vpnRunning && widget.advanced) ...[
           _InfoBand(
             icon: Icons.lock_outline,
             title: 'VPN активен',
@@ -10440,95 +9352,107 @@ class _SettingsDialogState extends State<_SettingsDialog> {
           ),
           const SizedBox(height: 14),
         ],
-        _SettingsGroup(
-          title: 'Общие',
-          children: [
-            if (!isMobile)
+        if (widget.advanced || !isMobile)
+          _SettingsGroup(
+            title: 'Общие',
+            children: [
+              if (!isMobile && !widget.advanced)
+                _SwitchSetting(
+                  title: 'Автозапуск',
+                  description: 'Запускать при входе в систему',
+                  value: config.autoStart,
+                  onChanged: canUseLiveSafe
+                      ? (value) =>
+                            _saveGeneral(config.copyWith(autoStart: value))
+                      : null,
+                ),
+              if (widget.advanced)
+                _SwitchSetting(
+                  title: 'Логирование sing-box',
+                  description: 'Записывать логи в файл',
+                  value: config.enableLogging,
+                  onChanged: canChangeRuntime
+                      ? (value) =>
+                            _saveGeneral(config.copyWith(enableLogging: value))
+                      : null,
+                ),
+              if (widget.advanced)
+                _SelectSetting(
+                  title: 'Уровень логирования',
+                  description: 'Детализация логов sing-box',
+                  value: config.logLevel,
+                  options: const {
+                    'error': 'Error',
+                    'warn': 'Warn',
+                    'info': 'Info',
+                    'debug': 'Debug',
+                    'trace': 'Trace',
+                  },
+                  onChanged: canChangeRuntime
+                      ? (value) =>
+                            _saveGeneral(config.copyWith(logLevel: value))
+                      : null,
+                ),
+            ],
+          ),
+        if (!widget.advanced)
+          _SettingsGroup(
+            title: 'Подписка',
+            children: [
               _SwitchSetting(
-                title: 'Автозапуск',
-                description: 'Запускать при входе в систему',
-                value: config.autoStart,
+                title: 'Авто-обновление',
+                description: 'Обновлять подписку автоматически',
+                value: config.autoUpdateSub,
                 onChanged: canUseLiveSafe
-                    ? (value) => _saveGeneral(config.copyWith(autoStart: value))
+                    ? (value) =>
+                          _saveGeneral(config.copyWith(autoUpdateSub: value))
                     : null,
               ),
-            _SwitchSetting(
-              title: 'Логирование sing-box',
-              description: 'Записывать логи в файл',
-              value: config.enableLogging,
-              onChanged: canChangeRuntime
-                  ? (value) =>
-                        _saveGeneral(config.copyWith(enableLogging: value))
-                  : null,
-            ),
-            _SelectSetting(
-              title: 'Уровень логирования',
-              description: 'Детализация логов sing-box',
-              value: config.logLevel,
-              options: const {
-                'error': 'Error',
-                'warn': 'Warn',
-                'info': 'Info',
-                'debug': 'Debug',
-                'trace': 'Trace',
-              },
-              onChanged: canChangeRuntime
-                  ? (value) => _saveGeneral(config.copyWith(logLevel: value))
-                  : null,
-            ),
-          ],
-        ),
-        _SettingsGroup(
-          title: 'Подписка',
-          children: [
-            _SwitchSetting(
-              title: 'Авто-обновление',
-              description: 'Обновлять подписку автоматически',
-              value: config.autoUpdateSub,
-              onChanged: canUseLiveSafe
-                  ? (value) =>
-                        _saveGeneral(config.copyWith(autoUpdateSub: value))
-                  : null,
-            ),
-          ],
-        ),
-        _SettingsGroup(
-          title: 'Обновления',
-          children: [
-            _SwitchSetting(
-              title: 'Автоматические обновления',
-              description:
-                  'Установленная Windows-версия скачивает проверенные стабильные релизы из GitHub и перезапускается автоматически',
-              value: config.checkUpdates,
-              onChanged: canUseLiveSafe
-                  ? (value) =>
-                        _saveGeneral(config.copyWith(checkUpdates: value))
-                  : null,
-            ),
-            if (widget.updateInfo?.hasUpdate == true)
-              _ButtonSetting(
-                title: 'Доступна версия ${widget.updateInfo!.latestVersion}',
-                description: widget.updateInfo!.selfUpdate
-                    ? 'Скачать, проверить и перезапустить dropo'
-                    : widget.updateInfo!.platform.toLowerCase() == 'windows'
-                    ? 'Скачать portable-архив из GitHub Releases'
-                    : 'Скачать APK из GitHub Releases',
-                label: widget.updateInfo!.selfUpdate
-                    ? 'Обновить'
-                    : widget.updateInfo!.platform.toLowerCase() == 'windows'
-                    ? 'Скачать portable'
-                    : 'Скачать APK',
-                icon: Icons.restart_alt,
-                onPressed: canUseLiveSafe ? widget.onInstallUpdate : null,
+            ],
+          ),
+        if (!widget.advanced)
+          _SettingsGroup(
+            title: 'Обновления',
+            children: [
+              _SwitchSetting(
+                title: 'Автоматические обновления',
+                description:
+                    'Установленная Windows-версия скачивает проверенные стабильные релизы из GitHub и перезапускается автоматически',
+                value: config.checkUpdates,
+                onChanged: canUseLiveSafe
+                    ? (value) =>
+                          _saveGeneral(config.copyWith(checkUpdates: value))
+                    : null,
               ),
-            _ButtonSetting(
-              title: 'Проверить сейчас',
-              description: 'Проверить стабильные релизы GitHub',
-              label: 'Проверить',
-              icon: Icons.system_update_alt,
-              onPressed: canUseLiveSafe ? widget.onCheckUpdates : null,
-            ),
-            if (!isMobile)
+              if (widget.updateInfo?.hasUpdate == true)
+                _ButtonSetting(
+                  title: 'Доступна версия ${widget.updateInfo!.latestVersion}',
+                  description: widget.updateInfo!.selfUpdate
+                      ? 'Скачать, проверить и перезапустить dropo'
+                      : widget.updateInfo!.platform.toLowerCase() == 'windows'
+                      ? 'Скачать portable-архив из GitHub Releases'
+                      : 'Скачать APK из GitHub Releases',
+                  label: widget.updateInfo!.selfUpdate
+                      ? 'Обновить'
+                      : widget.updateInfo!.platform.toLowerCase() == 'windows'
+                      ? 'Скачать portable'
+                      : 'Скачать APK',
+                  icon: Icons.restart_alt,
+                  onPressed: canUseLiveSafe ? widget.onInstallUpdate : null,
+                ),
+              _ButtonSetting(
+                title: 'Проверить сейчас',
+                description: 'Проверить стабильные релизы GitHub',
+                label: 'Проверить',
+                icon: Icons.system_update_alt,
+                onPressed: canUseLiveSafe ? widget.onCheckUpdates : null,
+              ),
+            ],
+          ),
+        if (widget.advanced && !isMobile)
+          _SettingsGroup(
+            title: 'Компоненты',
+            children: [
               _ButtonSetting(
                 title: 'Встроенный runtime',
                 description: widget.currentStatus.dependencies.ready
@@ -10543,144 +9467,133 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                     ? widget.onDownloadDependencies
                     : null,
               ),
-          ],
-        ),
-        _SettingsGroup(
-          title: 'Внешний вид',
-          children: [
-            if (!_isMobileShell)
+            ],
+          ),
+        if (!widget.advanced)
+          _SettingsGroup(
+            title: 'Внешний вид',
+            children: [
               const ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: Text('Atlas'),
                 subtitle: Text(
-                  'Тёмное зелёное оформление Windows. Размер текста задаётся в настройках экрана Windows.',
+                  'Компактное зелёное оформление. Размер текста и уменьшение движения задаются в настройках устройства.',
                 ),
               ),
-            if (_isMobileShell)
+            ],
+          ),
+        if (widget.advanced)
+          _SettingsGroup(
+            title: 'Маршрутизация',
+            children: [
               _SelectSetting(
-                title: 'Тема',
-                description: 'Оформление приложения',
-                value: config.theme,
+                title: 'Режим маршрутизации',
+                description: _routingModeDescription(config.routingMode),
+                value: config.routingMode,
+                stacked: true,
                 options: const {
-                  'dark': 'Тёмная',
-                  'light': 'Светлая',
-                  'system': 'Системная',
+                  'blocked_only': 'Выбранные сервисы',
+                  'all_traffic': 'Весь трафик',
                 },
-                onChanged: canUseLiveSafe
-                    ? (value) => _saveGeneral(config.copyWith(theme: value))
-                    : null,
-              ),
-          ],
-        ),
-        _SettingsGroup(
-          title: 'Маршрутизация',
-          children: [
-            _SelectSetting(
-              title: 'Режим маршрутизации',
-              description: _routingModeDescription(config.routingMode),
-              value: config.routingMode,
-              stacked: true,
-              options: const {
-                'blocked_only': 'Выбранные сервисы',
-                'all_traffic': 'Весь трафик',
-              },
-              onChanged: canChangeRuntime
-                  ? (value) => _applySpecial(
-                      () => widget.bridge.setRoutingMode(value),
-                      config.copyWith(routingMode: value),
-                    )
-                  : null,
-            ),
-            _SwitchSetting(
-              title: 'Скрывать RU-трафик от провайдера',
-              description:
-                  'Российские сайты по умолчанию идут напрямую. Включите, чтобы завернуть их в VPN/прокси.',
-              value: config.hideRuTraffic,
-              onChanged: canChangeRuntime
-                  ? (value) => _applySpecial(
-                      () => widget.bridge.setHideRuTraffic(
-                        value,
-                        config.ruProxyAddress,
-                      ),
-                      config.copyWith(hideRuTraffic: value),
-                    )
-                  : null,
-            ),
-            if (config.hideRuTraffic)
-              _TextSetting(
-                title: 'Адрес прокси для RU-трафика',
-                description: 'Необязательно: vless://, trojan:// или ss://',
-                initialValue: config.ruProxyAddress,
-                onSubmitted: canChangeRuntime
+                onChanged: canChangeRuntime
                     ? (value) => _applySpecial(
-                        () => widget.bridge.setHideRuTraffic(true, value),
-                        config.copyWith(ruProxyAddress: value),
+                        () => widget.bridge.setRoutingMode(value),
+                        config.copyWith(routingMode: value),
                       )
                     : null,
               ),
-            if (isMobile)
-              const _InfoBand(
-                icon: Icons.vpn_lock,
-                title: 'Android VPN',
-                body: 'Сетевой режим: Android VpnService + sing-box libbox.',
-              )
-            else
-              const _InfoBand(
-                icon: Icons.hub,
-                title: 'Windows Unified',
-                body:
-                    'Единый режим: sing-box TUN маршрутизирует трафик, а встроенный движок с одним WinDivert применяет отдельную стратегию для каждого сервиса.',
-              ),
-          ],
-        ),
-        _SettingsGroup(
-          title: 'Сервисы',
-          children: [
-            _ButtonSetting(
-              title: 'Сервисы и маршруты',
-              description:
-                  'Полный каталог, выбор маршрутов и закрепление на главной.',
-              label: 'Открыть',
-              icon: Icons.apps_outlined,
-              onPressed: saving ? null : widget.onOpenServices,
-            ),
-          ],
-        ),
-        _SettingsGroup(
-          title: 'Диагностика',
-          children: [
-            _ButtonSetting(
-              title: 'Проверить сервисы',
-              description:
-                  'Быстрая проверка доступности заблокированных и прямых сервисов.',
-              label: 'Проверить',
-              icon: Icons.search,
-              onPressed: canUseLiveSafe
-                  ? () => unawaited(_runQuickCheck())
-                  : null,
-            ),
-            if (!isMobile) ...[
-              _ButtonSetting(
-                title: 'Отпечаток блокировки',
+              _SwitchSetting(
+                title: 'Скрывать RU-трафик от провайдера',
                 description:
-                    'Снимает RST/таймаут/IP/DNS-поведение провайдера. Запускайте при отключённом VPN.',
-                label: 'Снять',
-                icon: Icons.fingerprint,
-                onPressed: canUseLiveSafe
-                    ? () => unawaited(_captureFingerprint())
+                    'Российские сайты по умолчанию идут напрямую. Включите, чтобы завернуть их в VPN/прокси.',
+                value: config.hideRuTraffic,
+                onChanged: canChangeRuntime
+                    ? (value) => _applySpecial(
+                        () => widget.bridge.setHideRuTraffic(
+                          value,
+                          config.ruProxyAddress,
+                        ),
+                        config.copyWith(hideRuTraffic: value),
+                      )
                     : null,
               ),
+              if (config.hideRuTraffic)
+                _TextSetting(
+                  title: 'Адрес прокси для RU-трафика',
+                  description: 'Необязательно: vless://, trojan:// или ss://',
+                  initialValue: config.ruProxyAddress,
+                  onSubmitted: canChangeRuntime
+                      ? (value) => _applySpecial(
+                          () => widget.bridge.setHideRuTraffic(true, value),
+                          config.copyWith(ruProxyAddress: value),
+                        )
+                      : null,
+                ),
+              if (isMobile)
+                const _InfoBand(
+                  icon: Icons.vpn_lock,
+                  title: 'Android VPN',
+                  body: 'Сетевой режим: Android VpnService + sing-box libbox.',
+                )
+              else
+                const _InfoBand(
+                  icon: Icons.hub,
+                  title: 'Windows Unified',
+                  body:
+                      'В режиме «По сервисам» применяются выбранные маршруты; остальное идёт напрямую. В режиме «Всё через VPN» используется TUN. Встроенный движок обхода работает только для выбранных сервисов.',
+                ),
+            ],
+          ),
+        if (widget.advanced)
+          _SettingsGroup(
+            title: 'Сервисы',
+            children: [
               _ButtonSetting(
-                title: 'Папка отпечатков',
-                description: 'Открыть файлы DPI-отпечатков для отправки.',
+                title: 'Сервисы и маршруты',
+                description:
+                    'Полный каталог, выбор маршрутов и быстрый список сервисов.',
                 label: 'Открыть',
-                icon: Icons.folder_special,
-                onPressed: () => unawaited(_openFingerprintFolder()),
+                icon: Icons.apps_outlined,
+                onPressed: saving ? null : widget.onOpenServices,
               ),
             ],
-          ],
-        ),
-        if (!isMobile)
+          ),
+        if (widget.advanced)
+          _SettingsGroup(
+            title: 'Диагностика',
+            children: [
+              _ButtonSetting(
+                title: 'Проверить сервисы',
+                description:
+                    'Быстрая проверка доступности заблокированных и прямых сервисов.',
+                label: 'Проверить',
+                icon: Icons.search,
+                onPressed: canUseLiveSafe
+                    ? () => unawaited(_runQuickCheck())
+                    : null,
+              ),
+              if (!isMobile) ...[
+                _ButtonSetting(
+                  title: 'Отпечаток блокировки',
+                  description:
+                      'Снимает RST/таймаут/IP/DNS-поведение провайдера. Запускайте при отключённом VPN.',
+                  label: 'Снять',
+                  icon: Icons.fingerprint,
+                  onPressed: canUseLiveSafe
+                      ? () => unawaited(_captureFingerprint())
+                      : null,
+                ),
+                _ButtonSetting(
+                  title: 'Папка отпечатков',
+                  description: 'Открыть файлы DPI-отпечатков для отправки.',
+                  label: 'Открыть',
+                  icon: Icons.folder_special,
+                  onPressed: () => unawaited(_openFingerprintFolder()),
+                ),
+              ],
+            ],
+          ),
+        if (widget.advanced && !isMobile)
           _SettingsGroup(
             title: 'Конфигурация',
             children: [
@@ -10713,7 +9626,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     );
     if (widget.embedded) {
       return _MenuPageSurface(
-        title: 'Настройки',
+        title: widget.advanced ? 'Сеть и диагностика' : 'Приложение',
         icon: Icons.settings,
         child: content,
       );

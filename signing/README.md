@@ -36,8 +36,17 @@ user's machine.
 
 ## GitHub release publishing
 
-GitHub Actions creates only the tag and release information page. It does not
-receive signing keys or build release artifacts. Build and validate Windows/Android
-artifacts locally, then use `tools/publish-release-assets.ps1` to upload them.
-The script obtains GitHub authentication from `GH_TOKEN` or the local Git
-credential manager; it never reads or writes private signing material in GitHub.
+GitHub Actions builds Windows installer/portable artifacts in the Windows
+package release gate. Publication requires both that gate and the general CI
+workflow to have completed successfully for the exact same commit on
+`Dzhamuha-develop`. The newest run/attempt is authoritative: an older successful
+run cannot override a failed or pending newer run. Packages are downloaded from
+the verified package-gate run, even when the CI completion triggers publication.
+
+No private signing keys are configured in this workflow, so these packages
+remain unsigned. SHA-256 verification provides integrity checking, not a
+publicly trusted publisher identity. Android is not published by this workflow.
+
+For an explicitly approved local release, `tools/publish-release-assets.ps1`
+uploads locally built and validated artifacts using `GH_TOKEN` or the local
+Git credential manager. It does not upload private signing material to GitHub.

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'navigation_helpers.dart';
 
 class _CatalogBridge extends MockCoreBridge {
   bool failRead = false, failWrite = false, failSources = false;
@@ -102,9 +103,10 @@ Future<void> _pump(
         textTheme: ThemeData.dark().textTheme.apply(fontFamily: 'Inter'),
       ),
       builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(
-          context,
-        ).copyWith(textScaler: TextScaler.linear(scale)),
+        data: MediaQuery.of(context).copyWith(
+          textScaler: TextScaler.linear(scale),
+          disableAnimations: true,
+        ),
         child: child!,
       ),
       home: Scaffold(body: child),
@@ -129,7 +131,15 @@ ServiceRoutesPage _page(
 );
 
 Future<void> _tap(WidgetTester tester, String key) async {
+  if (key.startsWith('nav-')) {
+    await openSection(tester, key.substring(4));
+    return;
+  }
   final item = find.byKey(ValueKey(key));
+  if (key.startsWith('nav-') && item.evaluate().isEmpty) {
+    await tester.tap(find.byKey(const ValueKey('toggle-navigation')));
+    await tester.pump();
+  }
   if (item.evaluate().isEmpty) {
     await tester.scrollUntilVisible(
       item,
@@ -189,7 +199,7 @@ void main() {
       find.byKey(const ValueKey('pin-service-discord')),
     );
     expect(pin.onPressed, isNull);
-    expect(pin.tooltip, 'Всегда на главной');
+    expect(pin.tooltip, 'Основной сервис');
     expect(tester.takeException(), isNull);
   });
 
@@ -270,7 +280,7 @@ void main() {
     await _search(tester, 'discord');
     await _tap(tester, 'service-route-discord-vpn');
     // Do not settle the intentional pending operation.
-    await tester.tap(find.byKey(const ValueKey('nav-sources')));
+    await tester.tap(find.byKey(const ValueKey('nav-settings')));
     await tester.pump();
     expect(find.byType(ServiceRoutesPage), findsOneWidget);
     expect(find.byType(VpnSourcesDialog), findsNothing);
@@ -345,25 +355,11 @@ void main() {
             size: mobile ? const Size(390, 844) : const Size(960, 640),
             scale: scale,
           );
-          if (mobile) {
-            await tester.tap(find.text('Еще'));
-            await tester.pumpAndSettle();
-            await tester.tap(find.text('Сервисы'));
-            await tester.pumpAndSettle();
-          } else {
-            await _tap(tester, 'nav-services');
-          }
+          await _tap(tester, 'nav-services');
           await _search(tester, 'discord');
           await _tap(tester, 'service-route-discord-vpn');
           expect(bridge.policies['discord'], 'vpn');
-          if (mobile) {
-            await tester.tap(find.text('Еще'));
-            await tester.pumpAndSettle();
-            await tester.tap(find.text('Источники VPN'));
-            await tester.pumpAndSettle();
-          } else {
-            await _tap(tester, 'nav-sources');
-          }
+          await _tap(tester, 'nav-sources');
           await _tap(tester, 'add-personal-vpn');
           expect(find.text('Скрыть форму'), findsOneWidget);
           expect(tester.takeException(), isNull);

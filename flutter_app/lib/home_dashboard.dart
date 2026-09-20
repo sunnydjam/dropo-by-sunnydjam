@@ -151,6 +151,7 @@ class _HomeConnectionPanel extends StatelessWidget {
         stopping: stopping,
         enabled: enabled,
         onPressed: onPressed,
+        onDisabledPressed: onDisabledPressed,
       );
     }
     return _HomePanel(
@@ -400,6 +401,7 @@ class _HomeRouteControls extends StatelessWidget {
     required this.onRemove,
     this.atlas = false,
     this.onAllServices,
+    this.summaryOnly = false,
   });
 
   final List<RouteService> services;
@@ -417,6 +419,7 @@ class _HomeRouteControls extends StatelessWidget {
   final void Function(RouteService service, bool visible) onRemove;
   final bool atlas;
   final VoidCallback? onAllServices;
+  final bool summaryOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -675,7 +678,7 @@ class _HomeRouteServiceRow extends StatelessWidget {
                 if (onRemove != null)
                   IconButton(
                     key: ValueKey('remove-home-route-${service.tag}'),
-                    tooltip: 'Убрать с главной',
+                    tooltip: 'Убрать из быстрого списка',
                     onPressed: enabled ? onRemove : null,
                     visualDensity: VisualDensity.compact,
                     constraints: const BoxConstraints.tightFor(
@@ -921,7 +924,7 @@ class _AddHomeRouteServiceSheet extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.fromLTRB(18, 4, 18, 12),
               child: Text(
-                'Добавить сервис на главную',
+                'Добавить сервис',
                 style: TextStyle(
                   color: Color(0xFFE8F3EF),
                   fontSize: 16,

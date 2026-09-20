@@ -2,6 +2,32 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.30 — 2026-09-21
+
+### Minimal Atlas interface
+
+- compact 700×500 Windows window with an animated globe and a centred connection
+  action; Home shows only connection state, source, mode and the service shortcut;
+- two primary destinations: Connection and Settings; subscriptions, services,
+  app options, advanced tools and help are grouped without removing features;
+- click-to-open side navigation, correct Back history, keyboard focus recovery
+  and layouts tested at 100/150/200% text scale;
+- service policies remain saved while full VPN is active; failed writes restore
+  the confirmed value and settings recover after bridge errors;
+- Windows no longer offers a misleading Auto service route that the core stores
+  as Direct; strategy auto-selection is separate, Android retains its own Auto;
+- animation respects reduced motion and pauses behind overlays/inactive views.
+
+### Release checks
+
+- publication now requires both general CI and the Windows package gate to pass
+  for the exact commit, with 24 offline readiness fixtures;
+- 93 Flutter tests cover navigation, accessibility, route editing and failures;
+- routing, packet strategies and VPN sources are unchanged; saved subscriptions
+  and policies are retained. Discord Zapret remains experimental;
+- Windows packages remain unsigned. Android is not part of this release; live
+  network acceptance after updating is separate from automated package checks.
+
 ## 3.0.29 — 2026-09-17
 
 ### Atlas desktop interface

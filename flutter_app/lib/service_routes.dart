@@ -174,7 +174,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
       if (!mounted) return;
       setState(
         () => feedback = !routeChange
-            ? 'Список на главной сохранён.'
+            ? 'Быстрый список сохранён.'
             : result['restarted'] == true
             ? 'Маршрут сохранён, VPN автоматически переподключён.'
             : 'Маршрут сохранён. Настройка применяется ядром при следующем подключении.',
@@ -232,7 +232,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const Text(
-                  'Выберите маршрут для сервиса. Звёздочка закрепляет его на главной.',
+                  'Выберите маршрут для сервиса. Звёздочка добавляет его в быстрый список.',
                   style: TextStyle(color: _homeMuted, height: 1.5),
                 ),
                 const SizedBox(height: 12),
@@ -273,7 +273,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                   children: [
                     FilterChip(
                       key: const ValueKey('services-pinned'),
-                      label: const Text('На главной'),
+                      label: const Text('Быстрый список'),
                       selected: pinnedOnly,
                       onSelected: (value) => setState(() => pinnedOnly = value),
                     ),
@@ -357,10 +357,10 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                     headerAction: IconButton(
                       key: ValueKey('pin-service-${service.tag}'),
                       tooltip: primary
-                          ? 'Всегда на главной'
+                          ? 'Основной сервис'
                           : _pinned(service)
-                          ? 'Убрать с главной'
-                          : 'Закрепить на главной',
+                          ? 'Убрать из быстрого списка'
+                          : 'Добавить в быстрый список',
                       onPressed: enabled && !primary
                           ? () => _change(
                               () => widget.bridge.setHomeRouteServiceVisible(

@@ -3,8 +3,15 @@ import 'dart:async';
 import 'package:dropo/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'navigation_helpers.dart';
 
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() {
+    binding.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+  });
+  tearDown(binding.platformDispatcher.clearAccessibilityFeaturesTestValue);
   test('saved theme values map to effective Flutter modes', () {
     expect(themeModeFromSetting('dark'), ThemeMode.dark);
     expect(themeModeFromSetting('light'), ThemeMode.light);
@@ -51,15 +58,14 @@ void main() {
 
       expect(find.text('Dropo'), findsOneWidget);
       expect(find.text('by sunnydjam'), findsOneWidget);
-      expect(find.byIcon(Icons.menu), findsNothing);
+      expect(find.byKey(const ValueKey('toggle-navigation')), findsOneWidget);
       expect(find.byKey(const ValueKey('atlas-planet')), findsOneWidget);
-      expect(find.byIcon(Icons.settings), findsOneWidget);
-      expect(find.text('Главная'), findsOneWidget);
-      expect(find.text('Сервисы'), findsOneWidget);
-      expect(find.text('Источники VPN'), findsOneWidget);
-      expect(find.text('Диагностика'), findsOneWidget);
-      expect(find.text('Настройки'), findsOneWidget);
-      expect(find.text('О приложении'), findsOneWidget);
+      expect(find.byKey(const ValueKey('nav-settings')), findsOneWidget);
+      expect(find.text('Подключение'), findsOneWidget);
+      expect(find.text('Настроить сервисы'), findsOneWidget);
+      expect(find.byKey(const ValueKey('nav-sources')), findsNothing);
+      expect(find.byKey(const ValueKey('nav-logs')), findsNothing);
+      expect(find.byKey(const ValueKey('navigation-drawer')), findsNothing);
       expect(find.textContaining('Компоненты готовы:'), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsWidgets);
     },
@@ -82,11 +88,13 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.textContaining('Нужны компоненты'), findsNothing);
 
-    await tester.tap(find.byIcon(Icons.settings));
+    await tester.tap(find.byKey(const ValueKey('nav-settings')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
 
-    expect(find.text('Настройки приложения'), findsOneWidget);
+    expect(find.text('Приложение'), findsOneWidget);
+    expect(find.text('Встроенный runtime'), findsNothing);
+    await openSection(tester, 'technical-settings');
     expect(find.text('Встроенный runtime'), findsOneWidget);
     expect(find.text('Всё кроме России'), findsNothing);
     expect(tester.takeException(), isNull);
@@ -121,6 +129,7 @@ void main() {
       find.byKey(const ValueKey<String>('home-routing-all-vpn')),
       findsOneWidget,
     );
+    await openSection(tester, 'service-settings');
     for (final tag in const ['youtube', 'discord', 'meta', 'openai']) {
       expect(
         find.byWidgetPredicate(
@@ -210,6 +219,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect((await bridge.routingMode())['mode'], 'all_traffic');
+    await openSection(tester, 'service-settings');
     expect(
       find.text('Политики ниже сохранены для режима «По сервисам».'),
       findsOneWidget,
@@ -240,6 +250,7 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
+    await openSection(tester, 'service-settings');
     await tester.tap(
       find.byKey(const ValueKey('home-route-policy-discord-direct')),
     );
@@ -309,6 +320,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(seconds: 2));
 
+      await openSection(tester, 'service-settings');
       Future<void> choose(String current, String next) async {
         final field = find.byKey(
           ValueKey('home-route-policy-discord-$current'),
@@ -359,6 +371,7 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
+    await openSection(tester, 'service-settings');
     final details = find.byKey(const ValueKey('home-route-details-discord'));
     await tester.ensureVisible(details);
     await tester.pump(const Duration(milliseconds: 200));
@@ -388,7 +401,7 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(seconds: 2));
-      await tester.tap(find.byKey(const ValueKey('nav-services')));
+      await openSection(tester, 'services');
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
@@ -509,7 +522,7 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(seconds: 2));
-      await tester.tap(find.byKey(const ValueKey('nav-services')));
+      await openSection(tester, 'services');
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
@@ -559,7 +572,7 @@ void main() {
   );
 
   testWidgets(
-    'Android shell uses bottom navigation and requires subscription before VPN start',
+    'Android uses the touch drawer and still requires a subscription before VPN start',
     (tester) async {
       debugMobileShellOverride = true;
       tester.view.physicalSize = const Size(390, 844);
@@ -573,37 +586,17 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
 
-      expect(find.text('Главная'), findsOneWidget);
-      expect(find.text('Настройки'), findsOneWidget);
-      expect(find.text('Еще'), findsOneWidget);
-      expect(find.text('Рабочие сети'), findsOneWidget);
-      expect(find.byIcon(Icons.menu), findsNothing);
-
-      await tester.tap(
-        find
-            .ancestor(
-              of: find.text('Настройки'),
-              matching: find.byType(GestureDetector),
-            )
-            .last,
-      );
+      expect(find.text('Подключение'), findsOneWidget);
+      expect(find.byKey(const ValueKey('navigation-rail')), findsNothing);
+      expect(find.text('Еще'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('toggle-navigation')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-settings')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
-      expect(find.text('Сервисы и маршруты'), findsOneWidget);
-      final servicesLink = find.widgetWithText(TextButton, 'Открыть');
-      // The settings section links to the single catalog editor.
-      final link = find.ancestor(
-        of: find.text('Сервисы и маршруты'),
-        matching: find.byWidgetPredicate(
-          (w) => w.runtimeType.toString() == '_ButtonSetting',
-        ),
-      );
-      final button = find.descendant(of: link, matching: find.text('Открыть'));
-      await tester.ensureVisible(button);
-      await tester.tap(button);
-      await tester.pumpAndSettle();
-      expect(servicesLink, findsNothing);
+      expect(find.text('Сервисы'), findsOneWidget);
+      await openSection(tester, 'services');
       await tester.enterText(
         find.byKey(const ValueKey('service-search')),
         'discord',
@@ -620,24 +613,14 @@ void main() {
         findsNothing,
       );
 
-      await tester.tap(
-        find
-            .ancestor(
-              of: find.text('Еще'),
-              matching: find.byType(GestureDetector),
-            )
-            .last,
-      );
+      await tester.tap(find.byKey(const ValueKey('toggle-navigation')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
-      expect(find.text('Разделы'), findsOneWidget);
-      expect(find.text('Профили'), findsOneWidget);
-      expect(find.text('Статистика'), findsOneWidget);
-      expect(find.text('Логи'), findsOneWidget);
-      expect(find.text('Выход'), findsOneWidget);
-
-      await tester.tap(find.text('Логи').last);
+      expect(find.byKey(const ValueKey('navigation-drawer')), findsOneWidget);
+      expect(find.byKey(const ValueKey('nav-profiles')), findsNothing);
+      expect(find.byKey(const ValueKey('nav-logs')), findsNothing);
+      await openSection(tester, 'logs');
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
@@ -645,14 +628,9 @@ void main() {
       expect(find.text('Копировать всё'), findsOneWidget);
       expect(find.text('Открыть папку с логами'), findsNothing);
 
-      await tester.tap(
-        find
-            .ancestor(
-              of: find.text('Главная'),
-              matching: find.byType(GestureDetector),
-            )
-            .last,
-      );
+      await tester.tap(find.byKey(const ValueKey('toggle-navigation')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('nav-home')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
 
@@ -879,6 +857,9 @@ void main() {
   testWidgets(
     'Dropo Space first-run notice has no checkbox and closes after 8 seconds',
     (tester) async {
+      // This existing countdown test covers its full-duration animation.
+      tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures();
       bool? openDropoSpace;
       final info = AndroidCompatibilityInfo.fromJson(const {
         'supported': true,

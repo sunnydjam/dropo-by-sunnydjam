@@ -1,6 +1,6 @@
 part of 'main.dart';
 
-// Desktop presentation only. Policy changes still go through the existing
+// Adaptive presentation only. Policy changes still go through the existing
 // session-aware callbacks; no traffic decisions belong in these widgets.
 const _atlasBackground = Color(0xFF071F17);
 const _atlasSurface = Color(0xFF10271F);
@@ -8,302 +8,6 @@ const _atlasBorder = Color(0xFF29483C);
 const _atlasText = Color(0xFFEDF5EF);
 const _atlasMuted = Color(0xFFADC2B7);
 const _atlasMint = Color(0xFF5CF0B0);
-
-class _AtlasDesktopShell extends StatelessWidget {
-  const _AtlasDesktopShell({
-    required this.activeSection,
-    required this.disabled,
-    required this.onSelect,
-    required this.onWorkNetworks,
-    required this.onExit,
-    required this.version,
-    required this.child,
-    this.notice,
-    this.overlay,
-  });
-  final String activeSection, version;
-  final bool disabled;
-  final ValueChanged<String> onSelect;
-  final VoidCallback? onWorkNetworks, onExit;
-  final Widget child;
-  final Widget? notice, overlay;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    // The approved desktop theme is deliberately forest-dark, independent of
-    // the system theme. Apply it locally so popups keep readable contrast too.
-    return Theme(
-      data: theme.copyWith(
-        brightness: Brightness.dark,
-        colorScheme:
-            ColorScheme.fromSeed(
-              seedColor: _atlasMint,
-              brightness: Brightness.dark,
-            ).copyWith(
-              primary: _atlasMint,
-              surface: _atlasSurface,
-              onSurface: _atlasText,
-            ),
-        textTheme: ThemeData.dark().textTheme.apply(
-          fontFamily: 'Inter',
-          bodyColor: _atlasText,
-          displayColor: _atlasText,
-        ),
-        dividerColor: _atlasBorder,
-        textButtonTheme: TextButtonThemeData(
-          style: TextButton.styleFrom(
-            textStyle: const TextStyle(
-              fontFamily: 'Inter',
-              fontSize: 16,
-              fontWeight: FontWeight.w400,
-            ),
-          ),
-        ),
-        popupMenuTheme: const PopupMenuThemeData(color: _atlasSurface),
-      ),
-      child: Scaffold(
-        backgroundColor: _atlasBackground,
-        body: Stack(
-          children: [
-            SafeArea(
-              child: Column(
-                children: [
-                  _header(),
-                  if (notice != null)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 8,
-                      ),
-                      child: notice!,
-                    ),
-                  Expanded(
-                    child: activeSection == 'home'
-                        ? child
-                        : Center(
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 1120),
-                              child: Padding(
-                                padding: const EdgeInsets.all(20),
-                                child: Column(
-                                  children: [
-                                    if (activeSection == 'settings')
-                                      Padding(
-                                        padding: const EdgeInsets.only(
-                                          bottom: 12,
-                                        ),
-                                        child: Wrap(
-                                          spacing: 12,
-                                          runSpacing: 8,
-                                          children: [
-                                            _shortcut(
-                                              'Профили',
-                                              Icons.layers_outlined,
-                                              'profiles',
-                                            ),
-                                            TextButton.icon(
-                                              key: const ValueKey(
-                                                'home-work-networks',
-                                              ),
-                                              onPressed: onWorkNetworks,
-                                              icon: const Icon(
-                                                Icons.hub_outlined,
-                                                size: 18,
-                                              ),
-                                              label: const Text('Рабочие сети'),
-                                            ),
-                                            _shortcut(
-                                              'Статистика',
-                                              Icons.bar_chart,
-                                              'stats',
-                                            ),
-                                            TextButton.icon(
-                                              onPressed: onExit,
-                                              icon: const Icon(
-                                                Icons.logout,
-                                                size: 18,
-                                              ),
-                                              label: const Text('Выход'),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    Expanded(child: child),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                  ),
-                  _footer(),
-                ],
-              ),
-            ),
-            if (overlay != null) Positioned.fill(child: overlay!),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _shortcut(String label, IconData icon, String section) =>
-      TextButton.icon(
-        onPressed: disabled ? null : () => onSelect(section),
-        icon: Icon(icon, size: 18),
-        label: Text(label),
-      );
-
-  Widget _header() => Container(
-    decoration: const BoxDecoration(
-      border: Border(bottom: BorderSide(color: _atlasBorder)),
-    ),
-    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-    child: LayoutBuilder(
-      builder: (context, constraints) {
-        final compact =
-            constraints.maxWidth < 800 ||
-            MediaQuery.textScalerOf(context).scale(16) > 20;
-        final brand = Semantics(
-          label: 'Dropo by sunnydjam',
-          excludeSemantics: true,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Dropo',
-                style: TextStyle(
-                  fontSize: compact ? 26 : 38,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -1.2,
-                  height: 1.1,
-                ),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                'by sunnydjam',
-                style: TextStyle(fontSize: 14, color: _atlasMuted),
-              ),
-            ],
-          ),
-        );
-        final tabs = Wrap(
-          spacing: 22,
-          runSpacing: 4,
-          children: [
-            _tab('home', 'Главная', Icons.home_outlined),
-            _tab('services', 'Сервисы', Icons.grid_view_outlined),
-            _tab('sources', 'Источники VPN', Icons.dns_outlined),
-            _tab('logs', 'Диагностика', Icons.monitor_heart_outlined),
-          ],
-        );
-        if (compact) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              brand,
-              const SizedBox(height: 8),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    for (final tab in tabs.children)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 12),
-                        child: tab,
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          );
-        }
-        return Row(
-          children: [
-            brand,
-            const SizedBox(width: 72),
-            Expanded(child: tabs),
-          ],
-        );
-      },
-    ),
-  );
-
-  Widget _tab(String section, String label, IconData icon) {
-    final selected = activeSection == section;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(
-            color: selected ? _atlasMint : Colors.transparent,
-            width: 2,
-          ),
-        ),
-      ),
-      child: Semantics(
-        selected: selected,
-        child: TextButton.icon(
-          key: ValueKey('nav-$section'),
-          onPressed: disabled ? null : () => onSelect(section),
-          style: TextButton.styleFrom(
-            foregroundColor: selected ? _atlasMint : _atlasText,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 20),
-            textStyle: const TextStyle(fontFamily: 'Inter', fontSize: 18),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(6),
-            ),
-          ),
-          icon: Icon(icon, size: 24),
-          label: Text(label),
-        ),
-      ),
-    );
-  }
-
-  Widget _footer() => Container(
-    margin: const EdgeInsets.symmetric(horizontal: 24),
-    padding: const EdgeInsets.symmetric(vertical: 14),
-    decoration: const BoxDecoration(
-      border: Border(top: BorderSide(color: _atlasBorder)),
-    ),
-    child: LayoutBuilder(
-      builder: (context, constraints) {
-        final links = Wrap(
-          spacing: 12,
-          runSpacing: 4,
-          children: [
-            _shortcut('Настройки', Icons.settings, 'settings'),
-            _shortcut('О приложении', Icons.info_outline, 'about'),
-          ],
-        );
-        final diagnostic = TextButton(
-          key: const ValueKey('home-diagnostics'),
-          onPressed: disabled ? null : () => onSelect('logs'),
-          child: const Text(
-            'Проверить подключение',
-            style: TextStyle(decoration: TextDecoration.underline),
-          ),
-        );
-        if (constraints.maxWidth < 680 ||
-            MediaQuery.textScalerOf(context).scale(14) > 18) {
-          return Wrap(
-            spacing: 12,
-            runSpacing: 4,
-            children: [links, diagnostic],
-          );
-        }
-        return Row(
-          children: [
-            links,
-            const Spacer(),
-            Tooltip(message: version, child: diagnostic),
-          ],
-        );
-      },
-    ),
-  );
-}
 
 class _AtlasHomeLayout extends StatelessWidget {
   const _AtlasHomeLayout({
@@ -315,78 +19,27 @@ class _AtlasHomeLayout extends StatelessWidget {
   final Widget connection, source, routes, notices;
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) {
-      final stacked =
-          constraints.maxWidth < 900 ||
-          MediaQuery.textScalerOf(context).scale(16) > 22;
-      final left = Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          connection,
-          const SizedBox(height: 20),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 390),
-              child: source,
-            ),
-          ),
-        ],
-      );
-      final right = Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          notices,
-          routes,
-          const SizedBox(height: 32),
-          const Text(
-            'Доступность сервисов проверяется отдельно.',
-            textAlign: TextAlign.end,
-            style: TextStyle(color: _atlasMuted, fontSize: 13, height: 1.5),
-          ),
-        ],
-      );
-      return Padding(
-        key: const ValueKey('home'),
-        padding: EdgeInsets.symmetric(
-          horizontal: stacked ? 20 : 28,
-          vertical: 28,
+  Widget build(BuildContext context) => Padding(
+    key: const ValueKey('home'),
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+    child: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 400),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Errors and active probes stay visible even on the simple screen.
+            notices,
+            connection,
+            const SizedBox(height: 8),
+            source,
+            const SizedBox(height: 8),
+            routes,
+          ],
         ),
-        child: stacked
-            ? Column(
-                children: [
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 480),
-                    child: left,
-                  ),
-                  const SizedBox(height: 32),
-                  right,
-                ],
-              )
-            : Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(flex: 37, child: left),
-                  Expanded(
-                    flex: 63,
-                    child: Container(
-                      decoration: const BoxDecoration(
-                        border: Border(left: BorderSide(color: _atlasBorder)),
-                      ),
-                      padding: const EdgeInsets.only(
-                        left: 32,
-                        top: 6,
-                        bottom: 20,
-                      ),
-                      child: right,
-                    ),
-                  ),
-                ],
-              ),
-      );
-    },
+      ),
+    ),
   );
 }
 
@@ -400,120 +53,147 @@ class _AtlasConnectionPanel extends StatelessWidget {
     required this.stopping,
     required this.enabled,
     required this.onPressed,
+    this.onDisabledPressed,
   });
   final String title;
   final Color accent;
   final bool connected, sessionActive, busy, stopping, enabled;
   final VoidCallback onPressed;
+  final VoidCallback? onDisabledPressed;
 
   @override
-  Widget build(BuildContext context) => Column(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Semantics(
-          liveRegion: true,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                width: 14,
-                height: 14,
-                decoration: BoxDecoration(
-                  color: accent,
-                  shape: BoxShape.circle,
-                  boxShadow: connected
-                      ? [
-                          BoxShadow(
-                            color: accent.withValues(alpha: 0.28),
-                            blurRadius: 16,
-                          ),
-                        ]
-                      : null,
-                ),
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final largeText = MediaQuery.textScalerOf(context).scale(17) > 23;
+      final planetSize = math.min(
+        constraints.maxWidth,
+        math.min(
+          280.0,
+          math.max(
+            largeText ? 280.0 : 190.0,
+            MediaQuery.sizeOf(context).height - 310,
+          ),
+        ),
+      );
+      final actionIcon = busy
+          ? const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.power_settings_new, size: 24);
+      final actionLabel = Text(
+        busy
+            ? (stopping ? 'Отключаем…' : 'Подождите')
+            : sessionActive
+            ? 'Отключить'
+            : 'Подключить',
+        textAlign: TextAlign.center,
+      );
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Tooltip(
+            message: 'Доступность сервисов проверяется отдельно.',
+            child: Semantics(
+              liveRegion: true,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: accent,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      title,
+                      key: const ValueKey('home-connection-state'),
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.4,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 12),
-              Flexible(
-                child: Text(
-                  title,
-                  key: const ValueKey('home-connection-state'),
-                  style: const TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.7,
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox.square(
+            dimension: planetSize,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                IgnorePointer(
+                  child: _AtlasAnimatedPlanet(
+                    connected: connected,
+                    size: planetSize,
                   ),
                 ),
-              ),
-            ],
-          ),
-        ),
-      ),
-      const SizedBox(height: 4),
-      if (MediaQuery.sizeOf(context).height > 700 ||
-          MediaQuery.textScalerOf(context).scale(16) <= 22)
-        ExcludeSemantics(
-          child: RepaintBoundary(
-            child: AnimatedOpacity(
-              duration: MediaQuery.disableAnimationsOf(context)
-                  ? Duration.zero
-                  : const Duration(milliseconds: 280),
-              opacity: connected ? 1 : 0.55,
-              child: Image.asset(
-                'assets/atlas-earth.png',
-                key: const ValueKey('atlas-planet'),
-                width: math.min(
-                  480,
-                  math.max(180, MediaQuery.sizeOf(context).height - 450),
+                SizedBox(
+                  width: largeText
+                      ? planetSize
+                      : math.min(216.0, planetSize * 0.82),
+                  child: FilledButton(
+                    key: const ValueKey('home-connect'),
+                    onPressed: enabled ? onPressed : onDisabledPressed,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(48, 52),
+                      backgroundColor: connected
+                          ? _atlasBackground.withValues(alpha: 0.94)
+                          : _atlasMint,
+                      foregroundColor: connected
+                          ? _atlasText
+                          : _atlasBackground,
+                      disabledBackgroundColor: _atlasSurface,
+                      disabledForegroundColor: _atlasMuted,
+                      side: BorderSide(
+                        color: enabled ? _atlasMint : _atlasBorder,
+                        width: 1.5,
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 14,
+                      ),
+                      textStyle: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      shape: const StadiumBorder(),
+                    ),
+                    child: largeText
+                        ? Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              actionIcon,
+                              const SizedBox(height: 8),
+                              actionLabel,
+                            ],
+                          )
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              actionIcon,
+                              const SizedBox(width: 8),
+                              Flexible(child: actionLabel),
+                            ],
+                          ),
+                  ),
                 ),
-                fit: BoxFit.contain,
-                filterQuality: FilterQuality.medium,
-              ),
+              ],
             ),
           ),
-        ),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 30),
-        child: SizedBox(
-          width: 376,
-          child: FilledButton.icon(
-            key: const ValueKey('home-connect'),
-            onPressed: enabled ? onPressed : null,
-            style: FilledButton.styleFrom(
-              backgroundColor: connected ? Colors.transparent : _atlasMint,
-              foregroundColor: connected ? _atlasText : _atlasBackground,
-              disabledBackgroundColor: _atlasSurface,
-              disabledForegroundColor: _atlasMuted,
-              side: BorderSide(
-                color: enabled ? _atlasMint : _atlasBorder,
-                width: 2,
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-              textStyle: const TextStyle(
-                fontFamily: 'Inter',
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-              ),
-              shape: const StadiumBorder(),
-            ),
-            icon: busy
-                ? const SizedBox(
-                    width: 26,
-                    height: 26,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.power_settings_new, size: 30),
-            label: Text(
-              busy
-                  ? (stopping ? 'Отключаем…' : 'Подождите')
-                  : sessionActive
-                  ? 'Отключить'
-                  : 'Подключить',
-            ),
-          ),
-        ),
-      ),
-    ],
+        ],
+      );
+    },
   );
 }
 
@@ -536,13 +216,13 @@ class _AtlasSourceTile extends StatelessWidget {
       foregroundColor: _atlasText,
       backgroundColor: _atlasSurface,
       side: const BorderSide(color: _atlasBorder),
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(10),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
     ),
     child: Row(
       children: [
-        const Icon(Icons.dns_outlined, size: 28),
-        const SizedBox(width: 16),
+        const Icon(Icons.dns_outlined, size: 22),
+        const SizedBox(width: 10),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -551,7 +231,7 @@ class _AtlasSourceTile extends StatelessWidget {
                 title,
                 key: const ValueKey('home-source-title'),
                 style: const TextStyle(
-                  fontSize: 16,
+                  fontSize: 14,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -580,7 +260,7 @@ class _AtlasSourceTile extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 8),
-        const Icon(Icons.expand_more, size: 20),
+        const Icon(Icons.chevron_right, size: 20),
       ],
     ),
   );
@@ -599,15 +279,16 @@ class _AtlasRouteControls extends StatelessWidget {
       key: const ValueKey('home-route-controls'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          'Как подключаться',
-          style: TextStyle(
-            fontSize: 32,
-            fontWeight: FontWeight.w700,
-            letterSpacing: -0.6,
+        if (!c.summaryOnly)
+          const Text(
+            'Как подключаться',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.6,
+            ),
           ),
-        ),
-        const SizedBox(height: 16),
+        if (!c.summaryOnly) const SizedBox(height: 8),
         LayoutBuilder(
           builder: (context, constraints) {
             final buttons = [
@@ -629,8 +310,8 @@ class _AtlasRouteControls extends StatelessWidget {
                 ),
               ),
             ];
-            if (constraints.maxWidth < 510 ||
-                MediaQuery.textScalerOf(context).scale(16) > 22) {
+            if (constraints.maxWidth < 275 ||
+                MediaQuery.textScalerOf(context).scale(14) > 19) {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [buttons[0], const SizedBox(height: 10), buttons[1]],
@@ -639,127 +320,143 @@ class _AtlasRouteControls extends StatelessWidget {
             return Row(
               children: [
                 Expanded(child: buttons[0]),
-                const SizedBox(width: 12),
+                const SizedBox(width: 8),
                 Expanded(child: buttons[1]),
               ],
             );
           },
         ),
-        const SizedBox(height: 12),
-        Text(
-          allTraffic
-              ? 'Общий трафик — через VPN. Локальные и рабочие сети сохраняют исключения.'
-              : 'Сервисы и правила блокировок. Остальное — напрямую.',
-          style: const TextStyle(color: _atlasMuted, fontSize: 14, height: 1.5),
-        ),
-        const SizedBox(height: 30),
-        Wrap(
-          alignment: WrapAlignment.spaceBetween,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          spacing: 12,
-          runSpacing: 8,
-          children: [
-            const Text(
-              'Избранные сервисы',
-              style: TextStyle(
-                fontSize: 30,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.6,
-              ),
-            ),
-            TextButton.icon(
-              key: const ValueKey('toggle-home-route-services'),
-              onPressed: () => c.onExpandedChanged(!c.expanded),
-              iconAlignment: IconAlignment.end,
-              icon: Icon(c.expanded ? Icons.expand_less : Icons.expand_more),
-              label: Text(c.expanded ? 'Свернуть' : 'Развернуть'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        if (c.expanded)
-          Container(
-            decoration: BoxDecoration(
-              border: Border.all(color: _atlasBorder),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (allTraffic)
-                  const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text(
-                      'Политики ниже сохранены для режима «По сервисам».',
-                      style: TextStyle(color: _atlasMuted, fontSize: 13),
-                    ),
-                  ),
-                for (final service in services) ...[
-                  _AtlasServiceRow(service: service, controls: c),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16),
-                    child: Divider(height: 1, color: _atlasBorder),
-                  ),
-                ],
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Wrap(
-                    alignment: WrapAlignment.spaceBetween,
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      TextButton.icon(
-                        key: const ValueKey('add-home-route-service'),
-                        onPressed: c.onAdd,
-                        icon: const Icon(Icons.add, size: 24),
-                        label: const Text('Добавить сервис'),
-                      ),
-                      TextButton.icon(
-                        key: const ValueKey('home-all-services'),
-                        onPressed: c.onAllServices,
-                        iconAlignment: IconAlignment.end,
-                        icon: const Icon(Icons.arrow_forward, size: 20),
-                        label: const Text('Все сервисы'),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+        if (!c.summaryOnly) ...[
+          const SizedBox(height: 6),
+          Text(
+            allTraffic
+                ? 'Общий трафик — через VPN. Локальные и рабочие сети сохраняют исключения.'
+                : 'Только выбранные сервисы. Остальное — напрямую.',
+            style: const TextStyle(
+              color: _atlasMuted,
+              fontSize: 12,
+              height: 1.3,
             ),
           ),
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 12,
+            runSpacing: 8,
+            children: [
+              const Text(
+                'Сервисы',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.6,
+                ),
+              ),
+              IconButton(
+                key: const ValueKey('toggle-home-route-services'),
+                onPressed: () => c.onExpandedChanged(!c.expanded),
+                icon: Icon(c.expanded ? Icons.expand_less : Icons.expand_more),
+                tooltip: c.expanded ? 'Свернуть сервисы' : 'Развернуть сервисы',
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                style: IconButton.styleFrom(
+                  minimumSize: const Size(48, 48),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          if (c.expanded)
+            Container(
+              decoration: BoxDecoration(
+                border: Border.all(color: _atlasBorder),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (allTraffic)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text(
+                        'Политики ниже сохранены для режима «По сервисам».',
+                        style: TextStyle(color: _atlasMuted, fontSize: 13),
+                      ),
+                    ),
+                  for (final service in services) ...[
+                    _AtlasServiceRow(service: service, controls: c),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Divider(height: 0, color: _atlasBorder),
+                    ),
+                  ],
+                  Padding(
+                    padding: EdgeInsets.zero,
+                    child: Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        TextButton.icon(
+                          key: const ValueKey('add-home-route-service'),
+                          onPressed: c.onAdd,
+                          icon: const Icon(Icons.add, size: 20),
+                          label: const Text('Добавить сервис'),
+                          style: TextButton.styleFrom(
+                            minimumSize: const Size(48, 48),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ] else ...[
+          const SizedBox(height: 8),
+          _SettingsLink(
+            section: 'service-settings',
+            title: 'Настроить сервисы',
+            icon: Icons.grid_view_rounded,
+            trailing: Text(
+              '${services.length}',
+              style: const TextStyle(color: _atlasMuted),
+            ),
+            onPressed: c.onAllServices,
+          ),
+        ],
       ],
     );
   }
 
-  Widget _mode(
-    String key,
-    String label,
-    bool selected,
-    VoidCallback action,
-  ) => Semantics(
-    selected: selected,
-    child: OutlinedButton.icon(
-      key: ValueKey('home-routing-$key'),
-      onPressed: controls.enabled ? action : null,
-      icon: Icon(
-        selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
-        size: 24,
-      ),
-      label: Text(label),
-      style: OutlinedButton.styleFrom(
-        foregroundColor: selected ? _atlasBackground : _atlasText,
-        backgroundColor: selected ? _atlasMint : _atlasSurface,
-        side: BorderSide(color: selected ? _atlasMint : _atlasBorder),
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
-        textStyle: const TextStyle(
-          fontFamily: 'Inter',
-          fontSize: 18,
-          fontWeight: FontWeight.w500,
+  Widget _mode(String key, String label, bool selected, VoidCallback action) =>
+      Semantics(
+        selected: selected,
+        child: OutlinedButton.icon(
+          key: ValueKey('home-routing-$key'),
+          onPressed: controls.enabled ? action : null,
+          icon: Icon(
+            key == 'selected' ? Icons.grid_view_rounded : Icons.public,
+            size: 18,
+          ),
+          label: Text(label),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: selected ? _atlasBackground : _atlasText,
+            backgroundColor: selected ? _atlasMint : _atlasSurface,
+            side: BorderSide(color: selected ? _atlasMint : _atlasBorder),
+            minimumSize: const Size(48, 48),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+            textStyle: const TextStyle(
+              fontFamily: 'Inter',
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
         ),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      ),
-    ),
-  );
+      );
 }
 
 class _AtlasServiceRow extends StatelessWidget {
@@ -776,34 +473,38 @@ class _AtlasServiceRow extends StatelessWidget {
       'vpn' => 'Через VPN',
       'zapret' =>
         service.tag == 'discord' ? 'Zapret (эксп.)' : 'Обход · Zapret',
-      _ => 'Автоматически',
+      _ => 'Авто',
     };
     final options = [
-      'auto',
+      if (_isMobileShell) 'auto',
       'direct',
       'vpn',
-      if (service.zapretSupported) 'zapret',
+      if (!_isMobileShell && service.zapretSupported) 'zapret',
     ];
     final dropdown = Semantics(
       label: 'Способ подключения: ${_homeRouteName(service)}',
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        constraints: const BoxConstraints(minHeight: 48),
         decoration: BoxDecoration(
           color: _atlasSurface,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        foregroundDecoration: BoxDecoration(
           border: Border.all(color: _atlasBorder),
           borderRadius: BorderRadius.circular(8),
         ),
         child: DropdownButtonHideUnderline(
           child: DropdownButton<String>(
             key: ValueKey('home-route-policy-${service.tag}-$policy'),
-            value: options.contains(policy) ? policy : 'auto',
+            value: options.contains(policy) ? policy : 'direct',
             isExpanded: true,
-            isDense: true,
+            isDense: false,
             itemHeight: null,
             menuMaxHeight: 360,
             style: const TextStyle(
               color: _atlasText,
-              fontSize: 17,
+              fontSize: 13,
               fontFamily: 'Inter',
             ),
             icon: const Icon(Icons.expand_more, color: _atlasText),
@@ -832,7 +533,7 @@ class _AtlasServiceRow extends StatelessWidget {
     final identity = Row(
       children: [
         _AtlasServiceIcon(tag: service.tag),
-        const SizedBox(width: 18),
+        const SizedBox(width: 8),
         Expanded(
           child: Tooltip(
             message: !controls.connected
@@ -842,14 +543,14 @@ class _AtlasServiceRow extends StatelessWidget {
                 : 'Маршрут по данным ядра: ${service.method}',
             child: Text(
               _homeRouteName(service),
-              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w500),
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
             ),
           ),
         ),
         if (!isPrimaryHomeRouteService(service.tag))
           IconButton(
             key: ValueKey('remove-home-route-${service.tag}'),
-            tooltip: 'Убрать с главной',
+            tooltip: 'Убрать из быстрого списка',
             onPressed: controls.enabled
                 ? () => controls.onRemove(service, false)
                 : null,
@@ -858,13 +559,15 @@ class _AtlasServiceRow extends StatelessWidget {
       ],
     );
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Column(
         children: [
           LayoutBuilder(
             builder: (context, constraints) {
-              if (constraints.maxWidth < 420 ||
-                  MediaQuery.textScalerOf(context).scale(16) > 22) {
+              if (constraints.maxWidth < 260 ||
+                  MediaQuery.textScalerOf(context).scale(14) > 19 ||
+                  (!isPrimaryHomeRouteService(service.tag) &&
+                      constraints.maxWidth < 340)) {
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [identity, const SizedBox(height: 12), dropdown],
@@ -873,9 +576,9 @@ class _AtlasServiceRow extends StatelessWidget {
               return Row(
                 children: [
                   Expanded(child: identity),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 8),
                   SizedBox(
-                    width: constraints.maxWidth > 650 ? 244 : 208,
+                    width: constraints.maxWidth > 420 ? 180 : 142,
                     child: dropdown,
                   ),
                 ],
@@ -921,9 +624,9 @@ class _AtlasServiceIcon extends StatelessWidget {
     };
     return ExcludeSemantics(
       child: Container(
-        width: 44,
-        height: 44,
-        padding: EdgeInsets.all(tag == 'openai' ? 0 : 8),
+        width: 28,
+        height: 28,
+        padding: EdgeInsets.all(tag == 'openai' ? 0 : 4),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(10),
           color: switch (tag) {

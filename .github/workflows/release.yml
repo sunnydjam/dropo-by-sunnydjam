@@ -5,11 +5,17 @@ name: Publish Windows Release
 # no signing keys are stored in Actions.
 on:
   workflow_run:
-    workflows: ["Windows package release gate"]
+    workflows: ["CI", "Windows package release gate"]
     types: [completed]
 
 permissions:
   contents: read
+
+# Either workflow may finish first. The second completion retries the check;
+# serialize publication for one SHA so two completions cannot create a release.
+concurrency:
+  group: publish-windows-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
 
 jobs:
   release-record:
@@ -28,21 +34,32 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha }}
 
+      - name: Require CI and package gate for the same commit
+        id: readiness
+        shell: pwsh
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: ./tools/check-release-readiness.ps1 -Sha $env:RELEASE_SHA
+
       - name: Reject generated contributor metadata
+        if: steps.readiness.outputs.ready == 'true'
         shell: pwsh
         run: .\tools\check-clean-contributors.ps1
 
       - name: Verify release contains the latest blocked lists
+        if: steps.readiness.outputs.ready == 'true'
         shell: pwsh
         run: .\scripts\filters\update-blocked-lists.ps1 -CheckOnly
 
       - name: Download verified Windows packages
+        if: steps.readiness.outputs.ready == 'true'
         shell: pwsh
         run: |
-          gh run download "${{ github.event.workflow_run.id }}" `
+          gh run download "${{ steps.readiness.outputs.package_run_id }}" `
             --repo "$env:GITHUB_REPOSITORY" `
             --name "dropo-windows-packages" `
             --dir "release-assets"
+          if ($LASTEXITCODE -ne 0) { throw "Verified artifact download failed" }
           $installer = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Setup-x64.exe")
           $portable = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Portable-x64.zip")
           if ($installer.Count -ne 1 -or $portable.Count -ne 1) {
@@ -50,6 +67,7 @@ jobs:
           }
 
       - name: Read version and check existing release
+        if: steps.readiness.outputs.ready == 'true'
         id: version
         shell: pwsh
         run: |
