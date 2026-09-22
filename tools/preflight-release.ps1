@@ -269,9 +269,9 @@ function Invoke-ArtifactValidation {
             throw "Bundled runtime manifest is missing required file: $requiredFile"
         }
     }
-    foreach ($forbiddenFile in @("winws.exe", "winws2.exe", "cygwin1.dll", "zapret-lib.lua", "zapret-antidpi.lua")) {
+    foreach ($forbiddenFile in @("winws.exe", "winws2.exe", "cygwin1.dll", "zapret-lib.lua", "zapret-antidpi.lua", "tg-ws-proxy.exe")) {
         if (Test-Path -LiteralPath (Join-Path $runtimeFolder "bin\$forbiddenFile")) {
-            throw "Release contains a forbidden external packet runtime file: $forbiddenFile"
+            throw "Release contains a forbidden Windows runtime file: $forbiddenFile"
         }
     }
 	$sbomPath = Join-Path $runtimeFolder "dropo-sbom.spdx.json"
@@ -285,15 +285,31 @@ function Invoke-ArtifactValidation {
 		throw "SPDX SBOM does not describe the complete native runtime manifest."
 	}
 	$sbomNames = @($sbom.packages | ForEach-Object { [string]$_.name })
-	foreach ($component in @("dropo", "sing-box", "Xray-core", "WireGuard for Windows", "WinDivert", "tg-ws-proxy", "Flowseal zapret-discord-youtube payloads", "metacubex uTLS")) {
+	foreach ($component in @("dropo", "sing-box", "Xray-core", "WireGuard for Windows", "WinDivert", "Flowseal zapret-discord-youtube payloads", "metacubex uTLS")) {
 		if ($component -notin $sbomNames) {
 			throw "SPDX SBOM is missing component: $component"
 		}
 	}
+	if ("tg-ws-proxy" -in $sbomNames -or (Test-Path -LiteralPath (Join-Path $runtimeFolder "licenses\tg-ws-proxy-LICENSE.txt"))) {
+		throw "Windows release must not contain the removed Telegram proxy sidecar or its license."
+	}
 	$provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
+	if (@($provenance.predicate.buildDefinition.resolvedDependencies | ForEach-Object { [string]$_.uri }) -match "tg-ws-proxy") {
+		throw "Build provenance still lists the removed Telegram proxy sidecar."
+	}
 	$expectedManifestSHA = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 	if (([string]$provenance.subject[0].digest.sha256).ToLowerInvariant() -ne $expectedManifestSHA) {
 		throw "Build provenance does not bind the trusted runtime manifest."
+	}
+	$guardPath = Join-Path $runtimeFolder 'bin\dropo-wfp-guard.exe'
+	$guardManifestEntries = @($runtimeManifest.files | Where-Object { [string]$_.path -ieq 'bin/dropo-wfp-guard.exe' })
+	if ((Test-Path -LiteralPath $guardPath) -or $guardManifestEntries.Count -ne 0) {
+		# Supplementary publication check. The build has already verified the
+		# exact manifest hash embedded into the signed core; this readback catches
+		# missing/tampered guard files and signer drift after packaging. The local
+		# provenance hash alone is not independent proof of that core binding.
+		. (Join-Path $ScriptRoot 'check-wfp-guard-release.ps1') -FunctionsOnly
+		Assert-DropoWfpGuardInstallerRelease -RuntimeFolder $runtimeFolder -InstallerPath $windowsInstallerPath -ExpectedManifestSHA256 $expectedManifestSHA | Out-Null
 	}
 	Assert-FileExists (Join-Path $runtimeFolder "resources\template.json")
     Assert-FileExists $windowsInstallerPath

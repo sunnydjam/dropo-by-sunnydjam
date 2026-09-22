@@ -35,6 +35,7 @@ func BuildSingBoxConfig() string {
 	signature := androidConfigSignature(subscription, enableLogging, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies)
 	if !autoUpdateSub && cachedConfig != "" && subscription != "" && subscription == cachedSubscription && signature == cachedSignature {
 		appendLogIfChangedLocked("android sing-box config cache reused (auto-update disabled)")
+		current.SubscriptionProxyCount = cachedProxyCount
 		_ = saveLocked()
 		mu.Unlock()
 		return encode(map[string]interface{}{
@@ -51,11 +52,18 @@ func BuildSingBoxConfig() string {
 
 	mu.Lock()
 	defer mu.Unlock()
+	if strings.TrimSpace(current.Subscription) != subscription {
+		return encode(map[string]interface{}{
+			"success": false,
+			"error":   "VPN subscription changed while Android configuration was being built",
+		})
+	}
 	if err != nil {
 		if cachedConfig != "" && subscription != "" && subscription == cachedSubscription && signature == cachedSignature {
 			appendLogLocked("android sing-box config failed, using cached config: " + err.Error())
 			current.Version.SingboxVersion = androidSingBoxVersion
 			current.LastError = ""
+			current.SubscriptionProxyCount = cachedProxyCount
 			_ = saveLocked()
 			return encode(map[string]interface{}{
 				"success":    true,
@@ -80,6 +88,7 @@ func BuildSingBoxConfig() string {
 	current.LastError = ""
 	current.CachedSingBoxConfig = config
 	current.CachedProxyCount = len(proxies)
+	current.SubscriptionProxyCount = len(proxies)
 	current.CachedConfigSubscription = subscription
 	current.CachedConfigSignature = signature
 	current.CachedConfigUpdatedAt = currentTimeRFC3339()
@@ -111,7 +120,7 @@ func buildAndroidSingBoxConfig(subscription, logLevel, routingMode string, hideR
 	}
 
 	outbounds, proxyTags := buildAndroidOutbounds(filtered)
-	effectiveRoutePolicies := androidEffectiveRoutePolicies(routePolicies, len(proxyTags) > 0)
+	effectiveRoutePolicies := androidEffectiveRoutePoliciesForMode(routePolicies, len(proxyTags) > 0, routingMode)
 	ruOutbound := "proxy"
 	ruProxyAddress = strings.TrimSpace(ruProxyAddress)
 	if hideRuTraffic && ruProxyAddress != "" {
@@ -181,11 +190,17 @@ func effectiveAndroidLogLevel(enableLogging bool, logLevel string) string {
 }
 
 func parseAndroidProxyCandidates(subscription string) ([]proxyConfig, error) {
-	fetcher := newSubscriptionFetcher()
+	return parseAndroidProxyCandidatesWithFetcher(subscription, newSubscriptionFetcher())
+}
+
+func parseAndroidProxyCandidatesWithFetcher(subscription string, fetcher *subscriptionFetcher) ([]proxyConfig, error) {
+	if fetcher == nil {
+		return nil, fmt.Errorf("subscription checker is unavailable")
+	}
 	var proxies []proxyConfig
 	var err error
 	if isDirectProxyLink(subscription) {
-		proxy, parseErr := fetcher.parseSingleLink(subscription)
+		proxy, parseErr := parseAndroidDirectProxyCandidate(subscription)
 		err = parseErr
 		proxies = []proxyConfig{proxy}
 	} else {
@@ -210,6 +225,16 @@ func parseAndroidProxyCandidates(subscription string) ([]proxyConfig, error) {
 		return nil, fmt.Errorf("subscription does not contain supported Android sing-box proxies")
 	}
 	return filtered, nil
+}
+
+func parseAndroidDirectProxyCandidate(value string) (proxy proxyConfig, err error) {
+	defer func() {
+		if recover() != nil {
+			proxy = proxyConfig{}
+			err = fmt.Errorf("invalid VPN key")
+		}
+	}()
+	return (&subscriptionFetcher{}).parseSingleLink(value)
 }
 
 func buildAndroidOutbounds(proxies []proxyConfig) ([]interface{}, []string) {

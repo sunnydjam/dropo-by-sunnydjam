@@ -20,7 +20,6 @@ CC0-1.0. Текст лицензии поставляется в Flutter assets 
 | sing-box | TUN, VPN-протоколы и маршрутизация | [SagerNet/sing-box](https://github.com/SagerNet/sing-box); текст лицензии включается в release |
 | WireGuard for Windows / Wintun | Рабочие и пользовательские WireGuard-туннели | [WireGuard/wireguard-windows](https://github.com/WireGuard/wireguard-windows); текст лицензии включается в release |
 | Xray-core | Поддержка отдельных VLESS transport-вариантов | [XTLS/Xray-core](https://github.com/XTLS/Xray-core); текст лицензии включается в release |
-| tg-ws-proxy | Локальный MTProto-over-WebSocket transport для Telegram | Локально закреплённая версия 1.7.3, MIT; текст лицензии включается в `licenses/tg-ws-proxy-LICENSE.txt` |
 | Flowseal zapret-discord-youtube 1.10.2 protocol payloads | Восемь неизменяемых fake TLS/QUIC/STUN/Discord payload встроены как данные в подписанное ядро | MIT; copyright и полный текст разрешения сохранены ниже. `winws`, Cygwin, Lua, драйвер и код Flowseal не включаются |
 | metacubex/uTLS 1.8.4 | Chromium-compatible TLS ClientHello только для проверки выбранной Discord-стратегии через сервисно-ограниченный CONNECT relay | BSD-3-Clause; текст лицензии включается в `licenses/metacubex-utls-LICENSE.txt` |
 | Flutter | Пользовательский интерфейс | [flutter/flutter](https://github.com/flutter/flutter), BSD-3-Clause |

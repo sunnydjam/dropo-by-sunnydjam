@@ -2,12 +2,16 @@ package dropocore
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestAndroidCoreLifecycle(t *testing.T) {
@@ -39,7 +43,17 @@ func TestAndroidCoreSubscriptionCall(t *testing.T) {
 	current = defaultState()
 	mu.Unlock()
 
-	args := `["vless://example"]`
+	args := `["vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#demo"]`
+	var check map[string]interface{}
+	if err := json.Unmarshal([]byte(Call("TestVPNConnection", args)), &check); err != nil {
+		t.Fatal(err)
+	}
+	if check["success"] != true || check["count"] != float64(1) || check["isDirectLink"] != true {
+		t.Fatalf("direct VPN key check = %#v, want one verified proxy", check)
+	}
+	if _, exists := check["proxies"]; exists {
+		t.Fatalf("direct VPN key check exposed proxy details: %#v", check)
+	}
 	if ok := decodeSuccess(Call("SetVPNSubscription", args)); !ok {
 		t.Fatal("SetVPNSubscription success = false")
 	}
@@ -53,6 +67,345 @@ func TestAndroidCoreSubscriptionCall(t *testing.T) {
 	}
 	if sub["proxyCount"].(float64) != 1 {
 		t.Fatalf("proxyCount = %v, want 1", sub["proxyCount"])
+	}
+	if ok := decodeSuccess(Call("RemoveVPNSubscription", "[]")); !ok {
+		t.Fatal("RemoveVPNSubscription success = false")
+	}
+	if err := json.Unmarshal([]byte(Call("GetCurrentSubscription", "[]")), &sub); err != nil {
+		t.Fatal(err)
+	}
+	if sub["hasSubscription"] != false || sub["proxyCount"] != float64(0) {
+		t.Fatalf("removed subscription = %#v, want empty with zero verified proxies", sub)
+	}
+	mu.Lock()
+	verifiedAfterRemove := current.testedSubscriptionValid
+	mu.Unlock()
+	if verifiedAfterRemove {
+		t.Fatal("removing the subscription retained stale test verification")
+	}
+}
+
+func TestAndroidVPNConnectionDownloadsHTTPSSubscriptionWithoutHoldingStateLock(t *testing.T) {
+	mu.Lock()
+	current = defaultState()
+	mu.Unlock()
+
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRequest) }) }
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		_, _ = w.Write([]byte(strings.Join([]string{
+			"vless://00000000-0000-0000-0000-000000000001@one.example.com:443?security=tls#one",
+			"trojan://private-password@two.example.com:443?security=tls#two",
+		}, "\n")))
+	}))
+	defer server.Close()
+	defer release()
+
+	serverClient := server.Client()
+	previousFactory := androidSubscriptionTestFetcherFactory
+	androidSubscriptionTestFetcherFactory = func() *subscriptionFetcher {
+		fetcher := newSubscriptionFetcher()
+		fetcher.client.Transport = serverClient.Transport
+		fetcher.client.Timeout = 5 * time.Second
+		return fetcher
+	}
+	defer func() { androidSubscriptionTestFetcherFactory = previousFactory }()
+
+	callDone := make(chan string, 1)
+	go func() {
+		callDone <- Call("TestVPNConnection", `["`+server.URL+`/subscription/private-token"]`)
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTPS subscription request did not start")
+	}
+
+	statusDone := make(chan string, 1)
+	go func() { statusDone <- Status() }()
+	select {
+	case response := <-statusDone:
+		if !decodeSuccess(response) {
+			t.Fatalf("Status() while subscription download is pending = %s", response)
+		}
+	case <-time.After(time.Second):
+		release()
+		t.Fatal("TestVPNConnection held the global state lock during HTTPS download")
+	}
+
+	release()
+	var response map[string]interface{}
+	var rawResponse string
+	select {
+	case raw := <-callDone:
+		rawResponse = raw
+		if err := json.Unmarshal([]byte(raw), &response); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("TestVPNConnection did not finish after HTTPS response was released")
+	}
+	if response["success"] != true || response["count"] != float64(2) || response["isDirectLink"] != false {
+		t.Fatalf("HTTPS subscription result = %#v, want two verified proxies", response)
+	}
+	if _, exists := response["proxies"]; exists {
+		t.Fatalf("HTTPS subscription result exposed proxy details: %#v", response)
+	}
+	for _, secret := range []string{"private-password", "one.example.com", "two.example.com"} {
+		if strings.Contains(rawResponse, secret) {
+			t.Fatalf("HTTPS subscription result leaked %q: %s", secret, rawResponse)
+		}
+	}
+}
+
+func TestAndroidVerifiedSubscriptionCountPersistsAfterExactSetAndReload(t *testing.T) {
+	const secret = "verified-count-private-token"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Join([]string{
+			"vless://00000000-0000-0000-0000-000000000021@one.example.com:443?security=tls#one",
+			"trojan://verified-password@two.example.com:443?security=tls#two",
+		}, "\n")))
+	}))
+	defer server.Close()
+	installAndroidSubscriptionTestTransport(t, server.Client())
+
+	basePath := t.TempDir()
+	input := server.URL + "/subscription/" + secret
+	mu.Lock()
+	current = defaultState()
+	current.BasePath = basePath
+	mu.Unlock()
+
+	checkRaw := Call("TestVPNConnection", `["`+input+`"]`)
+	var check map[string]interface{}
+	if err := json.Unmarshal([]byte(checkRaw), &check); err != nil {
+		t.Fatal(err)
+	}
+	if check["success"] != true || check["count"] != float64(2) {
+		t.Fatalf("verified subscription = %#v, want count 2", check)
+	}
+	if _, exists := check["proxies"]; exists || strings.Contains(checkRaw, "verified-password") {
+		t.Fatalf("subscription check exposed proxy credentials: %s", checkRaw)
+	}
+
+	var saved map[string]interface{}
+	if err := json.Unmarshal([]byte(Call("SetVPNSubscription", `["`+input+`"]`)), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved["success"] != true || saved["proxyCount"] != float64(2) {
+		t.Fatalf("exact verified subscription was not saved with count 2: %#v", saved)
+	}
+	assertAndroidSubscriptionCount(t, 2)
+
+	mu.Lock()
+	current = defaultState()
+	current.BasePath = basePath
+	loadErr := loadLocked()
+	verificationRestored := current.testedSubscriptionValid
+	mu.Unlock()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if verificationRestored {
+		t.Fatal("transient subscription verification was persisted")
+	}
+	assertAndroidSubscriptionCount(t, 2)
+}
+
+func TestAndroidVerifiedSubscriptionCountDoesNotCarryToDifferentInput(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Join([]string{
+			"vless://00000000-0000-0000-0000-000000000031@one.example.com:443?security=tls#one",
+			"vless://00000000-0000-0000-0000-000000000032@two.example.com:443?security=tls#two",
+			"trojan://mismatch-password@three.example.com:443?security=tls#three",
+		}, "\n")))
+	}))
+	defer server.Close()
+	installAndroidSubscriptionTestTransport(t, server.Client())
+
+	mu.Lock()
+	current = defaultState()
+	current.BasePath = t.TempDir()
+	mu.Unlock()
+	testedInput := server.URL + "/subscription/tested"
+	if result := Call("TestVPNConnection", `["`+testedInput+`"]`); !decodeSuccess(result) {
+		t.Fatalf("subscription verification failed: %s", result)
+	}
+
+	const differentInput = "https://127.0.0.1:1/subscription/different"
+	var saved map[string]interface{}
+	if err := json.Unmarshal([]byte(Call("SetVPNSubscription", `["`+differentInput+`"]`)), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved["success"] != true || saved["proxyCount"] != float64(0) {
+		t.Fatalf("different subscription inherited a verified count: %#v", saved)
+	}
+	assertAndroidSubscriptionCount(t, 0)
+}
+
+func TestAndroidVPNConnectionErrorsDoNotLeakSubscriptionInput(t *testing.T) {
+	const secret = "private-subscription-secret"
+	for _, input := range []string{
+		"vless://" + secret,
+		"http://example.test/" + secret,
+		"https://user:" + secret + "@example.test/subscription",
+	} {
+		mu.Lock()
+		current = defaultState()
+		mu.Unlock()
+
+		response := Call("TestVPNConnection", `["`+input+`"]`)
+		if decodeSuccess(response) {
+			t.Fatalf("invalid subscription input was accepted: %s", subscriptionSummary(input))
+		}
+		if strings.Contains(response, secret) {
+			t.Fatalf("subscription error leaked input: %s", response)
+		}
+		if logs := Logs(); strings.Contains(logs, secret) {
+			t.Fatalf("subscription error log leaked input: %s", logs)
+		}
+	}
+}
+
+func TestAndroidSetSubscriptionUsesLocalValidationOnly(t *testing.T) {
+	mu.Lock()
+	current = defaultState()
+	current.BasePath = t.TempDir()
+	mu.Unlock()
+
+	if response := Call("SetVPNSubscription", `["http://example.test/private"]`); decodeSuccess(response) {
+		t.Fatalf("insecure subscription URL was accepted: %s", response)
+	}
+	if response := Call("SetVPNSubscription", `["vless://private-key"]`); decodeSuccess(response) {
+		t.Fatalf("malformed direct VPN key was accepted: %s", response)
+	}
+
+	// This endpoint is intentionally unreachable. SetVPNSubscription only
+	// validates the HTTPS URL locally; the explicit TestVPNConnection call owns
+	// downloading and parsing the remote subscription.
+	const offlineURL = "https://127.0.0.1:1/private-subscription"
+	if response := Call("SetVPNSubscription", `["`+offlineURL+`"]`); !decodeSuccess(response) {
+		t.Fatalf("locally valid HTTPS subscription was not saved: %s", response)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if current.Subscription != offlineURL {
+		t.Fatalf("saved subscription = %q, want locally validated HTTPS URL", current.Subscription)
+	}
+	if current.SubscriptionProxyCount != 0 {
+		t.Fatalf("unverified HTTPS proxy count = %d, want 0", current.SubscriptionProxyCount)
+	}
+}
+
+func TestAndroidLoadedSubscriptionCountMigratesLegacyState(t *testing.T) {
+	const directSubscription = "vless://00000000-0000-0000-0000-000000000041@direct.example.com:443?security=tls#direct"
+	const cachedSubscription = "https://example.test/subscription/cached"
+	tests := []struct {
+		name         string
+		subscription string
+		cachedFor    string
+		cachedCount  int
+		want         int
+	}{
+		{name: "direct key", subscription: directSubscription, want: 1},
+		{name: "matching cached subscription", subscription: cachedSubscription, cachedFor: cachedSubscription, cachedCount: 4, want: 4},
+		{name: "unrelated cache", subscription: cachedSubscription, cachedFor: "https://example.test/subscription/other", cachedCount: 9, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			basePath := t.TempDir()
+			mu.Lock()
+			current = defaultState()
+			current.BasePath = basePath
+			current.Subscription = tt.subscription
+			current.CachedConfigSubscription = tt.cachedFor
+			current.CachedProxyCount = tt.cachedCount
+			if err := saveLocked(); err != nil {
+				mu.Unlock()
+				t.Fatal(err)
+			}
+			current = defaultState()
+			current.BasePath = basePath
+			err := loadLocked()
+			got := current.SubscriptionProxyCount
+			mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("migrated proxy count = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAndroidSubscriptionMutationRollsBackOnPersistenceFailure(t *testing.T) {
+	const oldSubscription = "vless://00000000-0000-0000-0000-000000000010@old.example.com:443?security=tls#old"
+	const newSubscription = "vless://00000000-0000-0000-0000-000000000011@new.example.com:443?security=tls#new"
+	tests := []struct {
+		name   string
+		method string
+		args   string
+	}{
+		{name: "set", method: "SetVPNSubscription", args: `["` + newSubscription + `"]`},
+		{name: "remove", method: "RemoveVPNSubscription", args: `[]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			basePath := t.TempDir()
+			if err := os.Mkdir(filepath.Join(basePath, stateFileName), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			current = defaultState()
+			current.BasePath = basePath
+			current.Subscription = oldSubscription
+			current.SubscriptionProxyCount = 11
+			current.LastError = "previous error"
+			current.Logs = []string{"before mutation"}
+			current.CachedSingBoxConfig = `{"cached":true}`
+			current.CachedProxyCount = 7
+			current.CachedConfigSubscription = oldSubscription
+			current.CachedConfigSignature = "cached-signature"
+			current.CachedConfigUpdatedAt = "2026-09-21T10:00:00Z"
+			mu.Unlock()
+
+			response := Call(tt.method, tt.args)
+			if decodeSuccess(response) {
+				t.Fatalf("%s reported success after persistence failure: %s", tt.method, response)
+			}
+			for _, secret := range []string{"old.example.com", "new.example.com", "00000000-0000-0000-0000-000000000010", "00000000-0000-0000-0000-000000000011"} {
+				if strings.Contains(response, secret) {
+					t.Fatalf("persistence response leaked %q: %s", secret, response)
+				}
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if current.Subscription != oldSubscription ||
+				current.SubscriptionProxyCount != 11 ||
+				current.CachedSingBoxConfig != `{"cached":true}` ||
+				current.CachedProxyCount != 7 ||
+				current.CachedConfigSubscription != oldSubscription ||
+				current.CachedConfigSignature != "cached-signature" ||
+				current.CachedConfigUpdatedAt != "2026-09-21T10:00:00Z" {
+				t.Fatalf("%s did not roll back subscription cache: %#v", tt.method, current)
+			}
+			logs := strings.Join(current.Logs, "\n")
+			if strings.Contains(logs, "android subscription saved") || strings.Contains(logs, "android subscription removed") {
+				t.Fatalf("%s retained a false success log: %s", tt.method, logs)
+			}
+			if !strings.Contains(current.LastError, "state save failed") || !strings.Contains(logs, "state save failed") {
+				t.Fatalf("%s did not retain the truthful persistence error: error=%q logs=%q", tt.method, current.LastError, logs)
+			}
+		})
 	}
 }
 
@@ -140,6 +493,7 @@ func TestBuildSingBoxConfigForDirectVLESS(t *testing.T) {
 	if !strings.Contains(configText, `"type": "ws"`) {
 		t.Fatal("config does not contain websocket transport")
 	}
+	assertAndroidSubscriptionCount(t, 1)
 }
 
 func TestAndroidBlockedOnlyRoutesOnlyBlockedServicesThroughVPN(t *testing.T) {
@@ -444,6 +798,9 @@ func TestAndroidRuntimeSettingsValidateAndInvalidateCache(t *testing.T) {
 	if ok := decodeSuccess(Call("SetRoutingMode", `["all_traffic"]`)); !ok {
 		t.Fatal("SetRoutingMode(all_traffic) success = false")
 	}
+	if ok := decodeSuccess(Call("SetAndroidRoutePolicy", `["meta","direct"]`)); !ok {
+		t.Fatal("SetAndroidRoutePolicy(meta, direct) success = false")
+	}
 	mu.Lock()
 	if current.CachedSingBoxConfig != "" {
 		t.Fatal("cached config must be cleared after routing mode change")
@@ -462,6 +819,14 @@ func TestAndroidRuntimeSettingsValidateAndInvalidateCache(t *testing.T) {
 		androidContainsPackageRoute(config, "com.valvesoftware.android.steam.community", "direct") ||
 		androidContainsDNSServer(config, "steam.com", "dns-direct") {
 		t.Fatal("all_traffic must not carve Steam out of the explicit full-VPN policy")
+	}
+	if androidContainsDomainRoute(config, "instagram.com", "direct") ||
+		androidContainsDNSServer(config, "instagram.com", "dns-direct") {
+		t.Fatal("all_traffic must override a saved per-service Direct policy")
+	}
+	if !androidContainsDomainRoute(config, "instagram.com", "proxy") ||
+		!androidContainsDNSServer(config, "instagram.com", "dns-remote") {
+		t.Fatal("all_traffic must route the saved Direct service and its DNS through VPN")
 	}
 }
 
@@ -757,6 +1122,76 @@ func TestAndroidRoutesExposeAutoDirectAndVPNMethods(t *testing.T) {
 	}
 }
 
+func TestAndroidAllTrafficRouteSummaryOverridesSavedDirectWithoutSyntheticLatency(t *testing.T) {
+	mu.Lock()
+	current = defaultState()
+	current.BasePath = t.TempDir()
+	current.Subscription = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#demo"
+	current.Config.RoutingMode = "all_traffic"
+	current.RoutePolicies = map[string]string{"meta": androidRoutePolicyDirect}
+	current.Connected = true
+	mu.Unlock()
+
+	var summary map[string]interface{}
+	if err := json.Unmarshal([]byte(Call("GetBypassRouteSummary", "[]")), &summary); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range summary["services"].([]interface{}) {
+		service := raw.(map[string]interface{})
+		if service["tag"] != "meta" {
+			continue
+		}
+		if service["selectedMethod"] != androidRoutePolicyDirect {
+			t.Fatalf("saved meta policy = %v, want direct", service["selectedMethod"])
+		}
+		if service["effectiveMethodLabel"] != androidRoutePolicyLabel(androidRoutePolicyVPN) || service["requiresVpn"] != true {
+			t.Fatalf("all-traffic meta route is not effective VPN: %#v", service)
+		}
+		if service["delayMs"] != float64(0) {
+			t.Fatalf("unmeasured Android route latency = %v, want 0", service["delayMs"])
+		}
+		return
+	}
+	t.Fatal("meta route missing from Android summary")
+}
+
+func TestAndroidQuickCheckUsesEffectiveRouteWithoutClaimingTransportProof(t *testing.T) {
+	result := androidClientQuickCheckResult(routeInfo{
+		Tag:                  "meta",
+		Name:                 "Instagram",
+		SelectedMethod:       androidRoutePolicyDirect,
+		EffectiveMethodLabel: androidRoutePolicyLabel(androidRoutePolicyVPN),
+		RequiresVPN:          true,
+	}, "https://www.instagram.com/", 200, "", 42)
+
+	if result["expectedRoute"] != androidRoutePolicyVPN {
+		t.Fatalf("expected route = %v, want effective VPN", result["expectedRoute"])
+	}
+	if result["routeVerified"] != false || result["checkScope"] != "endpoint_reachability" {
+		t.Fatalf("Android quick check overstates transport proof: %#v", result)
+	}
+	if result["statusText"] != "ENDPOINT_OK" || result["success"] != true {
+		t.Fatalf("successful endpoint result = %#v", result)
+	}
+}
+
+func TestAndroidQuickCheckSessionValidityRejectsReconnect(t *testing.T) {
+	mu.Lock()
+	defer mu.Unlock()
+	current = defaultState()
+	current.Connected = true
+	current.StartedAt = "2026-09-21T10:00:00+03:00"
+	current.TotalSessions = 4
+
+	if !androidQuickCheckSessionValidLocked(current.StartedAt, current.TotalSessions, true) {
+		t.Fatal("unchanged Android VPN session was rejected")
+	}
+	current.TotalSessions++
+	if androidQuickCheckSessionValidLocked("2026-09-21T10:00:00+03:00", 4, true) {
+		t.Fatal("quick check from the previous Android VPN session was accepted")
+	}
+}
+
 func TestAndroidWireGuardCRUD(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
@@ -816,6 +1251,29 @@ func decodeSuccess(raw string) bool {
 		return false
 	}
 	return data["success"] != false
+}
+
+func installAndroidSubscriptionTestTransport(t *testing.T, client *http.Client) {
+	t.Helper()
+	previousFactory := androidSubscriptionTestFetcherFactory
+	androidSubscriptionTestFetcherFactory = func() *subscriptionFetcher {
+		fetcher := newSubscriptionFetcher()
+		fetcher.client.Transport = client.Transport
+		fetcher.client.Timeout = 5 * time.Second
+		return fetcher
+	}
+	t.Cleanup(func() { androidSubscriptionTestFetcherFactory = previousFactory })
+}
+
+func assertAndroidSubscriptionCount(t *testing.T, want int) {
+	t.Helper()
+	var subscription map[string]interface{}
+	if err := json.Unmarshal([]byte(Call("GetCurrentSubscription", "[]")), &subscription); err != nil {
+		t.Fatal(err)
+	}
+	if subscription["proxyCount"] != float64(want) {
+		t.Fatalf("subscription proxy count = %v, want %d", subscription["proxyCount"], want)
+	}
 }
 
 func buildConfigForTest(t *testing.T) map[string]interface{} {

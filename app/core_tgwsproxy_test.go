@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,9 @@ func telegramTestSubscriptionConfig() map[string]interface{} {
 // subscription is present — the VPN is only the backstop route, so adding a
 // subscription must NOT silently break Telegram by killing the sidecar.
 func TestTelegramProxyStaysPrimaryWithSubscriptionInAutoMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses the ordinary Direct/VPN service policy without the Telegram sidecar")
+	}
 	basePath := t.TempDir()
 	binPath := filepath.Join(basePath, "bin")
 	if err := os.MkdirAll(binPath, 0755); err != nil {
@@ -58,6 +62,9 @@ func TestTelegramProxyStaysPrimaryWithSubscriptionInAutoMode(t *testing.T) {
 // has a live endpoint — even on a fresh portable extract where injected=false);
 // its egress is routed through the VPN by the config, not by stopping it.
 func TestTelegramProxyKeptAliveInVPNModeEvenWhenNotInjected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses the ordinary Direct/VPN service policy without the Telegram sidecar")
+	}
 	basePath := t.TempDir()
 	binPath := filepath.Join(basePath, "bin")
 	if err := os.MkdirAll(binPath, 0755); err != nil {
@@ -101,6 +108,9 @@ func TestTelegramProxyKeptAliveInVPNModeEvenWhenNotInjected(t *testing.T) {
 // be KEPT (so the existing local proxy keeps working, egress routed to VPN) and
 // the tg://proxy link must NOT be re-opened.
 func TestTelegramProxyKeptAliveInVPNModeWhenInjected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses the ordinary Direct/VPN service policy without the Telegram sidecar")
+	}
 	basePath := t.TempDir()
 	binPath := filepath.Join(basePath, "bin")
 	if err := os.MkdirAll(binPath, 0755); err != nil {
@@ -138,6 +148,98 @@ func TestTelegramProxyKeptAliveInVPNModeWhenInjected(t *testing.T) {
 	if !containsLogSubstring(app.logBuffer, "Telegram MTProto proxy failed to start") &&
 		!containsLogSubstring(app.logBuffer, "egress is routed through the VPN") {
 		t.Fatalf("vpn+injected must attempt to keep the sidecar alive; logs = %v", app.logBuffer)
+	}
+}
+
+func TestWindowsTelegramProxyNeverStartsForServicePolicy(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific sidecar removal")
+	}
+	for _, method := range []string{FreeAccessMethodDirect, FreeAccessMethodVPN, FreeAccessMethodAuto} {
+		t.Run(method, func(t *testing.T) {
+			basePath := t.TempDir()
+			binPath := filepath.Join(basePath, "bin")
+			if err := os.MkdirAll(binPath, 0755); err != nil {
+				t.Fatalf("create bin dir failed: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(binPath, TgWsProxyProcessName), []byte("not an executable"), 0644); err != nil {
+				t.Fatalf("write fake tg-ws-proxy failed: %v", err)
+			}
+			storage := NewStorage(basePath)
+			if err := storage.Init(); err != nil {
+				t.Fatalf("init storage failed: %v", err)
+			}
+			settings := storage.GetAppSettings()
+			settings.FreeAccessMethods["telegram"] = method
+			if err := storage.UpdateAppSettings(settings); err != nil {
+				t.Fatalf("update settings failed: %v", err)
+			}
+			app := &App{
+				logBuffer: make([]string, 0, MaxLogBufferSize),
+				basePath:  basePath,
+				storage:   storage,
+				tgwsproxy: NewTgWsProxyManager(basePath, nil),
+			}
+			config := telegramTestSubscriptionConfig()
+			app.startFreeAccess(config)
+			app.startTelegramProxyIfNeeded(config)
+			if app.tgwsproxy.IsRunning() || app.tgProxyStartedSession.Load() {
+				t.Fatal("Windows must not start the Telegram sidecar")
+			}
+			if _, err := os.Stat(app.tgwsproxy.configPath()); !os.IsNotExist(err) {
+				t.Fatalf("Windows must not create Telegram proxy config; stat error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsLegacyTelegramProxyMigrationRequiresExplicitAction(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific legacy proxy migration")
+	}
+
+	storage := NewStorage(t.TempDir())
+	if err := storage.Init(); err != nil {
+		t.Fatal(err)
+	}
+	settings := storage.GetAppSettings()
+	settings.TelegramProxyInjected = true
+	if err := storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{storage: storage, logBuffer: make([]string, 0, MaxLogBufferSize)}
+
+	opened := []string{}
+	previousOpenExternalURL := openExternalURL
+	openExternalURL = func(url string) error {
+		opened = append(opened, url)
+		return nil
+	}
+	defer func() { openExternalURL = previousOpenExternalURL }()
+
+	status := app.TelegramProxyStatus()
+	if !status.Injected || !status.RecommendRemove {
+		t.Fatalf("legacy status = %+v, want explicit cleanup recommendation", status)
+	}
+	if status.ProxyLink != "" || status.ActiveConnection || status.ShowNotice {
+		t.Fatalf("legacy Windows status must not expose or activate the removed proxy: %+v", status)
+	}
+	if len(opened) != 0 {
+		t.Fatalf("reading migration status opened Telegram unexpectedly: %v", opened)
+	}
+
+	if result := app.OpenTelegramProxySettings(); result["success"] != true {
+		t.Fatalf("explicit Telegram settings action failed: %+v", result)
+	}
+	if len(opened) != 1 || opened[0] != "tg://settings" {
+		t.Fatalf("explicit settings links = %v, want only tg://settings", opened)
+	}
+	if result := app.AcknowledgeTelegramProxyRemoved(); result["success"] != true {
+		t.Fatalf("cleanup acknowledgement failed: %+v", result)
+	}
+	status = app.TelegramProxyStatus()
+	if status.Injected || status.RecommendRemove {
+		t.Fatalf("acknowledged migration status = %+v, want cleared", status)
 	}
 }
 

@@ -490,18 +490,26 @@ func TestNamedServiceCIDRsNeverBecomeStandaloneSingBoxRoutes(t *testing.T) {
 
 	vpnSettings := GlobalAppSettings{FreeAccessMethods: map[string]string{"telegram": FreeAccessMethodVPN}}
 	rules = (&ConfigBuilderForStorage{}).buildFreeAccessRules(vpnSettings, true)
+	foundTelegramProcess := false
 	foundTelegramSidecar := false
 	for _, raw := range rules {
 		rule, ok := raw.(map[string]interface{})
 		if !ok || rule["outbound"] != ServiceBypassGroupTag("telegram") {
 			continue
 		}
-		if valuesContain(rule["ip_cidr"], "149.154.160.0/20") && valuesContain(rule["process_name"], TgWsProxyProcessName) {
-			foundTelegramSidecar = true
+		if valuesContain(rule["ip_cidr"], "149.154.160.0/20") {
+			foundTelegramProcess = foundTelegramProcess || valuesContain(rule["process_name"], TelegramProcessName)
+			foundTelegramSidecar = foundTelegramSidecar || valuesContain(rule["process_name"], TgWsProxyProcessName)
 		}
 	}
-	if !foundTelegramSidecar {
-		t.Fatal("forced Telegram VPN must use a CIDR+sidecar-process conjunction")
+	if !foundTelegramProcess {
+		t.Fatal("forced Telegram VPN must bind CIDR routes to Telegram.exe")
+	}
+	if runtime.GOOS == "windows" && foundTelegramSidecar {
+		t.Fatal("Windows must not route the removed Telegram sidecar")
+	}
+	if runtime.GOOS != "windows" && !foundTelegramSidecar {
+		t.Fatal("non-Windows Telegram sidecar VPN route must stay identity-scoped")
 	}
 }
 

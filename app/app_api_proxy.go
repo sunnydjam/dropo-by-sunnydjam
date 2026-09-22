@@ -4,29 +4,12 @@ package main
 // This file contains Clash API proxy operations
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"runtime"
-	"strings"
 	"time"
 )
-
-const (
-	routeSummaryPingTTL     = 15 * time.Second
-	routeSummaryPingTimeout = 2500 * time.Millisecond
-	routeSummaryMaxParallel = 3
-)
-
-var routeSummaryProbeSlots = make(chan struct{}, routeSummaryMaxParallel)
-
-type routeSummaryLatencyEntry struct {
-	Delay     int
-	Route     string
-	CheckedAt time.Time
-	InFlight  bool
-}
 
 type clashProxyHistoryEntry struct {
 	Delay int `json:"delay"`
@@ -460,6 +443,24 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 	serviceFallbackCache := a.loadServiceStrategyCache()
 	services := make([]map[string]interface{}, 0, len(DefaultFreeAccessServices))
 	for _, svc := range DefaultFreeAccessServices {
+		if mode == RoutingModeAllTraffic {
+			method, outbound, delay := summarizeAllTrafficProxy(proxies)
+			services = append(services, map[string]interface{}{
+				"tag":             svc.Tag,
+				"name":            svc.DisplayName,
+				"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+				"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+				"requiresVpn":     true,
+				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+				"group":           "proxy",
+				"method":          method,
+				"outbound":        outbound,
+				"delay":           delay,
+			})
+			continue
+		}
 		enabled := FreeAccessServiceEnabled(settings, svc.Tag)
 		if !enabled {
 			if hasVPNProxy {
@@ -518,17 +519,19 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 			continue
 		}
 
+		// The Clash selector is the live route authority. Probe history describes
+		// a previously tested candidate and must never overwrite a later manual
+		// policy or selector change.
 		method, outbound, delay := summarizeBypassProxy(proxies, info)
-		if probe, ok := a.lastRouteProbeResult(svc.Tag); ok && probe.Success && probe.MethodKind == "transparent" {
-			method = probe.MethodLabel
-			outbound = probe.MethodTag
-			delay = int(probe.LatencyMS)
+		if info.Now == "direct" {
+			// On Windows Unified, direct is also the carrier used by the single
+			// in-process packet engine. Read the immutable active plan so a live
+			// Zapret selection is not mislabeled as plain Direct.
+			if nativeMethod, nativeOutbound, ok := a.nativeTrafficRouteSummary(svc.Tag); ok {
+				method = nativeMethod
+				outbound = nativeOutbound
+			}
 		}
-		if delay <= 0 {
-			expectedRoute := a.clientQuickCheckExpectedRoute(settings, serviceFallbackCache, clientQuickCheckService{ServiceTag: svc.Tag, Category: "Blocked"})
-			delay = a.cachedRouteServiceDelay(svc, expectedRoute)
-		}
-
 		item := map[string]interface{}{
 			"tag":             svc.Tag,
 			"name":            svc.DisplayName,
@@ -552,11 +555,6 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 	catchAll := map[string]interface{}{}
 	if info, ok := proxies[SmartBypassGroupTag]; ok {
 		method, outbound, delay := summarizeBypassProxy(proxies, info)
-		if probe, ok := a.lastRouteProbeCatchAll(); ok {
-			method = probe.MethodLabel
-			outbound = probe.MethodTag
-			delay = int(probe.LatencyMS)
-		}
 		catchAll = map[string]interface{}{
 			"method":   method,
 			"outbound": outbound,
@@ -581,7 +579,24 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 	services := make([]map[string]interface{}, 0, len(DefaultFreeAccessServices))
 
 	for _, svc := range DefaultFreeAccessServices {
-		if !FreeAccessServiceEnabled(settings, svc.Tag) && !svc.RequiresVPN {
+		if mode != RoutingModeAllTraffic && !FreeAccessServiceEnabled(settings, svc.Tag) && !svc.RequiresVPN {
+			continue
+		}
+		if mode == RoutingModeAllTraffic {
+			services = append(services, map[string]interface{}{
+				"tag":             svc.Tag,
+				"name":            svc.DisplayName,
+				"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+				"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+				"requiresVpn":     true,
+				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+				"group":           "proxy",
+				"method":          "VPN",
+				"outbound":        "",
+				"delay":           0,
+			})
 			continue
 		}
 
@@ -589,10 +604,9 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 		outbound := "direct"
 		delay := 0
 
-		if probe, ok := a.lastRouteProbeResult(svc.Tag); ok && probe.Success {
-			method = probe.MethodLabel
-			outbound = probe.MethodTag
-			delay = int(probe.LatencyMS)
+		if nativeMethod, nativeOutbound, ok := a.nativeTrafficRouteSummary(svc.Tag); ok {
+			method = nativeMethod
+			outbound = nativeOutbound
 		} else {
 			selected := a.selectFreeAccessStrategyForService(settings, svc, storedStrategies, serviceFallbackCache, map[string]bool{}, transparentTags, false)
 			if selected.MethodTag != "" {
@@ -606,11 +620,6 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 				delay = 0
 			}
 		}
-		if delay <= 0 && method != "Direct (no VPN key)" {
-			expectedRoute := a.clientQuickCheckExpectedRoute(settings, serviceFallbackCache, clientQuickCheckService{ServiceTag: svc.Tag, Category: "Blocked"})
-			delay = a.cachedRouteServiceDelay(svc, expectedRoute)
-		}
-
 		item := map[string]interface{}{
 			"tag":             svc.Tag,
 			"name":            svc.DisplayName,
@@ -632,11 +641,11 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 	}
 
 	catchAll := map[string]interface{}{}
-	if probe, ok := a.lastRouteProbeCatchAll(); ok {
+	if method, outbound, ok := a.nativeTrafficRouteSummary(commonBlockedServiceTag); ok {
 		catchAll = map[string]interface{}{
-			"method":   probe.MethodLabel,
-			"outbound": probe.MethodTag,
-			"delay":    int(probe.LatencyMS),
+			"method":   method,
+			"outbound": outbound,
+			"delay":    0,
 		}
 	} else if tag := defaultZapretStrategyTag(transparentTags); tag != "" {
 		catchAll = map[string]interface{}{
@@ -654,86 +663,6 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 		"networkEngine": "windows_unified",
 		"services":      services,
 		"catchAll":      catchAll,
-	}
-}
-
-func (a *App) cachedRouteServiceDelay(svc FreeAccessService, expectedRoute string) int {
-	target := strings.TrimSpace(svc.HealthURL)
-	if target == "" && len(svc.ProbeURLs) > 0 {
-		target = strings.TrimSpace(svc.ProbeURLs[0])
-	}
-	if target == "" {
-		return 0
-	}
-
-	now := time.Now()
-	a.routeLatencyMu.Lock()
-	if a.routeLatencyCache == nil {
-		a.routeLatencyCache = make(map[string]routeSummaryLatencyEntry)
-	}
-	entry := a.routeLatencyCache[svc.Tag]
-	if entry.Route == expectedRoute && !entry.CheckedAt.IsZero() && now.Sub(entry.CheckedAt) < routeSummaryPingTTL {
-		delay := entry.Delay
-		a.routeLatencyMu.Unlock()
-		return delay
-	}
-	if entry.Route == expectedRoute && entry.InFlight {
-		delay := entry.Delay
-		a.routeLatencyMu.Unlock()
-		return delay
-	}
-	entry.InFlight = true
-	entry.Route = expectedRoute
-	a.routeLatencyCache[svc.Tag] = entry
-	delay := entry.Delay
-	a.routeLatencyMu.Unlock()
-
-	go a.refreshRouteServiceDelay(svc.Tag, svc.DisplayName, target, expectedRoute)
-	return delay
-}
-
-func (a *App) refreshRouteServiceDelay(tag, name, target, expectedRoute string) {
-	routeSummaryProbeSlots <- struct{}{}
-	defer func() { <-routeSummaryProbeSlots }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), routeSummaryPingTimeout)
-	defer cancel()
-
-	client, ready := a.quickCheckHTTPClientForRoute(expectedRoute)
-	if !ready {
-		a.writeLog(fmt.Sprintf("[RouteSummary] %s probe unavailable for %s: selected VPN proxy is not ready", expectedRoute, name))
-		a.storeRouteSummaryLatency(tag, expectedRoute, 0)
-		return
-	}
-	client.Timeout = routeSummaryPingTimeout
-	result := invokeQuickCheckURL(ctx, client, target)
-	delay := 0
-	if result.Success && result.TimeMS > 0 {
-		delay = int(result.TimeMS)
-	}
-	if !result.Success && expectedRoute != clientQuickCheckRouteDirect {
-		a.writeLog(fmt.Sprintf("[RouteSummary] %s probe failed for %s (%s): %s", expectedRoute, name, target, result.Error))
-	}
-
-	a.storeRouteSummaryLatency(tag, expectedRoute, delay)
-}
-
-func (a *App) storeRouteSummaryLatency(tag, expectedRoute string, delay int) {
-	a.routeLatencyMu.Lock()
-	defer a.routeLatencyMu.Unlock()
-	if a.routeLatencyCache == nil {
-		a.routeLatencyCache = make(map[string]routeSummaryLatencyEntry)
-	}
-	if current, ok := a.routeLatencyCache[tag]; ok && current.Route != "" && current.Route != expectedRoute {
-		// A route switch started a newer probe while this one was in flight.
-		// Never let the stale completion overwrite the new route's cache entry.
-		return
-	}
-	a.routeLatencyCache[tag] = routeSummaryLatencyEntry{
-		Delay:     delay,
-		Route:     expectedRoute,
-		CheckedAt: time.Now(),
-		InFlight:  false,
 	}
 }
 
@@ -839,6 +768,82 @@ func summarizeBypassProxy(proxies map[string]clashProxyInfo, info clashProxyInfo
 	}
 
 	return FreeAccessOutboundLabel(methodTag), outbound, delay
+}
+
+func (a *App) nativeTrafficRouteSummary(serviceTag string) (string, string, bool) {
+	if a == nil || a.trafficEngine == nil || serviceTag == "" {
+		return "", "", false
+	}
+	plan := a.trafficEngine.CurrentPlan()
+	kind := ""
+	for _, route := range plan.Routes {
+		if route.ServiceID == serviceTag {
+			kind = string(route.Kind)
+			break
+		}
+	}
+	switch kind {
+	case clientQuickCheckRouteVPN:
+		return "VPN", "auto-select", true
+	case clientQuickCheckRouteDirect:
+		return "Direct", "direct", true
+	case clientQuickCheckRouteZapret:
+		strategyID := ""
+		for _, selection := range plan.Selections {
+			if selection.ServiceID == serviceTag {
+				strategyID = selection.StrategyID
+				break
+			}
+		}
+		label := FreeAccessOutboundLabel(strategyID)
+		for _, strategy := range plan.Strategies {
+			if strategy.ID == strategyID && strategy.Label != "" {
+				label = strategy.Label
+				break
+			}
+		}
+		if label == "" {
+			label = "Обход (Zapret)"
+		}
+		return label, strategyID, true
+	default:
+		return "", "", false
+	}
+}
+
+func summarizeAllTrafficProxy(proxies map[string]clashProxyInfo) (string, string, int) {
+	active := "auto-select"
+	delay := 0
+	if proxy, ok := proxies["proxy"]; ok {
+		if proxy.Now != "" {
+			active = proxy.Now
+		}
+		delay = latestProxyDelay(proxy)
+	}
+	visited := map[string]bool{}
+	for active != "" && !visited[active] {
+		visited[active] = true
+		info, ok := proxies[active]
+		if !ok || info.Now == "" || info.Now == active {
+			break
+		}
+		if delay == 0 {
+			delay = latestProxyDelay(info)
+		}
+		active = info.Now
+	}
+	if active == "" {
+		active = "auto-select"
+	}
+	if delay == 0 {
+		if info, ok := proxies[active]; ok {
+			delay = latestProxyDelay(info)
+		}
+	}
+	if active == "direct" {
+		return "Direct", active, delay
+	}
+	return "VPN", active, delay
 }
 
 // GetCurrentProxy returns current active proxy and its delay

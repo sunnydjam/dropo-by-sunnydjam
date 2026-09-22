@@ -1508,10 +1508,6 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 	fmt.Printf("[BuildConfigForProfile] Adding WireGuard DNS rules for %d configs...\n", len(wireGuardConfigs))
 	b.addWireGuardDNSNew(template, wireGuardConfigs)
 
-	// Update route rules for WireGuard AllowedIPs
-	fmt.Printf("[BuildConfigForProfile] Adding WireGuard route rules...\n")
-	b.updateRouteRulesForWireGuardNew(template, wireGuardConfigs)
-
 	updatedSources := append([]VPNSource(nil), sources...)
 	proxies := make([]ProxyConfig, 0, len(updatedSources))
 	xrayCandidates := make([]ProxyConfig, 0)
@@ -1564,6 +1560,9 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 	}
 	xrayBridge := BuildXrayBridgeConfig(xrayCandidates)
 	proxies = append(proxies, xrayBridge.SingBoxProxies...)
+	if NormalizeRoutingMode(b.routingMode) == RoutingModeAllTraffic && len(proxies) == 0 {
+		return fmt.Errorf("для режима «Всё через VPN» нужен настроенный поддерживаемый VPN-источник в активном профиле")
+	}
 	orderVPNSourceProxies(proxies, updatedSources)
 	if err := b.storage.UpdateProfileXrayConfig(profileID, xrayBridge.XrayConfig); err != nil {
 		return err
@@ -1579,6 +1578,20 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 
 	// Apply routing mode (blocked_only, except_russia, all_traffic)
 	b.applyRoutingMode(template)
+	// Routing-mode builders replace the template rule list. Re-apply work-network
+	// routes afterwards so every WireGuard AllowedIP, including public corporate
+	// ranges, takes precedence over the public VPN/direct policy.
+	fmt.Printf("[BuildConfigForProfile] Adding WireGuard route rules...\n")
+	b.updateRouteRulesForWireGuardNew(template, wireGuardConfigs)
+	if b.routingMode == RoutingModeAllTraffic {
+		// Keep old selected-services selector choices (including direct) out of
+		// the full-tunnel session even when sing-box restores its cache file.
+		if experimental, ok := template["experimental"].(map[string]interface{}); ok {
+			if cacheFile, ok := experimental["cache_file"].(map[string]interface{}); ok {
+				cacheFile["path"] = "cache-all-traffic.db"
+			}
+		}
+	}
 
 	// Add experimental section
 	if err := b.addExperimentalAPI(template); err != nil {
@@ -1648,7 +1661,12 @@ func (b *ConfigBuilderForStorage) generateOutbounds(template map[string]interfac
 		outbounds = append(outbounds, buildVPNSourceFallbackOutbound(proxyTags))
 
 		selectorOutbounds := append([]string{"auto-select"}, proxyTags...)
-		selectorOutbounds = append(selectorOutbounds, "direct")
+		// A cached manual selector choice survives sing-box restarts. Do not
+		// offer direct in full-tunnel mode: an old direct choice must not
+		// silently bypass the user's explicit all-VPN policy.
+		if NormalizeRoutingMode(b.routingMode) != RoutingModeAllTraffic {
+			selectorOutbounds = append(selectorOutbounds, "direct")
+		}
 
 		if selector, ok := outboundsTemplate["selector"].(map[string]interface{}); ok {
 			selector = copyMap(selector)
@@ -2153,11 +2171,10 @@ func buildFreeAccessProcessRules(settings GlobalAppSettings) []interface{} {
 	if FreeMethodsAllowed(settings) || AnyFreeAccessServiceUsesZapret(settings) {
 		processNames = append(processNames, freeAccessProcessNames()...)
 	}
-	// Telegram MTProto sidecar egress: route DIRECT (its WS obfuscation works on
-	// the direct path - free) UNLESS Telegram is forced to the VPN. In that case
-	// the identity-scoped Telegram CIDR rule below binds the sidecar process and
-	// destination together before sending it to bypass-telegram.
-	if FreeAccessServiceMethod(settings, "telegram") != FreeAccessMethodVPN {
+	// The legacy non-Windows Telegram sidecar uses a direct WS path unless
+	// Telegram is forced to VPN. Windows routes Telegram.exe itself and never
+	// launches or matches that sidecar.
+	if runtime.GOOS != "windows" && FreeAccessServiceMethod(settings, "telegram") != FreeAccessMethodVPN {
 		processNames = append(processNames, TgWsProxyProcessName)
 	}
 	processNames = uniqueStrings(processNames)
@@ -2291,7 +2308,7 @@ func (b *ConfigBuilderForStorage) buildFreeAccessRules(settings GlobalAppSetting
 			})
 		}
 		ipProcesses := append([]string(nil), svc.ProcessNames...)
-		if svc.Tag == "telegram" && FreeAccessServiceMethod(settings, svc.Tag) == FreeAccessMethodVPN {
+		if runtime.GOOS != "windows" && svc.Tag == "telegram" && FreeAccessServiceMethod(settings, svc.Tag) == FreeAccessMethodVPN {
 			ipProcesses = append(ipProcesses, TgWsProxyProcessName)
 		}
 		ipProcesses = uniqueStrings(ipProcesses)
@@ -2377,6 +2394,39 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 		"action":        "route",
 		"server":        "dns-local",
 	})
+	if b.routingMode == RoutingModeAllTraffic {
+		// Use DNS-over-HTTPS through the VPN. The new sing-box UDP DNS server
+		// dials directly unless given a detour, and UDP is not supported by
+		// every subscription transport. Only VPN-endpoint bootstrap (below)
+		// and preserved work-network DNS rules may use a direct resolver.
+		if servers, ok := dns["servers"].([]interface{}); ok {
+			for _, server := range servers {
+				remote, ok := server.(map[string]interface{})
+				if !ok || remote["tag"] != "dns-remote" {
+					continue
+				}
+				remote["type"] = "https"
+				remote["server"] = "8.8.8.8"
+				remote["server_port"] = 443
+				remote["path"] = "/dns-query"
+				remote["tls"] = map[string]interface{}{"server_name": "dns.google"}
+				remote["detour"] = "proxy"
+			}
+		}
+		dns["rules"] = rules
+		dns["final"] = "dns-remote"
+		dns["strategy"] = "ipv4_only"
+		dns["reverse_mapping"] = true
+		dns["independent_cache"] = true
+		if route, ok := template["route"].(map[string]interface{}); ok {
+			// Resolving a VPN server through a resolver inside that VPN would
+			// deadlock the tunnel before it connects.
+			route["default_domain_resolver"] = map[string]interface{}{
+				"server": "dns-direct", "strategy": "ipv4_only",
+			}
+		}
+		return
+	}
 	if b.routingMode != RoutingModeAllTraffic && len(DirectDomainSuffixes) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": DirectDomainSuffixes,

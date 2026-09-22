@@ -21,6 +21,9 @@ object DropoVpnRuntime {
     private var error = ""
     private var updatedAt = System.currentTimeMillis()
     private var connectedAt = 0L
+    private var vpnProtectionObserved = false
+    private var vpnAlwaysOn = false
+    private var vpnLockdown = false
     private val recentLogs = ArrayDeque<String>()
 
     fun addListener(listener: Listener) {
@@ -52,6 +55,33 @@ object DropoVpnRuntime {
         setState(STATE_FAILED, text, text)
     }
 
+    fun setVpnProtection(
+        observed: Boolean,
+        alwaysOn: Boolean,
+        lockdown: Boolean,
+    ) {
+        val shouldEmit: Boolean
+        val payload: Map<String, Any?>
+        synchronized(lock) {
+            val normalizedAlwaysOn = observed && alwaysOn
+            val normalizedLockdown = normalizedAlwaysOn && lockdown
+            shouldEmit = vpnProtectionObserved != observed ||
+                vpnAlwaysOn != normalizedAlwaysOn ||
+                vpnLockdown != normalizedLockdown
+            vpnProtectionObserved = observed
+            vpnAlwaysOn = normalizedAlwaysOn
+            vpnLockdown = normalizedLockdown
+            payload = vpnProtectionSnapshotLocked()
+        }
+        if (shouldEmit) {
+            emit("android-vpn-protection", payload)
+        }
+    }
+
+    fun vpnProtectionSnapshot(): Map<String, Any?> = synchronized(lock) {
+        vpnProtectionSnapshotLocked()
+    }
+
     fun appendLog(line: String) {
         val entry = "${DateFormat.format("HH:mm:ss", System.currentTimeMillis())} $line"
         synchronized(lock) {
@@ -81,6 +111,10 @@ object DropoVpnRuntime {
             "connectedAt" to connectedAt,
             "uptimeMs" to if (connectedAt > 0) SystemClock.elapsedRealtime() - connectedAt else 0L,
             "pid" to Process.myPid(),
+            "observed" to vpnProtectionObserved,
+            "alwaysOn" to vpnAlwaysOn,
+            "lockdown" to vpnLockdown,
+            "killSwitchActive" to (vpnProtectionObserved && vpnAlwaysOn && vpnLockdown),
         )
     }
 
@@ -101,12 +135,23 @@ object DropoVpnRuntime {
         status.put("serviceMessage", snapshot["message"]?.toString().orEmpty())
         status.put("serviceUpdatedAt", snapshot["updatedAt"])
         status.put("servicePid", snapshot["pid"])
+        status.put("observed", snapshot["observed"] == true)
+        status.put("alwaysOn", snapshot["alwaysOn"] == true)
+        status.put("lockdown", snapshot["lockdown"] == true)
+        status.put("killSwitchActive", snapshot["killSwitchActive"] == true)
         status.put("hasError", nativeHasError || coreHasError)
         if (nativeHasError) {
             status.put("error", snapshot["error"]?.toString().orEmpty())
         }
         return status.toString()
     }
+
+    private fun vpnProtectionSnapshotLocked(): Map<String, Any?> = mapOf(
+        "observed" to vpnProtectionObserved,
+        "alwaysOn" to vpnAlwaysOn,
+        "lockdown" to vpnLockdown,
+        "killSwitchActive" to (vpnProtectionObserved && vpnAlwaysOn && vpnLockdown),
+    )
 
     private fun setState(nextState: String, nextMessage: String, nextError: String) {
         val shouldEmit: Boolean

@@ -1,10 +1,12 @@
 package dropocore
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -400,6 +402,20 @@ func androidEffectiveRoutePolicies(policies map[string]string, hasVPN bool) map[
 	return result
 }
 
+func androidEffectiveRoutePoliciesForMode(policies map[string]string, hasVPN bool, routingMode string) map[string]string {
+	result := androidEffectiveRoutePolicies(policies, hasVPN)
+	if normalizeAndroidRoutingMode(routingMode) != "all_traffic" {
+		return result
+	}
+	// Full VPN is a mode-level contract. Keep the saved per-service choices so
+	// they can be restored in selective mode, but never emit a Direct carve-out
+	// while all public traffic is expected to use the VPN.
+	for tag := range result {
+		result[tag] = androidRoutePolicyVPN
+	}
+	return result
+}
+
 func androidRoutePoliciesLocked() map[string]string {
 	if len(current.RoutePolicies) == 0 {
 		return nil
@@ -414,17 +430,15 @@ func androidRoutePoliciesLocked() map[string]string {
 }
 
 func androidServiceRoutesLocked(live bool) []routeInfo {
-	delay := 0
-	if live && current.Connected {
-		delay = 20
-	}
+	_ = live
 	policies := androidRoutePoliciesLocked()
 	hasVPN := strings.TrimSpace(current.Subscription) != ""
+	effectivePolicies := androidEffectiveRoutePoliciesForMode(policies, hasVPN, current.Config.RoutingMode)
 	catalog := androidServiceCatalog()
 	routes := make([]routeInfo, 0, len(catalog))
-	for index, service := range catalog {
+	for _, service := range catalog {
 		selectedPolicy := androidServicePolicy(service, policies)
-		effectivePolicy := androidEffectiveRoutePolicy(selectedPolicy, hasVPN)
+		effectivePolicy := effectivePolicies[service.Tag]
 		methodLabel := androidRoutePolicyLabel(effectivePolicy)
 		routes = append(routes, routeInfo{
 			Tag:                  service.Tag,
@@ -434,9 +448,11 @@ func androidServiceRoutesLocked(live bool) []routeInfo {
 			SelectedMethod:       selectedPolicy,
 			RequiresVPN:          effectivePolicy == androidRoutePolicyVPN,
 			HomeVisible:          androidHomeRouteServiceVisibleLocked(service.Tag),
-			DelayMS:              delay + 8 + index%9,
-			DomainSuffixes:       append([]string(nil), service.DomainSuffixes...),
-			IPCidrs:              append([]string(nil), service.IPCIDRs...),
+			// Unknown until an explicit health check runs. Never manufacture
+			// latency from a connected flag: zero means "not measured".
+			DelayMS:        0,
+			DomainSuffixes: append([]string(nil), service.DomainSuffixes...),
+			IPCidrs:        append([]string(nil), service.IPCIDRs...),
 		})
 	}
 	return routes
@@ -577,73 +593,160 @@ func androidServicePackageNamesByPolicy(policies map[string]string, policy strin
 	return uniqueNonEmptyStrings(result)
 }
 
+// Android excludes the Dropo package from its own TUN. Until quick checks use
+// a dedicated loopback inbound, an ordinary HTTP request proves endpoint
+// reachability only; it must never claim that the request used the VPN route.
+func androidClientQuickCheckResult(service routeInfo, target string, statusCode int, errText string, latencyMS int) map[string]interface{} {
+	expectedRoute := androidRoutePolicyDirect
+	if service.RequiresVPN {
+		expectedRoute = androidRoutePolicyVPN
+	}
+	success := strings.TrimSpace(errText) == ""
+	statusText := "FAIL"
+	if success {
+		statusText = "ENDPOINT_OK"
+	}
+	return map[string]interface{}{
+		"tag":           service.Tag,
+		"serviceTag":    service.Tag,
+		"name":          service.Name,
+		"success":       success,
+		"target":        target,
+		"url":           target,
+		"status":        statusCode,
+		"statusText":    statusText,
+		"error":         errText,
+		"latencyMs":     latencyMS,
+		"methodTag":     expectedRoute,
+		"expectedRoute": expectedRoute,
+		"methodLabel":   service.EffectiveMethodLabel,
+		"routeVerified": false,
+		"checkScope":    "endpoint_reachability",
+	}
+}
+
 func runAndroidClientQuickCheck() string {
+	startedAt := time.Now()
 	mu.Lock()
 	services := androidServiceRoutesLocked(true)
+	sessionStartedAt := current.StartedAt
+	sessionNumber := current.TotalSessions
+	sessionWasConnected := current.Connected
 	startServices := make([]map[string]interface{}, 0, len(services))
 	for _, service := range services {
 		startServices = append(startServices, map[string]interface{}{"tag": service.Tag, "name": service.Name})
 	}
 	appendLogLocked(fmt.Sprintf("android service quick check started (%d services)", len(services)))
-	emitLocked("route-probe-start", map[string]interface{}{
+	emitLocked("client-check-start", map[string]interface{}{
+		"total":        len(services),
 		"serviceCount": len(services),
 		"services":     startServices,
 	})
 	_ = saveLocked()
 	mu.Unlock()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	client := &http.Client{Timeout: 8 * time.Second}
-	results := make([]map[string]interface{}, 0, len(services))
+	results := make([]map[string]interface{}, len(services))
+	jobs := make(chan int)
+	workers := 8
+	if workers > len(services) {
+		workers = len(services)
+	}
+	var workersDone sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		workersDone.Add(1)
+		go func() {
+			defer workersDone.Done()
+			for index := range jobs {
+				service := services[index]
+				target := androidServiceHealthTarget(service.Tag)
+				probeStarted := time.Now()
+				statusCode, errText := probeAndroidService(ctx, client, target)
+				delayMS := int(time.Since(probeStarted).Milliseconds())
+				result := androidClientQuickCheckResult(service, target, statusCode, errText, delayMS)
+				results[index] = result
+
+				mu.Lock()
+				emitLocked("client-check-service", result)
+				if result["success"] == true {
+					appendLogLocked(fmt.Sprintf("android service quick check ok: %s %s (%d ms)", service.Tag, target, delayMS))
+				} else {
+					appendLogLocked(fmt.Sprintf("android service quick check failed: %s %s: %s", service.Tag, target, errText))
+				}
+				_ = saveLocked()
+				mu.Unlock()
+			}
+		}()
+	}
+
+enqueue:
+	for index := range services {
+		select {
+		case <-ctx.Done():
+			break enqueue
+		case jobs <- index:
+		}
+	}
+	close(jobs)
+	workersDone.Wait()
+
 	failedCount := 0
-	for _, service := range services {
-		target := androidServiceHealthTarget(service.Tag)
-		started := time.Now()
-		statusCode, errText := probeAndroidService(client, target)
-		delayMS := int(time.Since(started).Milliseconds())
-		success := errText == ""
-		if !success {
+	okCount := 0
+	for index, service := range services {
+		if results[index] == nil {
+			target := androidServiceHealthTarget(service.Tag)
+			results[index] = androidClientQuickCheckResult(
+				service,
+				target,
+				0,
+				"quick check deadline exceeded",
+				0,
+			)
+		}
+		if results[index]["success"] == true {
+			okCount++
+		} else {
 			failedCount++
 		}
-		result := map[string]interface{}{
-			"tag":         service.Tag,
-			"name":        service.Name,
-			"success":     success,
-			"target":      target,
-			"status":      statusCode,
-			"error":       errText,
-			"latencyMs":   delayMS,
-			"methodTag":   androidRouteMethodCache([]routeInfo{service})[service.Tag],
-			"methodLabel": service.EffectiveMethodLabel,
-		}
-		results = append(results, result)
-
-		mu.Lock()
-		emitLocked("route-probe-service", result)
-		if success {
-			appendLogLocked(fmt.Sprintf("android service quick check ok: %s %s (%d ms)", service.Tag, target, delayMS))
-		} else {
-			appendLogLocked(fmt.Sprintf("android service quick check failed: %s %s: %s", service.Tag, target, errText))
-		}
-		_ = saveLocked()
-		mu.Unlock()
 	}
 
 	success := failedCount == 0
 	payload := map[string]interface{}{
-		"success":     success,
-		"android":     true,
-		"services":    results,
-		"total":       len(results),
-		"totalCount":  len(results),
-		"failedCount": failedCount,
-		"checkedAt":   currentTimeRFC3339(),
+		"success":       success,
+		"android":       true,
+		"services":      results,
+		"total":         len(results),
+		"totalCount":    len(results),
+		"okCount":       okCount,
+		"failedCount":   failedCount,
+		"durationMs":    time.Since(startedAt).Milliseconds(),
+		"checkedAt":     currentTimeRFC3339(),
+		"routeVerified": false,
+		"checkScope":    "endpoint_reachability",
+	}
+	if ctx.Err() != nil {
+		payload["error"] = ctx.Err().Error()
 	}
 	mu.Lock()
-	emitLocked("route-probe-complete", payload)
+	payload["sessionValid"] = androidQuickCheckSessionValidLocked(
+		sessionStartedAt,
+		sessionNumber,
+		sessionWasConnected,
+	)
+	emitLocked("client-check-done", payload)
 	appendLogLocked(fmt.Sprintf("android service quick check complete: %d/%d failed", failedCount, len(results)))
 	_ = saveLocked()
 	mu.Unlock()
 	return encode(payload)
+}
+
+func androidQuickCheckSessionValidLocked(startedAt string, sessionNumber int, wasConnected bool) bool {
+	return wasConnected &&
+		current.Connected &&
+		current.TotalSessions == sessionNumber &&
+		current.StartedAt == startedAt
 }
 
 func androidServiceHealthTarget(tag string) string {
@@ -665,8 +768,8 @@ func androidServiceHealthTarget(tag string) string {
 	return "https://www.gstatic.com/generate_204"
 }
 
-func probeAndroidService(client *http.Client, target string) (int, string) {
-	request, err := http.NewRequest(http.MethodGet, target, nil)
+func probeAndroidService(ctx context.Context, client *http.Client, target string) (int, string) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return 0, err.Error()
 	}

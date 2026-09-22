@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func (a *App) handleClientQuickCheckFailures(results []clientQuickCheckResult) {
+func (a *App) handleClientQuickCheckFailures(session uint64, results []clientQuickCheckResult) {
 	// Don't react to a test that ran while the strategy engine was being
 	// switched: those failures are an artifact of the switch, not of the
 	// strategy, and acting on them creates a churn feedback loop.
@@ -20,10 +20,7 @@ func (a *App) handleClientQuickCheckFailures(results []clientQuickCheckResult) {
 		a.writeLog("[FreeAccess] quick-check failures ignored: strategy discovery is in progress")
 		return
 	}
-	a.mu.Lock()
-	running := a.isRunning
-	a.mu.Unlock()
-	if !running {
+	if !a.routeStrategySessionActive(session) {
 		// Without an active VPN session there is no transparent engine to
 		// retune; the test is purely informational.
 		return
@@ -34,6 +31,12 @@ func (a *App) handleClientQuickCheckFailures(results []clientQuickCheckResult) {
 		if result.Name == "" || result.Category != "Blocked" {
 			continue
 		}
+		// Endpoint-only probes report reachability, not the carrier that handled
+		// the request. A failure from such a probe is not evidence that the
+		// active Zapret strategy failed and must never trigger a live retune.
+		if !result.RouteVerified {
+			continue
+		}
 		// Explicit Direct and VPN policies are authoritative. A route-aware
 		// quick check must never turn their result into a Zapret retune request.
 		if result.ExpectedRoute != clientQuickCheckRouteZapret && result.ExpectedRoute != FreeAccessMethodAuto {
@@ -42,7 +45,10 @@ func (a *App) handleClientQuickCheckFailures(results []clientQuickCheckResult) {
 		if result.Success {
 			continue
 		}
-		serviceTag := clientQuickCheckServiceTag(result.Name)
+		serviceTag := strings.TrimSpace(result.ServiceTag)
+		if serviceTag == "" {
+			serviceTag = clientQuickCheckServiceTag(result.Name)
+		}
 		if serviceTag == "" || queued[serviceTag] {
 			continue
 		}
@@ -50,7 +56,7 @@ func (a *App) handleClientQuickCheckFailures(results []clientQuickCheckResult) {
 		// Do not change the live selector on a single quick-check result. The
 		// maintenance worker first confirms the current strategy; a transient
 		// failure must leave a proven working selection untouched.
-		a.requestRouteStrategyMaintenance(fmt.Sprintf("service:%s quick-check failure: %s", serviceTag, firstNonEmpty(result.NormalError, result.ProxyError, result.StatusText)))
+		a.requestRouteStrategyMaintenanceForSession(session, fmt.Sprintf("service:%s quick-check failure: %s", serviceTag, firstNonEmpty(result.NormalError, result.ProxyError, result.StatusText)))
 	}
 }
 

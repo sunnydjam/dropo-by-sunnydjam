@@ -1,6 +1,7 @@
 package dropocore
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -20,8 +21,15 @@ const (
 )
 
 var (
-	mu      sync.Mutex
-	current = defaultState()
+	mu                                    sync.Mutex
+	current                               = defaultState()
+	androidSubscriptionTestFetcherFactory = newSubscriptionFetcher
+)
+
+const (
+	androidInvalidVPNKeyError    = "VPN key is invalid or unsupported on Android"
+	androidSubscriptionTestError = "VPN subscription could not be downloaded or contains no supported Android servers"
+	androidSubscriptionSaveError = "Could not save Android VPN subscription"
 )
 
 type coreState struct {
@@ -29,6 +37,7 @@ type coreState struct {
 	Connected                bool              `json:"connected"`
 	StartedAt                string            `json:"startedAt"`
 	Subscription             string            `json:"subscription"`
+	SubscriptionProxyCount   int               `json:"subscriptionProxyCount,omitempty"`
 	Config                   appConfig         `json:"config"`
 	Version                  versionInfo       `json:"version"`
 	Events                   []bridgeEvent     `json:"events"`
@@ -48,6 +57,9 @@ type coreState struct {
 	CachedConfigSubscription string            `json:"cachedConfigSubscription,omitempty"`
 	CachedConfigSignature    string            `json:"cachedConfigSignature,omitempty"`
 	CachedConfigUpdatedAt    string            `json:"cachedConfigUpdatedAt,omitempty"`
+	testedSubscriptionHash   [sha256.Size]byte
+	testedSubscriptionCount  int
+	testedSubscriptionValid  bool
 }
 
 type appConfig struct {
@@ -291,6 +303,12 @@ func Call(method, argsJSON string) string {
 	if method == "CheckForUpdates" {
 		return checkAndroidUpdates()
 	}
+	// Subscription downloads can take up to the HTTP client timeout and must
+	// never block status, events, stop requests, or other bridge calls behind
+	// the process-wide state mutex.
+	if method == "TestVPNConnection" {
+		return testAndroidVPNConnection(stringArg(args, 0, ""))
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -343,10 +361,9 @@ func Call(method, argsJSON string) string {
 		current.Config.AutoStartPrompted = true
 		_ = saveLocked()
 		return encode(map[string]interface{}{
-			"success":            true,
-			"autoStart":          current.Config.AutoStart,
-			"autoStartPrompted":  true,
-			"androidAlwaysOnVpn": true,
+			"success":           true,
+			"autoStart":         current.Config.AutoStart,
+			"autoStartPrompted": true,
 		})
 	case "GetProfiles":
 		return encode(profilesLocked())
@@ -463,54 +480,10 @@ func Call(method, argsJSON string) string {
 		return updateWireGuardLocked(args)
 	case "DeleteWireGuard":
 		return deleteWireGuardLocked(args)
-	case "TestVPNConnection":
-		value := strings.TrimSpace(stringArg(args, 0, ""))
-		if value == "" {
-			return encode(map[string]interface{}{"success": false, "error": "Subscription URL is empty"})
-		}
-		if isDirectProxyLink(value) {
-			proxies, err := parseAndroidProxyCandidates(value)
-			if err != nil {
-				appendLogLocked("android subscription test failed: " + err.Error())
-				_ = saveLocked()
-				return encode(map[string]interface{}{"success": false, "error": err.Error()})
-			}
-			appendLogLocked("android subscription test ok: " + proxyListSummary(proxies))
-			_ = saveLocked()
-			return encode(map[string]interface{}{
-				"success":      true,
-				"count":        len(proxies),
-				"isDirectLink": true,
-				"proxies":      proxyCandidatesPayload(proxies),
-			})
-		}
-		return encode(map[string]interface{}{
-			"success":      true,
-			"count":        estimateProxyCount(value),
-			"isDirectLink": strings.Contains(value, "://"),
-			"proxies":      []interface{}{},
-		})
 	case "SetVPNSubscription":
-		nextSubscription := strings.TrimSpace(stringArg(args, 0, ""))
-		if nextSubscription != current.Subscription {
-			clearCachedConfigLocked()
-		}
-		current.Subscription = nextSubscription
-		current.LastError = ""
-		appendLogLocked("android subscription saved: " + subscriptionSummary(current.Subscription))
-		_ = saveLocked()
-		return encode(map[string]interface{}{
-			"success":    true,
-			"proxyCount": estimateProxyCount(current.Subscription),
-			"wasRunning": current.Connected,
-		})
+		return encode(updateAndroidSubscriptionLocked(stringArg(args, 0, ""), false))
 	case "RemoveVPNSubscription":
-		current.Subscription = ""
-		current.LastError = ""
-		clearCachedConfigLocked()
-		appendLogLocked("android subscription removed")
-		_ = saveLocked()
-		return encode(map[string]interface{}{"success": true, "proxyCount": 0, "wasRunning": current.Connected})
+		return encode(updateAndroidSubscriptionLocked("", true))
 	case "AndroidEngineStarting":
 		applyServiceStateLocked("starting", "Android VpnService is starting sing-box", "")
 		appendLogLocked("android engine starting")
@@ -558,6 +531,177 @@ func Call(method, argsJSON string) string {
 	default:
 		return encode(map[string]interface{}{"success": true, "android": true, "method": method})
 	}
+}
+
+type androidSubscriptionStateSnapshot struct {
+	subscription             string
+	subscriptionProxyCount   int
+	lastError                string
+	logs                     []string
+	cachedSingBoxConfig      string
+	cachedProxyCount         int
+	cachedConfigSubscription string
+	cachedConfigSignature    string
+	cachedConfigUpdatedAt    string
+}
+
+func captureAndroidSubscriptionStateLocked() androidSubscriptionStateSnapshot {
+	return androidSubscriptionStateSnapshot{
+		subscription:             current.Subscription,
+		subscriptionProxyCount:   current.SubscriptionProxyCount,
+		lastError:                current.LastError,
+		logs:                     append([]string(nil), current.Logs...),
+		cachedSingBoxConfig:      current.CachedSingBoxConfig,
+		cachedProxyCount:         current.CachedProxyCount,
+		cachedConfigSubscription: current.CachedConfigSubscription,
+		cachedConfigSignature:    current.CachedConfigSignature,
+		cachedConfigUpdatedAt:    current.CachedConfigUpdatedAt,
+	}
+}
+
+func restoreAndroidSubscriptionStateLocked(snapshot androidSubscriptionStateSnapshot) {
+	current.Subscription = snapshot.subscription
+	current.SubscriptionProxyCount = snapshot.subscriptionProxyCount
+	current.LastError = snapshot.lastError
+	current.Logs = append([]string(nil), snapshot.logs...)
+	current.CachedSingBoxConfig = snapshot.cachedSingBoxConfig
+	current.CachedProxyCount = snapshot.cachedProxyCount
+	current.CachedConfigSubscription = snapshot.cachedConfigSubscription
+	current.CachedConfigSignature = snapshot.cachedConfigSignature
+	current.CachedConfigUpdatedAt = snapshot.cachedConfigUpdatedAt
+}
+
+// validateAndroidSubscriptionLocally deliberately performs no network I/O.
+// Remote subscriptions are checked for a safe HTTPS URL; direct keys are
+// parsed and filtered against the transports supported by Android sing-box.
+func validateAndroidSubscriptionLocally(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("VPN subscription is empty")
+	}
+	if !isDirectProxyLink(value) {
+		return validateSubscriptionURL(value)
+	}
+
+	proxy, err := parseAndroidDirectProxyCandidate(value)
+	if err != nil || !isTransportSupported(proxy.Network) {
+		return fmt.Errorf(androidInvalidVPNKeyError)
+	}
+	return nil
+}
+
+func updateAndroidSubscriptionLocked(value string, remove bool) map[string]interface{} {
+	nextSubscription := strings.TrimSpace(value)
+	if remove {
+		nextSubscription = ""
+	} else if err := validateAndroidSubscriptionLocally(nextSubscription); err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+
+	previous := captureAndroidSubscriptionStateLocked()
+	wasRunning := current.Connected
+	nextProxyCount := current.SubscriptionProxyCount
+	if remove {
+		nextProxyCount = 0
+	} else if verifiedCount, ok := testedAndroidSubscriptionCountLocked(nextSubscription); ok {
+		nextProxyCount = verifiedCount
+	} else if nextSubscription != current.Subscription {
+		// A locally parsed direct key is exactly one usable candidate. A remote
+		// HTTPS URL has no truthful count until TestVPNConnection or a successful
+		// BuildSingBoxConfig has parsed its response.
+		if isDirectProxyLink(nextSubscription) {
+			nextProxyCount = 1
+		} else {
+			nextProxyCount = 0
+		}
+	}
+	if remove || nextSubscription != current.Subscription {
+		clearCachedConfigLocked()
+	}
+	current.Subscription = nextSubscription
+	current.SubscriptionProxyCount = nextProxyCount
+	current.LastError = ""
+	if remove {
+		appendLogLocked("android subscription removed")
+	} else {
+		appendLogLocked("android subscription saved: " + subscriptionSummary(current.Subscription))
+	}
+	if err := saveLocked(); err != nil {
+		restoreAndroidSubscriptionStateLocked(previous)
+		recordPersistenceErrorLocked(err)
+		return map[string]interface{}{"success": false, "error": androidSubscriptionSaveError}
+	}
+	if remove {
+		clearAndroidSubscriptionTestVerificationLocked()
+	}
+	return map[string]interface{}{
+		"success":    true,
+		"proxyCount": current.SubscriptionProxyCount,
+		"wasRunning": wasRunning,
+	}
+}
+
+func testAndroidVPNConnection(value string) string {
+	value = strings.TrimSpace(value)
+	direct := isDirectProxyLink(value)
+	if err := validateAndroidSubscriptionLocally(value); err != nil {
+		recordAndroidSubscriptionTestResult(value, false, err.Error(), nil)
+		return encode(map[string]interface{}{"success": false, "error": err.Error(), "count": 0})
+	}
+
+	fetcherFactory := androidSubscriptionTestFetcherFactory
+	if fetcherFactory == nil {
+		recordAndroidSubscriptionTestResult(value, false, androidSubscriptionTestError, nil)
+		return encode(map[string]interface{}{"success": false, "error": androidSubscriptionTestError, "count": 0})
+	}
+	fetcher := fetcherFactory()
+	proxies, err := parseAndroidProxyCandidatesWithFetcher(value, fetcher)
+	if err != nil {
+		message := androidSubscriptionTestError
+		if direct {
+			message = androidInvalidVPNKeyError
+		}
+		recordAndroidSubscriptionTestResult(value, false, message, nil)
+		return encode(map[string]interface{}{"success": false, "error": message, "count": 0})
+	}
+
+	recordAndroidSubscriptionTestResult(value, true, "", proxies)
+	return encode(map[string]interface{}{
+		"success":      true,
+		"count":        len(proxies),
+		"isDirectLink": direct,
+	})
+}
+
+func recordAndroidSubscriptionTestResult(value string, success bool, message string, proxies []proxyConfig) {
+	mu.Lock()
+	defer mu.Unlock()
+	if success {
+		current.testedSubscriptionHash = androidSubscriptionFingerprint(value)
+		current.testedSubscriptionCount = len(proxies)
+		current.testedSubscriptionValid = true
+		appendLogLocked("android subscription test ok: " + proxyListSummary(proxies))
+	} else {
+		appendLogLocked("android subscription test failed: " + message)
+	}
+	_ = saveLocked()
+}
+
+func androidSubscriptionFingerprint(value string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(strings.TrimSpace(value)))
+}
+
+func testedAndroidSubscriptionCountLocked(value string) (int, bool) {
+	if !current.testedSubscriptionValid || current.testedSubscriptionHash != androidSubscriptionFingerprint(value) {
+		return 0, false
+	}
+	return current.testedSubscriptionCount, true
+}
+
+func clearAndroidSubscriptionTestVerificationLocked() {
+	current.testedSubscriptionHash = [sha256.Size]byte{}
+	current.testedSubscriptionCount = 0
+	current.testedSubscriptionValid = false
 }
 
 func statusLocked() map[string]interface{} {
@@ -650,7 +794,7 @@ func subscriptionLocked() map[string]interface{} {
 	return map[string]interface{}{
 		"hasSubscription": strings.TrimSpace(current.Subscription) != "",
 		"url":             current.Subscription,
-		"proxyCount":      estimateProxyCount(current.Subscription),
+		"proxyCount":      current.SubscriptionProxyCount,
 	}
 }
 
@@ -699,7 +843,7 @@ func profilesLocked() map[string]interface{} {
 				"name":           "Android",
 				"subscription":   current.Subscription,
 				"wireguardCount": len(current.WireGuards),
-				"proxyCount":     estimateProxyCount(current.Subscription),
+				"proxyCount":     current.SubscriptionProxyCount,
 				"isActive":       true,
 				"createdAt":      time.Now().Format(time.RFC3339),
 			},
@@ -961,22 +1105,6 @@ func subscriptionSummary(value string) string {
 	return "[redacted]"
 }
 
-func proxyCandidatesPayload(proxies []proxyConfig) []interface{} {
-	items := make([]interface{}, 0, len(proxies))
-	for _, proxy := range proxies {
-		items = append(items, map[string]interface{}{
-			"type":     proxy.Type,
-			"name":     proxy.Name,
-			"server":   proxy.Server,
-			"port":     proxy.ServerPort,
-			"network":  proxy.Network,
-			"security": proxy.Security,
-			"raw":      proxy.Raw,
-		})
-	}
-	return items
-}
-
 func proxyListSummary(proxies []proxyConfig) string {
 	if len(proxies) == 0 {
 		return "0 proxy"
@@ -997,6 +1125,7 @@ func proxyListSummary(proxies []proxyConfig) string {
 }
 
 func loadLocked() error {
+	clearAndroidSubscriptionTestVerificationLocked()
 	if current.BasePath == "" {
 		return nil
 	}
@@ -1033,7 +1162,29 @@ func loadLocked() error {
 		current.RoutePolicies = map[string]string{}
 	}
 	normalizeLoadedAppConfigLocked()
+	normalizeLoadedAndroidSubscriptionCountLocked()
 	return nil
+}
+
+func normalizeLoadedAndroidSubscriptionCountLocked() {
+	subscription := strings.TrimSpace(current.Subscription)
+	if subscription == "" {
+		current.SubscriptionProxyCount = 0
+		return
+	}
+	if current.SubscriptionProxyCount > 0 {
+		return
+	}
+	current.SubscriptionProxyCount = 0
+	if isDirectProxyLink(subscription) {
+		if validateAndroidSubscriptionLocally(subscription) == nil {
+			current.SubscriptionProxyCount = 1
+		}
+		return
+	}
+	if strings.TrimSpace(current.CachedConfigSubscription) == subscription && current.CachedProxyCount > 0 {
+		current.SubscriptionProxyCount = current.CachedProxyCount
+	}
 }
 
 func normalizeLoadedAppConfigLocked() {
@@ -1164,25 +1315,6 @@ func intArg(args []interface{}, index int, fallback int) int {
 	default:
 		return fallback
 	}
-}
-
-func estimateProxyCount(value string) int {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	if strings.Contains(value, "\n") {
-		count := 0
-		for _, line := range strings.Split(value, "\n") {
-			if strings.TrimSpace(line) != "" {
-				count++
-			}
-		}
-		if count > 0 {
-			return count
-		}
-	}
-	return 1
 }
 
 func formatBytes(value int64) string {

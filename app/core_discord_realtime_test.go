@@ -411,6 +411,57 @@ func TestDiscordRealtimeEndpointObservationDoesNotResetControllerState(t *testin
 	}
 }
 
+func TestDiscordRealtimeOldSessionCannotObserveNewSession(t *testing.T) {
+	controller := newDiscordRealtimeController()
+	controller.running = true
+	controller.session = 2
+	connection := clashConnection{
+		ID: "stale-session-voice",
+		Metadata: clashConnectionMetadata{
+			Network:         "udp",
+			DestinationIP:   "203.0.113.20",
+			DestinationPort: "19328",
+			Process:         "Discord.exe",
+		},
+		Upload: 74,
+	}
+
+	if actions := controller.observeConnections([]clashConnection{connection}, time.Now(), 1); len(actions) != 0 {
+		t.Fatalf("old session produced realtime actions: %#v", actions)
+	}
+	if len(controller.learnedUDPPorts) != 0 || len(controller.flows) != 0 || controller.initialBusy {
+		t.Fatalf("old session mutated the new controller: ports=%v flows=%v busy=%v", controller.learnedUDPPorts, controller.flows, controller.initialBusy)
+	}
+	if actions := controller.observeConnections([]clashConnection{connection}, time.Now(), 2); len(actions) == 0 {
+		t.Fatal("current session did not observe Discord media")
+	}
+}
+
+func TestDiscordRealtimeFailureFromOldSessionCannotTouchNewController(t *testing.T) {
+	controller := newDiscordRealtimeController()
+	app := &App{isRunning: true, discordRealtime: controller}
+	app.resetRouteStrategySession()
+	oldSession := app.currentRouteStrategySession()
+	app.resetRouteStrategySession()
+	newSession := app.currentRouteStrategySession()
+
+	controller.mu.Lock()
+	controller.session = newSession
+	controller.running = true
+	controller.automatic = true
+	controller.initialBusy = true
+	controller.lastSwitch = time.Time{}
+	controller.mu.Unlock()
+
+	app.handleDiscordRealtimeFailure(oldSession, "stale failure")
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.session != newSession || !controller.running || !controller.automatic || !controller.initialBusy || !controller.lastSwitch.IsZero() {
+		t.Fatalf("old failure mutated new session controller: %#v", controller)
+	}
+}
+
 func TestDiscordRealtimePrunesStaleLearnedEndpoints(t *testing.T) {
 	controller := newDiscordRealtimeController()
 	stale := time.Now().Add(-discordRealtimeLearnedTTL - time.Minute)

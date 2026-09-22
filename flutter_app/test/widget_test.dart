@@ -100,6 +100,55 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+    'legacy Telegram proxy cleanup stays explicit and clears after acknowledgement',
+    (tester) async {
+      tester.view.physicalSize = const Size(1100, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final bridge = _LegacyTelegramProxyBridge();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: DropoHomePage(bridge: bridge),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(
+        find.byKey(const ValueKey('legacy-telegram-proxy-strip')),
+        findsOneWidget,
+      );
+      expect(bridge.settingsOpened, isFalse);
+
+      final open = find.byKey(const ValueKey('open-telegram-proxy-settings'));
+      await tester.ensureVisible(open);
+      await tester.tap(open);
+      await tester.pump();
+      expect(bridge.settingsOpened, isTrue);
+      expect(
+        find.byKey(const ValueKey('legacy-telegram-proxy-strip')),
+        findsOneWidget,
+      );
+
+      final acknowledge = find.byKey(
+        const ValueKey('ack-telegram-proxy-removed'),
+      );
+      await tester.ensureVisible(acknowledge);
+      await tester.tap(acknowledge);
+      await tester.pump();
+      expect(bridge.acknowledged, isTrue);
+      expect(
+        find.byKey(const ValueKey('legacy-telegram-proxy-strip')),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('home routes keep four primary services and can pin another', (
     tester,
   ) async {
@@ -1109,6 +1158,32 @@ class _UpdateAvailableBridge extends MockCoreBridge {
       'success': false,
       'error': 'Test bridge stops before replacing the running test process',
     };
+  }
+}
+
+class _LegacyTelegramProxyBridge extends MockCoreBridge {
+  bool settingsOpened = false;
+  bool acknowledged = false;
+
+  @override
+  Future<TelegramExitInfo> telegramProxyStatus() async {
+    return TelegramExitInfo.fromJson({
+      'injected': !acknowledged,
+      'recommendRemove': !acknowledged,
+      'showNotice': false,
+    });
+  }
+
+  @override
+  Future<Map<String, dynamic>> openTelegramProxySettings() async {
+    settingsOpened = true;
+    return {'success': true};
+  }
+
+  @override
+  Future<Map<String, dynamic>> acknowledgeTelegramProxyRemoved() async {
+    acknowledged = true;
+    return {'success': true};
   }
 }
 

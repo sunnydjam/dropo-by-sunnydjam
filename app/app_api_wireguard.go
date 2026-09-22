@@ -99,10 +99,14 @@ func (a *App) ParseWireGuardConfigAPI(configText string) map[string]interface{} 
 // AddWireGuard добавляет новый WireGuard конфиг
 func (a *App) AddWireGuard(tag string, name string, configText string, camouflageEnabled bool) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	// Проверяем что VPN выключен
 	a.mu.Lock()
-	if a.isRunning {
+	if a.isRunning || a.isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		a.mu.Unlock()
 		return map[string]interface{}{
 			"success": false,
@@ -197,10 +201,14 @@ func (a *App) AddWireGuard(tag string, name string, configText string, camouflag
 // UpdateWireGuard обновляет существующий WireGuard конфиг
 func (a *App) UpdateWireGuard(oldTag string, tag string, name string, configText string, camouflageEnabled bool) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	// Проверяем что VPN выключен
 	a.mu.Lock()
-	if a.isRunning {
+	if a.isRunning || a.isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		a.mu.Unlock()
 		return map[string]interface{}{
 			"success": false,
@@ -301,10 +309,14 @@ func (a *App) UpdateWireGuard(oldTag string, tag string, name string, configText
 // DeleteWireGuard удаляет WireGuard конфиг
 func (a *App) DeleteWireGuard(tag string) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	// Проверяем что VPN выключен
 	a.mu.Lock()
-	if a.isRunning {
+	if a.isRunning || a.isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		a.mu.Unlock()
 		return map[string]interface{}{
 			"success": false,
@@ -418,10 +430,14 @@ func (a *App) GetWireGuardConfig(tag string) map[string]interface{} {
 // Эти домены будут резолвиться через системный DNS (WireGuard DNS) вместо hijack-dns
 func (a *App) UpdateWireGuardInternalDomains(tag string, domains []string) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	// Проверяем что VPN выключен
 	a.mu.Lock()
-	if a.isRunning {
+	if a.isRunning || a.isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		a.mu.Unlock()
 		return map[string]interface{}{
 			"success": false,

@@ -88,6 +88,48 @@ class _HomeBridge extends MockCoreBridge {
   }
 }
 
+class _OnboardingBridge extends _HomeBridge {
+  String savedSubscription = '';
+  int personalTests = 0;
+  int personalAdds = 0;
+
+  @override
+  Future<SubscriptionInfo> subscription() async => SubscriptionInfo(
+    hasSubscription: savedSubscription.isNotEmpty,
+    url: savedSubscription,
+    proxyCount: savedSubscription.isEmpty ? 0 : 3,
+  );
+
+  @override
+  Future<List<VpnSourceInfo>> vpnSources() async {
+    if (savedSubscription.isEmpty) return const [];
+    return [
+      VpnSourceInfo.fromJson({
+        'id': 'source-1',
+        'name': 'Мой VPN 1',
+        'kind': 'subscription',
+        'selected_node': 0,
+        'node_count': 3,
+        'node_names': const ['Нидерланды · 1', 'Германия · 1', 'Финляндия · 1'],
+        'active': connected,
+      }),
+    ];
+  }
+
+  @override
+  Future<Map<String, dynamic>> testSubscription(String value) async {
+    personalTests++;
+    return {'success': true, 'count': 3, 'proxies': const []};
+  }
+
+  @override
+  Future<Map<String, dynamic>> addVpnSource(String name, String uri) async {
+    personalAdds++;
+    savedSubscription = uri.trim();
+    return {'success': true, 'sourceCount': 1};
+  }
+}
+
 class _PolicyContractBridge extends _HomeBridge {
   _PolicyContractBridge(this.mobile);
   final bool mobile;
@@ -110,6 +152,174 @@ class _PolicyContractBridge extends _HomeBridge {
     policyWrites++;
     savedPolicy = method == 'auto' && !mobile ? 'direct' : method;
     return {'success': true, 'method': savedPolicy};
+  }
+}
+
+class _HealthBridge extends _HomeBridge {
+  int quickChecks = 0;
+
+  @override
+  Future<List<RouteService>> routes({bool live = false}) async => const [
+    RouteService(
+      tag: 'youtube',
+      name: 'YouTube',
+      method: 'VPN',
+      actualOutbound: 'NL Amsterdam 1',
+      selectedMethod: 'vpn',
+      requiresVpn: true,
+      delayMs: 82,
+      homeVisible: true,
+    ),
+    RouteService(
+      tag: 'discord',
+      name: 'Discord',
+      method: 'Zapret TLS split',
+      actualOutbound: 'youtube-discord-tls',
+      selectedMethod: 'zapret',
+      requiresVpn: false,
+      delayMs: 0,
+      homeVisible: true,
+    ),
+  ];
+
+  @override
+  Future<Map<String, dynamic>> runQuickCheck() async {
+    quickChecks++;
+    return {
+      'success': false,
+      'checkedAt': '2026-09-21T09:30:00Z',
+      'durationMs': 1250,
+      'total': 3,
+      'okCount': 2,
+      'failedCount': 1,
+      'services': [
+        {
+          'serviceTag': 'youtube',
+          'name': 'YouTube',
+          'url': 'https://www.youtube.com',
+          'success': true,
+          'statusText': 'VPN_OK',
+          'expectedRoute': 'vpn',
+          'proxyTimeMs': 74,
+        },
+        {
+          'serviceTag': 'youtube',
+          'name': 'YouTube API',
+          'url': 'https://youtubei.googleapis.com',
+          'success': true,
+          'statusText': 'VPN_OK',
+          'expectedRoute': 'vpn',
+          'proxyTimeMs': 88,
+        },
+        {
+          'serviceTag': 'discord',
+          'name': 'Discord',
+          'url': 'https://discord.com',
+          'success': false,
+          'statusText': 'FAIL',
+          'expectedRoute': 'zapret',
+          'normalTimeMs': 240,
+          'normalError': 'connection reset',
+        },
+      ],
+    };
+  }
+}
+
+class _UnconfirmedRouteBridge extends _HealthBridge {
+  @override
+  Future<List<RouteService>> routes({bool live = false}) async {
+    throw StateError('route summary unavailable');
+  }
+}
+
+class _FlakyRouteBridge extends _HealthBridge {
+  bool failLiveRoutes = false;
+
+  @override
+  Future<List<RouteService>> routes({bool live = false}) async {
+    if (live && failLiveRoutes) {
+      throw StateError('live route summary unavailable');
+    }
+    return super.routes(live: live);
+  }
+}
+
+class _PendingHealthBridge extends _HealthBridge {
+  final Completer<Map<String, dynamic>> pendingCheck = Completer();
+
+  @override
+  Future<Map<String, dynamic>> runQuickCheck() {
+    quickChecks++;
+    return pendingCheck.future;
+  }
+}
+
+class _ChangingRouteHealthBridge extends _PendingHealthBridge {
+  String outbound = 'NL Amsterdam 1';
+
+  @override
+  Future<List<RouteService>> routes({bool live = false}) async => [
+    RouteService(
+      tag: 'youtube',
+      name: 'YouTube',
+      method: 'VPN',
+      actualOutbound: outbound,
+      selectedMethod: 'vpn',
+      requiresVpn: true,
+      delayMs: 0,
+      homeVisible: true,
+    ),
+  ];
+}
+
+class _AndroidHealthBridge extends _HealthBridge {
+  @override
+  Future<Map<String, dynamic>> runQuickCheck() async {
+    quickChecks++;
+    return {
+      'success': true,
+      'android': true,
+      'total': 1,
+      'okCount': 1,
+      'failedCount': 0,
+      'routeVerified': false,
+      'checkScope': 'endpoint_reachability',
+      'services': [
+        {
+          'serviceTag': 'youtube',
+          'name': 'YouTube',
+          'success': true,
+          'expectedRoute': 'vpn',
+          'latencyMs': 64,
+          'statusText': 'ENDPOINT_OK',
+          'routeVerified': false,
+          'checkScope': 'endpoint_reachability',
+        },
+      ],
+    };
+  }
+}
+
+class _StaleSessionHealthBridge extends _HealthBridge {
+  @override
+  Future<Map<String, dynamic>> runQuickCheck() async {
+    quickChecks++;
+    return {
+      'success': true,
+      'sessionValid': false,
+      'total': 1,
+      'okCount': 1,
+      'failedCount': 0,
+      'services': [
+        {
+          'serviceTag': 'youtube',
+          'name': 'YouTube',
+          'success': true,
+          'expectedRoute': 'vpn',
+        },
+      ],
+    };
   }
 }
 
@@ -183,6 +393,94 @@ void main() {
     )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
   });
 
+  test('health report normalizes Windows and Android result payloads', () {
+    final route = RouteService.fromBypassSummaryJson({
+      'tag': 'youtube',
+      'name': 'YouTube',
+      'method': 'VPN',
+      'outbound': 'NL Amsterdam 1',
+      'selectedMethod': 'vpn',
+    });
+    final report = ConnectionHealthReport.fromJson({
+      'success': false,
+      'totalCount': 2,
+      'failedCount': 1,
+      'services': [
+        {
+          'serviceTag': 'youtube',
+          'name': 'YouTube',
+          'url': 'https://youtube.com',
+          'success': true,
+          'expectedRoute': 'vpn',
+          'proxyTimeMs': 91,
+        },
+        {
+          'tag': 'discord',
+          'name': 'Discord',
+          'target': 'https://discord.com',
+          'success': false,
+          'methodTag': 'zapret',
+          'latencyMs': 204,
+          'error': 'timeout',
+          'routeVerified': false,
+        },
+      ],
+    });
+
+    expect(route.actualOutbound, 'NL Amsterdam 1');
+    expect(report.total, 2);
+    expect(report.okCount, 1);
+    expect(report.failedCount, 1);
+    expect(report.results.first.serviceTag, 'youtube');
+    expect(report.results.first.latencyMs, 91);
+    expect(report.results.first.routeVerified, isTrue);
+    expect(report.results.last.serviceTag, 'discord');
+    expect(report.results.last.target, 'https://discord.com');
+    expect(report.results.last.expectedRoute, 'zapret');
+    expect(report.results.last.latencyMs, 204);
+    expect(report.results.last.error, 'timeout');
+    expect(report.results.last.routeVerified, isFalse);
+    expect(report.routesVerified, isFalse);
+    expect(report.sessionValid, isTrue);
+    expect(
+      ConnectionHealthReport.fromJson({
+        'success': true,
+        'sessionValid': false,
+      }).sessionValid,
+      isFalse,
+    );
+
+    final ruRoute = ConnectionHealthResult.fromJson({
+      'name': 'Yandex',
+      'success': false,
+      'expectedRoute': 'ru-route',
+      'normalTimeMs': 9,
+      'proxyTimeMs': 81,
+      'normalError': 'wrong transport error',
+      'proxyError': 'RU route unavailable',
+    });
+    expect(ruRoute.latencyMs, 81);
+    expect(ruRoute.error, 'RU route unavailable');
+  });
+
+  test('live route payload never falls back to catalog data', () {
+    expect(
+      () => routeServicesFromPayload({
+        'success': false,
+        'error': 'Clash API unavailable',
+      }, live: true),
+      throwsStateError,
+    );
+    expect(
+      () => routeServicesFromPayload({'success': true}, live: true),
+      throwsStateError,
+    );
+    expect(
+      routeServicesFromPayload({'success': true}, live: false),
+      same(fallbackRoutes),
+    );
+  });
+
   testWidgets(
     'home separates saved source from active session and retains actions',
     (tester) async {
@@ -210,6 +508,251 @@ void main() {
     },
   );
 
+  testWidgets(
+    'diagnostics separates active routes from explicit route health',
+    (tester) async {
+      final bridge = _HealthBridge()..connected = true;
+      await _pumpHome(tester, bridge, size: const Size(700, 500));
+
+      await _tap(tester, 'nav-logs');
+      expect(find.text('Проверяемое подключение'), findsOneWidget);
+      expect(find.text('Фактические маршруты ядра'), findsOneWidget);
+      expect(find.text('Узел: NL Amsterdam 1'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('diagnostics-route-youtube')),
+        findsOneWidget,
+      );
+      expect(find.text('82 мс'), findsNothing);
+
+      final check = find.byKey(const ValueKey('diagnostics-run-check'));
+      await tester.ensureVisible(check);
+      await tester.tap(check);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(bridge.quickChecks, 1);
+      expect(
+        find.textContaining('Некоторые маршруты не ответили'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('2 из 3 проверок успешны'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('diagnostics-health-youtube')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('diagnostics-health-discord')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Нет ответа через: обход'), findsOneWidget);
+      expect(find.text('connection reset'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('diagnostics never presents fallback routes as live facts', (
+    tester,
+  ) async {
+    final bridge = _UnconfirmedRouteBridge()..connected = true;
+    await _pumpHome(tester, bridge, size: const Size(700, 500));
+
+    await _tap(tester, 'nav-logs');
+    expect(
+      find.textContaining('Ядро ещё не подтвердило активные маршруты'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('diagnostics-route-youtube')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('all-traffic diagnostics waits for a live core summary', (
+    tester,
+  ) async {
+    final bridge = _UnconfirmedRouteBridge()..connected = true;
+    await bridge.setRoutingMode('all_traffic');
+    await _pumpHome(tester, bridge, size: const Size(700, 500));
+
+    await _tap(tester, 'nav-logs');
+    expect(
+      find.textContaining('Актуальные маршруты ядра пока не подтверждены'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('diagnostics-route-all')), findsNothing);
+    expect(
+      find.textContaining('Весь публичный трафик направлен через VPN'),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a failed refresh revokes an earlier live route confirmation', (
+    tester,
+  ) async {
+    final bridge = _FlakyRouteBridge()..connected = true;
+    await _pumpHome(tester, bridge, size: const Size(700, 500));
+    await _tap(tester, 'nav-logs');
+    expect(
+      find.byKey(const ValueKey('diagnostics-route-youtube')),
+      findsOneWidget,
+    );
+
+    bridge.failLiveRoutes = true;
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(
+      find.textContaining('Ядро ещё не подтвердило активные маршруты'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('diagnostics-route-youtube')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('loss of core status revokes live diagnostics', (tester) async {
+    final bridge = _HealthBridge()..connected = true;
+    await _pumpHome(tester, bridge, size: const Size(700, 500));
+    await _tap(tester, 'nav-logs');
+    expect(
+      find.byKey(const ValueKey('diagnostics-route-youtube')),
+      findsOneWidget,
+    );
+
+    bridge.failStatus = true;
+    for (var index = 0; index < 4; index++) {
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+    }
+
+    expect(
+      find.byKey(const ValueKey('diagnostics-route-youtube')),
+      findsNothing,
+    );
+    expect(find.text('Отключено'), findsWidgets);
+    expect(find.textContaining('Нет активной сессии'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('diagnostics discards a check completed after disconnect', (
+    tester,
+  ) async {
+    final bridge = _PendingHealthBridge()..connected = true;
+    await _pumpHome(tester, bridge, size: const Size(700, 500));
+    await _tap(tester, 'nav-logs');
+
+    final check = find.byKey(const ValueKey('diagnostics-run-check'));
+    await tester.tap(check);
+    await tester.pump();
+    expect(find.text('Проверяем...'), findsOneWidget);
+
+    bridge.connected = false;
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    bridge.pendingCheck.complete({
+      'success': true,
+      'total': 1,
+      'okCount': 1,
+      'failedCount': 0,
+      'services': [
+        {
+          'serviceTag': 'youtube',
+          'name': 'YouTube',
+          'success': true,
+          'expectedRoute': 'vpn',
+        },
+      ],
+    });
+    await tester.pump();
+
+    expect(find.text('Проверяем...'), findsNothing);
+    expect(find.textContaining('Проверка маршрутов пройдена'), findsNothing);
+    expect(find.text('Отключено'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('diagnostics discards a check after the active node changes', (
+    tester,
+  ) async {
+    final bridge = _ChangingRouteHealthBridge()..connected = true;
+    await _pumpHome(tester, bridge, size: const Size(700, 500));
+    await _tap(tester, 'nav-logs');
+    await tester.tap(find.byKey(const ValueKey('diagnostics-run-check')));
+    await tester.pump();
+    expect(find.text('Проверяем...'), findsOneWidget);
+
+    bridge.outbound = 'DE Frankfurt 2';
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    bridge.pendingCheck.complete({
+      'success': true,
+      'total': 1,
+      'okCount': 1,
+      'failedCount': 0,
+      'services': [
+        {
+          'serviceTag': 'youtube',
+          'name': 'YouTube',
+          'success': true,
+          'expectedRoute': 'vpn',
+        },
+      ],
+    });
+    await tester.pump();
+
+    expect(find.textContaining('Проверка маршрутов пройдена'), findsNothing);
+    expect(find.text('Проверяем...'), findsNothing);
+    expect(find.text('Узел: DE Frankfurt 2'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('diagnostics rejects a result from an older VPN session', (
+    tester,
+  ) async {
+    final bridge = _StaleSessionHealthBridge()..connected = true;
+    await _pumpHome(tester, bridge, size: const Size(700, 500));
+    await _tap(tester, 'nav-logs');
+    await tester.tap(find.byKey(const ValueKey('diagnostics-run-check')));
+    await tester.pump();
+
+    expect(
+      find.textContaining('Подключение изменилось во время проверки'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Проверка маршрутов пройдена'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Android diagnostics does not claim that HTTP proved VPN use', (
+    tester,
+  ) async {
+    debugMobileShellOverride = true;
+    addTearDown(() => debugMobileShellOverride = null);
+    final bridge = _AndroidHealthBridge()..connected = true;
+    await _pumpHome(tester, bridge, size: const Size(390, 844));
+    await _tap(tester, 'nav-logs');
+
+    expect(find.text('Проверка адресов'), findsOneWidget);
+    expect(
+      find.textContaining('Транспорт этой HTTP-проверкой не подтверждается'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('diagnostics-run-check')));
+    await tester.pump();
+
+    expect(find.textContaining('Адреса ответили'), findsOneWidget);
+    expect(
+      find.textContaining('путь этой проверкой не подтверждён'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Проверка маршрутов пройдена'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('source editor remains reachable from the new home', (
     tester,
   ) async {
@@ -218,6 +761,56 @@ void main() {
     expect(find.byType(VpnSourcesDialog), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'first Android subscription refreshes home and unlocks connection',
+    (tester) async {
+      debugMobileShellOverride = true;
+      addTearDown(() => debugMobileShellOverride = null);
+      final bridge = _OnboardingBridge();
+      await _pumpHome(tester, bridge, size: const Size(390, 844));
+
+      final initialConnect = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('home-connect')),
+      );
+      expect(initialConnect.onPressed, isNotNull);
+      await _tap(tester, 'home-connect');
+      expect(bridge.toggles, 0);
+      expect(
+        find.text('Добавьте VPN-подписку для запуска на Android.'),
+        findsOneWidget,
+      );
+      await _tap(tester, 'home-manage-sources');
+      expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const ValueKey('personal-vpn-uri')),
+        'https://example.test/subscription',
+      );
+      await _tap(tester, 'submit-personal-vpn');
+      expect(
+        find.text('3 сервера добавлено. Можно подключаться.'),
+        findsOneWidget,
+      );
+      expect(bridge.personalTests, 1);
+      expect(bridge.personalAdds, 1);
+
+      await _tap(tester, 'onboarding-ready-connect');
+      expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
+      expect(find.text('Нидерланды · 1'), findsOneWidget);
+      final readyConnect = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('home-connect')),
+      );
+      expect(readyConnect.onPressed, isNotNull);
+
+      await _tap(tester, 'home-connect');
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+      expect(bridge.toggles, 1);
+      expect(find.text('Подключено'), findsOneWidget);
+      expect(find.textContaining('используется сейчас'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('startup core error retains an actionable explanation', (
     tester,
@@ -816,12 +1409,15 @@ void main() {
       'drawer-700',
       'settings-700',
       'services-700',
+      'diagnostics-700',
       'portrait',
       'text-200',
       'motion-a',
       'motion-b',
     ]) {
-      final bridge = _HomeBridge()..connected = state != 'disconnected-700';
+      final _HomeBridge bridge = state == 'diagnostics-700'
+          ? (_HealthBridge()..connected = true)
+          : (_HomeBridge()..connected = state != 'disconnected-700');
       await bridge.saveSubscription('https://example.test/subscription');
       for (final tag in ['youtube', 'discord', 'meta', 'openai']) {
         await bridge.setFreeAccessServiceMethod(tag, 'vpn');
@@ -845,6 +1441,12 @@ void main() {
       if (state == 'drawer-700') await _tap(tester, 'toggle-navigation');
       if (state == 'settings-700') await _tap(tester, 'nav-settings');
       if (state == 'services-700') await _tap(tester, 'nav-service-settings');
+      if (state == 'diagnostics-700') {
+        await _tap(tester, 'nav-logs');
+        final check = find.byKey(const ValueKey('diagnostics-run-check'));
+        await tester.tap(check);
+        await tester.pump(const Duration(milliseconds: 100));
+      }
       if (state == 'motion-b') await tester.pump(const Duration(seconds: 4));
       expect(tester.takeException(), isNull);
       await tester.runAsync(() async {

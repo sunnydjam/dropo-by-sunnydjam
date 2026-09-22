@@ -37,6 +37,7 @@ type clientQuickCheckService struct {
 	ServiceTag    string
 	ExpectedRoute string
 	Regional      bool
+	EndpointOnly  bool
 }
 
 type clientQuickHTTPResult struct {
@@ -48,6 +49,7 @@ type clientQuickHTTPResult struct {
 
 type clientQuickCheckResult struct {
 	Index         int    `json:"index"`
+	ServiceTag    string `json:"serviceTag,omitempty"`
 	Name          string `json:"name"`
 	Category      string `json:"category"`
 	URL           string `json:"url"`
@@ -62,18 +64,21 @@ type clientQuickCheckResult struct {
 	NormalTimeMS  int64  `json:"normalTimeMs"`
 	NormalError   string `json:"normalError,omitempty"`
 
-	ProxyChecked bool   `json:"proxyChecked"`
-	ProxySuccess bool   `json:"proxySuccess,omitempty"`
-	ProxyStatus  int    `json:"proxyStatus,omitempty"`
-	ProxyTimeMS  int64  `json:"proxyTimeMs,omitempty"`
-	ProxyError   string `json:"proxyError,omitempty"`
-	Regional     bool   `json:"regional,omitempty"`
+	ProxyChecked  bool   `json:"proxyChecked"`
+	ProxySuccess  bool   `json:"proxySuccess,omitempty"`
+	ProxyStatus   int    `json:"proxyStatus,omitempty"`
+	ProxyTimeMS   int64  `json:"proxyTimeMs,omitempty"`
+	ProxyError    string `json:"proxyError,omitempty"`
+	Regional      bool   `json:"regional,omitempty"`
+	RouteVerified bool   `json:"routeVerified"`
+	CheckScope    string `json:"checkScope"`
 }
 
 const (
 	clientQuickCheckRouteDirect = FreeAccessMethodDirect
 	clientQuickCheckRouteVPN    = FreeAccessMethodVPN
 	clientQuickCheckRouteZapret = FreeAccessMethodZapret
+	clientQuickCheckRouteRU     = RuRouteGroupTag
 )
 
 var clientQuickCheckServices = []clientQuickCheckService{
@@ -141,10 +146,11 @@ func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
 	a.waitForInit()
 
 	startedAt := time.Now()
+	strategySession := a.currentRouteStrategySession()
 	ctx, cancel := context.WithTimeout(context.Background(), clientQuickCheckTimeout)
 	defer cancel()
 
-	a.ensureTransparentBypassForClientQuickCheck()
+	a.ensureTransparentBypassForClientQuickCheck(strategySession)
 
 	catalog := denseClientQuickCheckServices(clientQuickCheckServices)
 	settings := GlobalAppSettings{}
@@ -175,6 +181,27 @@ func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
 			proxyClient = newQuickCheckHTTPClient(http.ProxyURL(proxyParsed))
 		}
 	}
+	zapretProxyAddress := ""
+	zapretUsesTUNPath := false
+	tunZapretDirect := map[string]bool{}
+	if a.trafficEngine != nil {
+		zapretProxyAddress = a.trafficEngine.ZapretProbeProxyAddress()
+		// Hide-RU sessions use the TUN-sidecar traffic plan instead of the
+		// selective scoped CONNECT proxy. A normal client can check endpoint
+		// reachability there, but cannot prove the packet strategy that carried it.
+		zapretUsesTUNPath = settings.HideRuTraffic && a.trafficEngine.ActiveTag() != ""
+	}
+	if zapretUsesTUNPath {
+		// Under the Windows TUN path a normal HTTP client follows the live
+		// sing-box service selector before the in-process packet action runs. A
+		// service still on its bootstrap VPN fallback must therefore be checked
+		// and reported as VPN, never as a successful Zapret route.
+		proxies, _ := a.fetchClashProxies(&http.Client{Timeout: 2 * time.Second})
+		// Apply the endpoint-only scope even when the live selector snapshot is
+		// unavailable. In that case the check fails closed instead of treating a
+		// missing scoped proxy as route-level evidence.
+		services, tunZapretDirect = clientQuickCheckEffectiveTUNRoutes(services, proxies)
+	}
 
 	a.emitClientQuickCheck("client-check-start", map[string]interface{}{
 		"total":    len(services),
@@ -202,7 +229,16 @@ func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
 					"name":  svc.Name,
 					"url":   svc.URL,
 				})
-				result := runSingleClientQuickCheck(ctx, svc, directClient, proxyClient)
+				var zapretClient *http.Client
+				if svc.ExpectedRoute == clientQuickCheckRouteZapret {
+					zapretClient = clientQuickCheckZapretHTTPClient(
+						svc.ServiceTag,
+						zapretProxyAddress,
+						zapretUsesTUNPath && tunZapretDirect[svc.ServiceTag],
+						directClient,
+					)
+				}
+				result := runSingleClientQuickCheck(ctx, svc, directClient, proxyClient, zapretClient)
 				results[svc.Index] = result
 				a.emitClientQuickCheck("client-check-service", result)
 			}
@@ -253,9 +289,11 @@ enqueue:
 	if ctx.Err() == context.DeadlineExceeded {
 		success = false
 	}
+	sessionValid := a.routeStrategySessionActive(strategySession)
 
 	payload := map[string]interface{}{
 		"success":       success,
+		"checkedAt":     time.Now().UTC().Format(time.RFC3339),
 		"durationMs":    duration.Milliseconds(),
 		"services":      results,
 		"output":        output,
@@ -267,34 +305,36 @@ enqueue:
 		"directFailed":  directFailed,
 		"blockedFailed": blockedFailed,
 		"proxyUrl":      proxyURL,
+		"sessionValid":  sessionValid,
 	}
 	if ctx.Err() != nil {
 		payload["error"] = ctx.Err().Error()
 	}
-	a.handleClientQuickCheckFailures(results)
+	// A check may outlive Stop followed by a new Start. Its report is still
+	// useful to the caller, but it must never retune the new VPN session.
+	if sessionValid {
+		a.handleClientQuickCheckFailures(strategySession, results)
+	}
 	a.emitClientQuickCheck("client-check-done", payload)
 	return payload
 }
 
-func (a *App) ensureTransparentBypassForClientQuickCheck() {
+func (a *App) ensureTransparentBypassForClientQuickCheck(session uint64) {
 	if a == nil || a.trafficEngine == nil || a.storage == nil {
 		return
 	}
-	a.mu.Lock()
-	running := a.isRunning
-	a.mu.Unlock()
-	if !running {
-		return
-	}
-	settings := a.storage.GetAppSettings()
-	if !AnyFreeAccessServiceUsesZapret(settings) || a.trafficEngine.ActiveTag() != "" {
-		return
-	}
-	if err := a.startComposedTransparentEngine(""); err != nil {
-		a.writeLog(fmt.Sprintf("[ClientCheck] failed to restore Windows Unified per-service engine before service check: %v", err))
-		return
-	}
-	a.writeLog("[ClientCheck] Windows Unified per-service engine checked before service test")
+	_ = a.commitRouteStrategySession(session, func() error {
+		settings := a.storage.GetAppSettings()
+		if !AnyFreeAccessServiceUsesZapret(settings) || a.trafficEngine.ActiveTag() != "" {
+			return nil
+		}
+		if err := a.startComposedTransparentEngine(""); err != nil {
+			a.writeLog(fmt.Sprintf("[ClientCheck] failed to restore Windows Unified per-service engine before service check: %v", err))
+			return nil
+		}
+		a.writeLog("[ClientCheck] Windows Unified per-service engine checked before service test")
+		return nil
+	})
 }
 
 func includeClientQuickCheckService(svc clientQuickCheckService) bool {
@@ -313,6 +353,19 @@ func denseClientQuickCheckServices(catalog []clientQuickCheckService) []clientQu
 }
 
 func (a *App) clientQuickCheckExpectedRoute(settings GlobalAppSettings, cache map[string]serviceStrategyCacheEntry, svc clientQuickCheckService) string {
+	// In the full-tunnel mode every public endpoint must be verified through
+	// the active VPN path. Service-level Direct/Auto preferences are retained
+	// for the selective mode, but they do not override the all-traffic
+	// contract while that mode is active.
+	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
+		return clientQuickCheckRouteVPN
+	}
+	if settings.HideRuTraffic && strings.HasPrefix(svc.Category, "Direct-RU") {
+		// The request enters sing-box's mixed inbound and is classified by the
+		// same RU rules as application traffic. The ru-route group may resolve to
+		// a dedicated RU proxy or to the subscription fallback.
+		return clientQuickCheckRouteRU
+	}
 	if strings.HasPrefix(svc.Category, "Direct") || svc.ServiceTag == "" {
 		return clientQuickCheckRouteDirect
 	}
@@ -344,7 +397,35 @@ func (a *App) clientQuickCheckExpectedRoute(settings GlobalAppSettings, cache ma
 	}
 }
 
-func runSingleClientQuickCheck(ctx context.Context, svc clientQuickCheckService, directClient *http.Client, proxyClient *http.Client) clientQuickCheckResult {
+func clientQuickCheckEffectiveTUNRoutes(services []clientQuickCheckService, proxies map[string]clashProxyInfo) ([]clientQuickCheckService, map[string]bool) {
+	result := append([]clientQuickCheckService(nil), services...)
+	directSelectors := map[string]bool{}
+	for i := range result {
+		if result[i].ExpectedRoute != clientQuickCheckRouteZapret || result[i].ServiceTag == "" {
+			continue
+		}
+		// The plain client traverses the live TUN selector, which background
+		// validation may change while the request is in flight. It proves endpoint
+		// reachability, but unlike the scoped CONNECT probe it cannot prove which
+		// transport carried that individual request.
+		result[i].EndpointOnly = true
+		selector, ok := proxies[ServiceBypassGroupTag(result[i].ServiceTag)]
+		if ok && selector.Now == "direct" {
+			directSelectors[result[i].ServiceTag] = true
+		} else if ok && selector.Now == "auto-select" {
+			result[i].ExpectedRoute = clientQuickCheckRouteVPN
+		}
+	}
+	return result, directSelectors
+}
+
+func runSingleClientQuickCheck(
+	ctx context.Context,
+	svc clientQuickCheckService,
+	directClient *http.Client,
+	proxyClient *http.Client,
+	zapretClient *http.Client,
+) clientQuickCheckResult {
 	expectedRoute := svc.ExpectedRoute
 	if expectedRoute == "" {
 		if strings.Contains(svc.Category, "VPNOnly") {
@@ -353,20 +434,34 @@ func runSingleClientQuickCheck(ctx context.Context, svc clientQuickCheckService,
 			expectedRoute = clientQuickCheckRouteDirect
 		}
 	}
+	endpointOnly := svc.EndpointOnly || expectedRoute == clientQuickCheckRouteRU
 
 	var normal clientQuickHTTPResult
 	var proxy clientQuickHTTPResult
-	normalChecked := expectedRoute != clientQuickCheckRouteVPN
-	proxyChecked := expectedRoute == clientQuickCheckRouteVPN && proxyClient != nil
+	routeClient := directClient
+	if expectedRoute == clientQuickCheckRouteZapret {
+		routeClient = zapretClient
+	}
+	usesProxy := expectedRoute == clientQuickCheckRouteVPN || expectedRoute == clientQuickCheckRouteRU
+	normalChecked := !usesProxy && routeClient != nil
+	proxyChecked := usesProxy && proxyClient != nil
 	if normalChecked {
-		normal = invokeQuickCheckURL(ctx, directClient, svc.URL)
+		normal = invokeQuickCheckURL(ctx, routeClient, svc.URL)
+	} else if expectedRoute == clientQuickCheckRouteZapret {
+		normal.Error = "scoped Zapret probe proxy is unavailable"
+	} else if usesProxy {
+		if expectedRoute == clientQuickCheckRouteRU {
+			proxy.Error = "RU route probe proxy is unavailable"
+		} else {
+			proxy.Error = "VPN probe proxy is unavailable"
+		}
 	}
 	if normalChecked && !normal.Success && !svc.Regional && quickCheckRetryableError(normal.Error) {
 		select {
 		case <-ctx.Done():
 		case <-time.After(clientQuickCheckRetryDelay):
 			retryCtx, cancel := context.WithTimeout(ctx, clientQuickCheckRetryTimeout)
-			retry := invokeQuickCheckURL(retryCtx, directClient, svc.URL)
+			retry := invokeQuickCheckURL(retryCtx, routeClient, svc.URL)
 			cancel()
 			if retry.Success {
 				normal = retry
@@ -379,11 +474,11 @@ func runSingleClientQuickCheck(ctx context.Context, svc clientQuickCheckService,
 
 	statusText := "FAIL"
 	success := false
-	if svc.Regional && normalChecked && !normal.Success {
-		statusText = "REGION_LIMIT"
-		success = true
-	} else if expectedRoute == clientQuickCheckRouteVPN && proxyChecked && proxy.Success {
+	if expectedRoute == clientQuickCheckRouteVPN && proxyChecked && proxy.Success {
 		statusText = "VPN_OK"
+		success = true
+	} else if expectedRoute == clientQuickCheckRouteRU && proxyChecked && proxy.Success {
+		statusText = "RU_ROUTE_OK"
 		success = true
 	} else if expectedRoute == clientQuickCheckRouteDirect && normal.Success {
 		statusText = "DIRECT_OK"
@@ -392,9 +487,17 @@ func runSingleClientQuickCheck(ctx context.Context, svc clientQuickCheckService,
 		statusText = "ZAPRET_OK"
 		success = true
 	}
+	if success && endpointOnly {
+		statusText = "ENDPOINT_OK"
+	}
+	checkScope := "route"
+	if endpointOnly {
+		checkScope = "endpoint_reachability"
+	}
 
 	return clientQuickCheckResult{
 		Index:         svc.Index,
+		ServiceTag:    svc.ServiceTag,
 		Name:          svc.Name,
 		Category:      svc.Category,
 		URL:           svc.URL,
@@ -413,6 +516,8 @@ func runSingleClientQuickCheck(ctx context.Context, svc clientQuickCheckService,
 		ProxyTimeMS:   proxy.TimeMS,
 		ProxyError:    proxy.Error,
 		Regional:      svc.Regional,
+		RouteVerified: !endpointOnly,
+		CheckScope:    checkScope,
 	}
 }
 
@@ -481,16 +586,14 @@ func newQuickCheckHTTPClient(proxy func(*http.Request) (*url.URL, error)) *http.
 	}
 }
 
-func (a *App) quickCheckHTTPClientForRoute(expectedRoute string) (*http.Client, bool) {
-	if expectedRoute != clientQuickCheckRouteVPN {
-		return newQuickCheckHTTPClient(nil), true
+func clientQuickCheckZapretHTTPClient(serviceTag, proxyAddress string, tunPathActive bool, directClient *http.Client) *http.Client {
+	if strings.TrimSpace(proxyAddress) != "" {
+		return newServiceZapretProbeHTTPClient(serviceTag, proxyAddress)
 	}
-	proxyURL := a.quickCheckProxyURL()
-	parsed, err := url.Parse(proxyURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, false
+	if tunPathActive {
+		return directClient
 	}
-	return newQuickCheckHTTPClient(http.ProxyURL(parsed)), true
+	return nil
 }
 
 func (a *App) quickCheckProxyURL() string {
@@ -552,7 +655,7 @@ func formatClientQuickCheckOutput(results []clientQuickCheckResult, proxyURL str
 		if result.NormalTimeMS > 0 {
 			fmt.Fprintf(&b, " (%d ms)", result.NormalTimeMS)
 		}
-		if result.ExpectedRoute == clientQuickCheckRouteVPN && result.ProxyTimeMS > 0 {
+		if (result.ExpectedRoute == clientQuickCheckRouteVPN || result.ExpectedRoute == clientQuickCheckRouteRU) && result.ProxyTimeMS > 0 {
 			fmt.Fprintf(&b, " proxy=%d ms", result.ProxyTimeMS)
 		}
 		if !result.Success && result.NormalError != "" {

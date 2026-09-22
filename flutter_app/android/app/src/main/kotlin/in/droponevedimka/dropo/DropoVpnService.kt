@@ -80,6 +80,15 @@ class DropoVpnService :
     @Volatile
     private var verboseSingBoxLogs = false
 
+    @Volatile
+    private var foregroundActive = false
+
+    @Volatile
+    private var foregroundText = ""
+
+    @Volatile
+    private var notificationAlwaysOn: Boolean? = null
+
     private var interfaceUpdateListener: InterfaceUpdateListener? = null
     private var networkCallbackRegistered = false
     private val networkCallback =
@@ -100,12 +109,40 @@ class DropoVpnService :
             }
         }
 
+    override fun onCreate() {
+        super.onCreate()
+        // ACTION_STOP can start a previously inactive service via an old
+        // PendingIntent. The fail-safe response still needs a valid channel
+        // before it can refresh the foreground notification.
+        createNotificationChannel()
+        activeService = this
+        publishVpnProtection()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        refreshVpnProtectionAndNotification()
         return when (intent?.action) {
             ACTION_STOP -> {
-                DropoVpnRuntime.setDisconnecting("VPN останавливается")
-                stopVpn(stopSelf = true)
-                START_NOT_STICKY
+                val protection = publishVpnProtection()
+                if (!protection.observed || protection.alwaysOn) {
+                    // The service is the final authority for every stop path,
+                    // including stale notification PendingIntents. Stopping an
+                    // Always-on service makes Android recreate it and can cause
+                    // a brief direct-traffic window when lockdown is disabled.
+                    // Unknown protection state is handled fail-safe as well.
+                    val text = if (protection.alwaysOn) {
+                        "Always-on VPN управляется Android"
+                    } else {
+                        "Сначала проверьте системные настройки VPN"
+                    }
+                    DropoVpnRuntime.appendLog("VPN stop redirected to Android settings")
+                    showForeground(text, protection)
+                    START_STICKY
+                } else {
+                    DropoVpnRuntime.setDisconnecting("VPN останавливается")
+                    stopVpn(stopSelf = true)
+                    START_NOT_STICKY
+                }
             }
             else -> {
                 startVpn()
@@ -122,6 +159,15 @@ class DropoVpnService :
     override fun onDestroy() {
         stopVpn(stopSelf = false)
         executor.shutdown()
+        foregroundActive = false
+        if (activeService === this) {
+            activeService = null
+            DropoVpnRuntime.setVpnProtection(
+                observed = false,
+                alwaysOn = false,
+                lockdown = false,
+            )
+        }
         super.onDestroy()
     }
 
@@ -134,13 +180,13 @@ class DropoVpnService :
             if (commandServer != null) {
                 DropoVpnRuntime.setConnected("VPN уже работает")
             }
-            startForegroundCompat(buildNotification("VPN работает"))
+            showForeground("VPN работает")
             return
         }
         starting = true
         stopping = false
         DropoVpnRuntime.setStarting("VPN запускается")
-        startForegroundCompat(buildNotification("VPN запускается"))
+        showForeground("VPN запускается")
         executor.execute {
             try {
                 Dropoandroid.ensureStarted(filesDir.absolutePath, packageVersionName())
@@ -198,7 +244,7 @@ class DropoVpnService :
         DropoVpnRuntime.setConnected("VPN работает")
         syncCoreServiceState("connected", "VPN работает")
         coreLog("sing-box $version is active")
-        startForegroundCompat(buildNotification("VPN работает"))
+        showForeground("VPN работает")
     }
 
     private fun stopVpn(stopSelf: Boolean, failureMessage: String? = null) {
@@ -488,7 +534,7 @@ class DropoVpnService :
                 notification.title.ifBlank { "VPN работает" }
             }
         }
-        startForegroundCompat(buildNotification(userNotificationText(text)))
+        showForeground(userNotificationText(text))
     }
 
     override fun localDNSTransport(): LocalDNSTransport? = null
@@ -651,9 +697,59 @@ class DropoVpnService :
 
     private fun stopForegroundCompat() {
         stopForeground(STOP_FOREGROUND_REMOVE)
+        foregroundActive = false
+        foregroundText = ""
+        notificationAlwaysOn = null
     }
 
-    private fun buildNotification(text: String): Notification {
+    private fun showForeground(
+        text: String,
+        protection: VpnProtectionState = publishVpnProtection(),
+    ) {
+        foregroundText = text
+        startForegroundCompat(buildNotification(text, protection))
+        foregroundActive = true
+        notificationAlwaysOn = protection.alwaysOn
+    }
+
+    private fun refreshVpnProtectionAndNotification() {
+        val protection = publishVpnProtection()
+        if (foregroundActive && notificationAlwaysOn != protection.alwaysOn) {
+            runCatching {
+                executor.execute {
+                    if (foregroundActive && notificationAlwaysOn != protection.alwaysOn) {
+                        showForeground(foregroundText.ifBlank { "VPN работает" }, protection)
+                    }
+                }
+            }.onFailure {
+                Log.w(TAG, "VPN notification protection refresh skipped", it)
+            }
+        }
+    }
+
+    private fun publishVpnProtection(): VpnProtectionState {
+        val protection = runCatching {
+            VpnProtectionState(
+                observed = true,
+                alwaysOn = isAlwaysOn,
+                lockdown = isLockdownEnabled,
+            )
+        }.getOrElse {
+            Log.w(TAG, "could not read Android VPN protection state", it)
+            VpnProtectionState(observed = false, alwaysOn = false, lockdown = false)
+        }
+        DropoVpnRuntime.setVpnProtection(
+            observed = protection.observed,
+            alwaysOn = protection.alwaysOn,
+            lockdown = protection.lockdown,
+        )
+        return protection
+    }
+
+    private fun buildNotification(
+        text: String,
+        protection: VpnProtectionState,
+    ): Notification {
         val safeText = userNotificationText(text)
         val openIntent = packageManager.getLaunchIntentForPackage(packageName)
             ?: Intent(this, MainActivity::class.java)
@@ -670,14 +766,20 @@ class DropoVpnService :
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("dropo VPN")
             .setContentText(safeText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setContentIntent(openPendingIntent)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отключить", stopPendingIntent)
-            .build()
+        if (protection.observed && !protection.alwaysOn) {
+            builder.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Отключить",
+                stopPendingIntent,
+            )
+        }
+        return builder.build()
     }
 
     private fun userNotificationText(text: String): String {
@@ -752,6 +854,12 @@ class DropoVpnService :
         override fun next(): BoxNetworkInterface = iterator.next()
     }
 
+    private data class VpnProtectionState(
+        val observed: Boolean,
+        val alwaysOn: Boolean,
+        val lockdown: Boolean,
+    )
+
     companion object {
         private const val TAG = "DropoVpnService"
         private const val CHANNEL_ID = "dropo_vpn"
@@ -761,6 +869,23 @@ class DropoVpnService :
 
         private val libboxSetup = AtomicBoolean(false)
         private val certificateCache = mutableListOf<String>()
+
+        @Volatile
+        private var activeService: DropoVpnService? = null
+
+        fun refreshVpnProtection(): Map<String, Any?> {
+            val service = activeService
+            if (service == null) {
+                DropoVpnRuntime.setVpnProtection(
+                    observed = false,
+                    alwaysOn = false,
+                    lockdown = false,
+                )
+            } else {
+                service.refreshVpnProtectionAndNotification()
+            }
+            return DropoVpnRuntime.vpnProtectionSnapshot()
+        }
 
         fun start(context: Context) {
             val intent = Intent(context, DropoVpnService::class.java).setAction(ACTION_START)

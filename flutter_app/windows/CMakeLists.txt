@@ -1,5 +1,10 @@
 # Project-level configuration.
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.15)
+# The Windows release must launch on a clean installation without relying on
+# Visual Studio's machine-wide VC++ runtime. Apply this before project() so it
+# also initializes the Flutter wrapper and generated plugin targets.
+cmake_policy(SET CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 project(dropo LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change

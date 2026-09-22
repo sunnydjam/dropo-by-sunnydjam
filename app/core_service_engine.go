@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -693,7 +694,12 @@ func (a *App) validateWindowsUnifiedServiceStrategies(
 			// voice. Remove the old fallback before retrying so the realtime
 			// monitor observes the newly selected local policy instead of being
 			// pulled back to a stale VPN decision.
-			a.removeServiceStrategyCacheEntry("discord")
+			if err := a.commitRouteStrategySession(session, func() error {
+				a.removeServiceStrategyCacheEntry("discord")
+				return nil
+			}); err != nil {
+				return nil, err
+			}
 		}
 		cache = serviceStrategyCacheForConnectedValidationTags(cache, onlyTags)
 	}
@@ -711,7 +717,9 @@ func (a *App) validateWindowsUnifiedServiceStrategies(
 	if onlyTags != nil && !allowed["discord"] {
 		a.preserveCurrentDiscordSelection(selections)
 	}
-	if err := a.composeAndStartServiceEngine(selections); err != nil {
+	if err := a.commitRouteStrategySession(session, func() error {
+		return a.composeAndStartServiceEngine(selections)
+	}); err != nil {
 		return nil, fmt.Errorf("prepare background service validation: %w", err)
 	}
 	validationTags := make([]string, 0, len(selections))
@@ -752,16 +760,21 @@ func (a *App) startWindowsUnifiedServiceValidationAsync(startDiscordMonitorAfter
 				}
 			}
 		}
-		a.emitRouteProbe("route-probe-start", map[string]interface{}{
-			"source":          backgroundServiceStrategySource,
-			"reason":          "post-connect",
-			"serviceCount":    len(serviceTags),
-			"services":        backgroundServiceStrategySummaries(serviceTags),
-			"hasSubscription": hasVPN,
-			"cycleTotal":      1,
-			"extendedSearch":  extendedSearch,
-			"warning":         map[bool]string{true: "Полный подбор Zapret проверит весь список стратегий и может занять продолжительное время", false: ""}[extendedSearch],
-		})
+		if err := a.commitRouteStrategySession(session, func() error {
+			a.emitRouteProbe("route-probe-start", map[string]interface{}{
+				"source":          backgroundServiceStrategySource,
+				"reason":          "post-connect",
+				"serviceCount":    len(serviceTags),
+				"services":        backgroundServiceStrategySummaries(serviceTags),
+				"hasSubscription": hasVPN,
+				"cycleTotal":      1,
+				"extendedSearch":  extendedSearch,
+				"warning":         map[bool]string{true: "Полный подбор Zapret проверит весь список стратегий и может занять продолжительное время", false: ""}[extendedSearch],
+			})
+			return nil
+		}); err != nil {
+			return
+		}
 
 		var validationErr error
 		var failed []string
@@ -774,7 +787,7 @@ func (a *App) startWindowsUnifiedServiceValidationAsync(startDiscordMonitorAfter
 			)
 		}
 		if startDiscordMonitorAfter && a.routeStrategySessionActive(session) {
-			a.startDiscordRealtimeMonitor()
+			a.startDiscordRealtimeMonitorForSession(session)
 		}
 
 		// Discord uses real bidirectional media evidence after the web/API
@@ -786,17 +799,20 @@ func (a *App) startWindowsUnifiedServiceValidationAsync(startDiscordMonitorAfter
 			a.mu.Unlock()
 			if running && a.routeStrategySessionActive(session) {
 				a.writeLog(fmt.Sprintf("[FreeAccess] background service validation failed: %v", validationErr))
-				switched := a.activateSubscriptionFallbackForTransparentRuntime()
+				switched := a.activateSubscriptionFallbackForTransparentRuntime(session)
 				if switched > 0 {
 					a.writeLog(fmt.Sprintf("[FreeAccess] background validation failure switched %d blocked-service group(s) to VPN fallback", switched))
 				}
 			}
 		}
-		a.emitRouteProbe("route-probe-complete", map[string]interface{}{
-			"source":     backgroundServiceStrategySource,
-			"reason":     "post-connect",
-			"durationMs": time.Since(startedAt).Milliseconds(),
-			"error":      compactProbeError(validationErr),
+		_ = a.commitRouteStrategySession(session, func() error {
+			a.emitRouteProbe("route-probe-complete", map[string]interface{}{
+				"source":     backgroundServiceStrategySource,
+				"reason":     "post-connect",
+				"durationMs": time.Since(startedAt).Milliseconds(),
+				"error":      compactProbeError(validationErr),
+			})
+			return nil
 		})
 	}()
 }
@@ -806,6 +822,13 @@ func (a *App) backgroundServiceStrategyTags() []string {
 		return nil
 	}
 	settings := a.storage.GetAppSettings()
+	// Full-tunnel mode has no service-specific selectors: sing-box/TUN carries
+	// every public service through the VPN. Requiring the optional packet engine
+	// here would turn a missing WinDivert runtime into a failed VPN connection.
+	// WireGuard camouflage is checked separately by startComposedTransparentEngine.
+	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
+		return nil
+	}
 	tags := make([]string, 0, len(DefaultFreeAccessServices))
 	for _, service := range DefaultFreeAccessServices {
 		method := FreeAccessServiceMethod(settings, service.Tag)
@@ -1277,7 +1300,7 @@ func containsStringValue(values []string, target string) bool {
 	return false
 }
 
-func (a *App) activateSubscriptionFallbackForTransparentRuntime() int {
+func (a *App) activateSubscriptionFallbackForTransparentRuntime(session uint64) int {
 	groups := make([]string, 0, len(DefaultFreeAccessServices)+2)
 	for _, service := range DefaultFreeAccessServices {
 		groups = append(groups, ServiceBypassGroupTag(service.Tag))
@@ -1285,7 +1308,13 @@ func (a *App) activateSubscriptionFallbackForTransparentRuntime() int {
 	groups = append(groups, SmartBypassGroupTag, VpnOrDirectGroupTag)
 	switched := 0
 	for _, group := range groups {
-		if a.switchOutboundSelector(group, "auto-select") {
+		ok, err := a.commitRouteStrategyBool(session, func() bool {
+			return a.switchOutboundSelector(group, "auto-select")
+		})
+		if err != nil {
+			break
+		}
+		if ok {
 			switched++
 		}
 	}
@@ -1335,7 +1364,12 @@ func (a *App) firstRunServiceSearch(
 	for round := 0; round < maxRounds && len(pending) > 0; round++ {
 		if extendedCampaign && time.Now().After(campaignDeadline) {
 			for _, tag := range pending {
-				a.applyServiceFreeFallback(tag, nextServiceStrategyIndexAfterLadder(tag, ladders[tag]))
+				if err := a.commitRouteStrategySession(session, func() error {
+					a.applyServiceFreeFallback(tag, nextServiceStrategyIndexAfterLadder(tag, ladders[tag]))
+					return nil
+				}); err != nil {
+					return pending, err
+				}
 				delete(selections, tag)
 				a.emitBackgroundStrategyService(tag, ServiceBypassMethod{}, false, true, false, "failed", "Автоподбор остановлен через один час: подходящая стратегия не найдена", round, len(ladders[tag]))
 			}
@@ -1355,7 +1389,9 @@ func (a *App) firstRunServiceSearch(
 					selections[tag] = serviceWinwsSelection{ServiceTag: tag, HostlistPath: selections[tag].HostlistPath, Method: ladder[round]}
 				}
 			}
-			if err := a.composeAndStartServiceEngine(selections); err != nil {
+			if err := a.commitRouteStrategySession(session, func() error {
+				return a.composeAndStartServiceEngine(selections)
+			}); err != nil {
 				a.writeLog(fmt.Sprintf("[FreeAccess] background validation round %d recompose failed: %v", round, err))
 				return pending, fmt.Errorf("background validation round %d recompose: %w", round, err)
 			}
@@ -1369,7 +1405,7 @@ func (a *App) firstRunServiceSearch(
 			a.emitBackgroundStrategyCandidate(tag, method, round, len(ladder))
 		}
 
-		failures := a.probeServiceFailuresThroughEngine(pending)
+		failures := a.probeServiceFailuresThroughEngineForSession(pending, session)
 		if !a.routeStrategySessionActive(session) {
 			return pending, fmt.Errorf("service strategy search interrupted after probes")
 		}
@@ -1377,12 +1413,17 @@ func (a *App) firstRunServiceSearch(
 		for _, tag := range pending {
 			failureDetail, failed := failures[tag]
 			if !failed {
-				if tag == "discord" {
-					a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
-				}
-				a.cacheWebValidatedServiceMethod(tag, selections[tag].Method.Tag, "startup-validation")
-				if !a.switchServiceRoute(tag, "direct") {
-					return pending, fmt.Errorf("activate confirmed startup strategy for %s", tag)
+				if err := a.commitRouteStrategySession(session, func() error {
+					if tag == "discord" {
+						a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
+					}
+					a.cacheWebValidatedServiceMethod(tag, selections[tag].Method.Tag, "startup-validation")
+					if !a.switchServiceRoute(tag, "direct") {
+						return fmt.Errorf("activate confirmed startup strategy for %s", tag)
+					}
+					return nil
+				}); err != nil {
+					return pending, err
 				}
 				if tag == "discord" {
 					a.writeLog(fmt.Sprintf("[FreeAccess] discord: provisional method = %s; live voice proof is still required", selections[tag].Method.Label))
@@ -1394,13 +1435,23 @@ func (a *App) firstRunServiceSearch(
 				continue
 			}
 			if tag == "discord" {
-				a.removeServiceStrategyCacheEntry(tag)
+				if err := a.commitRouteStrategySession(session, func() error {
+					a.removeServiceStrategyCacheEntry(tag)
+					return nil
+				}); err != nil {
+					return pending, err
+				}
 			}
 			a.writeLog(fmt.Sprintf("[FreeAccess] %s: %s did not pass every required target: %s", tag, selections[tag].Method.Label, failureDetail))
 			if shouldHoldDiscordStrategyForLiveValidation(tag, selections[tag].Method, failureDetail) {
-				a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
-				if !a.switchServiceRoute(tag, "direct") {
-					return pending, fmt.Errorf("activate provisional Discord strategy for live validation")
+				if err := a.commitRouteStrategySession(session, func() error {
+					a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
+					if !a.switchServiceRoute(tag, "direct") {
+						return fmt.Errorf("activate provisional Discord strategy for live validation")
+					}
+					return nil
+				}); err != nil {
+					return pending, err
 				}
 				a.writeLog(fmt.Sprintf("[FreeAccess] discord: synthetic web/API probe was inconclusive; retaining priority method %s for live app/voice validation without caching it", selections[tag].Method.Label))
 				detail := "Синтетическая проверка Discord завершилась нестабильным таймаутом; приоритетная ALT оставлена для проверки реальным приложением и voice. Как рабочая стратегия пока не сохранена"
@@ -1412,11 +1463,16 @@ func (a *App) firstRunServiceSearch(
 				a.emitBackgroundStrategyService(tag, selections[tag].Method, false, false, true, "retrying", detail, round, len(ladders[tag]))
 				next = append(next, tag)
 			} else {
-				if tag == "discord" {
-					a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
-				}
 				a.writeLog(fmt.Sprintf("[FreeAccess] %s: the complete transparent strategy list was exhausted; using policy fallback", tag))
-				a.applyServiceFreeFallback(tag, nextServiceStrategyIndexAfterLadder(tag, ladders[tag]))
+				if err := a.commitRouteStrategySession(session, func() error {
+					if tag == "discord" {
+						a.seedDiscordRealtimeStrategyAttempts(ladders[tag], round)
+					}
+					a.applyServiceFreeFallback(tag, nextServiceStrategyIndexAfterLadder(tag, ladders[tag]))
+					return nil
+				}); err != nil {
+					return pending, err
+				}
 				delete(selections, tag)
 				strictZapret := a.storage != nil && FreeAccessServiceMethod(a.storage.GetAppSettings(), tag) == FreeAccessMethodZapret
 				if strictZapret {
@@ -1437,7 +1493,9 @@ func (a *App) firstRunServiceSearch(
 	if !a.routeStrategySessionActive(session) {
 		return pending, fmt.Errorf("service strategy search interrupted before commit")
 	}
-	if err := a.composeAndStartServiceEngine(selections); err != nil {
+	if err := a.commitRouteStrategySession(session, func() error {
+		return a.composeAndStartServiceEngine(selections)
+	}); err != nil {
 		a.writeLog(fmt.Sprintf("[FreeAccess] failed to re-compose engine after background validation: %v", err))
 		return pending, fmt.Errorf("commit background service selections: %w", err)
 	}
@@ -1613,12 +1671,61 @@ func (a *App) searchServiceStrategy(serviceTag string, selections map[string]ser
 	return ServiceBypassMethod{}, false
 }
 
+func (a *App) searchServiceStrategyForSession(serviceTag string, selections map[string]serviceWinwsSelection, session uint64) (ServiceBypassMethod, bool, error) {
+	current := selections[serviceTag]
+	for _, method := range recoveryServiceSearchLadder(serviceTag, current.Method.Tag) {
+		if !a.routeStrategySessionActive(session) {
+			return ServiceBypassMethod{}, false, errRouteStrategySessionExpired
+		}
+		trial := map[string]serviceWinwsSelection{}
+		for key, value := range selections {
+			trial[key] = value
+		}
+		trial[serviceTag] = serviceWinwsSelection{ServiceTag: serviceTag, HostlistPath: current.HostlistPath, Method: method}
+		if err := a.commitRouteStrategySession(session, func() error {
+			return a.composeAndStartServiceEngine(trial)
+		}); err != nil {
+			if errors.Is(err, errRouteStrategySessionExpired) {
+				return ServiceBypassMethod{}, false, err
+			}
+			a.writeLog(fmt.Sprintf("[FreeAccess] %s: trial %s failed to start: %v", serviceTag, method.Label, err))
+			continue
+		}
+		if !a.probeServicesThroughEngineForSession([]string{serviceTag}, session)[serviceTag] {
+			if !a.routeStrategySessionActive(session) {
+				return ServiceBypassMethod{}, false, errRouteStrategySessionExpired
+			}
+			return method, true, nil
+		}
+	}
+	if !a.routeStrategySessionActive(session) {
+		return ServiceBypassMethod{}, false, errRouteStrategySessionExpired
+	}
+	return ServiceBypassMethod{}, false, nil
+}
+
 // probeServiceFailuresThroughEngine probes the given services through the
 // currently running engine (no restart). The returned map contains only failed
 // services and retains the exact required target that failed, so an automatic
 // search never looks like it skipped a partially working strategy.
 func (a *App) probeServiceFailuresThroughEngine(serviceTags []string) map[string]string {
+	return a.probeServiceFailuresThroughEngineForSession(serviceTags, 0)
+}
+
+func (a *App) probeServiceFailuresThroughEngineForSession(serviceTags []string, session uint64) map[string]string {
 	failing := map[string]string{}
+	workAllowed := func() bool {
+		if session != 0 {
+			return a.routeStrategySessionActive(session)
+		}
+		return a.routeStrategyWorkAllowed()
+	}
+	if !workAllowed() {
+		for _, tag := range serviceTags {
+			failing[tag] = errRouteStrategySessionExpired.Error()
+		}
+		return failing
+	}
 	if a.trafficEngine == nil || a.trafficEngine.ActiveTag() != composedStrategyTag {
 		for _, tag := range serviceTags {
 			failing[tag] = "движок выбранных сервисов не активен"
@@ -1648,7 +1755,22 @@ func (a *App) probeServiceFailuresThroughEngine(serviceTags []string) map[string
 			mu.Unlock()
 			continue
 		}
-		if !a.switchServiceRoute(tag, "direct") {
+		switched := false
+		if session == 0 {
+			switched = a.switchServiceRoute(tag, "direct")
+		} else {
+			var switchErr error
+			switched, switchErr = a.commitRouteStrategyBool(session, func() bool {
+				return a.switchServiceRoute(tag, "direct")
+			})
+			if switchErr != nil {
+				mu.Lock()
+				failing[tag] = switchErr.Error()
+				mu.Unlock()
+				continue
+			}
+		}
+		if !switched {
 			mu.Lock()
 			failing[tag] = "не удалось включить прямой тестовый маршрут"
 			mu.Unlock()
@@ -1659,21 +1781,46 @@ func (a *App) probeServiceFailuresThroughEngine(serviceTags []string) map[string
 			defer wg.Done()
 			if restoreRoute != "" && restoreRoute != "direct" {
 				defer func() {
-					if !a.switchServiceRoute(service.Tag, restoreRoute) {
+					restored := false
+					if session == 0 {
+						restored = a.switchServiceRoute(service.Tag, restoreRoute)
+					} else {
+						restored, _ = a.commitRouteStrategyBool(session, func() bool {
+							return a.switchServiceRoute(service.Tag, restoreRoute)
+						})
+					}
+					if !restored && workAllowed() {
 						a.writeLog(fmt.Sprintf("[FreeAccess] failed to restore %s selector to %s after probe", service.Tag, restoreRoute))
 					}
 				}()
 			}
+			if !workAllowed() {
+				mu.Lock()
+				failing[service.Tag] = errRouteStrategySessionExpired.Error()
+				mu.Unlock()
+				return
+			}
+			// Only the service-scoped CONNECT endpoint proves that this exact
+			// request traversed the selected packet strategy. A plain client in a
+			// TUN session can use trusted Dropo/sing-box egress and must therefore
+			// fail closed instead of validating or caching a Zapret candidate.
+			probeClient := newServiceZapretProbeHTTPClient(service.Tag, zapretProxyAddress)
 			candidate := routeProbeCandidate{
 				Tag:       composedStrategyTag,
 				Label:     "per-service",
 				Kind:      "transparent",
-				Client:    newServiceZapretProbeHTTPClient(service.Tag, zapretProxyAddress),
-				Available: true,
+				Client:    probeClient,
+				Available: probeClient != nil,
 			}
 			item := a.probeSingleCandidateQuiet(service, candidate)
-			if !item.Success && a.routeStrategyWorkAllowed() {
+			if !item.Success && workAllowed() {
 				time.Sleep(serviceStrategyProbeRetryDelay)
+				if !workAllowed() {
+					mu.Lock()
+					failing[service.Tag] = errRouteStrategySessionExpired.Error()
+					mu.Unlock()
+					return
+				}
 				item = a.probeSingleCandidateQuiet(service, candidate)
 			}
 			if !item.Success {
@@ -1695,8 +1842,12 @@ func (a *App) probeServiceFailuresThroughEngine(serviceTags []string) map[string
 // success/failure bit. Detailed automatic-selection reporting uses the helper
 // above directly.
 func (a *App) probeServicesThroughEngine(serviceTags []string) map[string]bool {
+	return a.probeServicesThroughEngineForSession(serviceTags, 0)
+}
+
+func (a *App) probeServicesThroughEngineForSession(serviceTags []string, session uint64) map[string]bool {
 	failing := make(map[string]bool)
-	for tag := range a.probeServiceFailuresThroughEngine(serviceTags) {
+	for tag := range a.probeServiceFailuresThroughEngineForSession(serviceTags, session) {
 		failing[tag] = true
 	}
 	return failing
@@ -1776,7 +1927,10 @@ func (a *App) applyServiceFallbackSelectionToConfig(configPath string, result ro
 // working method, cache it, and recompose. If nothing works, fall back to
 // VPN/direct. Runs under the discovery lock so the quick-check feedback guard
 // suppresses spurious re-triggers.
-func (a *App) retunePerServiceStrategy(serviceTag, reason string) error {
+func (a *App) retunePerServiceStrategy(serviceTag, reason string, session uint64) error {
+	if !a.routeStrategySessionActive(session) {
+		return errRouteStrategySessionExpired
+	}
 	if a.trafficEngine == nil || a.trafficEngine.ActiveTag() != composedStrategyTag {
 		return fmt.Errorf("per-service engine is not active")
 	}
@@ -1787,13 +1941,21 @@ func (a *App) retunePerServiceStrategy(serviceTag, reason string) error {
 		return fmt.Errorf("route method discovery is already running")
 	}
 	defer a.finishRouteProbeDiscovery()
+	if !a.routeStrategySessionActive(session) {
+		return errRouteStrategySessionExpired
+	}
 
 	a.writeLog(fmt.Sprintf("[FreeAccess] per-service retune started for %s: %s", serviceTag, reason))
 	if serviceTag == "discord" {
-		a.removeServiceStrategyCacheEntry(serviceTag)
+		if err := a.commitRouteStrategySession(session, func() error {
+			a.removeServiceStrategyCacheEntry(serviceTag)
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
-	if !a.routeStrategyWorkAllowed() {
-		return fmt.Errorf("VPN is stopping")
+	if !a.routeStrategySessionActive(session) {
+		return errRouteStrategySessionExpired
 	}
 	dir := a.serviceHostlistDir()
 	cache := a.loadServiceStrategyCache()
@@ -1824,13 +1986,23 @@ func (a *App) retunePerServiceStrategy(serviceTag, reason string) error {
 		}
 		selection = serviceWinwsSelection{ServiceTag: serviceTag, HostlistPath: hostlistPath, Method: ranked[0]}
 		selections[serviceTag] = selection
-		if err := a.composeAndStartServiceEngine(selections); err != nil {
+		if err := a.commitRouteStrategySession(session, func() error {
+			return a.composeAndStartServiceEngine(selections)
+		}); err != nil {
 			return fmt.Errorf("restore %s to transparent engine: %w", serviceTag, err)
 		}
-		if !a.probeServicesThroughEngine([]string{serviceTag})[serviceTag] {
-			a.cacheWebValidatedServiceMethod(serviceTag, selection.Method.Tag, "fallback-recovery")
-			if !a.switchServiceRoute(serviceTag, "direct") {
-				return fmt.Errorf("restore %s selector to confirmed transparent route", serviceTag)
+		if !a.probeServicesThroughEngineForSession([]string{serviceTag}, session)[serviceTag] {
+			if !a.routeStrategySessionActive(session) {
+				return errRouteStrategySessionExpired
+			}
+			if err := a.commitRouteStrategySession(session, func() error {
+				a.cacheWebValidatedServiceMethod(serviceTag, selection.Method.Tag, "fallback-recovery")
+				if !a.switchServiceRoute(serviceTag, "direct") {
+					return fmt.Errorf("restore %s selector to confirmed transparent route", serviceTag)
+				}
+				return nil
+			}); err != nil {
+				return err
 			}
 			if serviceTag == "discord" {
 				a.writeLog(fmt.Sprintf("[FreeAccess] discord web/API recovered with %s; waiting for live voice proof", selection.Method.Label))
@@ -1842,21 +2014,37 @@ func (a *App) retunePerServiceStrategy(serviceTag, reason string) error {
 	}
 
 	// Confirm it actually still fails before disrupting the engine.
-	if handled && !a.probeServicesThroughEngine([]string{serviceTag})[serviceTag] {
-		if !a.switchServiceRoute(serviceTag, "direct") {
-			return fmt.Errorf("keep %s on its confirmed transparent route", serviceTag)
+	if handled && !a.probeServicesThroughEngineForSession([]string{serviceTag}, session)[serviceTag] {
+		if !a.routeStrategySessionActive(session) {
+			return errRouteStrategySessionExpired
+		}
+		if err := a.commitRouteStrategySession(session, func() error {
+			if !a.switchServiceRoute(serviceTag, "direct") {
+				return fmt.Errorf("keep %s on its confirmed transparent route", serviceTag)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		a.writeLog(fmt.Sprintf("[FreeAccess] %s already works; keeping current method", serviceTag))
 		return nil
 	}
-	if !a.routeStrategyWorkAllowed() {
-		return fmt.Errorf("VPN is stopping")
+	if !a.routeStrategySessionActive(session) {
+		return errRouteStrategySessionExpired
 	}
 
-	method, ok := a.searchServiceStrategy(serviceTag, selections)
+	method, ok, err := a.searchServiceStrategyForSession(serviceTag, selections, session)
+	if err != nil {
+		return err
+	}
 	if ok {
 		selections[serviceTag] = serviceWinwsSelection{ServiceTag: serviceTag, HostlistPath: selections[serviceTag].HostlistPath, Method: method}
-		a.cacheWebValidatedServiceMethod(serviceTag, method.Tag, "retune")
+		if err := a.commitRouteStrategySession(session, func() error {
+			a.cacheWebValidatedServiceMethod(serviceTag, method.Tag, "retune")
+			return nil
+		}); err != nil {
+			return err
+		}
 		if serviceTag == "discord" {
 			a.writeLog(fmt.Sprintf("[FreeAccess] discord provisionally retuned to %s; waiting for live voice proof", method.Label))
 		} else {
@@ -1864,17 +2052,31 @@ func (a *App) retunePerServiceStrategy(serviceTag, reason string) error {
 		}
 	} else {
 		nextIndex := nextServiceStrategyIndexAfterAttemptWindow(serviceTag, selection.Method.Tag, maxAutomaticServiceStrategies)
-		a.applyServiceFreeFallback(serviceTag, nextIndex)
+		if err := a.commitRouteStrategySession(session, func() error {
+			a.applyServiceFreeFallback(serviceTag, nextIndex)
+			return nil
+		}); err != nil {
+			return err
+		}
 		delete(selections, serviceTag)
 	}
-	if !a.routeStrategyWorkAllowed() {
-		return fmt.Errorf("VPN is stopping")
+	if !a.routeStrategySessionActive(session) {
+		return errRouteStrategySessionExpired
 	}
-	if err := a.composeAndStartServiceEngine(selections); err != nil {
+	if err := a.commitRouteStrategySession(session, func() error {
+		return a.composeAndStartServiceEngine(selections)
+	}); err != nil {
 		return fmt.Errorf("re-compose after retune: %w", err)
 	}
-	if ok && !a.switchServiceRoute(serviceTag, "direct") {
-		return fmt.Errorf("activate confirmed transparent route for %s", serviceTag)
+	if ok {
+		if err := a.commitRouteStrategySession(session, func() error {
+			if !a.switchServiceRoute(serviceTag, "direct") {
+				return fmt.Errorf("activate confirmed transparent route for %s", serviceTag)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

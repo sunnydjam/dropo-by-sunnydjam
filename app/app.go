@@ -45,6 +45,19 @@ type App struct {
 	storage                *Storage                 // Unified storage for all settings
 	configBuilder          *ConfigBuilderForStorage // Config builder for storage
 	settingsPolicyMu       sync.Mutex               // Serializes transactional service-policy changes and reconnects.
+	vpnLifecycleMu         sync.Mutex               // Serializes Start/Stop and internal reconnect transactions.
+	vpnIntentMu            sync.Mutex               // Serializes publication and coalescing of public Start/Stop commands.
+	activeStartIntent      uint64                   // Public Start generation currently waiting or running; guarded by vpnIntentMu.
+	desiredConnected       atomic.Bool              // User intent; internal reconnects must never clear it.
+	vpnIntentGeneration    atomic.Uint64            // Makes the newest public Start/Stop authoritative.
+	reconnecting           atomic.Bool              // True while a bounded crash-recovery campaign is active.
+	reconnectGeneration    atomic.Uint64            // Invalidates stale delayed reconnect attempts.
+	reconnectMu            sync.Mutex
+	reconnectCancel        context.CancelFunc
+	reconnectReason        string
+	reconnectAttempt       int
+	reconnectError         string
+	reconnectStartAttempt  func(*App) map[string]interface{} // Test seam; nil uses the production start path.
 	trafficStats           *TrafficStats
 	nativeWG               *NativeWireGuardManager // Native WireGuard tunnel manager
 	byeDPI                 *ByeDPIManager          // Free access (DPI-bypass) process manager
@@ -53,14 +66,13 @@ type App struct {
 	xrayBridge             *XrayBridgeManager // Xray bridge for VLESS xhttp profiles
 	lastRouteProbe         map[string]routeProbeServiceResult
 	lastRouteProbeMu       sync.RWMutex
-	routeLatencyMu         sync.Mutex
-	routeLatencyCache      map[string]routeSummaryLatencyEntry
 	routeProbeRunMu        sync.Mutex
 	routeProbeRunning      bool
 	routeProbeDone         chan struct{}
-	routeStrategyJobs      chan string
+	routeStrategyJobs      chan routeStrategyMaintenanceJob
 	routeStrategyLoop      atomic.Bool
 	routeStrategySession   atomic.Uint64
+	routeStrategyCommitMu  sync.Mutex
 	// routeStrategy* keep per-service background searches unhurried and in order.
 	// Pending jobs are coalesced and completed searches use a cooldown, so a
 	// later confirmed failure can retune the same service again without churn.
@@ -109,7 +121,7 @@ func NewApp() *App {
 	a := &App{
 		logBuffer:         make([]string, 0, MaxLogBufferSize),
 		windowVisible:     true,
-		routeStrategyJobs: make(chan string, 64),
+		routeStrategyJobs: make(chan routeStrategyMaintenanceJob, 64),
 		discordRealtime:   newDiscordRealtimeController(),
 		events:            NewEventHub(512),
 		initDone:          make(chan struct{}),
@@ -462,9 +474,9 @@ func (a *App) initFreeAccess() {
 
 	runtimeBase := a.runtimeBasePath()
 	a.trafficEngine = NewNativeTrafficManager(runtimeBase, a.writeLog)
-	a.tgwsproxy = NewTgWsProxyManagerWithData(runtimeBase, a.dataPath, a.writeLog)
 
 	if runtime.GOOS != "windows" {
+		a.tgwsproxy = NewTgWsProxyManagerWithData(runtimeBase, a.dataPath, a.writeLog)
 		a.byeDPI = NewByeDPIManager(runtimeBase, a.writeLog)
 		if a.byeDPI.IsInstalled() {
 			a.writeLog("Compatibility free-access helper found")
@@ -477,10 +489,12 @@ func (a *App) initFreeAccess() {
 	} else {
 		a.writeLog("Native traffic engine unavailable: bundled WinDivert files are missing")
 	}
-	if a.tgwsproxy.IsInstalled() {
-		a.writeLog("Telegram MTProto proxy (tg-ws-proxy) binary found")
-	} else {
-		a.writeLog("Telegram MTProto proxy (tg-ws-proxy) binary not found - Telegram app proxy unavailable")
+	if a.tgwsproxy != nil {
+		if a.tgwsproxy.IsInstalled() {
+			a.writeLog("Telegram MTProto proxy (tg-ws-proxy) binary found")
+		} else {
+			a.writeLog("Telegram MTProto proxy (tg-ws-proxy) binary not found - Telegram app proxy unavailable")
+		}
 	}
 }
 

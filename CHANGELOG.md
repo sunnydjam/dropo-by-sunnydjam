@@ -2,6 +2,44 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.31 — 2026-09-23
+
+### Full VPN and Windows routing
+
+- repaired `Everything through VPN`: the final Internet route and remote DoH
+  now use the selected VPN source, with no hidden Direct candidate in the
+  selector or stale selective-mode cache;
+- full VPN now refuses to start without a usable VPN source, while local/private
+  destinations and work-network WireGuard overlays keep their higher-priority
+  routes across every mode;
+- route diagnostics separate endpoint reachability from a confirmed effective
+  route and no longer present fallback/catalog data as a live route;
+- VPN start, stop, reconnect, source, subscription and route changes are
+  serialized and transactional; stale background work cannot revive or mutate
+  a disconnected session.
+
+### Telegram and Discord
+
+- Windows no longer bundles, starts or opens the legacy `tg-ws-proxy` sidecar;
+  Telegram follows the same explicit Direct/VPN service policy as other apps;
+- upgrades remove the obsolete sidecar binary and show a non-modal, explicit
+  migration action when an older Dropo version may have left a localhost proxy
+  saved in Telegram; Dropo never edits Telegram settings automatically;
+- Discord strategy selection and media health run in the background, are fenced
+  to the active VPN session, and mark voice/video working only after sustained
+  bidirectional evidence; explicit Direct/VPN policy remains authoritative.
+
+### Release reliability
+
+- Windows UI now uses the static MSVC runtime, fixing startup error
+  `0x0000135` on clean systems without a machine-wide Visual C++ runtime;
+- runtime manifest, SBOM and provenance checks reject the removed Telegram
+  sidecar and cover the self-contained Windows package;
+- WFP kill-switch code remains an inactive architecture prototype: it is not
+  installed, does not create filters and is not advertised as active protection;
+- Android source changes remain behind a separate Android release gate; no APK
+  is included in this Windows release.
+
 ## 3.0.30 — 2026-09-21
 
 ### Minimal Atlas interface

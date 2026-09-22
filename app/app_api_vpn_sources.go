@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
-	"time"
 )
 
 func (a *App) GetVPNSources() map[string]interface{} {
@@ -124,43 +122,11 @@ func (a *App) RefreshVPNSources() map[string]interface{} {
 }
 
 func (a *App) changeVPNSources(change func(*ProfileData) error) map[string]interface{} {
-	a.waitForInit()
-	if a.storage == nil || a.configBuilder == nil {
-		return map[string]interface{}{"success": false, "error": "VPN storage is not initialized"}
-	}
-	profile, err := a.storage.GetActiveProfile()
-	if err != nil {
-		return map[string]interface{}{"success": false, "error": err.Error()}
-	}
-	profile.VPNSources = append([]VPNSource(nil), profile.VPNSources...)
-	if err := change(profile); err != nil {
-		return map[string]interface{}{"success": false, "error": err.Error()}
-	}
-	for index := range profile.VPNSources {
-		if strings.TrimSpace(profile.VPNSources[index].ID) == "" {
-			profile.VPNSources[index].ID = nextVPNSourceID(profile.VPNSources)
-		}
-	}
-	wasRunning := a.isVPNRunning()
-	if wasRunning {
-		a.Stop()
-	}
-	busyID := a.beginBusy("Обновляем цепочку VPN-источников...")
-	defer a.endBusy(busyID)
-	if err := a.configBuilder.BuildConfigForProfileSources(profile.ID, profile.VPNSources, profile.WireGuardConfigs); err != nil {
-		return map[string]interface{}{"success": false, "error": err.Error()}
-	}
-	updated, _ := a.storage.GetActiveProfile()
-	if wasRunning {
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			a.Start()
-		}()
-	}
-	return map[string]interface{}{
-		"success": true, "sources": publicVPNSources(updated.VPNSources),
-		"sourceCount": len(updated.VPNSources), "wasRunning": wasRunning,
-	}
+	return a.changeVPNSourcesTransaction(change, vpnSourceReconnectOps{
+		stop:    a.stopVPNForReconnect,
+		start:   a.startVPNForReconnect,
+		restore: a.restoreVPNSourceProfile,
+	})
 }
 
 // publicVPNSources deliberately excludes subscription URIs and cached node

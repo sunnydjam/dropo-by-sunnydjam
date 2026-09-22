@@ -21,6 +21,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.UserManager
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import dropoandroid.Dropoandroid
@@ -35,6 +36,7 @@ import java.util.concurrent.TimeUnit
 
 class MainActivity : FlutterActivity() {
     private val coreExecutor = Executors.newSingleThreadExecutor()
+    private val subscriptionExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var coreChannel: MethodChannel? = null
     private var eventChannel: EventChannel? = null
@@ -114,6 +116,7 @@ class MainActivity : FlutterActivity() {
         eventListener?.let { DropoVpnRuntime.removeListener(it) }
         eventListener = null
         coreExecutor.shutdownNow()
+        subscriptionExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -166,7 +169,17 @@ class MainActivity : FlutterActivity() {
             result.notImplemented()
             return
         }
-        coreExecutor.execute {
+        val executor = if (
+            call.method == "call" && stringArg(call, "method") == "TestVPNConnection"
+        ) {
+            // Subscription validation can spend up to the HTTP timeout on the
+            // network. Keep status/events/stop-capable core work responsive on
+            // their ordered executor while Go protects shared state itself.
+            subscriptionExecutor
+        } else {
+            coreExecutor
+        }
+        executor.execute {
             val response = try {
                 handleCoreCallInBackground(call)
             } catch (error: Throwable) {
@@ -180,6 +193,8 @@ class MainActivity : FlutterActivity() {
         try {
             val response = when (call.method) {
                 "androidCompatibility" -> buildAndroidCompatibility()
+                "androidVpnProtection" -> buildAndroidVpnProtection()
+                "androidOpenVpnSettings" -> openAndroidVpnSettings()
                 "androidSetCompatibilityPromptDismissed" -> {
                     val dismissed = boolArg(call, "dismissed")
                     prefs().edit().putBoolean(PREF_COMPAT_PROMPT_DISMISSED, dismissed).apply()
@@ -202,10 +217,16 @@ class MainActivity : FlutterActivity() {
     private fun handleCoreCallInBackground(call: MethodCall): String {
         return when (call.method) {
             "ensureStarted" -> ensureCoreStarted()
-            "status" -> DropoVpnRuntime.mergeCoreStatus(Dropoandroid.status())
+            "status" -> {
+                DropoVpnService.refreshVpnProtection()
+                DropoVpnRuntime.mergeCoreStatus(Dropoandroid.status())
+            }
             "logs" -> Dropoandroid.logs()
             "events" -> Dropoandroid.events(longArg(call, "since"))
-            "serviceStatus" -> JSONObject(DropoVpnRuntime.snapshot()).toString()
+            "serviceStatus" -> {
+                DropoVpnService.refreshVpnProtection()
+                JSONObject(DropoVpnRuntime.snapshot()).toString()
+            }
             "diagnostics" -> buildDiagnostics()
             "call" -> Dropoandroid.call(
                 stringArg(call, "method"),
@@ -227,6 +248,31 @@ class MainActivity : FlutterActivity() {
     private fun handleSetConnectedUnsafe(call: MethodCall, result: MethodChannel.Result) {
         val connected = boolArg(call, "connected")
         if (!connected) {
+            val protection = DropoVpnService.refreshVpnProtection()
+            if (protection["observed"] != true) {
+                result.success(
+                    errorJson(
+                        "Android не подтвердил состояние Always-on VPN. " +
+                            "Проверьте системные настройки VPN.",
+                    ),
+                )
+                return
+            }
+            if (protection["observed"] == true && protection["alwaysOn"] == true) {
+                // Android owns an Always-on VPN session. Stopping the service
+                // from inside the app is misleading (and the OS may immediately
+                // recreate it), so hand control back to the authoritative
+                // system screen instead.
+                val settingsResult = JSONObject(openAndroidVpnSettings())
+                settingsResult.put("running", true)
+                settingsResult.put("requiresSystemSettings", true)
+                settingsResult.put(
+                    "message",
+                    "Always-on VPN управляется в системных настройках Android",
+                )
+                result.success(settingsResult.toString())
+                return
+            }
             DropoVpnRuntime.setDisconnecting("VPN останавливается")
             recordCoreCall("AndroidServiceState", "[\"disconnecting\",\"VPN останавливается\",\"\"]")
             recordCoreCall("AndroidEngineLog", "[\"VPN stop requested from Flutter\"]")
@@ -310,6 +356,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun buildDiagnostics(): String {
+        DropoVpnService.refreshVpnProtection()
         val coreStatus = runCatching { Dropoandroid.status() }
             .getOrElse { errorJson(it.message ?: it.javaClass.simpleName) }
         val coreDiagnostics = runCatching {
@@ -373,6 +420,31 @@ class MainActivity : FlutterActivity() {
             "riskApps" to apps,
         )
         return JSONObject(payload).toString()
+    }
+
+    private fun buildAndroidVpnProtection(): String {
+        val payload = DropoVpnService.refreshVpnProtection().toMutableMap()
+        payload["success"] = true
+        return JSONObject(payload).toString()
+    }
+
+    private fun openAndroidVpnSettings(): String {
+        val primaryIntent = Intent(Settings.ACTION_VPN_SETTINGS)
+        val fallbackIntent = Intent(Settings.ACTION_WIRELESS_SETTINGS)
+        val intent = if (primaryIntent.resolveActivity(packageManager) != null) {
+            primaryIntent
+        } else {
+            fallbackIntent
+        }
+        return runCatching {
+            startActivity(intent)
+            val payload = DropoVpnService.refreshVpnProtection().toMutableMap()
+            payload["success"] = true
+            payload["opened"] = true
+            JSONObject(payload).toString()
+        }.getOrElse { error ->
+            errorJson(error.message ?: "Android VPN settings are unavailable")
+        }
     }
 
     private fun buildRiskAppStatuses(): List<Map<String, Any?>> {
@@ -969,6 +1041,8 @@ class MainActivity : FlutterActivity() {
         )
         private val ANDROID_NATIVE_METHODS = setOf(
             "androidCompatibility",
+            "androidVpnProtection",
+            "androidOpenVpnSettings",
             "androidSetCompatibilityPromptDismissed",
             "androidCreateDropoSpace",
             "androidMoveToDropoSpace",

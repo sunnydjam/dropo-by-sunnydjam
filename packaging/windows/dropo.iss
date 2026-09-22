@@ -41,7 +41,7 @@ PrivilegesRequiredOverridesAllowed=commandline
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=force
-CloseApplicationsFilter=dropo.exe,dropo-ui.exe,dropo-core.exe
+CloseApplicationsFilter=dropo.exe,dropo-ui.exe,dropo-core.exe,tg-ws-proxy.exe
 ; The installer owns the single post-update launch. Restart Manager must not
 ; race it by restarting old UI/core commands independently.
 RestartApplications=no
@@ -60,6 +60,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Ярлыки:"; Flags: unchecked
 Name: "autostart"; Description: "Запускать dropo при входе в Windows"; GroupDescription: "Автозапуск:"; Flags: checkedonce
 Name: "backgroundcore"; Description: "Заранее запускать защищённый фоновый core (быстрее подключение, без повторного UAC)"; GroupDescription: "Автозапуск:"; Flags: checkedonce
+
+[InstallDelete]
+; Remove only files shipped by older Windows releases. Do not touch the
+; user's Telegram Desktop settings or the per-user tg-ws-proxy config.
+Type: files; Name: "{app}\resources\bin\tg-ws-proxy.exe"; Check: IsUpgradeInstall
+Type: files; Name: "{app}\resources\licenses\tg-ws-proxy-LICENSE.txt"; Check: IsUpgradeInstall
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs notimestamp

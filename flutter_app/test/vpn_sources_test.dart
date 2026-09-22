@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -43,9 +44,16 @@ VpnSourceInfo _source(
 class _SourceBridge extends MockCoreBridge {
   List<VpnSourceInfo> sources = [];
   int publicAdds = 0;
+  int personalTests = 0;
+  int personalAdds = 0;
   bool consentReceived = false;
   bool throwOnPublicAdd = false;
   bool throwOnCatalog = false;
+  bool failPersonalAdd = false;
+  String personalAddError = 'Источник временно недоступен';
+  Completer<List<PublicVpnProviderInfo>>? pendingCatalog;
+  String lastPersonalName = '';
+  String lastPersonalUri = '';
 
   @override
   Future<List<VpnSourceInfo>> vpnSources() async => sources;
@@ -53,7 +61,37 @@ class _SourceBridge extends MockCoreBridge {
   @override
   Future<List<PublicVpnProviderInfo>> publicVpnProviders() async {
     if (throwOnCatalog) throw StateError('offline');
+    if (pendingCatalog case final pending?) return pending.future;
     return [_provider];
+  }
+
+  @override
+  Future<Map<String, dynamic>> testSubscription(String value) async {
+    personalTests++;
+    return {'success': true, 'count': 3, 'proxies': const []};
+  }
+
+  @override
+  Future<Map<String, dynamic>> addVpnSource(String name, String uri) async {
+    personalAdds++;
+    lastPersonalName = name;
+    lastPersonalUri = uri;
+    if (failPersonalAdd) {
+      return {'success': false, 'error': personalAddError};
+    }
+    sources = [
+      ...sources,
+      VpnSourceInfo.fromJson({
+        'id': 'personal-$personalAdds',
+        'name': name,
+        'kind': 'subscription',
+        'active': false,
+        'selected_node': 0,
+        'node_count': 3,
+        'node_names': const ['NL 1', 'DE 1', 'FI 1'],
+      }),
+    ];
+    return {'success': true, 'sourceCount': sources.length};
   }
 
   @override
@@ -75,12 +113,21 @@ Future<void> _pumpEditor(
   Size size = const Size(960, 800),
   double textScale = 1,
   GlobalKey? captureKey,
+  SubscriptionInfo subscription = _subscription,
+  VoidCallback? onChanged,
+  VoidCallback? onReadyToConnect,
+  bool settle = true,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
-  final editor = VpnSourcesDialog(bridge: bridge, subscription: _subscription);
+  final editor = VpnSourcesDialog(
+    bridge: bridge,
+    subscription: subscription,
+    onChanged: onChanged,
+    onReadyToConnect: onReadyToConnect,
+  );
   await tester.pumpWidget(
     MaterialApp(
       theme: ThemeData.dark().copyWith(
@@ -101,7 +148,12 @@ Future<void> _pumpEditor(
           : RepaintBoundary(key: captureKey, child: editor),
     ),
   );
-  await tester.pumpAndSettle();
+  if (settle) {
+    await tester.pumpAndSettle();
+  } else {
+    await tester.pump();
+    await tester.pump();
+  }
 }
 
 Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
@@ -129,8 +181,10 @@ void main() {
     (tester) async {
       final bridge = _SourceBridge();
       await _pumpEditor(tester, bridge);
-      expect(find.text('Своя подписка или бесплатный резерв'), findsOneWidget);
-      expect(find.byKey(const ValueKey('add-personal-vpn')), findsOneWidget);
+      expect(find.text('Первое подключение'), findsOneWidget);
+      expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
+      expect(find.byKey(const ValueKey('submit-personal-vpn')), findsOneWidget);
+      expect(find.byKey(const ValueKey('add-personal-vpn')), findsNothing);
       expect(
         find.byKey(const ValueKey('add-public-vpn-test-public')),
         findsOneWidget,
@@ -189,11 +243,242 @@ void main() {
   ) async {
     final bridge = _SourceBridge()..throwOnCatalog = true;
     await _pumpEditor(tester, bridge);
-    await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
     expect(find.text('Проверить и добавить'), findsOneWidget);
+    expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
     expect(find.textContaining('Каталог недоступен'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('slow optional catalog never disables personal onboarding', (
+    tester,
+  ) async {
+    final catalog = Completer<List<PublicVpnProviderInfo>>();
+    final bridge = _SourceBridge()..pendingCatalog = catalog;
+    await _pumpEditor(tester, bridge, settle: false);
+
+    final input = tester.widget<TextField>(
+      find.byKey(const ValueKey('personal-vpn-uri')),
+    );
+    final submit = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('submit-personal-vpn')),
+    );
+    expect(input.enabled, isTrue);
+    expect(submit.onPressed, isNotNull);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+
+    catalog.complete([_provider]);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('add-public-vpn-test-public')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'configured personal source keeps the optional add form collapsed',
+    (tester) async {
+      final bridge = _SourceBridge()..sources = [_source('personal')];
+      await _pumpEditor(
+        tester,
+        bridge,
+        subscription: const SubscriptionInfo(
+          hasSubscription: true,
+          url: '',
+          proxyCount: 2,
+        ),
+      );
+      expect(find.byKey(const ValueKey('vpn-source-personal')), findsOneWidget);
+      expect(find.byKey(const ValueKey('personal-vpn-uri')), findsNothing);
+      expect(find.byKey(const ValueKey('add-personal-vpn')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('unsafe personal input is rejected before a bridge call', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge();
+    await _pumpEditor(tester, bridge);
+    final input = find.byKey(const ValueKey('personal-vpn-uri'));
+    final submit = find.byKey(const ValueKey('submit-personal-vpn'));
+
+    await _tapVisible(tester, submit);
+    expect(
+      find.text('Вставьте HTTPS-ссылку подписки или VPN-ключ.'),
+      findsOneWidget,
+    );
+    expect(bridge.personalTests, 0);
+
+    await tester.enterText(input, 'http://example.test/private-token');
+    await _tapVisible(tester, submit);
+    expect(
+      find.textContaining('нужна корректная HTTPS-ссылка'),
+      findsOneWidget,
+    );
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Text && (widget.data?.contains('private-token') ?? false),
+      ),
+      findsNothing,
+    );
+    expect(bridge.personalTests, 0);
+
+    await tester.enterText(input, 'https://user:secret@example.test/sub');
+    await _tapVisible(tester, submit);
+    expect(find.textContaining('Логин и пароль нельзя'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Text && (widget.data?.contains('secret') ?? false),
+      ),
+      findsNothing,
+    );
+    expect(bridge.personalTests, 0);
+    expect(bridge.personalAdds, 0);
+  });
+
+  testWidgets('failed personal add preserves input and succeeds on retry', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()..failPersonalAdd = true;
+    var changes = 0;
+    var readyActions = 0;
+    await _pumpEditor(
+      tester,
+      bridge,
+      onChanged: () => changes++,
+      onReadyToConnect: () => readyActions++,
+    );
+    final uri = find.byKey(const ValueKey('personal-vpn-uri'));
+    final name = find.byKey(const ValueKey('personal-vpn-name'));
+    final submit = find.byKey(const ValueKey('submit-personal-vpn'));
+    await tester.enterText(uri, 'https://example.test/subscription');
+    await tester.enterText(name, 'Рабочий VPN');
+    await _tapVisible(tester, submit);
+
+    expect(find.textContaining('Источник временно недоступен'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(uri).controller?.text,
+      contains('example.test'),
+    );
+    expect(tester.widget<TextField>(name).controller?.text, 'Рабочий VPN');
+    expect(bridge.personalTests, 1);
+    expect(bridge.personalAdds, 1);
+    expect(changes, 0);
+    expect(tester.widget<FilledButton>(submit).onPressed, isNotNull);
+
+    bridge.failPersonalAdd = false;
+    await _tapVisible(tester, submit);
+    expect(bridge.personalTests, 2);
+    expect(bridge.personalAdds, 2);
+    expect(changes, 1);
+    expect(
+      find.text('3 сервера добавлено. Можно подключаться.'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('vpn-source-personal-2')), findsOneWidget);
+    expect(find.byKey(const ValueKey('personal-vpn-uri')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('onboarding-ready-connect')),
+      findsOneWidget,
+    );
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('onboarding-ready-connect')),
+    );
+    expect(readyActions, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Android subscription errors are localized without wrappers', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..failPersonalAdd = true
+      ..personalAddError =
+          'VPN subscription could not be downloaded or contains no supported Android servers';
+    await _pumpEditor(tester, bridge);
+    await tester.enterText(
+      find.byKey(const ValueKey('personal-vpn-uri')),
+      'https://example.test/subscription',
+    );
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('submit-personal-vpn')),
+    );
+
+    expect(
+      find.text(
+        'Не удалось загрузить подписку или в ней нет поддерживаемых серверов для Android.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Bad state:'), findsNothing);
+    expect(find.textContaining('could not be downloaded'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Android uses an honest single-subscription editor', (
+    tester,
+  ) async {
+    debugMobileShellOverride = true;
+    addTearDown(() => debugMobileShellOverride = null);
+    final bridge = _SourceBridge()..sources = [_source('personal', count: 4)];
+    await _pumpEditor(
+      tester,
+      bridge,
+      size: const Size(390, 844),
+      subscription: const SubscriptionInfo(
+        hasSubscription: true,
+        url: '',
+        proxyCount: 4,
+      ),
+    );
+
+    expect(find.text('VPN-подписка'), findsOneWidget);
+    expect(find.textContaining('одна активная подписка'), findsOneWidget);
+    expect(find.textContaining('4 сервера'), findsOneWidget);
+    expect(find.byType(Switch), findsNothing);
+    expect(
+      find.byKey(const ValueKey('choose-vpn-node-personal')),
+      findsNothing,
+    );
+    expect(find.text('Обновить списки'), findsNothing);
+    await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
+    expect(find.text('Проверить и заменить'), findsOneWidget);
+    expect(find.byKey(const ValueKey('personal-vpn-name')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final viewport in [const Size(390, 844), const Size(320, 568)]) {
+    for (final scale in [1.0, 2.0]) {
+      testWidgets(
+        'empty onboarding fits ${viewport.width.toInt()}x${viewport.height.toInt()} at $scale',
+        (tester) async {
+          debugMobileShellOverride = true;
+          addTearDown(() => debugMobileShellOverride = null);
+          await _pumpEditor(
+            tester,
+            _SourceBridge(),
+            size: viewport,
+            textScale: scale,
+          );
+          final input = find.byKey(const ValueKey('personal-vpn-uri'));
+          final submit = find.byKey(const ValueKey('submit-personal-vpn'));
+          await tester.ensureVisible(input);
+          await tester.ensureVisible(submit);
+          expect(
+            tester.getSize(input).width,
+            lessThanOrEqualTo(viewport.width),
+          );
+          expect(tester.getSize(submit).height, greaterThanOrEqualTo(48));
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
 
   for (final scale in [1.0, 1.5, 2.0]) {
     testWidgets('source editor has no overflow at 960x640 scale $scale', (

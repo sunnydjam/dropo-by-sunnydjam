@@ -33,11 +33,27 @@ func (a *App) GetStatus() map[string]interface{} {
 
 	a.mu.Lock()
 	running := a.isRunning
-	connecting := a.isStarting
+	starting := a.isStarting
 	singboxPath := a.singboxPath
 	logPath := a.logPath
 	tempLogPath := a.tempLogPath
 	a.mu.Unlock()
+	reconnect := a.vpnReconnectSnapshot()
+	connecting := starting || reconnect.Active
+	disconnecting := a.vpnStopping.Load()
+	vpnState := "stopped"
+	switch {
+	case disconnecting:
+		vpnState = "disconnecting"
+	case reconnect.Active:
+		vpnState = "reconnecting"
+	case starting:
+		vpnState = "starting"
+	case running:
+		vpnState = "connected"
+	case a.hasError.Load():
+		vpnState = "failed"
+	}
 
 	configPath := ""
 	hasConfig := false
@@ -59,12 +75,35 @@ func (a *App) GetStatus() map[string]interface{} {
 		sourceAvailable,
 		sourceError,
 	)
-	hasError := a.hasError.Load() || fullVPNSourceFailed
+	coreHasError := !reconnect.Active && a.hasError.Load()
+	if coreHasError && fullVPNError == "" {
+		fullVPNError = reconnect.Error
+	}
+	hasError := coreHasError || fullVPNSourceFailed
+	serviceMessage := ""
+	if reconnect.Active {
+		serviceMessage = fmt.Sprintf("Переподключение %d/%d", reconnect.Attempt, reconnect.Total)
+		if reconnect.Attempt == 0 {
+			serviceMessage = "Готовим переподключение"
+		}
+	} else if coreHasError && reconnect.Error != "" {
+		serviceMessage = reconnect.Error
+	}
 
 	return map[string]interface{}{
 		"running":                   running,
 		"connected":                 running,
 		"connecting":                connecting,
+		"disconnecting":             disconnecting,
+		"vpnState":                  vpnState,
+		"serviceMessage":            serviceMessage,
+		"desiredConnected":          a.desiredConnected.Load(),
+		"sessionGeneration":         reconnect.Generation,
+		"reconnectAttempt":          reconnect.Attempt,
+		"reconnectTotal":            reconnect.Total,
+		"reconnectReason":           reconnect.Reason,
+		"reconnectProtected":        false,
+		"vpnProtection":             currentVPNProtectionStatus(routingMode),
 		"hasError":                  hasError,
 		"error":                     fullVPNError,
 		"routingMode":               string(routingMode),
@@ -85,8 +124,134 @@ func (a *App) GetStatus() map[string]interface{} {
 	}
 }
 
-// Start starts VPN
+// Start records the user's connected intent and serializes the transition with
+// Stop and internal reconnects. Repeated Start calls for the same active intent
+// are coalesced instead of invalidating and restarting the in-flight attempt.
 func (a *App) Start() map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": false, "error": "VPN application is not initialized"}
+	}
+	if a.isShuttingDown() {
+		return map[string]interface{}{"success": false, "error": "Приложение завершает работу"}
+	}
+
+	a.vpnIntentMu.Lock()
+	if a.desiredConnected.Load() {
+		a.mu.Lock()
+		running := a.isRunning
+		a.mu.Unlock()
+		generation := a.vpnIntentGeneration.Load()
+		if running {
+			a.vpnIntentMu.Unlock()
+			return map[string]interface{}{
+				"success":    true,
+				"running":    true,
+				"unchanged":  true,
+				"generation": generation,
+			}
+		}
+		if a.activeStartIntent != 0 {
+			a.vpnIntentMu.Unlock()
+			return map[string]interface{}{
+				"success":    true,
+				"running":    false,
+				"connecting": true,
+				"unchanged":  true,
+				"generation": generation,
+			}
+		}
+	}
+	intentGeneration := a.vpnIntentGeneration.Add(1)
+	a.desiredConnected.Store(true)
+	a.activeStartIntent = intentGeneration
+	a.vpnIntentMu.Unlock()
+	defer func() {
+		a.vpnIntentMu.Lock()
+		if a.activeStartIntent == intentGeneration {
+			a.activeStartIntent = 0
+		}
+		a.vpnIntentMu.Unlock()
+	}()
+
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	if a.vpnIntentGeneration.Load() != intentGeneration || !a.desiredConnected.Load() {
+		return map[string]interface{}{"success": false, "cancelled": true, "superseded": true, "error": "Подключение заменено более новой командой"}
+	}
+	// A settings/source transaction may have completed its internal restart
+	// while this public Start was waiting for the lifecycle lock. Treat the
+	// already-restored session as the successful result of the same intent.
+	if a.isVPNRunning() {
+		return map[string]interface{}{
+			"success":    true,
+			"running":    true,
+			"unchanged":  true,
+			"generation": intentGeneration,
+		}
+	}
+	// Transaction markers are created while holding this same lifecycle lock.
+	// The check is a defensive guard for callers that expose a reconnect phase
+	// without immediately entering startVPN.
+	if a.vpnTransactionalReconnectActive() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "VPN уже переподключается после изменения настроек",
+		}
+	}
+	a.cancelVPNReconnect(false)
+	if !a.desiredConnected.Load() || a.isShuttingDown() {
+		return map[string]interface{}{"success": false, "cancelled": true, "error": "Подключение отменено"}
+	}
+	return a.startVPN(intentGeneration)
+}
+
+func (a *App) vpnStartIntentCurrent(expected uint64) bool {
+	return a != nil &&
+		a.vpnIntentGeneration.Load() == expected &&
+		a.desiredConnected.Load() &&
+		!a.isShuttingDown()
+}
+
+func cancelledVPNStartResult() map[string]interface{} {
+	return map[string]interface{}{
+		"success":   false,
+		"cancelled": true,
+		"error":     "Подключение отменено более новой командой",
+	}
+}
+
+// cancelStartedVPNAttempt tears down a process that was created before a newer
+// user intent became visible. The process waiter has not been started yet at
+// this point, so this function owns Wait and clears the published identity.
+func (a *App) cancelStartedVPNAttempt(cmd *exec.Cmd) {
+	if a == nil || cmd == nil {
+		return
+	}
+	if a.trafficEngine != nil {
+		a.trafficEngine.Stop()
+	}
+	a.stopVPNSourceMonitor()
+	if cmd.Process != nil {
+		if runtime.GOOS == "windows" {
+			terminateProcessTree(cmd)
+		} else {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}
+	a.mu.Lock()
+	if a.cmd == cmd {
+		a.cmd = nil
+		a.cmdDone = nil
+		a.isRunning = false
+	}
+	a.mu.Unlock()
+	a.closeLogFile()
+}
+
+// startVPN performs one serialized start attempt. Callers must hold
+// vpnLifecycleMu and must have checked the active connection intent.
+func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	// Wait for initialization
 	a.waitForInit()
 
@@ -117,6 +282,9 @@ func (a *App) Start() map[string]interface{} {
 		}
 		a.refreshSingBoxPath()
 	}
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return cancelledVPNStartResult()
+	}
 	singboxPath := a.singBoxPathSnapshot()
 	a.mu.Lock()
 	if a.isRunning {
@@ -136,6 +304,11 @@ func (a *App) Start() map[string]interface{} {
 	a.isStarting = true
 
 	a.mu.Unlock()
+	if a.reconnecting.Load() {
+		a.emitVPNLifecycleState("reconnecting", a.reconnectGeneration.Load(), 0, "Запускаем VPN заново")
+	} else {
+		a.emitVPNLifecycleState("starting", a.reconnectGeneration.Load(), 0, "Запускаем VPN")
+	}
 	defer func() {
 		a.mu.Lock()
 		a.isStarting = false
@@ -169,6 +342,9 @@ func (a *App) Start() map[string]interface{} {
 				"error":   "Идет фоновый подбор бесплатных методов. Повторите запуск через несколько секунд.",
 			}
 		}
+	}
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return cancelledVPNStartResult()
 	}
 
 	a.cleanupDropoRuntimeResidue("before start")
@@ -403,6 +579,9 @@ func (a *App) Start() map[string]interface{} {
 	} else {
 		cmd.Dir = a.basePath
 	}
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return cancelledVPNStartResult()
+	}
 
 	if err := cmd.Start(); err != nil {
 		a.stopFreeAccess()
@@ -507,7 +686,7 @@ func (a *App) Start() map[string]interface{} {
 			}
 		}
 		_, _ = a.forceSubscriptionFallbackForTransparentRuntime(configPath)
-		switched := a.activateSubscriptionFallbackForTransparentRuntime()
+		switched := a.activateSubscriptionFallbackForTransparentRuntime(a.currentRouteStrategySession())
 		if switched > 0 {
 			a.writeLog(fmt.Sprintf("[NetworkMode] kept sing-box running and switched %d blocked-service group(s) to the ordered VPN-source fallback", switched))
 			a.AddToLogBuffer("Локальный движок трафика недоступен. Заблокированные сервисы временно направлены через VPN-источник.")
@@ -534,6 +713,10 @@ func (a *App) Start() map[string]interface{} {
 	if a.nativeWG != nil && a.nativeWG.IsInstalled() {
 		a.updateBusy(busyID, "Запускаем рабочие WireGuard-сети...")
 		a.startNativeWireGuardTunnels()
+	}
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		a.cancelStartedVPNAttempt(cmd)
+		return cancelledVPNStartResult()
 	}
 
 	// Start user-visible session accounting as soon as the base VPN and immutable
@@ -573,35 +756,67 @@ func (a *App) Start() map[string]interface{} {
 			close(done)
 			return
 		}
-		if isCurrentProcess {
-			a.isRunning = false
-			a.stoppedManually = false
-			a.cmd = nil
-			a.cmdDone = nil
-		}
+		// Signal process completion immediately so an already queued manual Stop
+		// never waits for the lifecycle lock while holding that same lock itself.
+		// Keep the process marked current until cleanup owns vpnLifecycleMu: a
+		// concurrent Start will then see an existing session instead of starting a
+		// new sing-box that this stale watcher could subsequently terminate.
+		a.mu.Unlock()
+		done <- err
+		close(done)
 
-		// End traffic session
+		a.vpnLifecycleMu.Lock()
+		defer a.vpnLifecycleMu.Unlock()
+
+		// Stop may have won the lifecycle lock after Wait returned and completed
+		// all cleanup itself. Revalidate identity under the lock before touching
+		// any process-wide runtime or scheduling recovery for this generation.
+		a.mu.Lock()
+		isCurrentProcess = a.cmd == cmd
+		wasStoppedManually = a.stoppedManually
+		if !isCurrentProcess || wasStoppedManually {
+			a.mu.Unlock()
+			return
+		}
+		a.isRunning = false
+		a.stoppedManually = false
+		a.cmd = nil
+		a.cmdDone = nil
 		if a.trafficStats != nil {
 			a.trafficStats.EndSession()
 			a.trafficStats.Save()
 		}
-		done <- err
-		close(done)
+		shouldReconnect := a.desiredConnected.Load() && !a.isShuttingDown()
+		reason := "VPN-процесс завершился неожиданно"
+		if err != nil {
+			reason = fmt.Sprintf("VPN-процесс завершился с ошибкой: %v", err)
+		}
 
 		// ALWAYS stop WireGuard tunnels when VPN process exits
 		// This prevents orphaned tunnels that block user's native WireGuard
 		a.mu.Unlock() // Unlock before calling stopNativeWireGuardTunnels to avoid deadlock
-		if isCurrentProcess {
-			a.invalidateRouteStrategySession()
+		if shouldReconnect {
+			// Publish the reconnecting state before potentially slow native cleanup.
+			// The worker cannot start a replacement process until this watcher
+			// releases vpnLifecycleMu, so cleanup remains strictly ordered.
+			a.hasError.Store(false)
+			a.writeLog("[Reconnect] " + reason)
+			a.AddToLogBuffer("Соединение прервано. dropo выполняет переподключение.")
+			a.scheduleVPNReconnect(reason)
 		}
+		a.invalidateRouteStrategySession()
 		a.stopNativeWireGuardTunnels()
 		a.stopVPNSourceMonitor()
 		a.stopDiscordRealtimeMonitor()
 		a.stopFreeAccess()
 		a.stopXrayBridge()
 		a.cleanupDropoRuntimeResidue("process exit")
-		a.mu.Lock()
+		if shouldReconnect {
+			a.closeLogFile()
+			return
+		}
 
+		a.mu.Lock()
 		if err != nil {
 			a.hasError.Store(true)
 			a.writeLog(fmt.Sprintf("VPN process exited with error: %v", err))
@@ -616,7 +831,7 @@ func (a *App) Start() map[string]interface{} {
 		a.mu.Unlock()
 		// Notify frontend about status change
 		if a.ctx != nil {
-			a.emitEvent("vpn-status-changed", false)
+			a.emitVPNLifecycleState(map[bool]string{true: "failed", false: "stopped"}[err != nil], a.reconnectGeneration.Load(), 0, "")
 		}
 	}(cmd, cmdDone)
 	if !deferDiscordMonitor {
@@ -626,6 +841,7 @@ func (a *App) Start() map[string]interface{} {
 		a.startWindowsUnifiedServiceValidationAsync(deferDiscordMonitor)
 	}
 	a.updateBusy(busyID, "Подключение запущено")
+	a.emitVPNLifecycleState("connected", a.reconnectGeneration.Load(), 0, "VPN работает")
 	return map[string]interface{}{
 		"success": true,
 		"running": true,
@@ -987,29 +1203,55 @@ func (a *App) monitorSingBoxProcess(cmd *exec.Cmd, done chan error) {
 		close(done)
 		return
 	}
-	if isCurrentProcess {
-		a.isRunning = false
-		a.stoppedManually = false
-		a.cmd = nil
-		a.cmdDone = nil
-	}
+	// Wake an in-flight manual Stop before contending for vpnLifecycleMu. Keep
+	// the process identity intact until the lifecycle lock is owned so a newer
+	// Start cannot be damaged by this waiter's cleanup.
+	a.mu.Unlock()
+	done <- err
+	close(done)
 
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	a.mu.Lock()
+	isCurrentProcess = a.cmd == cmd
+	wasStoppedManually = a.stoppedManually
+	if !isCurrentProcess || wasStoppedManually {
+		a.mu.Unlock()
+		return
+	}
+	a.isRunning = false
+	a.stoppedManually = false
+	a.cmd = nil
+	a.cmdDone = nil
 	if a.trafficStats != nil {
 		a.trafficStats.EndSession()
 		a.trafficStats.Save()
 	}
-	done <- err
-	close(done)
-
+	shouldReconnect := a.desiredConnected.Load() && !a.isShuttingDown()
+	reason := "VPN-процесс завершился неожиданно"
+	if err != nil {
+		reason = fmt.Sprintf("VPN-процесс завершился с ошибкой: %v", err)
+	}
 	a.mu.Unlock()
+	if shouldReconnect {
+		a.hasError.Store(false)
+		a.writeLog("[Reconnect] " + reason)
+		a.AddToLogBuffer("Соединение прервано. dropo выполняет переподключение.")
+		a.scheduleVPNReconnect(reason)
+	}
+	a.invalidateRouteStrategySession()
 	a.stopNativeWireGuardTunnels()
 	a.stopVPNSourceMonitor()
 	a.stopDiscordRealtimeMonitor()
 	a.stopFreeAccess()
 	a.stopXrayBridge()
 	a.cleanupDropoRuntimeResidue("process exit")
-	a.mu.Lock()
+	if shouldReconnect {
+		a.closeLogFile()
+		return
+	}
 
+	a.mu.Lock()
 	if err != nil {
 		a.hasError.Store(true)
 		a.writeLog(fmt.Sprintf("VPN process exited with error: %v", err))
@@ -1023,7 +1265,7 @@ func (a *App) monitorSingBoxProcess(cmd *exec.Cmd, done chan error) {
 	a.closeLogFile()
 	a.mu.Unlock()
 	if a.ctx != nil {
-		a.emitEvent("vpn-status-changed", false)
+		a.emitVPNLifecycleState(map[bool]string{true: "failed", false: "stopped"}[err != nil], a.reconnectGeneration.Load(), 0, "")
 	}
 }
 
@@ -1052,6 +1294,9 @@ func (a *App) ensureActiveConfigForStart() error {
 		return fmt.Errorf("active profile not found")
 	}
 	appSettings := a.storage.GetAppSettings()
+	if NormalizeRoutingMode(appSettings.RoutingMode) == RoutingModeAllTraffic && !hasConfiguredVPNSource(profile) {
+		return fmt.Errorf("для режима «Всё через VPN» добавьте и включите VPN-подписку или ключ в активном профиле")
+	}
 
 	// The subscription URL can live on the profile OR in global settings
 	// (SetVPNSubscription / GenerateAndSaveConfig write settings.SubscriptionURL).
@@ -1092,6 +1337,10 @@ func (a *App) ensureActiveConfigForStart() error {
 			a.writeLog("Active config predates latency-sensitive game direct routing; rebuilding before start")
 			needsRebuild = true
 		}
+		if !needsRebuild && configNeedsAllTrafficTunnelMigration(config, appSettings.RoutingMode) {
+			a.writeLog("Active config predates full-tunnel selector/DNS isolation; rebuilding before start")
+			needsRebuild = true
+		}
 		if !needsRebuild && subscriptionURL != "" {
 			if path := a.storage.ActiveConfigFilePath(); path != "" {
 				if hasVPN, verr := configHasVPNProbeCandidates(path); verr == nil && !hasVPN {
@@ -1114,6 +1363,50 @@ func (a *App) ensureActiveConfigForStart() error {
 
 	a.writeLog("Active profile has no generated config, building it before start")
 	return a.configBuilder.BuildConfigForProfile(profile.ID, subscriptionURL, profile.WireGuardConfigs)
+}
+
+func configNeedsAllTrafficTunnelMigration(config map[string]interface{}, mode RoutingMode) bool {
+	if NormalizeRoutingMode(mode) != RoutingModeAllTraffic {
+		return false
+	}
+	outbounds, _ := config["outbounds"].([]interface{})
+	selector := configOutboundByTag(outbounds, "proxy")
+	if selector == nil || stringSliceContains(interfaceStringSlice(selector["outbounds"]), "direct") {
+		return true
+	}
+	dns, _ := config["dns"].(map[string]interface{})
+	if dns == nil || dns["final"] != "dns-remote" {
+		return true
+	}
+	remoteDNS := false
+	if servers, ok := dns["servers"].([]interface{}); ok {
+		for _, raw := range servers {
+			server, _ := raw.(map[string]interface{})
+			if server["tag"] == "dns-remote" {
+				remoteDNS = server["type"] == "https" && server["detour"] == "proxy"
+				break
+			}
+		}
+	}
+	if !remoteDNS {
+		return true
+	}
+	if rules, ok := dns["rules"].([]interface{}); ok {
+		for _, raw := range rules {
+			rule, _ := raw.(map[string]interface{})
+			if rule["server"] == "dns-direct" {
+				return true
+			}
+		}
+	}
+	route, _ := config["route"].(map[string]interface{})
+	resolver, _ := route["default_domain_resolver"].(map[string]interface{})
+	if resolver["server"] != "dns-direct" {
+		return true
+	}
+	experimental, _ := config["experimental"].(map[string]interface{})
+	cacheFile, _ := experimental["cache_file"].(map[string]interface{})
+	return cacheFile["path"] != "cache-all-traffic.db"
 }
 
 // configSupportsDiscordRealtimeRouting is the structural migration gate for
@@ -1443,8 +1736,66 @@ func (a *App) logOutput(reader io.Reader, prefix string) {
 	}
 }
 
-// Stop stops VPN
+// Stop clears the user's connected intent before waiting for an in-flight
+// Start. This guarantees that a timed-out or stale start cannot resurrect the
+// session after an explicit disconnect.
 func (a *App) Stop() map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": true, "running": false}
+	}
+	a.vpnIntentMu.Lock()
+	intentGeneration := a.vpnIntentGeneration.Add(1)
+	a.desiredConnected.Store(false)
+	a.vpnIntentMu.Unlock()
+	a.cancelVPNReconnect(false)
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	if a.vpnIntentGeneration.Load() != intentGeneration || a.desiredConnected.Load() {
+		return map[string]interface{}{
+			"success":    true,
+			"superseded": true,
+			"running":    a.isVPNRunning(),
+		}
+	}
+	a.emitVPNLifecycleState("disconnecting", a.reconnectGeneration.Load(), 0, "Отключаем VPN")
+	return a.stopVPN(false)
+}
+
+// stopVPNForReconnect tears down one session without changing the persisted
+// restore flag or the user's connected intent. The caller must hold
+// vpnLifecycleMu for the complete config transaction, including rollback.
+func (a *App) stopVPNForReconnect() map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": false, "error": "VPN application is not initialized"}
+	}
+	generation := a.reconnectGeneration.Load()
+	result := a.stopVPN(true)
+	result["generation"] = generation
+	result["protectionHeld"] = false
+	return result
+}
+
+// startVPNForReconnect starts one internal transition without creating a new
+// user intent. The caller must hold vpnLifecycleMu; a manual Stop records its
+// intent before waiting for that lock, so it still cancels this restart.
+func (a *App) startVPNForReconnect() map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": false, "error": "VPN application is not initialized"}
+	}
+	generation := a.reconnectGeneration.Load()
+	expectedIntent := a.vpnIntentGeneration.Load()
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return map[string]interface{}{"success": false, "cancelled": true, "error": "Переподключение отменено"}
+	}
+	result := a.startVPN(expectedIntent)
+	result["generation"] = generation
+	result["protectionHeld"] = false
+	return result
+}
+
+// stopVPN performs one serialized stop. preserveIntent is true only for a
+// transactional reconnect and keeps RestoreVPNOnStartup unchanged.
+func (a *App) stopVPN(preserveIntent bool) map[string]interface{} {
 	busyID := a.beginBusyTagged("vpn-disconnect", "Отключаем VPN...")
 	defer a.endBusy(busyID)
 
@@ -1453,7 +1804,7 @@ func (a *App) Stop() map[string]interface{} {
 	a.invalidateRouteStrategySession()
 
 	a.writeLog("VPN stop requested")
-	manualStop := !a.isShuttingDown()
+	manualStop := !preserveIntent && !a.isShuttingDown()
 	if manualStop {
 		a.setRestoreVPNOnStartup(false)
 	}
@@ -1485,9 +1836,13 @@ func (a *App) Stop() map[string]interface{} {
 		a.writeLog("VPN stopped successfully")
 		a.closeLogFile()
 		UpdateTrayIcon("disconnected")
-		if a.ctx != nil {
-			a.emitEvent("vpn-status-changed", false)
+		state := "stopped"
+		message := "VPN остановлен"
+		if preserveIntent {
+			state = "reconnecting"
+			message = "Применяем изменения перед повторным запуском"
 		}
+		a.emitVPNLifecycleState(state, a.reconnectGeneration.Load(), 0, message)
 		return map[string]interface{}{
 			"success": true,
 		}
@@ -1554,9 +1909,13 @@ func (a *App) Stop() map[string]interface{} {
 	a.mu.Unlock()
 	UpdateTrayIcon("disconnected")
 	a.closeLogFile()
-	if a.ctx != nil {
-		a.emitEvent("vpn-status-changed", false)
+	state := "stopped"
+	message := "VPN остановлен"
+	if preserveIntent {
+		state = "reconnecting"
+		message = "Применяем изменения перед повторным запуском"
 	}
+	a.emitVPNLifecycleState(state, a.reconnectGeneration.Load(), 0, message)
 
 	return map[string]interface{}{
 		"success": true,
@@ -1982,7 +2341,6 @@ func (a *App) startFreeAccess(activeConfig map[string]interface{}) []string {
 	}
 	if runtime.GOOS == "windows" {
 		a.writeLog("[FreeAccess] Windows Unified uses the native in-process traffic engine; legacy proxy helpers are disabled")
-		a.startTelegramProxyIfNeeded(activeConfig)
 		return activeTags
 	}
 	if a.freeProxySidecarsCapturedByActiveNetwork(activeConfig) {
@@ -2060,6 +2418,15 @@ func resolveTelegramTransport(settings GlobalAppSettings, hasVPN bool) string {
 // The tg://proxy link is offered at most once per VPN session. Telegram exposes
 // no API to inspect or remove saved proxies, so repeated prompts are intrusive.
 func (a *App) startTelegramProxyIfNeeded(activeConfig map[string]interface{}) {
+	// Windows routes Telegram with the ordinary Direct/VPN service policy.
+	// Never start the legacy MTProto sidecar or open tg://proxy there: the
+	// external proxy UI and repeated deep-link prompts interfere with Telegram.
+	if runtime.GOOS == "windows" {
+		if a.tgwsproxy != nil {
+			a.tgwsproxy.Stop()
+		}
+		return
+	}
 	if a.tgwsproxy == nil || !a.tgwsproxy.IsInstalled() {
 		return
 	}
@@ -2184,6 +2551,15 @@ func (a *App) TelegramProxyStatus() TelegramProxyStatusInfo {
 	if a.storage != nil {
 		info.Injected = a.storage.GetAppSettings().TelegramProxyInjected
 	}
+	if runtime.GOOS == "windows" {
+		// Current Windows builds never create or launch the legacy sidecar. A
+		// persisted flag therefore means an older build may have left Telegram
+		// Desktop pointed at its localhost proxy. Keep this as an explicit,
+		// user-driven migration: report the action, but never open Telegram or
+		// alter Telegram's own settings automatically.
+		info.RecommendRemove = info.Injected
+		return info
+	}
 	if a.tgwsproxy != nil {
 		if link, ok := a.tgwsproxy.TelegramProxyLink(); ok {
 			info.ProxyLink = link
@@ -2201,29 +2577,44 @@ func (a *App) TelegramProxyStatus() TelegramProxyStatusInfo {
 	return info
 }
 
-// OpenTelegramProxySettings opens Telegram's settings deep link so the user can
-// delete the local proxy. Auto-removal is impossible; this is a best-effort
-// shortcut to the right screen.
-func (a *App) OpenTelegramProxySettings() {
+// OpenTelegramProxySettings opens Telegram's settings only after an explicit UI
+// action. Dropo never edits or deletes Telegram's own settings.
+func (a *App) OpenTelegramProxySettings() map[string]interface{} {
 	if err := openExternalURL("tg://settings"); err != nil {
 		a.writeLog(fmt.Sprintf("[Telegram] could not open Telegram settings: %v", err))
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("не удалось открыть настройки Telegram: %v", err),
+		}
 	}
+	return map[string]interface{}{"success": true}
 }
 
 // AcknowledgeTelegramProxyRemoved clears the injected flag after the user has
 // removed the proxy inside Telegram, so the cleanup hint stops appearing.
-func (a *App) AcknowledgeTelegramProxyRemoved() {
+func (a *App) AcknowledgeTelegramProxyRemoved() map[string]interface{} {
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
 	if a.storage == nil {
-		return
+		return map[string]interface{}{
+			"success": false,
+			"error":   "хранилище настроек не инициализировано",
+		}
 	}
 	settings := a.storage.GetAppSettings()
 	if !settings.TelegramProxyInjected {
-		return
+		return map[string]interface{}{"success": true, "unchanged": true}
 	}
 	settings.TelegramProxyInjected = false
 	if err := a.storage.UpdateAppSettings(settings); err != nil {
 		a.writeLog(fmt.Sprintf("[Telegram] failed to clear proxy-injected flag: %v", err))
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("не удалось сохранить подтверждение: %v", err),
+		}
 	}
+	a.writeLog("[Telegram] legacy proxy cleanup acknowledged by user")
+	return map[string]interface{}{"success": true}
 }
 
 func liveFreeAccessProxyTags(tags []string) []string {

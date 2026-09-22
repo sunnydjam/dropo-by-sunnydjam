@@ -63,6 +63,43 @@ func newVPNSource(id, name, uri string) (VPNSource, error) {
 	return VPNSource{ID: id, Name: name, Kind: kind, URI: uri}, nil
 }
 
+// hasConfiguredVPNSource checks whether the active profile can produce a VPN
+// outbound without making a network request. A subscription's actual nodes are
+// still validated by the config builder; this guard prevents full-tunnel mode
+// from silently using its direct-only fallback when no source is configured.
+func hasConfiguredVPNSource(profile *ProfileData) bool {
+	if profile == nil {
+		return false
+	}
+	sources := profile.VPNSources
+	if len(sources) == 0 && strings.TrimSpace(profile.SubscriptionURL) != "" {
+		sources = []VPNSource{{ID: "legacy", URI: profile.SubscriptionURL}}
+	}
+	for _, source := range sources {
+		if source.Disabled {
+			continue
+		}
+		uri := strings.TrimSpace(source.URI)
+		if uri == "" {
+			continue
+		}
+		if isDirectProxyLink(uri) {
+			proxy, err := (&SubscriptionFetcher{}).ParseSingleLink(uri)
+			if err == nil && proxy.Server != "" && proxy.ServerPort > 0 && proxy.ServerPort <= 65535 {
+				split := SplitProxyConfigs([]ProxyConfig{proxy})
+				if len(split.SingBox)+len(split.XrayBridge) > 0 {
+					return true
+				}
+			}
+			continue
+		}
+		if validateSubscriptionURL(uri) == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeVPNSourceID(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	var builder strings.Builder

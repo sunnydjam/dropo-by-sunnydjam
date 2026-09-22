@@ -1,7 +1,9 @@
 package main
 
 import (
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -137,6 +139,23 @@ func TestSettingsAPIsMigrateLegacyRoutingAndPersistNetworkMode(t *testing.T) {
 
 func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
+	if result := app.SetRoutingMode(string(RoutingModeAllTraffic)); result["success"] != false {
+		t.Fatalf("full VPN without a source unexpectedly succeeded: %+v", result)
+	}
+	if got := app.storage.GetAppSettings().RoutingMode; got != RoutingModeBlockedOnly {
+		t.Fatalf("rejected full VPN persisted routing mode %q", got)
+	}
+	profile, err := app.storage.GetActiveProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := newVPNSource("source-1", "Test VPN", "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.storage.UpdateProfileVPNSources(profile.ID, []VPNSource{source}, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	result := app.SetRoutingMode(string(RoutingModeAllTraffic))
 	requireAPISuccess(t, result)
@@ -149,6 +168,262 @@ func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
 	}
 	if app.configBuilder.GetRoutingMode() != RoutingModeAllTraffic {
 		t.Fatalf("builder routing mode = %q, want all_traffic", app.configBuilder.GetRoutingMode())
+	}
+	config, err := app.storage.GetProfileConfig(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbounds, _ := config["outbounds"].([]interface{})
+	selector := configOutboundByTag(outbounds, "proxy")
+	if selector == nil {
+		t.Fatal("full VPN config has no proxy selector")
+	}
+	choices := interfaceStringSlice(selector["outbounds"])
+	if stringSliceContains(choices, "direct") || !stringSliceContains(choices, "auto-select") {
+		t.Fatalf("full VPN selector choices = %v, want VPN sources without direct", choices)
+	}
+	dns, _ := config["dns"].(map[string]interface{})
+	if dns["final"] != "dns-remote" {
+		t.Fatalf("full VPN DNS final = %v, want dns-remote", dns["final"])
+	}
+	remoteDNSFound := false
+	for _, raw := range dns["servers"].([]interface{}) {
+		server, _ := raw.(map[string]interface{})
+		if server["tag"] == "dns-remote" {
+			remoteDNSFound = true
+			if server["type"] != "https" || server["detour"] != "proxy" {
+				t.Fatalf("full VPN remote DNS does not use proxy DoH: %#v", server)
+			}
+		}
+	}
+	if !remoteDNSFound {
+		t.Fatal("full VPN remote DNS server is missing")
+	}
+	for _, raw := range dns["rules"].([]interface{}) {
+		rule, _ := raw.(map[string]interface{})
+		if rule["server"] == "dns-direct" {
+			t.Fatalf("full VPN DNS has a direct domain rule: %#v", rule)
+		}
+	}
+	route, _ := config["route"].(map[string]interface{})
+	bootstrap, _ := route["default_domain_resolver"].(map[string]interface{})
+	if bootstrap["server"] != "dns-direct" {
+		t.Fatalf("VPN endpoint bootstrap DNS = %v, want dns-direct", bootstrap)
+	}
+	experimental, _ := config["experimental"].(map[string]interface{})
+	cacheFile, _ := experimental["cache_file"].(map[string]interface{})
+	if cacheFile["path"] != "cache-all-traffic.db" {
+		t.Fatalf("full VPN cache path = %v, want isolated selector cache", cacheFile["path"])
+	}
+	if configNeedsAllTrafficTunnelMigration(config, RoutingModeAllTraffic) {
+		t.Fatal("new full VPN config was classified as stale")
+	}
+	selector["outbounds"] = append(choices, "direct")
+	if !configNeedsAllTrafficTunnelMigration(config, RoutingModeAllTraffic) {
+		t.Fatal("cached direct selector choice was not classified as stale")
+	}
+	if err := app.storage.UpdateProfileConfig(profile.ID, config); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.ensureActiveConfigForStart(); err != nil {
+		t.Fatalf("rebuild stale full VPN config: %v", err)
+	}
+	rebuilt, err := app.storage.GetProfileConfig(profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configNeedsAllTrafficTunnelMigration(rebuilt, RoutingModeAllTraffic) {
+		t.Fatal("Start retained a cached direct choice in full VPN config")
+	}
+}
+
+func TestFullVPNRequiresEnabledSupportedSource(t *testing.T) {
+	valid := "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#test"
+	cases := []struct {
+		name      string
+		sources   []VPNSource
+		legacyURL string
+		want      bool
+	}{
+		{name: "none"},
+		{name: "disabled", sources: []VPNSource{{URI: valid, Disabled: true}}},
+		{name: "invalid direct link", sources: []VPNSource{{URI: "vless://invalid"}}},
+		{name: "unsupported transport", sources: []VPNSource{{URI: "vless://00000000-0000-0000-0000-000000000000@example.com:443?type=kcp#test"}}},
+		{name: "valid direct link", sources: []VPNSource{{URI: valid}}, want: true},
+		{name: "valid subscription", sources: []VPNSource{{URI: "https://example.com/sub"}}, want: true},
+		{name: "legacy subscription field", legacyURL: "https://example.com/sub", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasConfiguredVPNSource(&ProfileData{VPNSources: tc.sources, SubscriptionURL: tc.legacyURL}); got != tc.want {
+				t.Fatalf("configured VPN source = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPersistedFullVPNWithoutSourceCannotStartOrBuildDirectFallback(t *testing.T) {
+	app := newInitializedSettingsScenarioApp(t)
+	settings := app.storage.GetAppSettings()
+	settings.RoutingMode = RoutingModeAllTraffic
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.ensureActiveConfigForStart(); err == nil || !strings.Contains(err.Error(), "VPN-подписку") {
+		t.Fatalf("cached config bypassed full VPN source gate: %v", err)
+	}
+	app.configBuilder.SetRoutingMode(RoutingModeAllTraffic)
+	if err := app.configBuilder.BuildConfig(""); err == nil || !strings.Contains(err.Error(), "VPN-источник") {
+		t.Fatalf("builder accepted direct-only full VPN: %v", err)
+	}
+}
+
+func TestAllTrafficDNSPreservesWorkNetworkResolver(t *testing.T) {
+	template := map[string]interface{}{
+		"dns": map[string]interface{}{
+			"servers": []interface{}{
+				map[string]interface{}{"type": "udp", "tag": "dns-remote", "server": "8.8.8.8"},
+				map[string]interface{}{"type": "udp", "tag": "dns-direct", "server": "77.88.8.8"},
+				map[string]interface{}{"type": "udp", "tag": "wg-dns", "server": "10.0.0.53"},
+			},
+			"rules": []interface{}{
+				map[string]interface{}{"domain_suffix": []string{"corp.example"}, "server": "wg-dns"},
+				map[string]interface{}{"domain_suffix": []string{"ru"}, "server": "dns-direct"},
+			},
+		},
+		"route": map[string]interface{}{},
+	}
+	builder := &ConfigBuilderForStorage{routingMode: RoutingModeAllTraffic}
+	builder.applyDNSRouting(template, GlobalAppSettings{}, true)
+	dns := template["dns"].(map[string]interface{})
+	rules := dns["rules"].([]interface{})
+	if len(rules) != 2 || rules[0].(map[string]interface{})["server"] != "wg-dns" || rules[1].(map[string]interface{})["server"] != "dns-local" {
+		t.Fatalf("full VPN DNS work/local exceptions = %#v", rules)
+	}
+}
+
+func TestGeneratedRoutingPreservesWireGuardOverlayAcrossModes(t *testing.T) {
+	modes := []RoutingMode{RoutingModeBlockedOnly, RoutingModeExceptRussia, RoutingModeAllTraffic}
+	for _, mode := range modes {
+		t.Run(string(mode), func(t *testing.T) {
+			app := newInitializedSettingsScenarioApp(t)
+			profile, err := app.storage.GetActiveProfile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := newVPNSource("source-1", "Test VPN", "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			workNetwork := UserWireGuardConfig{
+				Tag:               "work",
+				DNS:               "10.60.0.53",
+				AllowedIPs:        []string{"198.51.100.0/24", "10.60.0.0/16"},
+				Endpoint:          "wg.corp.example",
+				EndpointPort:      51820,
+				CamouflageEnabled: true,
+			}
+			if err := app.storage.UpdateProfileVPNSources(profile.ID, []VPNSource{source}, []UserWireGuardConfig{workNetwork}); err != nil {
+				t.Fatal(err)
+			}
+			settings := app.storage.GetAppSettings()
+			settings.RoutingMode = mode
+			if err := app.storage.UpdateAppSettings(settings); err != nil {
+				t.Fatal(err)
+			}
+			app.configBuilder.SetRoutingMode(mode)
+			if err := app.configBuilder.BuildConfigForProfileSources(profile.ID, []VPNSource{source}, []UserWireGuardConfig{workNetwork}); err != nil {
+				t.Fatalf("build %s config: %v", mode, err)
+			}
+
+			config, err := app.storage.GetProfileConfig(profile.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			route, _ := config["route"].(map[string]interface{})
+			rules, _ := route["rules"].([]interface{})
+			workRuleIndex := -1
+			privateRuleIndex := -1
+			for index, raw := range rules {
+				rule, _ := raw.(map[string]interface{})
+				cidrs := interfaceStringSlice(rule["ip_cidr"])
+				if rule["outbound"] == "direct" && stringSliceContains(cidrs, "198.51.100.0/24") && stringSliceContains(cidrs, "10.60.0.0/16") {
+					workRuleIndex = index
+				}
+				if private, _ := rule["ip_is_private"].(bool); private {
+					privateRuleIndex = index
+				}
+			}
+			if workRuleIndex < 0 {
+				t.Fatalf("%s config lost the WireGuard public/private AllowedIPs rule: %#v", mode, rules)
+			}
+			if privateRuleIndex < 0 || workRuleIndex >= privateRuleIndex {
+				t.Fatalf("%s WireGuard rule index = %d, generic private rule index = %d; work overlay must win", mode, workRuleIndex, privateRuleIndex)
+			}
+			if mode == RoutingModeAllTraffic && route["final"] != "proxy" {
+				t.Fatalf("all-traffic final = %v, want proxy after the work-network exception", route["final"])
+			}
+
+			dns, _ := config["dns"].(map[string]interface{})
+			workDNSFound := false
+			for _, raw := range dns["servers"].([]interface{}) {
+				server, _ := raw.(map[string]interface{})
+				if server["tag"] == "dns-work" && server["server"] == workNetwork.DNS {
+					workDNSFound = true
+					break
+				}
+			}
+			if !workDNSFound {
+				t.Fatalf("%s config lost the WireGuard DNS server", mode)
+			}
+			workDNSRuleFound := false
+			for _, raw := range dns["rules"].([]interface{}) {
+				rule, _ := raw.(map[string]interface{})
+				if rule["server"] == "dns-work" && stringSliceContains(interfaceStringSlice(rule["domain_suffix"]), "corp.example") {
+					workDNSRuleFound = true
+					break
+				}
+			}
+			if !workDNSRuleFound {
+				t.Fatalf("%s config lost the WireGuard DNS rule", mode)
+			}
+			if runtime.GOOS == "windows" && !app.wireGuardCamouflageRequested() {
+				t.Fatalf("%s config update lost the WireGuard camouflage request", mode)
+			}
+		})
+	}
+}
+
+func TestFullVPNGeneratedConfigPassesBundledSingBoxCheck(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("bundled sing-box check uses the Windows binary")
+	}
+	matches, err := filepath.Glob(filepath.Join("..", "dependencies", "sing-box-v1.13.14", "windows-amd64", "sing-box-*", "sing-box.exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Skip("bundled sing-box 1.13.14 is absent")
+	}
+	app := newInitializedSettingsScenarioApp(t)
+	profile, err := app.storage.GetActiveProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := newVPNSource("source-1", "Offline fixture", "vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=tls#offline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.storage.UpdateProfileVPNSources(profile.ID, []VPNSource{source}, nil); err != nil {
+		t.Fatal(err)
+	}
+	requireAPISuccess(t, app.SetRoutingMode(string(RoutingModeAllTraffic)))
+	configPath, err := app.storage.WriteActiveConfigToFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := newBackgroundCommand(matches[0], "check", "-c", configPath).CombinedOutput(); err != nil {
+		t.Fatalf("sing-box 1.13.14 rejected generated full-VPN config: %v\n%s", err, output)
 	}
 }
 

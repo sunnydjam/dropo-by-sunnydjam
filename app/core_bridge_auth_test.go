@@ -218,6 +218,7 @@ func TestBridgeCallAllowlistRejectsExportedMaintenanceMethods(t *testing.T) {
 		"GetVPNSources", "AddVPNSource", "RemoveVPNSource", "RefreshVPNSources",
 		"SetVPNSourceEnabled", "SetVPNSourceNode", "MoveVPNSource",
 		"SetFreeAccessServiceMethod", "SetZapretServiceStrategy", "SetHomeRouteServiceVisible",
+		"TelegramProxyStatus", "OpenTelegramProxySettings", "AcknowledgeTelegramProxyRemoved",
 	} {
 		if _, ok := bridgeCallableMethods[method]; !ok {
 			t.Fatalf("%s must be available to the trusted Flutter UI", method)

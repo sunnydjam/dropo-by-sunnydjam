@@ -50,6 +50,7 @@ type discordRealtimeController struct {
 	mu sync.Mutex
 
 	cancel             context.CancelFunc
+	session            uint64
 	running            bool
 	automatic          bool
 	vpnFallbackAllowed bool
@@ -187,6 +188,8 @@ func newDiscordRealtimeController() *discordRealtimeController {
 }
 
 func (c *discordRealtimeController) resetLocked() {
+	c.session = 0
+	c.running = false
 	c.profileIndex = 0
 	c.attempt = 1
 	c.fallbackVPN = false
@@ -205,6 +208,15 @@ func (c *discordRealtimeController) resetLocked() {
 	c.learnedUDPPorts = make(map[int]time.Time)
 	c.learnedUDPIPs = make(map[string]time.Time)
 	c.flows = make(map[string]*discordRealtimeFlow)
+}
+
+func (c *discordRealtimeController) ownsSession(session uint64) bool {
+	if c == nil || session == 0 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.running && c.session == session
 }
 
 // resetRouteObservationLocked starts a fresh health window after a selector
@@ -275,19 +287,20 @@ func (a *App) decorateDiscordRealtimeSelection(selection serviceWinwsSelection) 
 }
 
 func (a *App) startDiscordRealtimeMonitor() {
+	a.startDiscordRealtimeMonitorForSession(a.currentRouteStrategySession())
+}
+
+func (a *App) startDiscordRealtimeMonitorForSession(session uint64) {
 	if runtime.GOOS != "windows" || a.discordRealtime == nil || a.storage == nil {
 		return
 	}
-	controller := a.discordRealtime
-	controller.mu.Lock()
-	if controller.cancel != nil {
-		controller.cancel()
+	if !a.routeStrategySessionActive(session) {
+		return
 	}
+	controller := a.discordRealtime
 	settings := a.storage.GetAppSettings()
 	method := FreeAccessServiceMethod(settings, "discord")
-	ctx, cancel := context.WithCancel(context.Background())
-	controller.cancel = cancel
-	controller.running = true
+	controller.mu.Lock()
 	automatic := controller.automatic
 	controller.mu.Unlock()
 
@@ -301,14 +314,33 @@ func (a *App) startDiscordRealtimeMonitor() {
 	if preferVPN {
 		target = discordVPNGroupTag
 	}
-	selected := a.switchOutboundSelector(discordRealtimeGroupTag, target)
-	if !selected && target == discordVPNGroupTag {
-		target = "direct"
+	ctx, cancel := context.WithCancel(context.Background())
+	selected := false
+	if err := a.commitRouteStrategySession(session, func() error {
+		controller.mu.Lock()
+		if controller.cancel != nil {
+			controller.cancel()
+		}
+		controller.cancel = cancel
+		controller.session = session
+		controller.running = true
+		controller.mu.Unlock()
 		selected = a.switchOutboundSelector(discordRealtimeGroupTag, target)
+		if !selected && target == discordVPNGroupTag {
+			target = "direct"
+			selected = a.switchOutboundSelector(discordRealtimeGroupTag, target)
+		}
+		controller.mu.Lock()
+		controller.fallbackVPN = selected && target == discordVPNGroupTag
+		controller.mu.Unlock()
+		return nil
+	}); err != nil {
+		cancel()
+		return
 	}
-	controller.mu.Lock()
-	controller.fallbackVPN = selected && target == discordVPNGroupTag
-	controller.mu.Unlock()
+	if !a.discordRealtimeSessionActive(controller, session) {
+		return
+	}
 
 	realtimeCandidates, realtimeCurrent := a.selectorCandidates(discordRealtimeGroupTag)
 	vpnCandidates, vpnCurrent := a.selectorCandidates(discordVPNGroupTag)
@@ -316,9 +348,27 @@ func (a *App) startDiscordRealtimeMonitor() {
 	a.writeLog(fmt.Sprintf("[DiscordRealtime] monitor started: method=%s automatic=%v preferred=%s selected=%s switch_ok=%v profile=%s", method, automatic, map[bool]string{true: "vpn-first", false: "direct"}[preferVPN], realtimeCurrent, selected, profile.Tag))
 	a.writeLog(fmt.Sprintf("[DiscordRealtime][Route] realtime candidates=%v current=%s; vpn candidates=%v current=%s; web/API remains on the Discord service route", realtimeCandidates, realtimeCurrent, vpnCandidates, vpnCurrent))
 	if automatic {
-		a.emitDiscordRealtimeCandidate("Ожидаем реальный двусторонний медиапоток Discord voice")
+		a.emitDiscordRealtimeCandidate(session, "Ожидаем реальный двусторонний медиапоток Discord voice")
 	}
-	go a.runDiscordRealtimeMonitor(ctx, controller)
+	go a.runDiscordRealtimeMonitor(ctx, controller, session)
+}
+
+func (a *App) discordRealtimeSessionActive(controller *discordRealtimeController, session uint64) bool {
+	return a.routeStrategySessionActive(session) && controller.ownsSession(session)
+}
+
+func (a *App) commitDiscordRealtimeSessionAction(session uint64, action func()) bool {
+	if action == nil {
+		return false
+	}
+	err := a.commitRouteStrategySession(session, func() error {
+		if !a.discordRealtime.ownsSession(session) {
+			return errRouteStrategySessionExpired
+		}
+		action()
+		return nil
+	})
+	return err == nil
 }
 
 func discordRealtimeShouldPreferVPN(method string, freeMethodsAllowed, automatic bool, cached serviceStrategyCacheEntry, hasVPN bool) bool {
@@ -363,13 +413,14 @@ func (a *App) stopDiscordRealtimeMonitor() {
 		controller.cancel = nil
 	}
 	controller.running = false
+	controller.session = 0
 	controller.initialBusy = false
 	controller.initialIdle = time.Time{}
 	controller.mu.Unlock()
 	a.endBusy(discordRealtimeBusyID)
 }
 
-func (a *App) runDiscordRealtimeMonitor(ctx context.Context, controller *discordRealtimeController) {
+func (a *App) runDiscordRealtimeMonitor(ctx context.Context, controller *discordRealtimeController, session uint64) {
 	ticker := time.NewTicker(discordRealtimePollInterval)
 	defer ticker.Stop()
 	var fetchFailures int
@@ -380,8 +431,14 @@ func (a *App) runDiscordRealtimeMonitor(ctx context.Context, controller *discord
 			a.writeLog("[DiscordRealtime] monitor stopped")
 			return
 		case <-ticker.C:
+			if !a.discordRealtimeSessionActive(controller, session) {
+				return
+			}
 			now := time.Now()
 			document, err := a.fetchClashConnections()
+			if !a.discordRealtimeSessionActive(controller, session) {
+				return
+			}
 			if err != nil {
 				fetchFailures++
 				if lastFetchErrorLog.IsZero() || now.Sub(lastFetchErrorLog) >= discordRealtimeErrorInterval {
@@ -395,17 +452,22 @@ func (a *App) runDiscordRealtimeMonitor(ctx context.Context, controller *discord
 				fetchFailures = 0
 				lastFetchErrorLog = time.Time{}
 			}
-			actions := controller.observeConnections(document.Connections, now)
+			actions := controller.observeConnections(document.Connections, now, session)
 			learnedTCP := make(map[int]struct{})
 			learnedUDP := make(map[int]struct{})
 			learnedIPs := make(map[string]struct{})
 			for _, action := range actions {
+				if !a.discordRealtimeSessionActive(controller, session) {
+					return
+				}
 				if action.started {
-					if controller.usingVPN() {
-						a.updateBusy(discordRealtimeBusyID, "Проверяем Discord voice/video/Go Live через VPN...")
-					} else {
-						a.updateBusy(discordRealtimeBusyID, "Проверяем Discord voice/video/Go Live через локальную стратегию...")
-					}
+					a.commitDiscordRealtimeSessionAction(session, func() {
+						if controller.usingVPN() {
+							a.updateBusy(discordRealtimeBusyID, "Проверяем Discord voice/video/Go Live через VPN...")
+						} else {
+							a.updateBusy(discordRealtimeBusyID, "Проверяем Discord voice/video/Go Live через локальную стратегию...")
+						}
+					})
 				}
 				if action.learnedPort > 0 {
 					learnedTCP[action.learnedPort] = struct{}{}
@@ -421,23 +483,26 @@ func (a *App) runDiscordRealtimeMonitor(ctx context.Context, controller *discord
 				a.handleDiscordLearnedMedia(learnedTCP, learnedUDP, learnedIPs)
 			}
 			for _, action := range actions {
+				if !a.discordRealtimeSessionActive(controller, session) {
+					return
+				}
 				if action.healthy {
-					a.commitDiscordRealtimeHealthyStrategy()
+					a.commitDiscordRealtimeHealthyStrategy(session)
 					a.writeLog(fmt.Sprintf("[DiscordRealtime] sustained bidirectional Discord media confirmed (upload=%d, download=%d, inbound_polls=%d); keeping the selected strategy", action.mediaUpload, action.mediaDownload, action.inboundPolls))
-					a.endBusy(discordRealtimeBusyID)
+					a.commitDiscordRealtimeSessionAction(session, func() { a.endBusy(discordRealtimeBusyID) })
 				}
 				if action.cancelled {
 					a.writeLog("[DiscordRealtime] initial voice check ended because Discord no longer has an active UDP flow")
-					a.endBusy(discordRealtimeBusyID)
+					a.commitDiscordRealtimeSessionAction(session, func() { a.endBusy(discordRealtimeBusyID) })
 				}
 				if action.failure != "" {
-					a.handleDiscordRealtimeFailure(action.failure)
+					a.handleDiscordRealtimeFailure(session, action.failure)
 				}
 				if action.suppressed != "" {
 					a.writeLog("[DiscordRealtime][Health] ignored isolated flow failure while another established Discord UDP flow remained active: " + action.suppressed)
 				}
 			}
-			diagnostic, summaryDue := controller.collectDiagnostics(now)
+			diagnostic, summaryDue := controller.collectDiagnostics(now, session)
 			for _, flow := range diagnostic.NewFlows {
 				a.writeLog(formatDiscordFlowDiagnostic("opened", flow))
 			}
@@ -448,12 +513,15 @@ func (a *App) runDiscordRealtimeMonitor(ctx context.Context, controller *discord
 	}
 }
 
-func (c *discordRealtimeController) collectDiagnostics(now time.Time) (discordRealtimeDiagnostic, bool) {
+func (c *discordRealtimeController) collectDiagnostics(now time.Time, session ...uint64) (discordRealtimeDiagnostic, bool) {
 	if c == nil {
 		return discordRealtimeDiagnostic{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if len(session) > 0 && (session[0] == 0 || c.session != session[0]) {
+		return discordRealtimeDiagnostic{}, false
+	}
 	profile, ok := discordRealtimeProfileAt(c.profileIndex)
 	if !ok {
 		profile = defaultDiscordRealtimeProfile()
@@ -650,10 +718,10 @@ func (a *App) fetchClashConnections() (clashConnectionsDocument, error) {
 	return document, nil
 }
 
-func (c *discordRealtimeController) observeConnections(connections []clashConnection, now time.Time) []discordRealtimeAction {
+func (c *discordRealtimeController) observeConnections(connections []clashConnection, now time.Time, session ...uint64) []discordRealtimeAction {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.running {
+	if !c.running || (len(session) > 0 && (session[0] == 0 || c.session != session[0])) {
 		return nil
 	}
 	actions := make([]discordRealtimeAction, 0, 2)
@@ -1072,43 +1140,72 @@ func sortedStringSet(values map[string]struct{}) []string {
 	return result
 }
 
-func (a *App) handleDiscordRealtimeFailure(reason string) {
+func (a *App) handleDiscordRealtimeFailure(session uint64, reason string) {
 	controller := a.discordRealtime
-	if controller == nil {
-		return
-	}
-	controller.mu.Lock()
-	if !controller.running || time.Since(controller.lastSwitch) < discordRealtimeSwitchCooldown {
-		controller.mu.Unlock()
-		return
-	}
-	if controller.fallbackVPN {
-		controller.lastSwitch = time.Now()
-		initialBusy := controller.initialBusy
-		controller.mu.Unlock()
-		if initialBusy {
-			a.updateBusy(discordRealtimeBusyID, "Проверяем Discord voice через VPN...")
+	const (
+		discordFailureIgnored = iota
+		discordFailureManual
+		discordFailureRotateVPN
+		discordFailureRotateLocal
+	)
+	action := discordFailureIgnored
+	initialBusy := false
+	if err := a.commitRouteStrategySession(session, func() error {
+		if !controller.ownsSession(session) {
+			return errRouteStrategySessionExpired
 		}
-		a.rotateDiscordVPNSource(reason)
-		return
-	}
-	if !controller.automatic {
-		controller.initialBusy = false
-		controller.initialReady = true
-		controller.initialIdle = time.Time{}
+		controller.mu.Lock()
+		if controller.session != session || !controller.running || time.Since(controller.lastSwitch) < discordRealtimeSwitchCooldown {
+			controller.mu.Unlock()
+			return nil
+		}
+		if controller.fallbackVPN {
+			controller.lastSwitch = time.Now()
+			initialBusy = controller.initialBusy
+			controller.mu.Unlock()
+			action = discordFailureRotateVPN
+			return nil
+		}
+		if !controller.automatic {
+			controller.initialBusy = false
+			controller.initialReady = true
+			controller.initialIdle = time.Time{}
+			controller.mu.Unlock()
+			action = discordFailureManual
+			return nil
+		}
+		controller.lastSwitch = time.Now()
 		controller.mu.Unlock()
-		a.endBusy(discordRealtimeBusyID)
-		a.writeLog("[DiscordRealtime] failure detected but automatic routing is disabled: " + reason)
+		a.removeServiceStrategyCacheEntry("discord")
+		action = discordFailureRotateLocal
+		return nil
+	}); err != nil {
 		return
 	}
-	controller.lastSwitch = time.Now()
-	controller.mu.Unlock()
-	a.removeServiceStrategyCacheEntry("discord")
-	a.emitDiscordRealtimeService(false, false, true, reason)
-	if a.rotateDiscordLocalStrategy(reason) {
+	switch action {
+	case discordFailureManual:
+		a.commitDiscordRealtimeSessionAction(session, func() {
+			a.endBusy(discordRealtimeBusyID)
+			a.writeLog("[DiscordRealtime] failure detected but automatic routing is disabled: " + reason)
+		})
+		return
+	case discordFailureRotateVPN:
+		if initialBusy {
+			a.commitDiscordRealtimeSessionAction(session, func() {
+				a.updateBusy(discordRealtimeBusyID, "Проверяем Discord voice через VPN...")
+			})
+		}
+		a.rotateDiscordVPNSource(session, reason)
+		return
+	case discordFailureRotateLocal:
+	default:
 		return
 	}
-	a.activateDiscordRealtimeFallback(reason)
+	a.emitDiscordRealtimeService(session, false, false, true, reason)
+	if a.rotateDiscordLocalStrategy(session, reason) {
+		return
+	}
+	a.activateDiscordRealtimeFallback(session, reason)
 }
 
 func discordLocalStrategyCount() int {
@@ -1145,100 +1242,141 @@ func (a *App) seedDiscordRealtimeStrategyAttempts(ladder []ServiceBypassMethod, 
 	}
 }
 
-func (a *App) rotateDiscordLocalStrategy(reason string) bool {
-	if a == nil || a.trafficEngine == nil || a.discordRealtime == nil {
+func (a *App) rotateDiscordLocalStrategy(session uint64, reason string) bool {
+	if a == nil || a.trafficEngine == nil || !a.discordRealtimeSessionActive(a.discordRealtime, session) {
 		return false
 	}
 	if !a.tryBeginRouteProbeDiscovery() {
-		a.scheduleDiscordRealtimeFailureRetry(reason)
+		a.scheduleDiscordRealtimeFailureRetry(session, reason)
 		return true
 	}
 	defer a.finishRouteProbeDiscovery()
-	a.serviceEngineComposeMu.Lock()
-	defer a.serviceEngineComposeMu.Unlock()
 	for {
-		plan := a.trafficEngine.CurrentPlan()
-		current := ""
-		candidates := []string(nil)
-		for _, service := range plan.Services {
-			if service.ID == "discord" {
-				candidates = append(candidates, service.CandidateStrategyIDs...)
-				break
-			}
-		}
-		for _, selection := range plan.Selections {
-			if selection.ServiceID == "discord" {
-				current = selection.StrategyID
-				break
-			}
-		}
-		if current == "" || len(candidates) == 0 {
-			return false
-		}
-		if len(candidates) > discordRealtimeMaxLocalAttempts {
-			candidates = candidates[:discordRealtimeMaxLocalAttempts]
-		}
-
 		controller := a.discordRealtime
-		controller.mu.Lock()
-		if controller.localTried == nil {
-			controller.localTried = make(map[string]bool)
-		}
-		controller.localTried[current] = true
+		current := ""
 		next := ""
-		for _, candidate := range candidates {
-			if candidate != current && !controller.localTried[candidate] {
-				next = candidate
-				break
+		candidateCount := 0
+		initialBusy := false
+		noCandidate := false
+		var startErr error
+		if err := a.commitRouteStrategySession(session, func() error {
+			if !controller.ownsSession(session) {
+				return errRouteStrategySessionExpired
 			}
-		}
-		if next == "" {
-			controller.attempt = len(candidates)
+			a.serviceEngineComposeMu.Lock()
+			defer a.serviceEngineComposeMu.Unlock()
+
+			plan := a.trafficEngine.CurrentPlan()
+			candidates := []string(nil)
+			for _, service := range plan.Services {
+				if service.ID == "discord" {
+					candidates = append(candidates, service.CandidateStrategyIDs...)
+					break
+				}
+			}
+			for _, selection := range plan.Selections {
+				if selection.ServiceID == "discord" {
+					current = selection.StrategyID
+					break
+				}
+			}
+			if current == "" || len(candidates) == 0 {
+				noCandidate = true
+				return nil
+			}
+			if len(candidates) > discordRealtimeMaxLocalAttempts {
+				candidates = candidates[:discordRealtimeMaxLocalAttempts]
+			}
+			candidateCount = len(candidates)
+
+			controller.mu.Lock()
+			if controller.session != session || !controller.running {
+				controller.mu.Unlock()
+				return errRouteStrategySessionExpired
+			}
+			if controller.localTried == nil {
+				controller.localTried = make(map[string]bool)
+			}
+			controller.localTried[current] = true
+			for _, candidate := range candidates {
+				if candidate != current && !controller.localTried[candidate] {
+					next = candidate
+					break
+				}
+			}
+			if next == "" {
+				controller.attempt = len(candidates)
+				controller.mu.Unlock()
+				noCandidate = true
+				return nil
+			}
+			controller.attempt = len(controller.localTried) + 1
+			if controller.attempt > len(candidates) {
+				controller.attempt = len(candidates)
+			}
+			initialBusy = controller.initialBusy
+			controller.resetRouteObservationLocked()
 			controller.mu.Unlock()
+
+			trial := cloneTrafficPlan(plan)
+			trial.Revision++
+			for index := range trial.Selections {
+				if trial.Selections[index].ServiceID == "discord" {
+					trial.Selections[index].StrategyID = next
+					break
+				}
+			}
+			startErr = a.trafficEngine.StartPlan(trial)
+			if startErr != nil {
+				controller.mu.Lock()
+				controller.localTried[next] = true
+				controller.mu.Unlock()
+			}
+			return nil
+		}); err != nil {
 			return false
 		}
-		controller.attempt = len(controller.localTried) + 1
-		if controller.attempt > len(candidates) {
-			controller.attempt = len(candidates)
+		if noCandidate {
+			return false
 		}
-		initialBusy := controller.initialBusy
-		controller.resetRouteObservationLocked()
-		controller.mu.Unlock()
-
-		trial := cloneTrafficPlan(plan)
-		trial.Revision++
-		for index := range trial.Selections {
-			if trial.Selections[index].ServiceID == "discord" {
-				trial.Selections[index].StrategyID = next
-				break
-			}
-		}
-		if err := a.trafficEngine.StartPlan(trial); err != nil {
-			a.writeLog(fmt.Sprintf("[DiscordRealtime] cannot activate local strategy %s after %s: %v", next, reason, err))
-			controller.mu.Lock()
-			controller.localTried[next] = true
-			controller.mu.Unlock()
+		if startErr != nil {
+			a.writeLog(fmt.Sprintf("[DiscordRealtime] cannot activate local strategy %s after %s: %v", next, reason, startErr))
 			continue
 		}
-		if !a.switchServiceRoute("discord", "direct") || a.probeServicesThroughEngine([]string{"discord"})["discord"] {
+		routeSwitched, err := a.commitRouteStrategyBool(session, func() bool {
+			return controller.ownsSession(session) && a.switchServiceRoute("discord", "direct")
+		})
+		if err != nil || !routeSwitched {
+			return false
+		}
+		if a.probeServicesThroughEngineForSession([]string{"discord"}, session)["discord"] {
+			if !a.discordRealtimeSessionActive(controller, session) {
+				return false
+			}
 			a.writeLog(fmt.Sprintf("[DiscordRealtime] local strategy %s failed the complete Discord web/API precheck", next))
 			controller.mu.Lock()
-			controller.localTried[next] = true
+			if controller.session == session {
+				controller.localTried[next] = true
+			}
 			controller.mu.Unlock()
 			continue
 		}
-		if initialBusy {
-			a.updateBusy(discordRealtimeBusyID, fmt.Sprintf("Проверяем Discord voice, локальная стратегия %d/%d...", controller.currentAttempt(), len(candidates)))
+		if !a.discordRealtimeSessionActive(controller, session) {
+			return false
 		}
-		a.emitDiscordRealtimeCandidate(fmt.Sprintf("Проверяем следующую стратегию после сбоя: %s", reason))
+		if initialBusy {
+			a.commitDiscordRealtimeSessionAction(session, func() {
+				a.updateBusy(discordRealtimeBusyID, fmt.Sprintf("Проверяем Discord voice, локальная стратегия %d/%d...", controller.currentAttempt(), candidateCount))
+			})
+		}
+		a.emitDiscordRealtimeCandidate(session, fmt.Sprintf("Проверяем следующую стратегию после сбоя: %s", reason))
 		a.writeLog(fmt.Sprintf("[DiscordRealtime] voice failure (%s); atomically switched the complete Discord policy %s -> %s; web/API passed, waiting for live media proof", reason, current, next))
-		a.closeDiscordRealtimeConnections()
+		a.closeDiscordRealtimeConnections(session)
 		return true
 	}
 }
 
-func (a *App) scheduleDiscordRealtimeFailureRetry(reason string) {
-	session := a.currentRouteStrategySession()
+func (a *App) scheduleDiscordRealtimeFailureRetry(session uint64, reason string) {
 	go func() {
 		if !a.waitForRouteProbeDiscoverySession(session, 30*time.Second) {
 			return
@@ -1246,87 +1384,128 @@ func (a *App) scheduleDiscordRealtimeFailureRetry(reason string) {
 		timer := time.NewTimer(discordRealtimeSwitchCooldown)
 		defer timer.Stop()
 		<-timer.C
-		if a.routeStrategySessionActive(session) {
-			a.handleDiscordRealtimeFailure(reason)
+		if a.discordRealtimeSessionActive(a.discordRealtime, session) {
+			a.handleDiscordRealtimeFailure(session, reason)
 		}
 	}()
 }
 
-func (a *App) commitDiscordRealtimeHealthyStrategy() {
+func (a *App) commitDiscordRealtimeHealthyStrategy(session uint64) {
 	if a == nil || a.discordRealtime == nil {
 		return
 	}
-	if a.discordRealtime.usingVPN() {
-		a.cacheServiceMethod("discord", FreeAccessMethodVPN, "discord-live-media")
-		a.emitDiscordRealtimeService(true, true, false, "Discord voice подтверждён реальным двусторонним медиапотоком")
+	controller := a.discordRealtime
+	cached := false
+	if err := a.commitRouteStrategySession(session, func() error {
+		if !controller.ownsSession(session) {
+			return errRouteStrategySessionExpired
+		}
+		controller.mu.Lock()
+		usingVPN := controller.fallbackVPN
+		controller.mu.Unlock()
+		if usingVPN {
+			a.cacheServiceMethod("discord", FreeAccessMethodVPN, "discord-live-media")
+			cached = true
+			return nil
+		}
+		if a.trafficEngine == nil {
+			return nil
+		}
+		plan := a.trafficEngine.CurrentPlan()
+		selected := ""
+		for _, selection := range plan.Selections {
+			if selection.ServiceID == "discord" {
+				selected = selection.StrategyID
+				break
+			}
+		}
+		for _, method := range rankedMethodsForService("discord") {
+			if method.NativeStrategyID == selected {
+				a.cacheServiceMethod("discord", method.Tag, "discord-live-media")
+				cached = true
+				break
+			}
+		}
+		return nil
+	}); err != nil || !cached {
 		return
 	}
-	if a.trafficEngine == nil {
-		return
-	}
-	plan := a.trafficEngine.CurrentPlan()
-	selected := ""
-	for _, selection := range plan.Selections {
-		if selection.ServiceID == "discord" {
-			selected = selection.StrategyID
-			break
-		}
-	}
-	for _, method := range rankedMethodsForService("discord") {
-		if method.NativeStrategyID == selected {
-			a.cacheServiceMethod("discord", method.Tag, "discord-live-media")
-			a.emitDiscordRealtimeService(true, true, false, "Discord voice подтверждён реальным двусторонним медиапотоком")
-			return
-		}
-	}
+	a.emitDiscordRealtimeService(session, true, true, false, "Discord voice подтверждён реальным двусторонним медиапотоком")
 }
 
-func (a *App) activateDiscordRealtimeFallback(reason string) {
+func (a *App) activateDiscordRealtimeFallback(session uint64, reason string) {
 	controller := a.discordRealtime
-	if controller == nil {
+	if !a.discordRealtimeSessionActive(controller, session) {
 		return
 	}
 	controller.mu.Lock()
+	if controller.session != session {
+		controller.mu.Unlock()
+		return
+	}
 	allowVPNFallback := controller.vpnFallbackAllowed
 	controller.mu.Unlock()
 	nextStrategyIndex := a.nextDiscordStrategyIndex()
 	if allowVPNFallback && a.discordHasVPNFallback() {
-		controller.mu.Lock()
-		controller.fallbackVPN = true
-		controller.vpnTried = make(map[string]bool)
-		controller.resetRouteObservationLocked()
-		initialBusy := controller.initialBusy
-		controller.mu.Unlock()
-		serviceSwitched := a.switchServiceRoute("discord", "auto-select")
-		realtimeSwitched := a.switchOutboundSelector(discordRealtimeGroupTag, discordVPNGroupTag)
-		if serviceSwitched && realtimeSwitched {
+		initialBusy := false
+		serviceSwitched := false
+		realtimeSwitched := false
+		err := a.commitRouteStrategySession(session, func() error {
+			if !controller.ownsSession(session) {
+				return errRouteStrategySessionExpired
+			}
 			controller.mu.Lock()
-			controller.initialBusy = false
+			controller.fallbackVPN = true
+			controller.vpnTried = make(map[string]bool)
+			controller.resetRouteObservationLocked()
+			initialBusy = controller.initialBusy
 			controller.mu.Unlock()
-			a.endBusy(discordRealtimeBusyID)
-			a.cacheServiceMethodWithNextStrategy("discord", FreeAccessMethodVPN, "discord-local-batch-fallback", nextStrategyIndex)
+			serviceSwitched = a.switchServiceRoute("discord", "auto-select")
+			realtimeSwitched = a.switchOutboundSelector(discordRealtimeGroupTag, discordVPNGroupTag)
+			if serviceSwitched && realtimeSwitched {
+				controller.mu.Lock()
+				if controller.session == session {
+					controller.initialBusy = false
+				}
+				controller.mu.Unlock()
+				a.cacheServiceMethodWithNextStrategy("discord", FreeAccessMethodVPN, "discord-local-batch-fallback", nextStrategyIndex)
+			}
+			return nil
+		})
+		if err != nil {
+			return
+		}
+		if serviceSwitched && realtimeSwitched {
+			a.commitDiscordRealtimeSessionAction(session, func() { a.endBusy(discordRealtimeBusyID) })
 			if initialBusy {
 				a.writeLog("[DiscordRealtime] local verification window completed; Discord will reconnect through the VPN subscription")
 			}
 			a.writeLog(fmt.Sprintf("[DiscordRealtime] all %d local attempts failed; switched the complete Discord policy to VPN: %s", discordLocalStrategyCount(), reason))
-			a.emitDiscordRealtimeCandidate("Локальные стратегии не сработали; проверяем Discord voice через VPN-подписку")
-			a.closeDiscordRealtimeConnections()
+			a.emitDiscordRealtimeCandidate(session, "Локальные стратегии не сработали; проверяем Discord voice через VPN-подписку")
+			a.closeDiscordRealtimeConnections(session)
 			return
 		}
 	}
-	a.switchServiceRoute("discord", "direct")
-	a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
-	controller.mu.Lock()
-	controller.fallbackVPN = false
-	controller.initialBusy = false
-	controller.initialReady = false
-	controller.initialIdle = time.Time{}
-	controller.automatic = false
-	controller.initialReady = true
-	controller.mu.Unlock()
-	a.endBusy(discordRealtimeBusyID)
-	a.cacheServiceMethodWithNextStrategy("discord", FreeAccessMethodDirect, "discord-live-media-fallback", nextStrategyIndex)
-	a.emitDiscordRealtimeService(false, true, false, "В этой сессии проверены 4 стратегии Discord voice; следующий запуск продолжит со следующего набора")
+	if err := a.commitRouteStrategySession(session, func() error {
+		if !controller.ownsSession(session) {
+			return errRouteStrategySessionExpired
+		}
+		a.switchServiceRoute("discord", "direct")
+		a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
+		controller.mu.Lock()
+		controller.fallbackVPN = false
+		controller.initialBusy = false
+		controller.initialReady = true
+		controller.initialIdle = time.Time{}
+		controller.automatic = false
+		controller.mu.Unlock()
+		a.cacheServiceMethodWithNextStrategy("discord", FreeAccessMethodDirect, "discord-live-media-fallback", nextStrategyIndex)
+		return nil
+	}); err != nil {
+		return
+	}
+	a.commitDiscordRealtimeSessionAction(session, func() { a.endBusy(discordRealtimeBusyID) })
+	a.emitDiscordRealtimeService(session, false, true, false, "В этой сессии проверены 4 стратегии Discord voice; следующий запуск продолжит со следующего набора")
 	a.writeLog(fmt.Sprintf("[DiscordRealtime] all %d local attempts failed; direct fallback selected for this session and the next strategy cursor was saved", discordLocalStrategyCount()))
 }
 
@@ -1392,50 +1571,54 @@ func (a *App) discordRealtimeProgressSnapshot() (methodTag, methodLabel string, 
 	return
 }
 
-func (a *App) emitDiscordRealtimeCandidate(detail string) {
-	methodTag, methodLabel, attempt, attemptTotal, strategyIndex, strategyTotal, cycle, cycleTotal := a.discordRealtimeProgressSnapshot()
-	a.emitRouteProbe("route-probe-candidate", map[string]interface{}{
-		"source":        backgroundServiceStrategySource,
-		"serviceTag":    "discord",
-		"serviceName":   serviceDisplayNameForTag("discord"),
-		"methodTag":     methodTag,
-		"methodLabel":   methodLabel,
-		"status":        "voice-check",
-		"error":         detail,
-		"attempt":       attempt,
-		"attemptTotal":  attemptTotal,
-		"strategyIndex": strategyIndex,
-		"strategyTotal": strategyTotal,
-		"cycle":         cycle,
-		"cycleTotal":    cycleTotal,
+func (a *App) emitDiscordRealtimeCandidate(session uint64, detail string) {
+	a.commitDiscordRealtimeSessionAction(session, func() {
+		methodTag, methodLabel, attempt, attemptTotal, strategyIndex, strategyTotal, cycle, cycleTotal := a.discordRealtimeProgressSnapshot()
+		a.emitRouteProbe("route-probe-candidate", map[string]interface{}{
+			"source":        backgroundServiceStrategySource,
+			"serviceTag":    "discord",
+			"serviceName":   serviceDisplayNameForTag("discord"),
+			"methodTag":     methodTag,
+			"methodLabel":   methodLabel,
+			"status":        "voice-check",
+			"error":         detail,
+			"attempt":       attempt,
+			"attemptTotal":  attemptTotal,
+			"strategyIndex": strategyIndex,
+			"strategyTotal": strategyTotal,
+			"cycle":         cycle,
+			"cycleTotal":    cycleTotal,
+		})
 	})
 }
 
-func (a *App) emitDiscordRealtimeService(success, final, retrying bool, detail string) {
-	methodTag, methodLabel, attempt, attemptTotal, strategyIndex, strategyTotal, cycle, cycleTotal := a.discordRealtimeProgressSnapshot()
-	status := "retrying"
-	if success {
-		status = "done"
-	} else if final {
-		status = "failed"
-	}
-	a.emitRouteProbe("route-probe-service", map[string]interface{}{
-		"source":        backgroundServiceStrategySource,
-		"tag":           "discord",
-		"name":          serviceDisplayNameForTag("discord"),
-		"methodTag":     methodTag,
-		"methodLabel":   methodLabel,
-		"success":       success,
-		"final":         final,
-		"retrying":      retrying,
-		"status":        status,
-		"error":         detail,
-		"attempt":       attempt,
-		"attemptTotal":  attemptTotal,
-		"strategyIndex": strategyIndex,
-		"strategyTotal": strategyTotal,
-		"cycle":         cycle,
-		"cycleTotal":    cycleTotal,
+func (a *App) emitDiscordRealtimeService(session uint64, success, final, retrying bool, detail string) {
+	a.commitDiscordRealtimeSessionAction(session, func() {
+		methodTag, methodLabel, attempt, attemptTotal, strategyIndex, strategyTotal, cycle, cycleTotal := a.discordRealtimeProgressSnapshot()
+		status := "retrying"
+		if success {
+			status = "done"
+		} else if final {
+			status = "failed"
+		}
+		a.emitRouteProbe("route-probe-service", map[string]interface{}{
+			"source":        backgroundServiceStrategySource,
+			"tag":           "discord",
+			"name":          serviceDisplayNameForTag("discord"),
+			"methodTag":     methodTag,
+			"methodLabel":   methodLabel,
+			"success":       success,
+			"final":         final,
+			"retrying":      retrying,
+			"status":        status,
+			"error":         detail,
+			"attempt":       attempt,
+			"attemptTotal":  attemptTotal,
+			"strategyIndex": strategyIndex,
+			"strategyTotal": strategyTotal,
+			"cycle":         cycle,
+			"cycleTotal":    cycleTotal,
+		})
 	})
 }
 
@@ -1471,8 +1654,14 @@ func (a *App) closeClashConnection(id string) error {
 	return nil
 }
 
-func (a *App) closeDiscordRealtimeConnections() {
+func (a *App) closeDiscordRealtimeConnections(session uint64) {
+	if !a.discordRealtimeSessionActive(a.discordRealtime, session) {
+		return
+	}
 	document, err := a.fetchClashConnections()
+	if !a.discordRealtimeSessionActive(a.discordRealtime, session) {
+		return
+	}
 	if err != nil {
 		a.writeLog(fmt.Sprintf("[DiscordRealtime][Reconnect] cannot enumerate connections: %v", err))
 		return
@@ -1488,7 +1677,16 @@ func (a *App) closeDiscordRealtimeConnections() {
 			attempted++
 			port := clashPort(connection.Metadata.DestinationPort)
 			destination := net.JoinHostPort(connection.Metadata.DestinationIP, strconv.Itoa(port))
-			if err := a.closeClashConnection(connection.ID); err != nil {
+			err := a.commitRouteStrategySession(session, func() error {
+				if !a.discordRealtime.ownsSession(session) {
+					return errRouteStrategySessionExpired
+				}
+				return a.closeClashConnection(connection.ID)
+			})
+			if err != nil {
+				if !a.discordRealtimeSessionActive(a.discordRealtime, session) {
+					return
+				}
 				a.writeLog(fmt.Sprintf("[DiscordRealtime][Reconnect] close failed id=%s network=%s destination=%s chains=%s: %v", connection.ID, network, destination, strings.Join(connection.Chains, " -> "), err))
 				continue
 			}
@@ -1499,18 +1697,43 @@ func (a *App) closeDiscordRealtimeConnections() {
 	a.writeLog(fmt.Sprintf("[DiscordRealtime][Reconnect] completed: eligible=%d closed=%d failed=%d", attempted, closed, attempted-closed))
 }
 
-func (a *App) rotateDiscordVPNSource(reason string) {
-	candidates, current := a.selectorCandidates(discordVPNGroupTag)
-	if len(candidates) == 0 {
-		a.switchServiceRoute("discord", "direct")
-		a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
-		a.finishDiscordRealtimeInitialGate()
-		a.writeLog("[DiscordRealtime] VPN UDP failed and no alternative VPN source exists; switched to direct")
-		a.closeDiscordRealtimeConnections()
+func (a *App) rotateDiscordVPNSource(session uint64, reason string) {
+	controller := a.discordRealtime
+	if !a.discordRealtimeSessionActive(controller, session) {
 		return
 	}
-	controller := a.discordRealtime
+	candidates, current := a.selectorCandidates(discordVPNGroupTag)
+	if !a.discordRealtimeSessionActive(controller, session) {
+		return
+	}
+	if len(candidates) == 0 {
+		if err := a.commitRouteStrategySession(session, func() error {
+			if !controller.ownsSession(session) {
+				return errRouteStrategySessionExpired
+			}
+			a.switchServiceRoute("discord", "direct")
+			a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
+			controller.mu.Lock()
+			controller.initialBusy = false
+			controller.initialReady = true
+			controller.initialIdle = time.Time{}
+			controller.fallbackVPN = false
+			controller.automatic = false
+			controller.mu.Unlock()
+			return nil
+		}); err != nil {
+			return
+		}
+		a.commitDiscordRealtimeSessionAction(session, func() { a.endBusy(discordRealtimeBusyID) })
+		a.writeLog("[DiscordRealtime] VPN UDP failed and no alternative VPN source exists; switched to direct")
+		a.closeDiscordRealtimeConnections(session)
+		return
+	}
 	controller.mu.Lock()
+	if controller.session != session || !controller.running {
+		controller.mu.Unlock()
+		return
+	}
 	if controller.vpnTried == nil {
 		controller.vpnTried = make(map[string]bool)
 	}
@@ -1525,41 +1748,51 @@ func (a *App) rotateDiscordVPNSource(reason string) {
 		}
 	}
 	controller.mu.Unlock()
-	if next == "" || !a.switchOutboundSelector(discordVPNGroupTag, next) {
-		a.switchServiceRoute("discord", "direct")
-		a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
-		controller.mu.Lock()
-		controller.fallbackVPN = false
-		controller.vpnTried = make(map[string]bool)
-		controller.resetRouteObservationLocked()
-		controller.mu.Unlock()
+	switched := false
+	initialBusy := false
+	if next != "" {
+		var err error
+		switched, err = a.commitRouteStrategyBool(session, func() bool {
+			if !controller.ownsSession(session) || !a.switchOutboundSelector(discordVPNGroupTag, next) {
+				return false
+			}
+			controller.mu.Lock()
+			initialBusy = controller.initialBusy
+			controller.resetRouteObservationLocked()
+			controller.mu.Unlock()
+			return true
+		})
+		if err != nil {
+			return
+		}
+	}
+	if next == "" || !switched {
+		if err := a.commitRouteStrategySession(session, func() error {
+			if !controller.ownsSession(session) {
+				return errRouteStrategySessionExpired
+			}
+			a.switchServiceRoute("discord", "direct")
+			a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
+			controller.mu.Lock()
+			controller.fallbackVPN = false
+			controller.vpnTried = make(map[string]bool)
+			controller.resetRouteObservationLocked()
+			controller.mu.Unlock()
+			return nil
+		}); err != nil {
+			return
+		}
 		a.writeLog(fmt.Sprintf("[DiscordRealtime] every independent VPN source failed the current realtime health window (%s); switched to direct but kept automatic recovery enabled", reason))
-		a.closeDiscordRealtimeConnections()
+		a.closeDiscordRealtimeConnections(session)
 		return
 	}
 	a.writeLog(fmt.Sprintf("[DiscordRealtime] VPN realtime failure (%s); switched fallback source %s -> %s", reason, current, next))
-	controller.mu.Lock()
-	initialBusy := controller.initialBusy
-	controller.resetRouteObservationLocked()
-	controller.mu.Unlock()
 	if initialBusy {
-		a.updateBusy(discordRealtimeBusyID, fmt.Sprintf("Проверяем следующий VPN-источник для Discord voice: %s", next))
+		a.commitDiscordRealtimeSessionAction(session, func() {
+			a.updateBusy(discordRealtimeBusyID, fmt.Sprintf("Проверяем следующий VPN-источник для Discord voice: %s", next))
+		})
 	}
-	a.closeDiscordRealtimeConnections()
-}
-
-func (a *App) finishDiscordRealtimeInitialGate() {
-	controller := a.discordRealtime
-	if controller != nil {
-		controller.mu.Lock()
-		controller.initialBusy = false
-		controller.initialReady = true
-		controller.initialIdle = time.Time{}
-		controller.fallbackVPN = false
-		controller.automatic = false
-		controller.mu.Unlock()
-	}
-	a.endBusy(discordRealtimeBusyID)
+	a.closeDiscordRealtimeConnections(session)
 }
 
 func (a *App) selectorCandidates(groupTag string) ([]string, string) {

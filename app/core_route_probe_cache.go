@@ -16,6 +16,13 @@ const (
 	routeProbeCacheTTL      = 24 * time.Hour
 )
 
+var errRouteStrategySessionExpired = errors.New("VPN route-strategy session expired")
+
+type routeStrategyMaintenanceJob struct {
+	Session uint64
+	Reason  string
+}
+
 type routeProbeCacheFile struct {
 	Version    int                       `json:"version"`
 	UpdatedAt  time.Time                 `json:"updatedAt"`
@@ -32,47 +39,50 @@ func (a *App) startRouteStrategyMaintenanceListener() {
 	}
 	go func() {
 		a.writeLog("[FreeAccess] strategy maintenance listener started")
-		for reason := range a.routeStrategyJobs {
+		for job := range a.routeStrategyJobs {
 			if a.isShuttingDown() {
 				return
 			}
+			reason := job.Reason
 			serviceTag, serviceReason := parseServiceStrategyMaintenanceReason(reason)
+			if !a.routeStrategySessionActive(job.Session) {
+				if serviceTag != "" {
+					a.releaseRouteStrategyQueued(job.Session, serviceTag)
+				}
+				a.writeLog(fmt.Sprintf("[FreeAccess] stale strategy maintenance skipped (session %d): %s", job.Session, reason))
+				continue
+			}
 			// Dequeuing starts this service's cooldown, no matter which branch
 			// handles it below.
 			if serviceTag != "" {
-				a.finishRouteStrategyService(serviceTag)
-			}
-			a.mu.Lock()
-			stopping := a.stoppedManually || a.vpnStopping.Load()
-			running := (a.isRunning || a.isStarting) && !stopping
-			a.mu.Unlock()
-			if stopping {
-				a.writeLog(fmt.Sprintf("[FreeAccess] strategy maintenance skipped while VPN is stopping: %s", reason))
-				continue
+				a.finishRouteStrategyService(job.Session, serviceTag)
 			}
 			if serviceTag != "" {
-				if running {
+				if a.routeStrategySessionActive(job.Session) {
 					// Per-service retune: the composed winws2 engine lets each
 					// service keep its own method, so a failing service is
 					// retuned on its own ladder (cache → next working → VPN /
 					// direct) without disturbing the others. The dequeue above
 					// starts the anti-churn cooldown.
 					if a.trafficEngine != nil && a.trafficEngine.ActiveTag() == composedStrategyTag {
-						if err := a.retunePerServiceStrategy(serviceTag, serviceReason); err != nil {
+						if err := a.retunePerServiceStrategy(serviceTag, serviceReason, job.Session); err != nil && !errors.Is(err, errRouteStrategySessionExpired) {
 							a.writeLog(fmt.Sprintf("[FreeAccess] per-service retune failed (%s): %v", serviceReason, err))
 						}
-						a.sleepRouteStrategyMaintenancePause()
+						a.sleepRouteStrategyMaintenancePause(job.Session)
 						continue
 					}
 					a.writeLog(fmt.Sprintf("[FreeAccess] per-service retune deferred (%s): native traffic plan is not active; the next VPN session will continue from the saved strategy cursor", serviceReason))
 					// Unhurried: pace consecutive searches so the single
 					// transparent engine is never thrashed by a burst of jobs.
-					a.sleepRouteStrategyMaintenancePause()
+					a.sleepRouteStrategyMaintenancePause(job.Session)
 					continue
 				}
 				reason = serviceReason
-			} else if running {
+			} else if a.routeStrategySessionActive(job.Session) {
 				a.writeLog(fmt.Sprintf("[FreeAccess] strategy maintenance deferred while VPN is active: %s", reason))
+				continue
+			}
+			if !a.routeStrategySessionActive(job.Session) {
 				continue
 			}
 			report, err := a.runRouteProbeDiscovery("maintenance: " + reason)
@@ -89,29 +99,33 @@ func (a *App) startRouteStrategyMaintenanceListener() {
 }
 
 func (a *App) requestRouteStrategyMaintenance(reason string) {
+	a.requestRouteStrategyMaintenanceForSession(a.currentRouteStrategySession(), reason)
+}
+
+func (a *App) requestRouteStrategyMaintenanceForSession(session uint64, reason string) {
 	if a.routeStrategyJobs == nil || a.isShuttingDown() {
 		return
 	}
 	if reason == "" {
 		reason = "unspecified"
 	}
-	if !a.routeStrategyWorkAllowed() {
+	if !a.routeStrategySessionActive(session) {
 		a.writeLog("[FreeAccess] strategy maintenance skipped while VPN is stopping: " + reason)
 		return
 	}
 	serviceTag, _ := parseServiceStrategyMaintenanceReason(reason)
-	if serviceTag != "" && !a.markRouteStrategyQueued(serviceTag) {
+	if serviceTag != "" && !a.markRouteStrategyQueued(session, serviceTag) {
 		a.writeLog("[FreeAccess] strategy maintenance skipped for " + serviceTag + " (queued or still in cooldown)")
 		return
 	}
 	select {
-	case a.routeStrategyJobs <- reason:
+	case a.routeStrategyJobs <- routeStrategyMaintenanceJob{Session: session, Reason: reason}:
 		a.writeLog("[FreeAccess] strategy maintenance queued: " + reason)
 	default:
 		// Could not enqueue: release the de-dup reservation so a later failure
 		// can retry instead of being silently suppressed forever.
 		if serviceTag != "" {
-			a.releaseRouteStrategyQueued(serviceTag)
+			a.releaseRouteStrategyQueued(session, serviceTag)
 		}
 		a.writeLog("[FreeAccess] strategy maintenance queue is full; skipped: " + reason)
 	}
@@ -124,10 +138,10 @@ const (
 
 // sleepRouteStrategyMaintenancePause paces consecutive searches without blocking
 // shutdown for the full interval.
-func (a *App) sleepRouteStrategyMaintenancePause() {
+func (a *App) sleepRouteStrategyMaintenancePause(session uint64) {
 	deadline := time.Now().Add(routeStrategyMaintenancePause)
 	for time.Now().Before(deadline) {
-		if !a.routeStrategyWorkAllowed() {
+		if !a.routeStrategySessionActive(session) {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -150,18 +164,47 @@ func (a *App) routeStrategyWorkAllowed() bool {
 // resetRouteStrategySession clears all background retry cooldowns for a new VPN
 // session.
 func (a *App) resetRouteStrategySession() {
+	a.routeStrategyCommitMu.Lock()
+	defer a.routeStrategyCommitMu.Unlock()
 	a.routeStrategySession.Add(1)
 	a.routeStrategyMu.Lock()
 	a.routeStrategyLastAttempt = nil
 	a.routeStrategyQueued = nil
 	a.transparentReselectionDone = false
 	a.routeStrategyMu.Unlock()
+	// Candidate observations belong to the session that produced them. A fresh
+	// session must not expose them as the currently active route before its own
+	// selectors or transparent plan have been observed.
+	a.rememberRouteProbeResults(nil)
 }
 
 func (a *App) invalidateRouteStrategySession() {
 	if a != nil {
+		a.routeStrategyCommitMu.Lock()
+		defer a.routeStrategyCommitMu.Unlock()
 		a.routeStrategySession.Add(1)
 	}
+}
+
+func (a *App) commitRouteStrategySession(session uint64, action func() error) error {
+	if a == nil || action == nil {
+		return errRouteStrategySessionExpired
+	}
+	a.routeStrategyCommitMu.Lock()
+	defer a.routeStrategyCommitMu.Unlock()
+	if !a.routeStrategySessionActive(session) {
+		return errRouteStrategySessionExpired
+	}
+	return action()
+}
+
+func (a *App) commitRouteStrategyBool(session uint64, action func() bool) (bool, error) {
+	result := false
+	err := a.commitRouteStrategySession(session, func() error {
+		result = action()
+		return nil
+	})
+	return result, err
 }
 
 func (a *App) currentRouteStrategySession() uint64 {
@@ -196,9 +239,12 @@ func (a *App) beginTransparentReselectionOncePerSession() bool {
 // markRouteStrategyQueued reserves a service for a background strategy search.
 // Bursts are coalesced and recently completed searches are held behind a short
 // cooldown, but a later failure in the same VPN session is allowed to retune.
-func (a *App) markRouteStrategyQueued(serviceTag string) bool {
+func (a *App) markRouteStrategyQueued(session uint64, serviceTag string) bool {
 	a.routeStrategyMu.Lock()
 	defer a.routeStrategyMu.Unlock()
+	if a.routeStrategySession.Load() != session {
+		return false
+	}
 	if a.routeStrategyQueued[serviceTag] {
 		return false
 	}
@@ -212,16 +258,21 @@ func (a *App) markRouteStrategyQueued(serviceTag string) bool {
 	return true
 }
 
-func (a *App) releaseRouteStrategyQueued(serviceTag string) {
+func (a *App) releaseRouteStrategyQueued(session uint64, serviceTag string) {
 	a.routeStrategyMu.Lock()
-	delete(a.routeStrategyQueued, serviceTag)
+	if a.routeStrategySession.Load() == session {
+		delete(a.routeStrategyQueued, serviceTag)
+	}
 	a.routeStrategyMu.Unlock()
 }
 
 // finishRouteStrategyService starts the cooldown and drops the queued marker.
-func (a *App) finishRouteStrategyService(serviceTag string) {
+func (a *App) finishRouteStrategyService(session uint64, serviceTag string) {
 	a.routeStrategyMu.Lock()
 	defer a.routeStrategyMu.Unlock()
+	if a.routeStrategySession.Load() != session {
+		return
+	}
 	if a.routeStrategyLastAttempt == nil {
 		a.routeStrategyLastAttempt = map[string]time.Time{}
 	}

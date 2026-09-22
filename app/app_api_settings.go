@@ -317,6 +317,8 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 	a.waitForInit()
 	a.settingsPolicyMu.Lock()
 	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	if a.storage == nil {
 		return map[string]interface{}{
@@ -344,7 +346,7 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 	isRunning := a.isRunning
 	isStarting := a.isStarting
 	a.mu.Unlock()
-	if isStarting {
+	if isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		return map[string]interface{}{
 			"success": false,
 			"error":   "Дождитесь завершения текущего подключения VPN и повторите смену режима.",
@@ -359,6 +361,15 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 
 	settings := a.storage.GetAppSettings()
 	previousSettings := cloneGlobalAppSettings(settings)
+	if routingMode == RoutingModeAllTraffic {
+		profile, err := a.storage.GetActiveProfile()
+		if err != nil || !hasConfiguredVPNSource(profile) {
+			return map[string]interface{}{
+				"success": false,
+				"error":   "Для режима «Всё через VPN» добавьте и включите VPN-подписку или ключ в активном профиле.",
+			}
+		}
+	}
 	if NormalizeRoutingMode(settings.RoutingMode) == routingMode {
 		return map[string]interface{}{
 			"success":   true,
@@ -370,8 +381,11 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 	}
 	settings.RoutingMode = routingMode
 
+	transactionGeneration := uint64(0)
 	if isRunning {
-		stopResult := a.Stop()
+		transactionGeneration = a.beginVPNTransactionalReconnect("Применяем режим маршрутизации")
+		defer a.finishVPNTransactionalReconnect(transactionGeneration)
+		stopResult := a.stopVPNForReconnect()
 		if !apiResultSucceeded(stopResult) {
 			return map[string]interface{}{
 				"success": false,
@@ -398,25 +412,28 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 		if a.configBuilder != nil {
 			a.configBuilder.SetRoutingMode(previousSettings.RoutingMode)
 		}
-		rollbackErr := a.restoreServicePolicy(previousSettings)
-		recovery := a.restartAfterServicePolicyFailure(isRunning)
+		rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+		recovery := a.recoverAfterServicePolicyRollback(isRunning, rollbackOK)
 		return map[string]interface{}{
 			"success": false,
-			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v%s%s", err, rollbackErr, recovery),
+			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v%s%s", err, rollbackMessage, recovery),
 		}
 	}
+	restartCancelled := false
 	if isRunning {
-		startResult := a.Start()
-		if !apiResultSucceeded(startResult) {
+		startResult := a.startVPNForReconnect()
+		if apiResultCancelled(startResult) {
+			restartCancelled = true
+		} else if !apiResultSucceeded(startResult) {
 			startError := apiResultMessage(startResult)
 			if a.configBuilder != nil {
 				a.configBuilder.SetRoutingMode(previousSettings.RoutingMode)
 			}
-			rollbackErr := a.restoreServicePolicy(previousSettings)
-			recovery := a.restartAfterServicePolicyFailure(true)
+			rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+			recovery := a.recoverAfterServicePolicyRollback(true, rollbackOK)
 			return map[string]interface{}{
 				"success": false,
-				"error":   fmt.Sprintf("Режим сохранён, но VPN не переподключился: %s%s%s", startError, rollbackErr, recovery),
+				"error":   fmt.Sprintf("Режим сохранён, но VPN не переподключился: %s%s%s", startError, rollbackMessage, recovery),
 			}
 		}
 	}
@@ -424,10 +441,11 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 	a.writeLog(fmt.Sprintf("Routing mode changed to: %s", mode))
 
 	return map[string]interface{}{
-		"success":   true,
-		"message":   "Режим маршрутизации изменён",
-		"mode":      string(routingMode),
-		"restarted": isRunning,
+		"success":          true,
+		"message":          "Режим маршрутизации изменён",
+		"mode":             string(routingMode),
+		"restarted":        isRunning && !restartCancelled,
+		"restartCancelled": restartCancelled,
 	}
 }
 
@@ -629,6 +647,10 @@ func (a *App) SetFreeAccessEnabled(enabled bool) map[string]interface{} {
 // Explicit Direct/VPN/Zapret service policies remain authoritative.
 func (a *App) SetDisableFreeAccess(disabled bool) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	if a.storage == nil {
 		return map[string]interface{}{
@@ -639,8 +661,9 @@ func (a *App) SetDisableFreeAccess(disabled bool) map[string]interface{} {
 
 	a.mu.Lock()
 	isRunning := a.isRunning
+	isStarting := a.isStarting
 	a.mu.Unlock()
-	if isRunning {
+	if isRunning || isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		return map[string]interface{}{
 			"success": false,
 			"error":   "Нельзя изменить настройки пока VPN активен. Сначала отключите VPN.",
@@ -694,6 +717,8 @@ func (a *App) ToggleFreeAccessService(tag string, enabled bool) map[string]inter
 	a.waitForInit()
 	a.settingsPolicyMu.Lock()
 	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	if a.storage == nil {
 		return map[string]interface{}{
@@ -718,8 +743,9 @@ func (a *App) ToggleFreeAccessService(tag string, enabled bool) map[string]inter
 
 	a.mu.Lock()
 	isRunning := a.isRunning
+	isStarting := a.isStarting
 	a.mu.Unlock()
-	if isRunning {
+	if isRunning || isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		return map[string]interface{}{
 			"success": false,
 			"error":   "Нельзя изменить настройки пока VPN активен. Сначала отключите VPN.",
@@ -770,6 +796,8 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	a.waitForInit()
 	a.settingsPolicyMu.Lock()
 	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	if a.storage == nil {
 		return map[string]interface{}{
@@ -824,7 +852,7 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	isRunning := a.isRunning
 	isStarting := a.isStarting
 	a.mu.Unlock()
-	if isStarting {
+	if isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		return map[string]interface{}{
 			"success": false,
 			"error":   "Дождитесь завершения текущего подключения VPN и повторите изменение маршрута.",
@@ -860,8 +888,11 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	// must always be authoritative and immediately undo an old disabled value.
 	settings.FreeAccessServices[tag] = true
 
+	transactionGeneration := uint64(0)
 	if isRunning {
-		stopResult := a.Stop()
+		transactionGeneration = a.beginVPNTransactionalReconnect("Применяем маршрут сервиса")
+		defer a.finishVPNTransactionalReconnect(transactionGeneration)
+		stopResult := a.stopVPNForReconnect()
 		if !apiResultSucceeded(stopResult) {
 			return map[string]interface{}{
 				"success": false,
@@ -879,22 +910,25 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	}
 
 	if err := a.RebuildActiveProfileConfig(); err != nil {
-		rollbackErr := a.restoreServicePolicy(previousSettings)
-		recovery := a.restartAfterServicePolicyFailure(isRunning)
+		rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+		recovery := a.recoverAfterServicePolicyRollback(isRunning, rollbackOK)
 		return map[string]interface{}{
 			"success": false,
-			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v%s%s", err, rollbackErr, recovery),
+			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v%s%s", err, rollbackMessage, recovery),
 		}
 	}
+	restartCancelled := false
 	if isRunning {
-		startResult := a.Start()
-		if !apiResultSucceeded(startResult) {
+		startResult := a.startVPNForReconnect()
+		if apiResultCancelled(startResult) {
+			restartCancelled = true
+		} else if !apiResultSucceeded(startResult) {
 			startError := apiResultMessage(startResult)
-			rollbackErr := a.restoreServicePolicy(previousSettings)
-			recovery := a.restartAfterServicePolicyFailure(true)
+			rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+			recovery := a.recoverAfterServicePolicyRollback(true, rollbackOK)
 			return map[string]interface{}{
 				"success": false,
-				"error":   fmt.Sprintf("Новый маршрут сохранён, но VPN не переподключился: %s%s%s", startError, rollbackErr, recovery),
+				"error":   fmt.Sprintf("Новый маршрут сохранён, но VPN не переподключился: %s%s%s", startError, rollbackMessage, recovery),
 			}
 		}
 	}
@@ -902,10 +936,11 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	a.writeLog(fmt.Sprintf("Free access service %s method: %s", tag, normalized))
 
 	return map[string]interface{}{
-		"success":   true,
-		"tag":       tag,
-		"method":    normalized,
-		"restarted": isRunning,
+		"success":          true,
+		"tag":              tag,
+		"method":           normalized,
+		"restarted":        isRunning && !restartCancelled,
+		"restartCancelled": restartCancelled,
 	}
 }
 
@@ -916,6 +951,8 @@ func (a *App) SetZapretServiceStrategy(tag string, mode string, strategyTag stri
 	a.waitForInit()
 	a.settingsPolicyMu.Lock()
 	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	tag = strings.TrimSpace(strings.ToLower(tag))
 	mode = NormalizeZapretStrategyMode(mode)
@@ -939,7 +976,7 @@ func (a *App) SetZapretServiceStrategy(tag string, mode string, strategyTag stri
 	a.mu.Lock()
 	isRunning, isStarting := a.isRunning, a.isStarting
 	a.mu.Unlock()
-	if isStarting {
+	if isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		return map[string]interface{}{"success": false, "error": "Дождитесь завершения текущего подключения и повторите настройку Zapret."}
 	}
 
@@ -958,8 +995,11 @@ func (a *App) SetZapretServiceStrategy(tag string, mode string, strategyTag stri
 		delete(settings.ZapretStrategies, tag)
 	}
 
+	transactionGeneration := uint64(0)
 	if isRunning {
-		stopResult := a.Stop()
+		transactionGeneration = a.beginVPNTransactionalReconnect("Применяем стратегию Zapret")
+		defer a.finishVPNTransactionalReconnect(transactionGeneration)
+		stopResult := a.stopVPNForReconnect()
 		if !apiResultSucceeded(stopResult) {
 			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Не удалось остановить подключение для смены стратегии Zapret: %s", apiResultMessage(stopResult))}
 		}
@@ -972,24 +1012,28 @@ func (a *App) SetZapretServiceStrategy(tag string, mode string, strategyTag stri
 		a.removeServiceStrategyCacheEntry(tag)
 	}
 	if err := a.RebuildActiveProfileConfig(); err != nil {
-		rollbackErr := a.restoreServicePolicy(previousSettings)
-		recovery := a.restartAfterServicePolicyFailure(isRunning)
-		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка применения стратегии Zapret: %v%s%s", err, rollbackErr, recovery)}
+		rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+		recovery := a.recoverAfterServicePolicyRollback(isRunning, rollbackOK)
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка применения стратегии Zapret: %v%s%s", err, rollbackMessage, recovery)}
 	}
+	restartCancelled := false
 	if isRunning {
-		startResult := a.Start()
-		if !apiResultSucceeded(startResult) {
+		startResult := a.startVPNForReconnect()
+		if apiResultCancelled(startResult) {
+			restartCancelled = true
+		} else if !apiResultSucceeded(startResult) {
 			startError := apiResultMessage(startResult)
-			rollbackErr := a.restoreServicePolicy(previousSettings)
-			recovery := a.restartAfterServicePolicyFailure(true)
-			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Стратегия сохранена, но подключение не восстановлено: %s%s%s", startError, rollbackErr, recovery)}
+			rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+			recovery := a.recoverAfterServicePolicyRollback(true, rollbackOK)
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Стратегия сохранена, но подключение не восстановлено: %s%s%s", startError, rollbackMessage, recovery)}
 		}
 	}
 
 	a.writeLog(fmt.Sprintf("Zapret strategy for %s: mode=%s strategy=%s", tag, mode, strategyTag))
 	result := map[string]interface{}{
-		"success": true, "tag": tag, "mode": mode, "restarted": isRunning,
-		"searchStarted": mode == ZapretStrategyModeAuto && isRunning,
+		"success": true, "tag": tag, "mode": mode, "restarted": isRunning && !restartCancelled,
+		"restartCancelled": restartCancelled,
+		"searchStarted":    mode == ZapretStrategyModeAuto && isRunning && !restartCancelled,
 	}
 	for key, value := range zapretStrategySummary(settings, tag, a.loadServiceStrategyCache()) {
 		result[key] = value
@@ -1071,6 +1115,11 @@ func apiResultSucceeded(result map[string]interface{}) bool {
 	return success
 }
 
+func apiResultCancelled(result map[string]interface{}) bool {
+	cancelled, _ := result["cancelled"].(bool)
+	return cancelled
+}
+
 func apiResultMessage(result map[string]interface{}) string {
 	if message := strings.TrimSpace(fmt.Sprint(result["error"])); message != "" && message != "<nil>" {
 		return message
@@ -1078,23 +1127,39 @@ func apiResultMessage(result map[string]interface{}) string {
 	return "неизвестная ошибка"
 }
 
-func (a *App) restoreServicePolicy(previous GlobalAppSettings) string {
+func (a *App) restoreServicePolicy(previous GlobalAppSettings) (string, bool) {
 	if err := a.storage.UpdateAppSettings(previous); err != nil {
-		return fmt.Sprintf("; не удалось откатить настройки: %v", err)
+		return fmt.Sprintf("; не удалось откатить настройки: %v", err), false
 	}
 	if err := a.RebuildActiveProfileConfig(); err != nil {
-		return fmt.Sprintf("; настройки откатились, но прежний конфиг не восстановлен: %v", err)
+		return fmt.Sprintf("; настройки откатились, но прежний конфиг не восстановлен: %v", err), false
 	}
-	return "; прежний маршрут восстановлен"
+	return "; прежний маршрут восстановлен", true
+}
+
+func (a *App) recoverAfterServicePolicyRollback(wasRunning bool, rollbackOK bool) string {
+	if !rollbackOK {
+		if wasRunning {
+			return "; VPN оставлен отключённым: прежние настройки не были надёжно восстановлены"
+		}
+		return ""
+	}
+	return a.restartAfterServicePolicyFailure(wasRunning)
 }
 
 func (a *App) restartAfterServicePolicyFailure(wasRunning bool) string {
 	if !wasRunning {
 		return ""
 	}
-	result := a.Start()
+	// Service-policy callers hold vpnLifecycleMu across their complete
+	// stop/build/rollback window. Use the internal restart so Restore-on-startup
+	// and the user's connection intent are not rewritten mid-transaction.
+	result := a.startVPNForReconnect()
 	if apiResultSucceeded(result) {
 		return "; прежнее VPN-подключение восстановлено"
+	}
+	if apiResultCancelled(result) {
+		return "; переподключение отменено пользователем"
 	}
 	return fmt.Sprintf("; не удалось восстановить VPN-подключение: %s", apiResultMessage(result))
 }
@@ -1159,6 +1224,24 @@ func (a *App) SetHideRuTraffic(enabled bool, proxyAddress string) map[string]int
 				"success": false,
 				"error":   fmt.Sprintf("Ошибка проверки адреса прокси для RU-трафика: %s", errMsg),
 			}
+		}
+	}
+
+	// Remote proxy validation above is read-only and may be slow. Serialize only
+	// the state recheck and config commit so Stop remains responsive during that
+	// network operation while Start cannot observe a partial write.
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	a.mu.Lock()
+	isRunning = a.isRunning
+	isStarting := a.isStarting
+	a.mu.Unlock()
+	if isRunning || isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Нельзя изменить настройки пока VPN активен. Сначала отключите VPN.",
 		}
 	}
 

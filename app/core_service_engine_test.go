@@ -22,6 +22,73 @@ func newServiceEngineTestApp(t *testing.T) *App {
 	return &App{basePath: basePath, storage: storage}
 }
 
+func TestAllTrafficDoesNotRequireNativeServiceEngine(t *testing.T) {
+	app := newServiceEngineTestApp(t)
+	app.trafficEngine = NewNativeTrafficManager(t.TempDir(), nil)
+	if app.trafficEngine.IsInstalled() {
+		t.Fatal("empty test runtime unexpectedly contains WinDivert")
+	}
+	settings := app.storage.GetAppSettings()
+	if settings.FreeAccessMethods == nil {
+		settings.FreeAccessMethods = map[string]string{}
+	}
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+	settings.RoutingMode = RoutingModeAllTraffic
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatalf("save all-traffic settings: %v", err)
+	}
+	if tags := app.backgroundServiceStrategyTags(); len(tags) != 0 {
+		t.Fatalf("all-traffic service strategies = %v, want none", tags)
+	}
+	if err := app.startComposedTransparentEngine(""); err != nil {
+		t.Fatalf("all-traffic must not require the missing service engine: %v", err)
+	}
+
+	// The same explicit strategy still requires WinDivert when the user returns
+	// to selected-services mode; all-traffic must not erase their saved policy.
+	settings.RoutingMode = RoutingModeBlockedOnly
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatalf("restore selected-services settings: %v", err)
+	}
+	if tags := app.backgroundServiceStrategyTags(); !containsStringValue(tags, "youtube") {
+		t.Fatalf("selected-services strategy list = %v, want youtube", tags)
+	}
+	if err := app.startComposedTransparentEngine(""); err == nil {
+		t.Fatal("selected-services Zapret unexpectedly started without WinDivert")
+	}
+}
+
+func TestAllTrafficKeepsWireGuardCamouflageSeparateFromServiceStrategies(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("WireGuard camouflage is Windows-only")
+	}
+	app := newServiceEngineTestApp(t)
+	profile, err := app.storage.GetActiveProfile()
+	if err != nil || profile == nil {
+		t.Fatalf("get active profile: %v", err)
+	}
+	if err := app.storage.UpdateProfileWireGuard(profile.ID, []UserWireGuardConfig{{
+		Tag: "work", Endpoint: "192.0.2.10", EndpointPort: 51820, CamouflageEnabled: true,
+	}}); err != nil {
+		t.Fatalf("save WireGuard camouflage request: %v", err)
+	}
+	settings := app.storage.GetAppSettings()
+	settings.RoutingMode = RoutingModeAllTraffic
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatalf("save all-traffic settings: %v", err)
+	}
+	if !app.wireGuardCamouflageRequested() {
+		t.Fatal("all-traffic mode suppressed the explicit WireGuard camouflage request")
+	}
+	if tags := app.backgroundServiceStrategyTags(); len(tags) != 0 {
+		t.Fatalf("WireGuard camouflage created service strategies: %v", tags)
+	}
+	app.trafficEngine = NewNativeTrafficManager(t.TempDir(), nil)
+	if err := app.startComposedTransparentEngine(""); err != nil {
+		t.Fatalf("missing optional camouflage engine should not block full VPN: %v", err)
+	}
+}
+
 func writeServiceStrategyCacheForTest(t *testing.T, app *App, entries map[string]serviceStrategyCacheEntry) {
 	t.Helper()
 	file := serviceStrategyCacheFile{

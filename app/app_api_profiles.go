@@ -97,10 +97,14 @@ func (a *App) GetActiveProfile() map[string]interface{} {
 // SetActiveProfile устанавливает активный профиль (API для фронтенда)
 func (a *App) SetActiveProfile(id int) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	// Check if VPN is running - don't allow profile change while connected
 	a.mu.Lock()
-	if a.isRunning {
+	if a.isRunning || a.isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		a.mu.Unlock()
 		return map[string]interface{}{
 			"success": false,

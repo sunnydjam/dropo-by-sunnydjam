@@ -15,6 +15,8 @@ part 'compact_shell.dart';
 part 'planet_animation.dart';
 part 'service_routes.dart';
 part 'minimal_settings.dart';
+part 'connection_health.dart';
+part 'android_vpn_protection.dart';
 
 const String _coreEndpoint = String.fromEnvironment(
   'DROPO_CORE_ENDPOINT',
@@ -72,6 +74,12 @@ bool? debugMobileShellOverride;
 
 bool get _isMobileShell =>
     debugMobileShellOverride ?? (Platform.isAndroid || Platform.isIOS);
+
+@visibleForTesting
+bool? debugAndroidPlatformOverride;
+
+bool get _isAndroidPlatform =>
+    debugAndroidPlatformOverride ?? Platform.isAndroid;
 
 @visibleForTesting
 bool shouldAutomaticallyInstallUpdate(
@@ -264,6 +272,9 @@ abstract class CoreBridge {
   Future<Map<String, dynamic>> moveVpnSource(String id, int newIndex);
   Future<Map<String, dynamic>> refreshVpnSources();
   Future<Map<String, dynamic>> saveSubscription(String value);
+  Future<TelegramExitInfo> telegramProxyStatus();
+  Future<Map<String, dynamic>> openTelegramProxySettings();
+  Future<Map<String, dynamic>> acknowledgeTelegramProxyRemoved();
   Future<TelegramExitInfo> prepareQuit();
   Future<void> finalizeQuit();
   Future<String> diagnostics();
@@ -272,6 +283,8 @@ abstract class CoreBridge {
   Future<void> hideWindow();
   Future<void> openExternal(String link);
   Future<AndroidCompatibilityInfo> androidCompatibility();
+  Future<AndroidVpnProtection> androidVpnProtection();
+  Future<Map<String, dynamic>> androidOpenVpnSettings();
   Future<Map<String, dynamic>> setAndroidCompatibilityPromptDismissed(
     bool dismissed,
   );
@@ -561,19 +574,7 @@ class HttpCoreBridge implements CoreBridge {
     final data = await callMap(
       live ? 'GetBypassRouteSummary' : 'GetFreeAccessConfig',
     );
-    final raw = data['services'];
-    if (raw is! List) {
-      return fallbackRoutes;
-    }
-    return raw
-        .map(_asMap)
-        .where((item) => item.isNotEmpty)
-        .map(
-          live
-              ? RouteService.fromBypassSummaryJson
-              : RouteService.fromFreeAccessJson,
-        )
-        .toList(growable: false);
+    return routeServicesFromPayload(data, live: live);
   }
 
   @override
@@ -850,6 +851,21 @@ class HttpCoreBridge implements CoreBridge {
   }
 
   @override
+  Future<TelegramExitInfo> telegramProxyStatus() async {
+    return TelegramExitInfo.fromJson(await callMap('TelegramProxyStatus'));
+  }
+
+  @override
+  Future<Map<String, dynamic>> openTelegramProxySettings() {
+    return callMap('OpenTelegramProxySettings');
+  }
+
+  @override
+  Future<Map<String, dynamic>> acknowledgeTelegramProxyRemoved() {
+    return callMap('AcknowledgeTelegramProxyRemoved');
+  }
+
+  @override
   Future<TelegramExitInfo> prepareQuit() async {
     return TelegramExitInfo.fromJson(
       await _postMap('/api/quit', timeout: const Duration(seconds: 15)),
@@ -899,6 +915,20 @@ class HttpCoreBridge implements CoreBridge {
   @override
   Future<AndroidCompatibilityInfo> androidCompatibility() async {
     return AndroidCompatibilityInfo.unsupported();
+  }
+
+  @override
+  Future<AndroidVpnProtection> androidVpnProtection() async {
+    return AndroidVpnProtection.unknown();
+  }
+
+  @override
+  Future<Map<String, dynamic>> androidOpenVpnSettings() async {
+    return {
+      'success': false,
+      'unsupported': true,
+      'error': 'Системные настройки VPN доступны только на Android',
+    };
   }
 
   @override
@@ -1245,19 +1275,7 @@ class ChannelCoreBridge implements CoreBridge {
     final data = await callMap(
       live ? 'GetBypassRouteSummary' : 'GetFreeAccessConfig',
     );
-    final raw = data['services'];
-    if (raw is! List) {
-      return fallbackRoutes;
-    }
-    return raw
-        .map(_asMap)
-        .where((item) => item.isNotEmpty)
-        .map(
-          live
-              ? RouteService.fromBypassSummaryJson
-              : RouteService.fromFreeAccessJson,
-        )
-        .toList(growable: false);
+    return routeServicesFromPayload(data, live: live);
   }
 
   @override
@@ -1519,6 +1537,26 @@ class ChannelCoreBridge implements CoreBridge {
   }
 
   @override
+  Future<TelegramExitInfo> telegramProxyStatus() async {
+    if (!Platform.isWindows) {
+      return TelegramExitInfo.fromJson(const {});
+    }
+    return TelegramExitInfo.fromJson(await callMap('TelegramProxyStatus'));
+  }
+
+  @override
+  Future<Map<String, dynamic>> openTelegramProxySettings() async => {
+    'success': false,
+    'error': 'Очистка старого proxy требуется только на Windows',
+  };
+
+  @override
+  Future<Map<String, dynamic>> acknowledgeTelegramProxyRemoved() async => {
+    'success': true,
+    'unchanged': true,
+  };
+
+  @override
   Future<TelegramExitInfo> prepareQuit() async {
     return TelegramExitInfo.fromJson(await callMap('PrepareQuit'));
   }
@@ -1581,6 +1619,29 @@ class ChannelCoreBridge implements CoreBridge {
         'androidCompatibility',
         timeout: const Duration(seconds: 5),
       ),
+    );
+  }
+
+  @override
+  Future<AndroidVpnProtection> androidVpnProtection() async {
+    final response = await _invokeMap(
+      'androidVpnProtection',
+      timeout: const Duration(seconds: 5),
+    );
+    if (response['success'] == false) {
+      final message = response['error']?.toString().trim() ?? '';
+      throw StateError(
+        message.isEmpty ? 'Android не вернул состояние защиты VPN' : message,
+      );
+    }
+    return AndroidVpnProtection.fromJson(response);
+  }
+
+  @override
+  Future<Map<String, dynamic>> androidOpenVpnSettings() {
+    return _invokeMap(
+      'androidOpenVpnSettings',
+      timeout: const Duration(seconds: 5),
     );
   }
 
@@ -2217,6 +2278,21 @@ class MockCoreBridge implements CoreBridge {
   }
 
   @override
+  Future<TelegramExitInfo> telegramProxyStatus() async {
+    return TelegramExitInfo.fromJson(const {});
+  }
+
+  @override
+  Future<Map<String, dynamic>> openTelegramProxySettings() async => {
+    'success': true,
+  };
+
+  @override
+  Future<Map<String, dynamic>> acknowledgeTelegramProxyRemoved() async => {
+    'success': true,
+  };
+
+  @override
   Future<TelegramExitInfo> prepareQuit() async {
     return TelegramExitInfo.fromJson(const {
       'showNotice': false,
@@ -2285,6 +2361,20 @@ class MockCoreBridge implements CoreBridge {
         },
       ],
     });
+  }
+
+  @override
+  Future<AndroidVpnProtection> androidVpnProtection() async {
+    return AndroidVpnProtection.unknown();
+  }
+
+  @override
+  Future<Map<String, dynamic>> androidOpenVpnSettings() async {
+    return {
+      'success': false,
+      'unsupported': true,
+      'error': 'Системные настройки VPN недоступны в деморежиме',
+    };
   }
 
   @override
@@ -2415,7 +2505,10 @@ class CoreStatus {
               : (json['connecting'] == true ? 'starting' : 'stopped'))
         : rawState;
     final connected = json['connected'] == true;
-    final connecting = json['connecting'] == true || state == 'starting';
+    final connecting =
+        json['connecting'] == true ||
+        state == 'starting' ||
+        state == 'reconnecting';
     final disconnecting =
         json['disconnecting'] == true || state == 'disconnecting';
     return CoreStatus(
@@ -2859,6 +2952,7 @@ class RouteService {
     required this.tag,
     required this.name,
     required this.method,
+    this.actualOutbound = '',
     this.selectedMethod = 'auto',
     required this.requiresVpn,
     required this.delayMs,
@@ -2878,6 +2972,7 @@ class RouteService {
   final String tag;
   final String name;
   final String method;
+  final String actualOutbound;
   final String selectedMethod;
   final bool requiresVpn;
   final int delayMs;
@@ -2902,6 +2997,7 @@ class RouteService {
           json['methodLabel']?.toString() ??
           json['selectedMethod']?.toString() ??
           'Auto',
+      actualOutbound: json['outbound']?.toString() ?? '',
       selectedMethod: _routePolicyFromJson(json),
       requiresVpn: json['requiresVpn'] == true,
       domainSuffixes: _asStringList(
@@ -2941,6 +3037,7 @@ class RouteService {
           json['methodLabel']?.toString() ??
           json['outbound']?.toString() ??
           'Auto',
+      actualOutbound: json['outbound']?.toString() ?? '',
       selectedMethod: _routePolicyFromJson(json),
       requiresVpn:
           json['requiresVpn'] == true ||
@@ -2978,6 +3075,7 @@ class RouteService {
     String? tag,
     String? name,
     String? method,
+    String? actualOutbound,
     String? selectedMethod,
     bool? requiresVpn,
     int? delayMs,
@@ -2997,6 +3095,7 @@ class RouteService {
       tag: tag ?? this.tag,
       name: name ?? this.name,
       method: method ?? this.method,
+      actualOutbound: actualOutbound ?? this.actualOutbound,
       selectedMethod: selectedMethod ?? this.selectedMethod,
       requiresVpn: requiresVpn ?? this.requiresVpn,
       delayMs: delayMs ?? this.delayMs,
@@ -3018,6 +3117,35 @@ class RouteService {
       homeVisible: homeVisible ?? this.homeVisible,
     );
   }
+}
+
+@visibleForTesting
+List<RouteService> routeServicesFromPayload(
+  Map<String, dynamic> data, {
+  required bool live,
+}) {
+  final raw = data['services'];
+  if (live && data['success'] == false) {
+    final error = data['error']?.toString().trim() ?? '';
+    throw StateError(
+      error.isEmpty ? 'Live route summary is unavailable' : error,
+    );
+  }
+  if (raw is! List) {
+    if (live) {
+      throw StateError('Live route summary does not contain services');
+    }
+    return fallbackRoutes;
+  }
+  return raw
+      .map(_asMap)
+      .where((item) => item.isNotEmpty)
+      .map(
+        live
+            ? RouteService.fromBypassSummaryJson
+            : RouteService.fromFreeAccessJson,
+      )
+      .toList(growable: false);
 }
 
 class ZapretStrategyOption {
@@ -3517,8 +3645,14 @@ class _DropoHomePageState extends State<DropoHomePage>
     proxyCount: 0,
   );
   UpdateInfo? updateInfo;
+  TelegramExitInfo legacyTelegramProxy = const TelegramExitInfo(
+    showNotice: false,
+    injected: false,
+    recommendRemove: false,
+  );
   AppConfig appConfig = AppConfig.defaults;
   List<RouteService> routes = fallbackRoutes;
+  bool liveRoutesConfirmed = false;
   List<WireGuardInfo> wireGuards = const [];
   List<VpnSourceInfo> homeSources = const [];
   bool homeSourcesLoaded = false;
@@ -3795,14 +3929,26 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       SubscriptionInfo loadedSubscription = subscription;
       List<RouteService> loadedRoutes = routes;
+      var loadedRoutesConfirmed = liveRoutesConfirmed;
+      if (loadedStatus.connected != status.connected ||
+          !loadedStatus.connected) {
+        loadedRoutesConfirmed = false;
+      }
       AppConfig loadedAppConfig = appConfig;
       List<WireGuardInfo> loadedWireGuards = wireGuards;
       List<ProfileInfo> loadedProfiles = profiles;
+      TelegramExitInfo loadedLegacyTelegramProxy = legacyTelegramProxy;
       if (all || loadedStatus.connected) {
+        // A previous snapshot must not stay "confirmed" after the live API
+        // becomes unavailable. Keep its rows only as stale UI data while the
+        // diagnostics panel explicitly waits for a new core confirmation.
+        loadedRoutesConfirmed = false;
         try {
           loadedRoutes = await widget.bridge.routes(
             live: loadedStatus.connected,
           );
+          loadedRoutesConfirmed =
+              loadedStatus.connected && loadedRoutes.isNotEmpty;
         } catch (_) {}
       }
       if (all) {
@@ -3812,6 +3958,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           _dropoThemeMode.value = themeModeFromSetting(loadedAppConfig.theme);
           loadedWireGuards = await widget.bridge.wireGuards();
           loadedProfiles = (await widget.bridge.profiles()).profiles;
+          loadedLegacyTelegramProxy = await widget.bridge.telegramProxyStatus();
         } catch (error) {
           if (!booting) {
             routeHint = 'Настройки ещё загружаются: ${_cleanError(error)}';
@@ -3834,9 +3981,11 @@ class _DropoHomePageState extends State<DropoHomePage>
         logs = loadedLogs;
         subscription = loadedSubscription;
         routes = loadedRoutes.isEmpty ? fallbackRoutes : loadedRoutes;
+        liveRoutesConfirmed = loadedRoutesConfirmed;
         appConfig = loadedAppConfig;
         wireGuards = loadedWireGuards;
         profiles = loadedProfiles;
+        legacyTelegramProxy = loadedLegacyTelegramProxy;
         if (all && !connectionBusy && !uiBusy) {
           routeHint = '';
         }
@@ -3878,6 +4027,10 @@ class _DropoHomePageState extends State<DropoHomePage>
       final message = _cleanError(error);
       setState(() {
         refreshFailureCount += 1;
+        // A failed status read revokes the previous live snapshot
+        // immediately. We may still show the last rows elsewhere, but never
+        // label them as current core state while the core is unreachable.
+        liveRoutesConfirmed = false;
         if ((transient && online) || (online && refreshFailureCount < 3)) {
           connectionHint = transient
               ? 'Ждём ответ dropo-core: $message'
@@ -4232,7 +4385,9 @@ class _DropoHomePageState extends State<DropoHomePage>
         payload['state']?.toString() ??
         (payload['connected'] == true ? 'connected' : 'stopped');
     final connected = payload['connected'] == true || state == 'connected';
-    final connecting = payload['connecting'] == true || state == 'starting';
+    final reconnecting = state == 'reconnecting';
+    final connecting =
+        payload['connecting'] == true || state == 'starting' || reconnecting;
     final disconnecting =
         payload['disconnecting'] == true || state == 'disconnecting';
     final hasError = payload['hasError'] == true || state == 'failed';
@@ -4258,11 +4413,15 @@ class _DropoHomePageState extends State<DropoHomePage>
 
     if (connecting) {
       busyTasks['vpn-connect'] = message.isEmpty
-          ? 'Android VpnService is starting sing-box'
+          ? reconnecting
+                ? 'Восстанавливаем соединение…'
+                : 'Android VpnService is starting sing-box'
           : message;
       busyTasks.remove('vpn-disconnect');
-      statusMessage = 'Подключаем VPN';
-      connectionHint = 'Android VpnService запускает sing-box...';
+      statusMessage = reconnecting ? 'Переподключаем VPN' : 'Подключаем VPN';
+      connectionHint = reconnecting
+          ? (message.isEmpty ? 'Восстанавливаем соединение…' : message)
+          : 'Android VpnService запускает sing-box...';
       connectionHintDanger = false;
       routeProbeActive = true;
       routeProbeFailed = false;
@@ -5199,6 +5358,66 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
   }
 
+  Future<void> _openLegacyTelegramProxySettings() async {
+    try {
+      final result = await widget.bridge.openTelegramProxySettings();
+      if (result['success'] == false) {
+        throw StateError(
+          result['error']?.toString() ??
+              'Не удалось открыть настройки Telegram',
+        );
+      }
+      if (!mounted) return;
+      setState(() {
+        statusMessage = 'Открыты настройки Telegram';
+        connectionHint =
+            'Удалите старый локальный proxy dropo, затем вернитесь и подтвердите очистку.';
+        connectionHintDanger = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        statusMessage = 'Не удалось открыть Telegram';
+        connectionHint = _cleanError(error);
+        connectionHintDanger = true;
+      });
+    }
+  }
+
+  Future<void> _acknowledgeLegacyTelegramProxyRemoved() async {
+    if (uiBusy) return;
+    setState(() => uiBusy = true);
+    try {
+      final result = await widget.bridge.acknowledgeTelegramProxyRemoved();
+      if (result['success'] == false) {
+        throw StateError(
+          result['error']?.toString() ??
+              'Не удалось сохранить подтверждение очистки proxy',
+        );
+      }
+      if (!mounted) return;
+      setState(() {
+        legacyTelegramProxy = const TelegramExitInfo(
+          showNotice: false,
+          injected: false,
+          recommendRemove: false,
+        );
+        statusMessage = 'Старый proxy Telegram отключён';
+        connectionHint = '';
+        connectionHintDanger = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        statusMessage = 'Подтверждение не сохранено';
+        connectionHint = _cleanError(error);
+        connectionHintDanger = true;
+      });
+    } finally {
+      if (mounted) setState(() => uiBusy = false);
+    }
+  }
+
   Future<void> _finishPreparedQuit(TelegramExitInfo info) async {
     if (quitting) {
       return;
@@ -5368,6 +5587,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         return;
       }
       setState(() {
+        liveRoutesConfirmed = false;
         if (refreshed != null && refreshed.isNotEmpty) {
           routes = refreshed;
         } else {
@@ -5431,6 +5651,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       if (!mounted) return;
       setState(() {
         routes = refreshed;
+        liveRoutesConfirmed = false;
         statusMessage = experimentalDiscordAuto
             ? 'Экспериментальный автоподбор Discord включён'
             : mode == 'auto'
@@ -5496,6 +5717,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       setState(() {
         appConfig = appConfig.copyWith(routingMode: mode);
+        liveRoutesConfirmed = false;
         statusMessage = mode == 'all_traffic'
             ? 'Сохранён режим «Всё через VPN»'
             : 'Сохранён режим «По сервисам»';
@@ -5596,6 +5818,9 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (busyTasks.containsKey('vpn-disconnect')) {
       return 'Отключаем VPN';
     }
+    if (status.vpnState == 'reconnecting') {
+      return 'Переподключаем VPN';
+    }
     if (busyTasks.containsKey('vpn-connect')) {
       return 'Подключаем VPN';
     }
@@ -5666,6 +5891,16 @@ class _DropoHomePageState extends State<DropoHomePage>
       notices: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (legacyTelegramProxy.injected &&
+              legacyTelegramProxy.recommendRemove)
+            _LegacyTelegramProxyStrip(
+              onOpenSettings: controlsDisabled
+                  ? null
+                  : _openLegacyTelegramProxySettings,
+              onAcknowledge: controlsDisabled
+                  ? null
+                  : _acknowledgeLegacyTelegramProxyRemoved,
+            ),
           _ConnectionHint(
             visible: showHint,
             title: _hintTitle(),
@@ -5793,10 +6028,16 @@ class _DropoHomePageState extends State<DropoHomePage>
           bridge: widget.bridge,
           subscription: subscription,
           embedded: true,
-          enabled: online && !quitting && !uiBusy && !connectionBusy,
+          enabled:
+              online &&
+              !quitting &&
+              !uiBusy &&
+              !connectionBusy &&
+              (!_isMobileShell || !status.connected),
           sourceSnapshot: homeSourcesLoaded && online ? homeSources : null,
           onBusyChanged: _setSectionBusy,
           onChanged: () => unawaited(_refresh(all: true)),
+          onReadyToConnect: () => unawaited(_selectMenuSection('home')),
         );
       case 'profiles':
         return _ProfilesDialog(
@@ -5846,6 +6087,11 @@ class _DropoHomePageState extends State<DropoHomePage>
       case 'logs':
         return _LogsDialog(
           key: const ValueKey('logs-section'),
+          bridge: widget.bridge,
+          connected: online && status.connected,
+          routingMode: appConfig.routingMode,
+          routes: routes,
+          routesAreLive: online && liveRoutesConfirmed,
           logs: logs,
           onOpenFolder: () => widget.bridge.openLogsFolder(),
           onCopyDiagnostics: () => widget.bridge.diagnostics(),
@@ -6021,6 +6267,83 @@ class _DropoHomePageState extends State<DropoHomePage>
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _LegacyTelegramProxyStrip extends StatelessWidget {
+  const _LegacyTelegramProxyStrip({
+    required this.onOpenSettings,
+    required this.onAcknowledge,
+  });
+
+  final VoidCallback? onOpenSettings;
+  final VoidCallback? onAcknowledge;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('legacy-telegram-proxy-strip'),
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF2A2218).withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: const Color(0xFFF59E0B).withValues(alpha: 0.35),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.telegram, color: Color(0xFFF8D38B), size: 20),
+              SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  'Старый proxy Telegram требует проверки',
+                  style: TextStyle(
+                    color: Color(0xFFF8D38B),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Предыдущая версия dropo могла сохранить локальный proxy в Telegram. Новая версия его не запускает. Откройте настройки Telegram и удалите этот proxy вручную.',
+            style: TextStyle(
+              color: Color(0xFFD8E4E0),
+              fontSize: 12,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                key: const ValueKey('open-telegram-proxy-settings'),
+                onPressed: onOpenSettings,
+                icon: const Icon(Icons.open_in_new, size: 17),
+                label: const Text('Открыть настройки Telegram'),
+              ),
+              FilledButton.icon(
+                key: const ValueKey('ack-telegram-proxy-removed'),
+                onPressed: onAcknowledge,
+                icon: const Icon(Icons.check, size: 17),
+                label: const Text('Proxy уже удалён'),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -6753,6 +7076,9 @@ class _AppDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
+    final availableWidth = centered
+        ? math.max(0.0, media.size.width - 44)
+        : media.size.width;
     return Dialog(
       alignment: centered ? Alignment.center : Alignment.centerLeft,
       backgroundColor: Colors.transparent,
@@ -6766,7 +7092,7 @@ class _AppDialog extends StatelessWidget {
               : media.size.height,
         ),
         child: Container(
-          width: width.clamp(320.0, media.size.width * 0.92).toDouble(),
+          width: math.min(width, availableWidth),
           height: centered ? null : media.size.height,
           padding: EdgeInsets.fromLTRB(
             22,
@@ -6838,12 +7164,22 @@ class _AppDialog extends StatelessWidget {
 class _LogsDialog extends StatefulWidget {
   const _LogsDialog({
     super.key,
+    required this.bridge,
+    required this.connected,
+    required this.routingMode,
+    required this.routes,
+    required this.routesAreLive,
     required this.logs,
     required this.onOpenFolder,
     this.onCopyDiagnostics,
     this.embedded = false,
   });
 
+  final CoreBridge bridge;
+  final bool connected;
+  final String routingMode;
+  final List<RouteService> routes;
+  final bool routesAreLive;
   final List<String> logs;
   final Future<void> Function() onOpenFolder;
   final Future<String> Function()? onCopyDiagnostics;
@@ -6877,6 +7213,29 @@ class _LogsDialogState extends State<_LogsDialog> {
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        _ConnectionHealthPanel(
+          bridge: widget.bridge,
+          connected: widget.connected,
+          routingMode: widget.routingMode,
+          routes: widget.routes,
+          routesAreLive: widget.routesAreLive,
+        ),
+        const SizedBox(height: 18),
+        const Row(
+          children: [
+            Icon(Icons.article_outlined, color: Color(0xFFBAF7D0), size: 20),
+            SizedBox(width: 9),
+            Text(
+              'Технический журнал',
+              style: TextStyle(
+                color: Color(0xFFE8F3EF),
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
         Row(
           children: [
             Expanded(
@@ -6907,7 +7266,7 @@ class _LogsDialogState extends State<_LogsDialog> {
           Align(
             alignment: Alignment.centerRight,
             child: _ActionButton(
-              label: 'Copy diagnostics',
+              label: 'Копировать диагностику',
               icon: Icons.bug_report,
               compact: true,
               onPressed: () async {
@@ -6915,7 +7274,7 @@ class _LogsDialogState extends State<_LogsDialog> {
                 await Clipboard.setData(ClipboardData(text: diagnostics));
                 if (context.mounted) {
                   ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                    const SnackBar(content: Text('Diagnostics copied')),
+                    const SnackBar(content: Text('Диагностика скопирована')),
                   );
                 }
               },
@@ -6995,15 +7354,15 @@ class _LogsDialogState extends State<_LogsDialog> {
     );
     if (embedded) {
       return _MenuPageSurface(
-        title: 'Логи',
-        icon: Icons.article,
+        title: 'Диагностика',
+        icon: Icons.health_and_safety_outlined,
         child: content,
       );
     }
     return _AppDialog(
       width: 760,
-      title: 'Логи',
-      icon: Icons.article,
+      title: 'Диагностика',
+      icon: Icons.health_and_safety_outlined,
       child: content,
     );
   }
@@ -9208,10 +9567,88 @@ class _SettingsDialog extends StatefulWidget {
   State<_SettingsDialog> createState() => _SettingsDialogState();
 }
 
-class _SettingsDialogState extends State<_SettingsDialog> {
+class _SettingsDialogState extends State<_SettingsDialog>
+    with WidgetsBindingObserver {
   late AppConfig config = widget.initialConfig;
   String statusText = '';
   bool saving = false;
+  AndroidVpnProtection androidVpnProtection = AndroidVpnProtection.unknown();
+  bool androidVpnProtectionLoading = false;
+  String androidVpnProtectionError = '';
+  bool androidVpnSettingsOpening = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    if (_isAndroidPlatform && !widget.advanced) {
+      unawaited(_loadAndroidVpnProtection());
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _isAndroidPlatform &&
+        !widget.advanced) {
+      unawaited(_loadAndroidVpnProtection());
+    }
+  }
+
+  Future<void> _loadAndroidVpnProtection() async {
+    if (androidVpnProtectionLoading) {
+      return;
+    }
+    setState(() {
+      androidVpnProtectionLoading = true;
+      androidVpnProtectionError = '';
+    });
+    try {
+      final protection = await widget.bridge.androidVpnProtection();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        androidVpnProtection = protection;
+        androidVpnProtectionLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        androidVpnProtectionLoading = false;
+        androidVpnProtectionError = _cleanError(error);
+        statusText =
+            'Не удалось проверить защиту Android: $androidVpnProtectionError';
+      });
+    }
+  }
+
+  Future<void> _openAndroidVpnSettings() async {
+    setState(() {
+      androidVpnSettingsOpening = true;
+      statusText = 'Открываем системные настройки VPN...';
+    });
+    final result = await _settingAction(widget.bridge.androidOpenVpnSettings);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      androidVpnSettingsOpening = false;
+      statusText = result['success'] == false
+          ? result['error']?.toString() ??
+                'Не удалось открыть системные настройки VPN'
+          : 'Включите для Dropo Always-on VPN и «Блокировать подключения без VPN».';
+    });
+  }
+
   Future<Map<String, dynamic>> _settingAction(
     Future<Map<String, dynamic>> Function() action,
   ) async {
@@ -9407,6 +9844,19 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                     ? (value) =>
                           _saveGeneral(config.copyWith(autoUpdateSub: value))
                     : null,
+              ),
+            ],
+          ),
+        if (!widget.advanced && _isAndroidPlatform)
+          _SettingsGroup(
+            title: 'Защита соединения',
+            children: [
+              _AndroidVpnProtectionCard(
+                protection: androidVpnProtection,
+                loading: androidVpnProtectionLoading,
+                error: androidVpnProtectionError,
+                openingSettings: androidVpnSettingsOpening,
+                onOpenSettings: () => unawaited(_openAndroidVpnSettings()),
               ),
             ],
           ),

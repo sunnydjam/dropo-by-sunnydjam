@@ -136,10 +136,14 @@ func (a *App) ValidateImportData(jsonData string) map[string]interface{} {
 // This is a FULL REPLACE operation - all existing profiles will be deleted!
 func (a *App) ImportAllProfiles(jsonData string) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
 
 	// Check VPN is not running
 	a.mu.Lock()
-	if a.isRunning {
+	if a.isRunning || a.isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
 		a.mu.Unlock()
 		return map[string]interface{}{
 			"success": false,

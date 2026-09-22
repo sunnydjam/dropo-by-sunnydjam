@@ -31,6 +31,10 @@ param(
     [switch]$AllowUnsignedWindows,
     # Fail closed for publishers that configure a production signing gate.
     [switch]$RequireWindowsSigning,
+    # Inert packaging-only opt-in. The guard is never installed as a service or
+    # activated by this build; its signed bytes must be pinned independently.
+    [string]$WfpGuardBinaryPath,
+    [string]$WfpGuardSHA256,
     # Development-only escape hatch. Public/reproducible packages must always
     # be built from a clean commit.
     [switch]$AllowDirtySource,
@@ -230,10 +234,7 @@ $WinDivertArchiveURL = [string]$VersionInfo.windivert.url
 $XrayVersion = $VersionInfo.xray.version
 $XrayArchiveSHA256 = ([string]$VersionInfo.xray.archiveSha256).ToLowerInvariant()
 $XrayExeSHA256 = ([string]$VersionInfo.xray.executableSha256).ToLowerInvariant()
-$TgWsProxyVersion = $VersionInfo.tgwsproxy.version
 $UTLSVersion = "1.8.4"
-$TgWsProxyHeadlessSHA256 = ([string]$VersionInfo.tgwsproxy.headlessSha256).ToLowerInvariant()
-$TgWsProxyOfficialSHA256 = ([string]$VersionInfo.tgwsproxy.officialWindowsSha256).ToLowerInvariant()
 $SourceRevision = ([string](& git -C $ScriptRoot rev-parse HEAD 2>$null | Select-Object -First 1)).Trim()
 if ($SourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
     $SourceRevision = "unknown"
@@ -241,6 +242,22 @@ if ($SourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
 $SourceDirty = @(& git -C $ScriptRoot status --porcelain 2>$null).Count -gt 0
 $dirtyBuildAllowed = $AllowDirtySource -or $env:DROPO_ALLOW_DIRTY_BUILD -eq "1"
 $willBuildWindows = $Build -or $Flutter -or $AppOnly -or $All -or (-not $Portable -and -not $Android -and -not $Clean)
+if ([string]::IsNullOrWhiteSpace($WfpGuardBinaryPath) -ne [string]::IsNullOrWhiteSpace($WfpGuardSHA256)) {
+    throw 'Specify both -WfpGuardBinaryPath and -WfpGuardSHA256, or neither.'
+}
+if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+    if (-not $willBuildWindows) {
+        throw 'WFP guard packaging is available only for a Windows build.'
+    }
+    if ($WfpGuardSHA256 -cnotmatch '^[0-9a-fA-F]{64}$') {
+        throw '-WfpGuardSHA256 must be an independently pinned 64-character SHA-256.'
+    }
+    # The guard release preflight requires Windows-trusted core and guard
+    # signatures from the same signer, with the configured release cert pinned
+    # when its SHA-1 thumbprint is available.
+    # Do not let the normal unsigned development-build fallback weaken it.
+    $RequireWindowsSigning = $true
+}
 if ($willBuildWindows -and $SourceDirty -and -not $dirtyBuildAllowed) {
     throw "Reproducible Windows packages require a clean Git worktree. Commit the intended source first, or use -AllowDirtySource for a development-only build."
 }
@@ -297,7 +314,7 @@ $WinDivertX64Dir = Join-Path $WinDivertDir "x64"
 $ReleasePlatform = "windows"
 $ReleaseArch = "x64"
 $RequiredDepFiles = @("sing-box.exe", "xray.exe", "wireguard.exe", "wg.exe", "wintun.dll", "WinDivert.dll", "WinDivert64.sys")
-$ForbiddenDepFiles = @("winws.exe", "winws2.exe", "cygwin1.dll", "zapret-lib.lua", "zapret-antidpi.lua")
+$ForbiddenDepFiles = @("winws.exe", "winws2.exe", "cygwin1.dll", "zapret-lib.lua", "zapret-antidpi.lua", "tg-ws-proxy.exe")
 $WindowsInstallerAsset = "dropo-Windows-Setup-x64.exe"
 $WindowsPortableAsset = "dropo-Windows-Portable-x64.zip"
 $AndroidReleaseArch = "arm64"
@@ -487,25 +504,6 @@ function Ensure-WireGuardWindowsDependency {
     } finally {
         Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
     }
-}
-
-function Ensure-TgWsProxyWindowsDependency {
-    $tgDir = Join-Path $DepsDir "tg-ws-proxy-v$TgWsProxyVersion"
-    $headless = Join-Path $tgDir "TgWsProxy_headless_windows.exe"
-    $official = Join-Path $tgDir "TgWsProxy_windows.exe"
-    if (Test-Path -LiteralPath $headless -PathType Leaf) {
-        Assert-FileSHA256 -Path $headless -ExpectedSHA256 $TgWsProxyHeadlessSHA256 -Label "tg-ws-proxy headless executable"
-        return
-    }
-    if (Test-Path -LiteralPath $official -PathType Leaf) {
-        Assert-FileSHA256 -Path $official -ExpectedSHA256 $TgWsProxyOfficialSHA256 -Label "tg-ws-proxy official executable"
-        return
-    }
-    New-Item -ItemType Directory -Path $tgDir -Force | Out-Null
-    Download-File -Url "https://github.com/Flowseal/tg-ws-proxy/releases/download/v$TgWsProxyVersion/TgWsProxy_windows.exe" -Destination $official
-    Assert-FileSHA256 -Path $official -ExpectedSHA256 $TgWsProxyOfficialSHA256 -Label "tg-ws-proxy official executable"
-    Download-File -Url "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/v$TgWsProxyVersion/LICENSE" -Destination (Join-Path $tgDir "LICENSE")
-    Write-Host "[OK] Downloaded and verified tg-ws-proxy v$TgWsProxyVersion" -ForegroundColor Green
 }
 
 # Clean build
@@ -723,7 +721,6 @@ function Build-Application {
     Ensure-WinDivertWindowsDependency
     Ensure-XrayWindowsDependency
     Ensure-WireGuardWindowsDependency
-    Ensure-TgWsProxyWindowsDependency
     # Every build, including AppOnly/CI builds, verifies the repository-owned
     # blocked catalog and refreshes it when upstream published a new release.
     # End-user startup never downloads routing data.
@@ -878,6 +875,10 @@ function Build-Application {
     Rename-Item -LiteralPath $uiExe -NewName "dropo-ui.exe" -Force
     Write-Host "[OK] Built Flutter dropo-ui.exe" -ForegroundColor Green
 
+    & (Join-Path $ScriptRoot 'tools\check-windows-ui-runtime.ps1') `
+        -RuntimeFolder $RuntimeFolder `
+        -CMakeCachePath (Join-Path $FlutterDir 'build\windows\x64\CMakeCache.txt')
+
     $coreExe = Join-Path $RuntimeFolder "dropo-core.exe"
     $uiExe = Join-Path $RuntimeFolder "dropo-ui.exe"
     # Sign first: Authenticode changes PE bytes, so the launcher must pin the
@@ -906,6 +907,10 @@ function Build-Application {
     $binDir = Join-Path $RuntimeFolder "bin"
     if (-not (Test-Path $binDir)) {
         New-Item -ItemType Directory -Path $binDir | Out-Null
+    }
+    $wfpGuardDestination = Join-Path $binDir 'dropo-wfp-guard.exe'
+    if (Test-Path -LiteralPath $wfpGuardDestination) {
+        throw 'Stale dropo-wfp-guard.exe found in the release staging folder; refuse implicit packaging or overwrite.'
     }
 
     # Copy sing-box.exe to bin/ folder
@@ -953,27 +958,10 @@ function Build-Application {
         Write-Host "[WARNING] xray.exe not found at: $XrayExe" -ForegroundColor Yellow
     }
 
-    # Bundle the pinned tg-ws-proxy dependency (local MTProto-over-WebSocket
-    # proxy for Telegram). Prefer the verified headless build when present;
-    # clean builders use the verified official upstream Windows release.
-    $TgWsProxyDir = Join-Path $DepsDir "tg-ws-proxy-v$TgWsProxyVersion"
-    $TgWsProxyHeadlessSrc = Join-Path $TgWsProxyDir "TgWsProxy_headless_windows.exe"
-    $TgWsProxyTraySrc = Join-Path $TgWsProxyDir "TgWsProxy_windows.exe"
-    $tgWsProxyDst = Join-Path $binDir "tg-ws-proxy.exe"
-    $TgWsProxySrc = $null
-    $TgWsProxyMode = "headless"
-    if (Test-Path $TgWsProxyHeadlessSrc) {
-        $TgWsProxySrc = $TgWsProxyHeadlessSrc
-    } elseif (Test-Path $TgWsProxyTraySrc) {
-        $TgWsProxySrc = $TgWsProxyTraySrc
-        $TgWsProxyMode = "tray fallback"
-        Write-Host "[WARNING] Headless tg-ws-proxy not found; bundling tray fallback" -ForegroundColor Yellow
-    }
-    if ($TgWsProxySrc -and (Test-Path $TgWsProxySrc)) {
-        Copy-Item $TgWsProxySrc $tgWsProxyDst -Force
-        Write-Host "[OK] Copied bin/tg-ws-proxy.exe (tg-ws-proxy v$TgWsProxyVersion, $TgWsProxyMode)" -ForegroundColor Green
-    } else {
-        Write-Host "[WARNING] tg-ws-proxy.exe not bundled; Telegram MTProto proxy will be unavailable" -ForegroundColor Yellow
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        . (Join-Path $ScriptRoot 'tools\check-wfp-guard-release.ps1') -FunctionsOnly
+        Copy-VerifiedDropoWfpGuard -BinaryPath $WfpGuardBinaryPath -ExpectedSHA256 $WfpGuardSHA256 -BinFolder $binDir | Out-Null
+        Write-Host '[OK] Staged Windows-trusted, SHA-256-pinned WFP guard as an inert runtime file' -ForegroundColor Green
     }
 
     # Defender evaluates extracted child PE files independently from the outer
@@ -986,14 +974,6 @@ function Build-Application {
     if ($unsignedNestedPE.Count -gt 0) {
         Write-Host "[INFO] $($unsignedNestedPE.Count) upstream PE runtime file(s) are unsigned and remain attributed to upstream." -ForegroundColor DarkYellow
     }
-    # tg-ws-proxy is MIT licensed; ship the locally cached license notice.
-    $TgWsProxyLicense = Join-Path $TgWsProxyDir "LICENSE"
-    if (Test-Path $TgWsProxyLicense -PathType Leaf) {
-        Copy-LicenseFile $TgWsProxyLicense (Join-Path $RuntimeFolder "licenses") "tg-ws-proxy-LICENSE.txt"
-    } else {
-        Write-Host "[WARNING] Local tg-ws-proxy LICENSE not found at: $TgWsProxyLicense" -ForegroundColor Yellow
-    }
-
     # Copy third-party license notices required by bundled sidecar binaries.
     $licensesDir = Join-Path $RuntimeFolder "licenses"
     Copy-LicenseFile (Join-Path $SingBoxDir "windows-amd64\sing-box-$SingBoxVersion-windows-amd64\LICENSE") $licensesDir "sing-box-LICENSE.txt"
@@ -1072,7 +1052,7 @@ function Build-Application {
     }
     foreach ($forbiddenFile in $ForbiddenDepFiles) {
         if (Test-Path (Join-Path $binDir $forbiddenFile)) {
-            throw "Obsolete external packet runtime must not be packaged: $forbiddenFile"
+            throw "Forbidden Windows runtime file must not be packaged: $forbiddenFile"
         }
     }
 
@@ -1122,12 +1102,33 @@ function Build-Application {
         [ordered]@{ name = "Xray-core"; SPDXID = "SPDXRef-Package-xray"; versionInfo = $XrayVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "MPL-2.0"; licenseDeclared = "MPL-2.0" },
         [ordered]@{ name = "WireGuard for Windows"; SPDXID = "SPDXRef-Package-wireguard"; versionInfo = $WireGuardVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "NOASSERTION"; licenseDeclared = "NOASSERTION" },
         [ordered]@{ name = "WinDivert"; SPDXID = "SPDXRef-Package-windivert"; versionInfo = $WinDivertVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "LGPL-3.0-only OR GPL-2.0-only"; licenseDeclared = "LGPL-3.0-only OR GPL-2.0-only" },
-        [ordered]@{ name = "tg-ws-proxy"; SPDXID = "SPDXRef-Package-tg-ws-proxy"; versionInfo = $TgWsProxyVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" },
         [ordered]@{ name = "Flowseal zapret-discord-youtube payloads"; SPDXID = "SPDXRef-Package-flowseal-payloads"; versionInfo = "1.10.2"; downloadLocation = "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.2"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" },
         [ordered]@{ name = "metacubex uTLS"; SPDXID = "SPDXRef-Package-metacubex-utls"; versionInfo = $UTLSVersion; downloadLocation = "https://github.com/metacubex/utls"; filesAnalyzed = $false; licenseConcluded = "BSD-3-Clause"; licenseDeclared = "BSD-3-Clause" }
     )
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        # The guard is a separate Dropo-signed binary supplied to this build.
+        # Its version/license are not inferred from the parent app's metadata.
+        $guardSHA1 = (Get-FileHash -LiteralPath $wfpGuardDestination -Algorithm SHA1).Hash.ToLowerInvariant()
+        $guardVerificationBytes = [System.Text.Encoding]::ASCII.GetBytes($guardSHA1)
+        $guardVerificationHash = [System.Security.Cryptography.SHA1]::Create().ComputeHash($guardVerificationBytes)
+        $guardVerificationCode = [System.BitConverter]::ToString($guardVerificationHash).Replace('-', '').ToLowerInvariant()
+        $spdxPackages += [ordered]@{
+            name = 'Dropo WFP guard'
+            SPDXID = 'SPDXRef-Package-dropo-wfp-guard'
+            versionInfo = 'NOASSERTION'
+            downloadLocation = 'NOASSERTION'
+            filesAnalyzed = $true
+            packageVerificationCode = [ordered]@{ packageVerificationCodeValue = $guardVerificationCode }
+            licenseConcluded = 'NOASSERTION'
+            licenseDeclared = 'NOASSERTION'
+            checksums = @([ordered]@{ algorithm = 'SHA256'; checksumValue = $WfpGuardSHA256.ToLowerInvariant() })
+        }
+    }
     $spdxFiles = @()
     $spdxRelationships = @([ordered]@{ spdxElementId = "SPDXRef-DOCUMENT"; relationshipType = "DESCRIBES"; relatedSpdxElement = "SPDXRef-Package-dropo" })
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        $spdxRelationships += [ordered]@{ spdxElementId = 'SPDXRef-Package-dropo'; relationshipType = 'CONTAINS'; relatedSpdxElement = 'SPDXRef-Package-dropo-wfp-guard' }
+    }
     for ($index = 0; $index -lt $runtimeManifestFiles.Count; $index++) {
         $item = $runtimeManifestFiles[$index]
         $fileID = "SPDXRef-File-$($index + 1)"
@@ -1139,6 +1140,9 @@ function Build-Application {
             copyrightText = "NOASSERTION"
         }
         $spdxRelationships += [ordered]@{ spdxElementId = "SPDXRef-Package-dropo"; relationshipType = "CONTAINS"; relatedSpdxElement = $fileID }
+        if ([string]$item.path -ceq 'bin/dropo-wfp-guard.exe') {
+            $spdxRelationships += [ordered]@{ spdxElementId = 'SPDXRef-Package-dropo-wfp-guard'; relationshipType = 'CONTAINS'; relatedSpdxElement = $fileID }
+        }
     }
     $spdxDocument = [ordered]@{
         spdxVersion = "SPDX-2.3"
@@ -1171,12 +1175,17 @@ function Build-Application {
                     [ordered]@{ uri = "pkg:generic/xray-core@$XrayVersion" },
                     [ordered]@{ uri = "pkg:generic/wireguard-windows@$WireGuardVersion" },
                     [ordered]@{ uri = "pkg:generic/windivert@$WinDivertVersion" },
-                    [ordered]@{ uri = "pkg:generic/tg-ws-proxy@$TgWsProxyVersion" },
                     [ordered]@{ uri = "pkg:github/Flowseal/zapret-discord-youtube@1.10.2" },
                     [ordered]@{ uri = "pkg:golang/github.com/metacubex/utls@$UTLSVersion" }
                 )
             }
             runDetails = [ordered]@{ builder = [ordered]@{ id = "dropo-local-windows-builder" }; metadata = [ordered]@{ invocationId = $BuildHash; startedOn = $BuildTimestampISO } }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        $provenance.predicate.buildDefinition.resolvedDependencies += [ordered]@{
+            uri = 'file:dropo-wfp-guard.exe'
+            digest = [ordered]@{ sha256 = $WfpGuardSHA256.ToLowerInvariant() }
         }
     }
     $provenancePath = Join-Path $RuntimeFolder "dropo-build-provenance.json"
@@ -1195,6 +1204,20 @@ function Build-Application {
     }
     Invoke-WindowsCodeSigning -Paths @($coreExe)
     $coreSHA256 = (Get-FileHash -LiteralPath $coreExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        # Pass the same in-memory hash that was embedded by finalLdflags above.
+        # A hash derived from the adjacent manifest here would not establish the
+        # signed core -> manifest -> guard chain.
+        $guardPreflightArgs = @{
+            RuntimeFolder = $RuntimeFolder
+            ExpectedManifestSHA256 = $runtimeManifestSHA256
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:DROPO_WINDOWS_CERT_SHA1)) {
+            $guardPreflightArgs.ExpectedSignerThumbprint = [string]$env:DROPO_WINDOWS_CERT_SHA1
+        }
+        Assert-DropoWfpGuardRelease @guardPreflightArgs | Out-Null
+        Write-Host '[OK] Staged WFP guard matches the build-time manifest hash and signed core publisher' -ForegroundColor Green
+    }
 
     Push-Location (Join-Path $ScriptRoot "launcher")
     try {
@@ -1216,6 +1239,18 @@ function Build-Application {
     New-AppOnlyArchive -SourceAppFolder $AppFolder -DestinationZip $portablePath
     $installerPath = Join-Path $VersionDir $WindowsInstallerAsset
     New-WindowsInstaller -SourceAppFolder $AppFolder -DestinationExe $installerPath -PackageVersion $AppVersion
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        $guardInstallerArgs = @{
+            RuntimeFolder = $RuntimeFolder
+            InstallerPath = $installerPath
+            ExpectedManifestSHA256 = $runtimeManifestSHA256
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:DROPO_WINDOWS_CERT_SHA1)) {
+            $guardInstallerArgs.ExpectedSignerThumbprint = [string]$env:DROPO_WINDOWS_CERT_SHA1
+        }
+        Assert-DropoWfpGuardInstallerRelease @guardInstallerArgs | Out-Null
+        Write-Host '[OK] Signed installer, core and inert WFP guard share one trusted publisher' -ForegroundColor Green
+    }
     foreach ($assetPath in @($installerPath, $portablePath)) {
         $assetName = Split-Path -Leaf $assetPath
         $assetSHA = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
