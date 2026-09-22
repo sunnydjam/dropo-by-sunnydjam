@@ -1341,6 +1341,13 @@ func (a *App) ensureActiveConfigForStart() error {
 			a.writeLog("Active config predates full-tunnel selector/DNS isolation; rebuilding before start")
 			needsRebuild = true
 		}
+		if !needsRebuild && a.configBuilder.filterManager != nil &&
+			migrateRuntimeRuleSetPaths(config, a.configBuilder.filterManager.GetFiltersPath()) {
+			// Only the Dropo-owned absolute paths need changing here. Rebuilding the
+			// whole profile would unnecessarily contact the subscription provider and
+			// could make an otherwise usable cached VPN fail during an offline update.
+			a.writeLog("Active config referenced a previous dependency runtime; updated local rule-set paths before start")
+		}
 		if !needsRebuild && subscriptionURL != "" {
 			if path := a.storage.ActiveConfigFilePath(); path != "" {
 				if hasVPN, verr := configHasVPNProbeCandidates(path); verr == nil && !hasVPN {
@@ -1363,6 +1370,70 @@ func (a *App) ensureActiveConfigForStart() error {
 
 	a.writeLog("Active profile has no generated config, building it before start")
 	return a.configBuilder.BuildConfigForProfile(profile.ID, subscriptionURL, profile.WireGuardConfigs)
+}
+
+// migrateRuntimeRuleSetPaths rewrites cached local filter paths left behind by
+// an application update. Protected Windows runtimes are installed into
+// versioned directories and the previous directory is removed; reusing one of
+// those absolute paths makes sing-box fail before it can open its local proxy.
+// Only Dropo-owned rule-set tags participate, so an unrelated local rule-set is
+// never rewritten as part of this migration.
+func migrateRuntimeRuleSetPaths(config map[string]interface{}, currentFiltersPath string) bool {
+	currentFiltersPath = strings.TrimSpace(currentFiltersPath)
+	if currentFiltersPath == "" {
+		return false
+	}
+
+	expectedByTag := make(map[string]string, len(FilterFiles))
+	for _, filter := range FilterFiles {
+		expectedByTag[filter.Tag] = filepath.Join(currentFiltersPath, filter.Name)
+	}
+
+	route, ok := config["route"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	ruleSets, ok := route["rule_set"].([]interface{})
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, raw := range ruleSets {
+		ruleSet, ok := raw.(map[string]interface{})
+		if !ok || ruleSet["type"] != "local" {
+			continue
+		}
+		tag, _ := ruleSet["tag"].(string)
+		expectedPath, managed := expectedByTag[tag]
+		if !managed {
+			continue
+		}
+		configuredPath, _ := ruleSet["path"].(string)
+		if !sameRuntimeRuleSetPath(configuredPath, expectedPath) {
+			ruleSet["path"] = expectedPath
+			changed = true
+		}
+	}
+	return changed
+}
+
+func sameRuntimeRuleSetPath(configuredPath, expectedPath string) bool {
+	configuredPath = strings.TrimSpace(configuredPath)
+	expectedPath = strings.TrimSpace(expectedPath)
+	if configuredPath == "" || expectedPath == "" {
+		return false
+	}
+	configuredAbs, configuredErr := filepath.Abs(configuredPath)
+	expectedAbs, expectedErr := filepath.Abs(expectedPath)
+	if configuredErr != nil || expectedErr != nil {
+		return false
+	}
+	configuredAbs = filepath.Clean(configuredAbs)
+	expectedAbs = filepath.Clean(expectedAbs)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(configuredAbs, expectedAbs)
+	}
+	return configuredAbs == expectedAbs
 }
 
 func configNeedsAllTrafficTunnelMigration(config map[string]interface{}, mode RoutingMode) bool {

@@ -2,6 +2,20 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.32 — 2026-09-23
+
+### Windows update hotfix
+
+- fixed VPN startup after an installed update when the saved sing-box profile
+  still referenced filter files in the previous protected runtime directory;
+- startup now detects Dropo-owned local rule-set paths from another runtime and
+  rewrites only those references to the current signed bundle before launching
+  the selective proxy, without contacting the subscription provider;
+- subscriptions, source order, selected nodes, profiles, routing modes and
+  per-service Direct/VPN/Zapret policies are preserved during the migration;
+- routing behavior is otherwise unchanged from 3.0.31. Android remains outside
+  this Windows release.
+
 ## 3.0.31 — 2026-09-23
 
 ### Full VPN and Windows routing
