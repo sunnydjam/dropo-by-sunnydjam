@@ -100,9 +100,8 @@ func TestManualStopDoesNotClaimReconnectProtection(t *testing.T) {
 }
 
 func TestTerminalReconnectFailureDoesNotClaimProtection(t *testing.T) {
-	withReconnectTestDelays(t, []time.Duration{0})
-
 	app := NewApp()
+	withReconnectTestDelays(t, app, []time.Duration{0})
 	app.initialized = true
 	app.initializedReady.Store(true)
 	app.desiredConnected.Store(true)

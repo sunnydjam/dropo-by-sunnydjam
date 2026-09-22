@@ -58,6 +58,7 @@ type App struct {
 	reconnectAttempt       int
 	reconnectError         string
 	reconnectStartAttempt  func(*App) map[string]interface{} // Test seam; nil uses the production start path.
+	reconnectTestDelays    []time.Duration                   // Test seam; nil uses the immutable production retry ladder.
 	trafficStats           *TrafficStats
 	nativeWG               *NativeWireGuardManager // Native WireGuard tunnel manager
 	byeDPI                 *ByeDPIManager          // Free access (DPI-bypass) process manager

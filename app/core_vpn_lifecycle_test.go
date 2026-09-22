@@ -6,13 +6,11 @@ import (
 	"time"
 )
 
-func withReconnectTestDelays(t *testing.T, delays []time.Duration) {
+func withReconnectTestDelays(t *testing.T, app *App, delays []time.Duration) {
 	t.Helper()
-	previousDelays := vpnReconnectDelays
-	vpnReconnectDelays = delays
-	t.Cleanup(func() {
-		vpnReconnectDelays = previousDelays
-	})
+	app.reconnectMu.Lock()
+	app.reconnectTestDelays = append([]time.Duration(nil), delays...)
+	app.reconnectMu.Unlock()
 }
 
 func waitForReconnectIdle(t *testing.T, app *App) {
@@ -28,9 +26,8 @@ func waitForReconnectIdle(t *testing.T, app *App) {
 
 func TestVPNReconnectStopsAfterSuccessfulAttempt(t *testing.T) {
 	var attempts atomic.Int32
-	withReconnectTestDelays(t, []time.Duration{0, 0, 0})
-
 	app := NewApp()
+	withReconnectTestDelays(t, app, []time.Duration{0, 0, 0})
 	app.reconnectStartAttempt = func(*App) map[string]interface{} {
 		attempts.Add(1)
 		return map[string]interface{}{"success": true}
@@ -49,9 +46,8 @@ func TestVPNReconnectStopsAfterSuccessfulAttempt(t *testing.T) {
 
 func TestVPNReconnectIsBounded(t *testing.T) {
 	var attempts atomic.Int32
-	withReconnectTestDelays(t, []time.Duration{0, 0, 0})
-
 	app := NewApp()
+	withReconnectTestDelays(t, app, []time.Duration{0, 0, 0})
 	app.reconnectStartAttempt = func(*App) map[string]interface{} {
 		attempts.Add(1)
 		return map[string]interface{}{"success": false, "error": "offline"}
@@ -74,9 +70,8 @@ func TestVPNReconnectIsBounded(t *testing.T) {
 
 func TestManualStopCancelsDelayedReconnect(t *testing.T) {
 	var attempts atomic.Int32
-	withReconnectTestDelays(t, []time.Duration{150 * time.Millisecond})
-
 	app := NewApp()
+	withReconnectTestDelays(t, app, []time.Duration{150 * time.Millisecond})
 	app.reconnectStartAttempt = func(*App) map[string]interface{} {
 		attempts.Add(1)
 		return map[string]interface{}{"success": true}
@@ -100,9 +95,8 @@ func TestManualStopCancelsDelayedReconnect(t *testing.T) {
 }
 
 func TestCancelledReconnectCannotPublishStaleTerminalFailure(t *testing.T) {
-	withReconnectTestDelays(t, []time.Duration{0})
-
 	app := NewApp()
+	withReconnectTestDelays(t, app, []time.Duration{0})
 	attempted := make(chan struct{})
 	app.reconnectStartAttempt = func(*App) map[string]interface{} {
 		close(attempted)
@@ -133,9 +127,8 @@ func TestCancelledReconnectCannotPublishStaleTerminalFailure(t *testing.T) {
 }
 
 func TestGetStatusPublishesReconnectState(t *testing.T) {
-	withReconnectTestDelays(t, []time.Duration{time.Second})
-
 	app := NewApp()
+	withReconnectTestDelays(t, app, []time.Duration{time.Second})
 	app.reconnectStartAttempt = func(*App) map[string]interface{} {
 		return map[string]interface{}{"success": false}
 	}

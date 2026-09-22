@@ -9,7 +9,7 @@ import (
 // The retry ladder is deliberately short. It repairs transient process or
 // network failures without leaving an unbounded background loop that can
 // resurrect a session after the user pressed Disconnect.
-var vpnReconnectDelays = []time.Duration{
+var defaultVPNReconnectDelays = []time.Duration{
 	750 * time.Millisecond,
 	2 * time.Second,
 	5 * time.Second,
@@ -34,7 +34,7 @@ func (a *App) vpnReconnectSnapshot() vpnReconnectSnapshot {
 		Active:     a.reconnecting.Load(),
 		Generation: a.reconnectGeneration.Load(),
 		Attempt:    a.reconnectAttempt,
-		Total:      len(vpnReconnectDelays),
+		Total:      len(defaultVPNReconnectDelays),
 		Reason:     a.reconnectReason,
 		Error:      a.reconnectError,
 	}
@@ -93,12 +93,17 @@ func (a *App) scheduleVPNReconnect(reason string) {
 	a.reconnectAttempt = 0
 	a.reconnectError = ""
 	a.reconnecting.Store(true)
+	delays := defaultVPNReconnectDelays
+	if a.reconnectTestDelays != nil {
+		delays = a.reconnectTestDelays
+	}
+	delayPlan := append([]time.Duration(nil), delays...)
 	a.reconnectMu.Unlock()
 
 	a.hasError.Store(false)
 	UpdateTrayIcon("connecting")
 	a.emitVPNLifecycleState("reconnecting", generation, 0, reason)
-	go a.runVPNReconnect(ctx, generation, reason)
+	go a.runVPNReconnect(ctx, generation, reason, delayPlan)
 }
 
 // beginVPNTransactionalReconnect exposes a source/settings restart as one
@@ -136,15 +141,16 @@ func (a *App) finishVPNTransactionalReconnect(generation uint64) {
 	a.reconnectMu.Unlock()
 }
 
-func (a *App) runVPNReconnect(ctx context.Context, generation uint64, reason string) {
+func (a *App) runVPNReconnect(ctx context.Context, generation uint64, reason string, delays []time.Duration) {
 	lastError := ""
-	for index, delay := range vpnReconnectDelays {
+	total := len(delays)
+	for index, delay := range delays {
 		attempt := index + 1
 		if !a.setVPNReconnectAttempt(ctx, generation, attempt) {
 			return
 		}
 		a.emitVPNLifecycleState("reconnecting", generation, attempt,
-			fmt.Sprintf("Переподключение %d/%d", attempt, len(vpnReconnectDelays)))
+			fmt.Sprintf("Переподключение %d/%d", attempt, total))
 
 		timer := time.NewTimer(delay)
 		select {
@@ -167,7 +173,7 @@ func (a *App) runVPNReconnect(ctx context.Context, generation uint64, reason str
 			result = startAttempt(a)
 		}
 		if ok, _ := result["success"].(bool); ok {
-			if !a.completeVPNReconnectSuccess(ctx, generation, attempt) {
+			if !a.completeVPNReconnectSuccess(ctx, generation, attempt, total) {
 				return
 			}
 			return
@@ -176,14 +182,14 @@ func (a *App) runVPNReconnect(ctx context.Context, generation uint64, reason str
 		if lastError == "" {
 			lastError = "неизвестная ошибка запуска"
 		}
-		a.writeLog(fmt.Sprintf("[Reconnect] attempt %d/%d failed: %s", attempt, len(vpnReconnectDelays), lastError))
+		a.writeLog(fmt.Sprintf("[Reconnect] attempt %d/%d failed: %s", attempt, total, lastError))
 	}
 
 	message := "Не удалось восстановить VPN после краткого обрыва"
 	if lastError != "" {
 		message += ": " + lastError
 	}
-	a.completeVPNReconnectFailure(ctx, generation, message)
+	a.completeVPNReconnectFailure(ctx, generation, total, message)
 }
 
 // startVPNReconnectAttempt closes the small race between the worker's timer
@@ -240,19 +246,19 @@ func (a *App) finishVPNReconnect(ctx context.Context, generation uint64) bool {
 // Terminal reconnect commits are lifecycle-serialized. A newer public
 // Start/Stop can invalidate the generation while waiting for this lock; in
 // that case the stale worker performs no tray, error, log, or event updates.
-func (a *App) completeVPNReconnectSuccess(ctx context.Context, generation uint64, attempt int) bool {
+func (a *App) completeVPNReconnectSuccess(ctx context.Context, generation uint64, attempt, total int) bool {
 	a.vpnLifecycleMu.Lock()
 	defer a.vpnLifecycleMu.Unlock()
 	if !a.finishVPNReconnect(ctx, generation) {
 		return false
 	}
 	a.hasError.Store(false)
-	a.writeLog(fmt.Sprintf("[Reconnect] VPN restored on attempt %d/%d", attempt, len(vpnReconnectDelays)))
+	a.writeLog(fmt.Sprintf("[Reconnect] VPN restored on attempt %d/%d", attempt, total))
 	a.emitVPNLifecycleState("connected", generation, attempt, "VPN восстановлен")
 	return true
 }
 
-func (a *App) completeVPNReconnectFailure(ctx context.Context, generation uint64, message string) bool {
+func (a *App) completeVPNReconnectFailure(ctx context.Context, generation uint64, total int, message string) bool {
 	a.vpnLifecycleMu.Lock()
 	defer a.vpnLifecycleMu.Unlock()
 	if !a.finishVPNReconnect(ctx, generation) {
@@ -262,7 +268,7 @@ func (a *App) completeVPNReconnectFailure(ctx context.Context, generation uint64
 	a.hasError.Store(true)
 	UpdateTrayIcon("error")
 	a.AddToLogBuffer(message)
-	a.emitVPNLifecycleState("failed", generation, len(vpnReconnectDelays), message)
+	a.emitVPNLifecycleState("failed", generation, total, message)
 	return true
 }
 
@@ -291,7 +297,7 @@ func (a *App) emitVPNLifecycleState(state string, generation uint64, attempt int
 		"desiredConnected":  a.desiredConnected.Load(),
 		"sessionGeneration": generation,
 		"reconnectAttempt":  attempt,
-		"reconnectTotal":    len(vpnReconnectDelays),
+		"reconnectTotal":    len(defaultVPNReconnectDelays),
 		"message":           message,
 	}
 	if state == "failed" {
