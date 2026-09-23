@@ -274,7 +274,7 @@ func TestPersistedFullVPNWithoutSourceCannotStartOrBuildDirectFallback(t *testin
 	if err := app.storage.UpdateAppSettings(settings); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.ensureActiveConfigForStart(); err == nil || !strings.Contains(err.Error(), "VPN-подписку") {
+	if err := app.ensureActiveConfigForStart(); err == nil || !strings.Contains(err.Error(), "VPN-источник") {
 		t.Fatalf("cached config bypassed full VPN source gate: %v", err)
 	}
 	app.configBuilder.SetRoutingMode(RoutingModeAllTraffic)
