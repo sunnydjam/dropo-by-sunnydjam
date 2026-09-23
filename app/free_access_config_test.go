@@ -338,15 +338,16 @@ func TestBlockedOnlyWithoutFilterFilesFailsSafeDirect(t *testing.T) {
 	}
 }
 
-func TestDefaultBlockedOnlyWithSubscriptionRoutesOnlyBlockedTraffic(t *testing.T) {
+func TestSelectedBlockedOnlyWithSubscriptionRoutesOnlyBlockedTraffic(t *testing.T) {
 	basePath := t.TempDir()
 	storage := NewStorage(basePath)
 	if err := storage.Init(); err != nil {
 		t.Fatalf("storage init failed: %v", err)
 	}
 	settings := storage.GetAppSettings()
-	if settings.RoutingMode != RoutingModeBlockedOnly || !FreeMethodsAllowed(settings) {
-		t.Fatalf("default settings = %+v, want blocked_only with free methods enabled", settings)
+	settings.RoutingMode = RoutingModeBlockedOnly
+	if !FreeMethodsAllowed(settings) {
+		t.Fatalf("default settings = %+v, want free methods enabled", settings)
 	}
 
 	filtersPath := filepath.Join(basePath, "bin", FiltersFolder)

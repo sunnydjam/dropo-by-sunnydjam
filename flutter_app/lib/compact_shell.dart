@@ -45,7 +45,13 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     ('technical-settings', 'Сеть и диагностика', Icons.tune),
     ('help', 'Помощь', Icons.help_outline),
   ];
-  static const _primarySections = {'home', 'settings'};
+  static const _primarySections = {
+    'home',
+    'services',
+    'sources',
+    'settings',
+    'help',
+  };
   bool _open = false;
   final _toggleFocus = FocusNode(debugLabel: 'navigation-toggle');
   final _drawerFocus = FocusScopeNode(debugLabel: 'navigation-drawer');
@@ -77,9 +83,16 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   }
 
   String get _parentSection => switch (widget.activeSection) {
-    'services' => 'service-settings',
+    'service-settings' => 'services',
     'profiles' || 'work' || 'dropo_space' || 'technical-settings' => 'advanced',
     'logs' || 'stats' || 'about' => 'help',
+    _ => 'settings',
+  };
+
+  String get _selectedPrimary => switch (widget.activeSection) {
+    'service-settings' => 'services',
+    'logs' || 'stats' || 'about' => 'help',
+    final section when _primarySections.contains(section) => section,
     _ => 'settings',
   };
 
@@ -110,14 +123,13 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     tooltip: close ? 'Закрыть меню' : 'Открыть меню',
     constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
     icon: Icon(close ? Icons.close : Icons.menu_rounded),
+    mouseCursor: SystemMouseCursors.click,
     onPressed: () => close ? _close(restoreFocus: true) : _show(),
   );
 
   Widget _item((String, String, IconData) item, {bool compact = false}) {
     final (section, label, icon) = item;
-    final selected =
-        widget.activeSection == section ||
-        (section == 'settings' && _hasParent);
+    final selected = _selectedPrimary == section;
     final enabled =
         !widget.disabled &&
         (section != 'work' || widget.onWorkNetworks != null);
@@ -130,6 +142,8 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
           key: ValueKey('nav-$section'),
           onPressed: enabled ? () => _select(section) : null,
           style: TextButton.styleFrom(
+            enabledMouseCursor: SystemMouseCursors.click,
+            disabledMouseCursor: SystemMouseCursors.basic,
             minimumSize: const Size(48, 48),
             padding: EdgeInsets.symmetric(
               horizontal: compact ? 0 : 14,
@@ -164,7 +178,13 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     final theme = Theme.of(context);
     final screen = MediaQuery.sizeOf(context);
     final showRail = screen.width >= 520;
-    final railWidth = showRail ? 56.0 : 0.0;
+    final navigationTextScale = MediaQuery.textScalerOf(context).scale(15) / 15;
+    final expandedRail = screen.width >= 800 && navigationTextScale <= 1.5;
+    final railWidth = showRail
+        ? (expandedRail
+              ? 208.0 + math.max(0.0, navigationTextScale - 1) * 144
+              : 56.0)
+        : 0.0;
     final title =
         _items
             .where((item) => item.$1 == widget.activeSection)
@@ -191,6 +211,8 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
         dividerColor: _atlasBorder,
         textButtonTheme: TextButtonThemeData(
           style: TextButton.styleFrom(
+            enabledMouseCursor: SystemMouseCursors.click,
+            disabledMouseCursor: SystemMouseCursors.basic,
             textStyle: const TextStyle(fontFamily: 'Inter', fontSize: 14),
           ),
         ),
@@ -280,11 +302,6 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                 ],
                               ),
                             ),
-                            if (widget.notice != null)
-                              Padding(
-                                padding: const EdgeInsets.all(8),
-                                child: widget.notice!,
-                              ),
                             Expanded(
                               child: widget.activeSection == 'home'
                                   ? widget.child
@@ -320,7 +337,22 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                         ),
                         child: Column(
                           children: [
-                            _toggle(),
+                            if (expandedRail)
+                              const SizedBox(
+                                height: 48,
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Padding(
+                                    padding: EdgeInsets.only(left: 18),
+                                    child: Text(
+                                      'Навигация',
+                                      style: TextStyle(color: _atlasMuted),
+                                    ),
+                                  ),
+                                ),
+                              )
+                            else
+                              _toggle(),
                             Expanded(
                               child: ListView(
                                 padding: const EdgeInsets.symmetric(
@@ -328,18 +360,26 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                   vertical: 8,
                                 ),
                                 children: [
-                                  for (final item in _items.take(1))
-                                    _item(item, compact: true),
+                                  for (final item in _items)
+                                    if (_primarySections.contains(item.$1))
+                                      _item(item, compact: !expandedRail),
                                 ],
                               ),
-                            ),
-                            Padding(
-                              padding: const EdgeInsets.all(4),
-                              child: _item(_items[4], compact: true),
                             ),
                           ],
                         ),
                       ),
+                    ),
+                  ),
+                if (widget.notice != null && !_open)
+                  Positioned(
+                    top: 4,
+                    left: railWidth + 8,
+                    right: 8,
+                    child: _AtlasNoticeOverlay(
+                      identity: widget.notice!.key,
+                      maxHeight: 96,
+                      child: widget.notice!,
                     ),
                   ),
                 if (_open) ...[
@@ -424,4 +464,113 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
       ),
     );
   }
+}
+
+// Overlay messages never become layout children of the page. Closing only
+// collapses the presentation: errors and ongoing probes can still be opened.
+class _AtlasNoticeOverlay extends StatefulWidget {
+  const _AtlasNoticeOverlay({
+    required this.child,
+    required this.maxHeight,
+    this.identity,
+  });
+
+  final Widget child;
+  final double maxHeight;
+  final Key? identity;
+
+  @override
+  State<_AtlasNoticeOverlay> createState() => _AtlasNoticeOverlayState();
+}
+
+class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
+  bool _collapsed = false;
+
+  @override
+  void didUpdateWidget(covariant _AtlasNoticeOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.identity != widget.identity) _collapsed = false;
+  }
+
+  void _showDetails() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(child: Text('Сообщения подключения')),
+                    IconButton(
+                      tooltip: 'Закрыть',
+                      mouseCursor: SystemMouseCursors.click,
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                Flexible(child: SingleChildScrollView(child: widget.child)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Align(
+    alignment: Alignment.topRight,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 460),
+      child: Material(
+        key: const ValueKey('notice-overlay'),
+        elevation: 6,
+        color: _atlasSurface,
+        borderRadius: BorderRadius.circular(10),
+        clipBehavior: Clip.antiAlias,
+        child: _collapsed
+            ? TextButton.icon(
+                key: const ValueKey('reopen-notice'),
+                onPressed: _showDetails,
+                icon: const Icon(Icons.notifications_none, size: 18),
+                label: const Text('Сообщения'),
+              )
+            : ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: widget.maxHeight),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        liveRegion: true,
+                        child: SingleChildScrollView(child: widget.child),
+                      ),
+                    ),
+                    IconButton(
+                      key: const ValueKey('expand-notice'),
+                      tooltip: 'Открыть сообщение полностью',
+                      mouseCursor: SystemMouseCursors.click,
+                      onPressed: _showDetails,
+                      icon: const Icon(Icons.open_in_full, size: 16),
+                    ),
+                    IconButton(
+                      key: const ValueKey('dismiss-notice'),
+                      tooltip: 'Свернуть сообщение',
+                      mouseCursor: SystemMouseCursors.click,
+                      onPressed: () => setState(() => _collapsed = true),
+                      icon: const Icon(Icons.close, size: 18),
+                    ),
+                  ],
+                ),
+              ),
+      ),
+    ),
+  );
 }

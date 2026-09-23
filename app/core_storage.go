@@ -54,7 +54,7 @@ type GlobalAppSettings struct {
 	Language Language `json:"language"`
 
 	// Routing settings
-	RoutingMode RoutingMode `json:"routing_mode"` // blocked_only by default; all_traffic is explicit opt-in
+	RoutingMode RoutingMode `json:"routing_mode"` // persisted choice; fresh Windows installs start in all_traffic
 	NetworkMode NetworkMode `json:"network_mode"` // Windows desktop always migrates to windows_unified
 
 	// Free access settings — opening blocked-in-RF
@@ -104,11 +104,12 @@ type SettingsFile struct {
 
 // Storage manages the unified settings.json file.
 type Storage struct {
-	resourcesPath string // Path to resources folder
-	settingsPath  string // Path to settings.json
-	templatePath  string // Path to template.json
-	data          *SettingsFile
-	mu            sync.RWMutex
+	resourcesPath   string // Path to resources folder
+	settingsPath    string // Path to settings.json
+	templatePath    string // Path to template.json
+	data            *SettingsFile
+	createdSettings bool // only a missing file may receive fresh-install defaults or legacy import
+	mu              sync.RWMutex
 }
 
 const (
@@ -172,12 +173,18 @@ func (s *Storage) Init() error {
 func (s *Storage) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.createdSettings = false
 
 	data, err := os.ReadFile(s.settingsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Create default settings
+			// Fresh-install defaults are intentionally separate from legacy/recovery
+			// defaults. Merely choosing full VPN neither connects nor consents to a feed.
 			s.data = s.createDefaultSettings()
+			if runtime.GOOS == "windows" {
+				s.data.App.RoutingMode = RoutingModeAllTraffic
+			}
+			s.createdSettings = true
 			return s.saveInternal()
 		}
 		return fmt.Errorf("failed to read settings: %w", err)
@@ -232,12 +239,14 @@ func (s *Storage) Load() error {
 	s.normalizeAppSettings()
 	for index := range s.data.Profiles {
 		normalizeProfileVPNSources(&s.data.Profiles[index])
+		invalidateUnreadyVPNProfile(&s.data.Profiles[index], s.data.App.RoutingMode)
 	}
 
 	return s.saveInternal()
 }
 
-// createDefaultSettings creates default settings structure.
+// createDefaultSettings supplies legacy and recovery defaults. Only Load's
+// explicit missing-file path opts a fresh Windows installation into full VPN.
 func (s *Storage) createDefaultSettings() *SettingsFile {
 	return &SettingsFile{
 		Version: SettingsVersion,
@@ -469,8 +478,70 @@ func (s *Storage) GetActiveProfileID() int {
 func (s *Storage) SetActiveProfileID(id int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data.App.ActiveProfileID = id
-	return s.saveInternal()
+	for index := range s.data.Profiles {
+		if s.data.Profiles[index].ID != id {
+			continue
+		}
+		previousID, previousProfile := s.data.App.ActiveProfileID, s.data.Profiles[index]
+		s.data.App.ActiveProfileID = id
+		invalidateUnreadyVPNProfile(&s.data.Profiles[index], s.data.App.RoutingMode)
+		if err := s.saveInternal(); err != nil {
+			s.data.App.ActiveProfileID, s.data.Profiles[index] = previousID, previousProfile
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("profile with ID %d not found", id)
+}
+
+// An unready full-VPN profile is a saved preference, never a runnable direct
+// config. Start and the builder retain their own source guards as well.
+func invalidateUnreadyVPNProfile(profile *ProfileData, mode RoutingMode) bool {
+	if profile == nil || NormalizeRoutingMode(mode) != RoutingModeAllTraffic || hasConfiguredVPNSource(profile) {
+		return false
+	}
+	profile.SingboxConfig = nil
+	profile.XrayConfig = nil
+	profile.XrayConfigReady = false
+	return true
+}
+
+// saveUnreadyVPNProfile commits an explicit source replacement and optional
+// routing preference together, without fetching feeds or building a direct
+// fallback. Both memory and disk retain the prior state on a failed write.
+func (s *Storage) saveUnreadyVPNProfile(profile ProfileData, settings *GlobalAppSettings) error {
+	cloned, err := cloneVPNSourceProfile(&profile)
+	if err != nil {
+		return err
+	}
+	profile = cloned
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mode := s.data.App.RoutingMode
+	if settings != nil {
+		mode = settings.RoutingMode
+	}
+	profile.SubscriptionURL = "" // never resurrect a removed last source from its summary
+	normalizeProfileVPNSources(&profile)
+	if !invalidateUnreadyVPNProfile(&profile, mode) {
+		return fmt.Errorf("profile is not awaiting a full-VPN source")
+	}
+	for index := range s.data.Profiles {
+		if s.data.Profiles[index].ID != profile.ID {
+			continue
+		}
+		previousProfile, previousSettings := s.data.Profiles[index], s.data.App
+		s.data.Profiles[index] = profile
+		if settings != nil {
+			s.data.App = cloneGlobalAppSettings(*settings)
+		}
+		if err := s.saveInternal(); err != nil {
+			s.data.Profiles[index], s.data.App = previousProfile, previousSettings
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("profile with ID %d not found", profile.ID)
 }
 
 // --- Profile Management ---
@@ -1561,7 +1632,7 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 	xrayBridge := BuildXrayBridgeConfig(xrayCandidates)
 	proxies = append(proxies, xrayBridge.SingBoxProxies...)
 	if NormalizeRoutingMode(b.routingMode) == RoutingModeAllTraffic && len(proxies) == 0 {
-		return fmt.Errorf("для режима «Всё через VPN» нужен настроенный поддерживаемый VPN-источник в активном профиле")
+		return fmt.Errorf("для режима «Всё через VPN» выберите и включите поддерживаемый VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
 	}
 	orderVPNSourceProxies(proxies, updatedSources)
 	if err := b.storage.UpdateProfileXrayConfig(profileID, xrayBridge.XrayConfig); err != nil {
@@ -2864,10 +2935,12 @@ func (s *Storage) MigrateFromOldFormat(basePath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Skip migration if we already have profiles with data (settings.json existed)
-	if len(s.data.Profiles) > 0 && s.data.Profiles[0].SubscriptionURL != "" {
-		return nil // Already have data, skip migration
+	// Existing (including empty) profiles are authoritative. Do not resurrect
+	// deleted sources from legacy files or turn a recovery into a fresh install.
+	if !s.createdSettings {
+		return nil
 	}
+	defer func() { s.createdSettings = false }()
 
 	migrated := false
 
@@ -2973,6 +3046,8 @@ func (s *Storage) MigrateFromOldFormat(basePath string) error {
 	}
 
 	if migrated {
+		// Old-format files never had the new full-VPN first-run experience.
+		s.data.App.RoutingMode = DefaultRoutingMode
 		// Remove old files after successful migration
 		os.Remove(filepath.Join(basePath, "profiles.json"))
 		os.Remove(filepath.Join(basePath, "user_settings.json"))

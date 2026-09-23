@@ -1295,7 +1295,7 @@ func (a *App) ensureActiveConfigForStart() error {
 	}
 	appSettings := a.storage.GetAppSettings()
 	if NormalizeRoutingMode(appSettings.RoutingMode) == RoutingModeAllTraffic && !hasConfiguredVPNSource(profile) {
-		return fmt.Errorf("для режима «Всё через VPN» добавьте и включите VPN-подписку или ключ в активном профиле")
+		return fmt.Errorf("для режима «Всё через VPN» выберите и включите VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
 	}
 
 	// The subscription URL can live on the profile OR in global settings

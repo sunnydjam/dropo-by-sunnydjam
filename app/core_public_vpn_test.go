@@ -41,7 +41,7 @@ func TestPublicVPNIsOptInAndConsentIsRequired(t *testing.T) {
 	}
 }
 
-func TestPublicVPNAlwaysLastIncludingLegacyCacheBuster(t *testing.T) {
+func TestPublicVPNKeepsManualOrderIncludingLegacyCacheBuster(t *testing.T) {
 	provider := publicVPNProviders()[0]
 	profile := ProfileData{VPNSources: []VPNSource{
 		{ID: "free", URI: provider.URL + "?ts=123"},
@@ -50,18 +50,18 @@ func TestPublicVPNAlwaysLastIncludingLegacyCacheBuster(t *testing.T) {
 	}}
 	normalizeProfileVPNSources(&profile)
 	got := []string{profile.VPNSources[0].ID, profile.VPNSources[1].ID, profile.VPNSources[2].ID}
-	if !reflect.DeepEqual(got, []string{"personal-2", "personal-1", "free"}) {
+	if !reflect.DeepEqual(got, []string{"free", "personal-2", "personal-1"}) {
 		t.Fatalf("source order = %v", got)
 	}
-	if profile.SubscriptionURL != "https://example.com/private-one" {
-		t.Fatal("public feed replaced the enabled personal primary")
+	if profile.SubscriptionURL != provider.URL {
+		t.Fatal("summary does not follow the user's primary source")
 	}
-	if profile.VPNSources[2].URI != provider.URL || profile.VPNSources[2].PublicCatalogID != provider.ID {
+	if profile.VPNSources[0].URI != provider.URL || profile.VPNSources[0].PublicCatalogID != provider.ID {
 		t.Fatal("legacy public URL not recognized")
 	}
-	profile.VPNSources[0].PublicCatalogID = provider.ID
+	profile.VPNSources[1].PublicCatalogID = provider.ID
 	normalizeProfileVPNSources(&profile)
-	if profile.VPNSources[0].PublicCatalogID != "" {
+	if profile.VPNSources[1].PublicCatalogID != "" {
 		t.Fatal("catalog identity must be derived from the actual source URL")
 	}
 }
@@ -105,6 +105,7 @@ func publicVPNTestBuilder(t *testing.T, body string) (*Storage, *ConfigBuilderFo
 		t.Fatal(err)
 	}
 	builder := NewConfigBuilderForStorage(storage)
+	builder.SetRoutingMode(storage.GetAppSettings().RoutingMode)
 	builder.fetcher.client = &http.Client{Transport: publicVPNTestTransport(func(req *http.Request) (*http.Response, error) {
 		if req.URL.String() != publicVPNProviders()[0].URL {
 			return nil, fmt.Errorf("unexpected request")
@@ -119,12 +120,11 @@ func TestPublicVPNBuildKeepsPersonalXHTTPFirstAndOneNodePerSource(t *testing.T) 
 		"vless://free-unsupported@free.example.com:443?type=kcp#unsupported\n"+
 			"vless://free-one@free.example.com:443?security=tls#first\n"+
 			"vless://free-two@free2.example.com:443?security=tls#second")
-	profile := ProfileData{}
+	personal, _ := newVPNSource("personal", "Personal", "vless://personal@personal.example.com:443?type=xhttp&security=tls#personal")
+	profile := ProfileData{VPNSources: []VPNSource{personal}}
 	if err := addPublicVPNSource(&profile, publicVPNProviders()[0].ID, true); err != nil {
 		t.Fatal(err)
 	}
-	personal, _ := newVPNSource("personal", "Personal", "vless://personal@personal.example.com:443?type=xhttp&security=tls#personal")
-	profile.VPNSources = append(profile.VPNSources, personal)
 	if err := builder.BuildConfigForProfileSources(storage.GetActiveProfileID(), profile.VPNSources, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestPublicVPNOfflineRefreshShowsCacheWithoutClaimingFreshness(t *testing.T)
 	}
 }
 
-func TestPublicVPNCanBeDisabledAndCannotMoveAbovePersonal(t *testing.T) {
+func TestPublicVPNCanBeDisabledAndMoveAbovePersonal(t *testing.T) {
 	storage, builder := publicVPNTestBuilder(t, "vless://test@free.example.com:443?security=tls#Free")
 	app := &App{storage: storage, configBuilder: builder, initialized: true}
 	app.initializedReady.Store(true)
@@ -215,11 +215,24 @@ func TestPublicVPNCanBeDisabledAndCannotMoveAbovePersonal(t *testing.T) {
 		t.Fatalf("add personal failed: %v", result)
 	}
 	profile, _ = storage.GetActiveProfile()
-	if profile.VPNSources[0].PublicCatalogID != "" || profile.VPNSources[1].ID != freeID {
-		t.Fatal("personal source added after public source was not promoted")
+	if profile.VPNSources[0].ID != freeID || profile.VPNSources[1].PublicCatalogID != "" {
+		t.Fatal("adding a source unexpectedly changed existing priorities")
 	}
-	if result := app.MoveVPNSource(freeID, 0); result["success"] != false {
-		t.Fatal("public source moved above personal source")
+	if result := app.MoveVPNSource(freeID, 1); result["success"] != true {
+		t.Fatalf("move public below personal: %v", result)
+	}
+	if result := app.MoveVPNSource(freeID, 0); result["success"] != true {
+		t.Fatalf("move public above personal: %v", result)
+	}
+	if err := storage.Load(); err != nil {
+		t.Fatal(err)
+	}
+	profile, _ = storage.GetActiveProfile()
+	if profile.VPNSources[0].ID != freeID {
+		t.Fatal("reload discarded the user's public-first priority")
+	}
+	if got := app.configuredVPNSourceTags(); !reflect.DeepEqual(got, []string{"vpn-source-" + freeID, "vpn-source-" + profile.VPNSources[1].ID}) {
+		t.Fatalf("monitor priority = %v", got)
 	}
 }
 

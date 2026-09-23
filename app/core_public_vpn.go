@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
-	"sort"
 	"strings"
 )
 
@@ -22,7 +21,7 @@ func publicVPNProviders() []PublicVPNProvider {
 	return []PublicVPNProvider{{
 		ID:          "vpn-checker-ru-part9",
 		Name:        "VPN Checker · RU",
-		Description: "Публичный список серверов kort0881. Последний резерв после ваших подписок; доступность и скорость не гарантируются.",
+		Description: "Публичный список серверов kort0881. Скорость и доступность зависят от оператора и нагрузки; приоритет задаёте вы.",
 		Website:     "https://github.com/kort0881/vpn-checker-backend",
 		URL:         "https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_part9.txt",
 	}}
@@ -55,9 +54,9 @@ func publicVPNProviderForURI(uri string) (PublicVPNProvider, bool) {
 	return PublicVPNProvider{}, false
 }
 
-// A public feed stays last even when imported by URL, reordered through the
-// bridge or loaded from old settings. Personal source order remains stable.
-func orderPublicVPNFallbacks(sources []VPNSource) {
+// Derive public identity from the URI without changing the saved source order.
+// New sources are appended; a user's subsequent priority choice is authoritative.
+func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 	for index := range sources {
 		source := &sources[index]
 		source.PublicCatalogID = ""
@@ -66,9 +65,6 @@ func orderPublicVPNFallbacks(sources []VPNSource) {
 			source.URI = provider.URL
 		}
 	}
-	sort.SliceStable(sources, func(i, j int) bool {
-		return sources[i].PublicCatalogID == "" && sources[j].PublicCatalogID != ""
-	})
 }
 
 func addPublicVPNSource(profile *ProfileData, providerID string, consent bool) error {

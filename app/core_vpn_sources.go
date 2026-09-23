@@ -45,6 +45,10 @@ func newVPNSource(id, name, uri string) (VPNSource, error) {
 	kind := VPNSourceSubscription
 	if isDirectProxyLink(uri) {
 		kind = VPNSourceDirect
+		proxy, err := (&SubscriptionFetcher{}).ParseSingleLink(uri)
+		if err != nil || proxy.Server == "" || proxy.ServerPort < 1 || proxy.ServerPort > 65535 {
+			return VPNSource{}, fmt.Errorf("VPN key must contain a valid server address and port")
+		}
 	} else if err := validateSubscriptionURL(uri); err != nil {
 		return VPNSource{}, err
 	}
@@ -152,7 +156,7 @@ func normalizeProfileVPNSources(profile *ProfileData) {
 			source.SelectedNode = 0
 		}
 	}
-	orderPublicVPNFallbacks(profile.VPNSources)
+	normalizePublicVPNSourceMetadata(profile.VPNSources)
 	profile.SubscriptionURL = ""
 	profile.ProxyCount = 0
 	profile.LastUpdated = ""
@@ -239,8 +243,8 @@ func markVPNSourceUpdated(source *VPNSource, nodes []ProxyConfig, err error) {
 }
 
 // Xray-backed nodes are constructed separately from native sing-box nodes.
-// Restore source order afterwards so bootstrap cannot prefer a public native
-// node over a personal XHTTP subscription while health checks are pending.
+// Restore the user's source order afterwards so bootstrap and the background
+// health monitor agree even when native and XHTTP sources are interleaved.
 func orderVPNSourceProxies(proxies []ProxyConfig, sources []VPNSource) {
 	positions := make(map[string]int, len(sources))
 	for index, source := range sources {

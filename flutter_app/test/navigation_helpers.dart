@@ -1,21 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Exercise the real two-level navigation instead of reaching hidden sections.
+/// Exercise persistent primary navigation and real nested links on each page.
 Future<void> openSection(WidgetTester tester, String section) async {
-  if (section != 'home' &&
-      section != 'settings' &&
-      find.byKey(const ValueKey('navigation-drawer')).evaluate().isNotEmpty) {
-    await openSection(tester, 'settings');
+  const primary = {'home', 'services', 'sources', 'settings', 'help'};
+  Finder locate() {
+    final nav = find.byKey(ValueKey('nav-$section'));
+    return nav.evaluate().isNotEmpty
+        ? nav
+        : find.byKey(ValueKey('link-$section'));
   }
-  final target = find.byKey(ValueKey('nav-$section'));
+
+  var target = locate();
   if (target.evaluate().isEmpty) {
-    if (section == 'home' || section == 'settings') {
+    if (primary.contains(section)) {
       await tester.tap(find.byKey(const ValueKey('toggle-navigation')));
       await tester.pump();
+      target = locate();
     } else {
       final parent = switch (section) {
-        'services' => 'service-settings',
         'profiles' ||
         'work' ||
         'dropo_space' ||
@@ -24,6 +27,7 @@ Future<void> openSection(WidgetTester tester, String section) async {
         _ => 'settings',
       };
       await openSection(tester, parent);
+      target = locate();
       if (target.evaluate().isEmpty) {
         await tester.scrollUntilVisible(
           target,

@@ -17,7 +17,7 @@ const _provider = PublicVpnProviderInfo(
   id: 'test-public',
   name: 'VPN Checker · RU',
   description:
-      'Публичный список. Последний резерв после ваших подписок; доступность и скорость не гарантируются.',
+      'Сторонний публичный список. Приоритет можно изменить; доступность и скорость не гарантируются.',
   website: 'https://example.com/public',
 );
 
@@ -54,6 +54,16 @@ class _SourceBridge extends MockCoreBridge {
   Completer<List<PublicVpnProviderInfo>>? pendingCatalog;
   String lastPersonalName = '';
   String lastPersonalUri = '';
+  final List<(String, int)> moves = [];
+
+  @override
+  Future<Map<String, dynamic>> moveVpnSource(String id, int index) async {
+    moves.add((id, index));
+    final moved = sources.firstWhere((source) => source.id == id);
+    sources = [...sources.where((source) => source.id != id)]
+      ..insert(index, moved);
+    return {'success': true};
+  }
 
   @override
   Future<List<VpnSourceInfo>> vpnSources() async => sources;
@@ -181,10 +191,11 @@ void main() {
     (tester) async {
       final bridge = _SourceBridge();
       await _pumpEditor(tester, bridge);
-      expect(find.text('Первое подключение'), findsOneWidget);
+      expect(find.text('Подписки и приоритеты'), findsOneWidget);
+      expect(find.text('Dropo Boost · скоро'), findsOneWidget);
       expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
       expect(find.byKey(const ValueKey('submit-personal-vpn')), findsOneWidget);
-      expect(find.byKey(const ValueKey('add-personal-vpn')), findsNothing);
+      expect(find.byKey(const ValueKey('add-personal-vpn')), findsOneWidget);
       expect(
         find.byKey(const ValueKey('add-public-vpn-test-public')),
         findsOneWidget,
@@ -193,6 +204,21 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('add action reveals the form after a long source list', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..sources = [for (var i = 0; i < 8; i++) _source('personal-$i')];
+    await _pumpEditor(tester, bridge, size: const Size(820, 560));
+    expect(find.byKey(const ValueKey('personal-vpn-uri')), findsNothing);
+    await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
+    expect(
+      find.byKey(const ValueKey('personal-vpn-uri')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('public add requires consent and cancellation does not write', (
     tester,
@@ -216,6 +242,54 @@ void main() {
     expect(bridge.consentReceived, isTrue);
     expect(find.byKey(const ValueKey('vpn-source-free')), findsOneWidget);
     expect(find.text('Уже добавлен'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'public sources can move across personal sources and stay in requested order',
+    (tester) async {
+      final bridge = _SourceBridge()
+        ..sources = [_source('personal'), _source('free', public: true)];
+      await _pumpEditor(tester, bridge);
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('vpn-source-first-free')),
+      );
+      expect(bridge.moves, [('free', 0)]);
+      expect(bridge.sources.map((source) => source.id), ['free', 'personal']);
+      expect(
+        find.textContaining('Приоритет 1 · публичный бесплатный'),
+        findsOneWidget,
+      );
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('vpn-source-down-free')),
+      );
+      expect(bridge.sources.map((source) => source.id), ['personal', 'free']);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('new subscription offers priority without changing saved order', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()..sources = [_source('free', public: true)];
+    await _pumpEditor(tester, bridge);
+    await tester.enterText(
+      find.byKey(const ValueKey('personal-vpn-uri')),
+      'https://example.test/subscription',
+    );
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('submit-personal-vpn')),
+    );
+    expect(bridge.sources.map((source) => source.id), ['free', 'personal-1']);
+    expect(bridge.moves, isEmpty);
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('new-source-make-primary')),
+    );
+    expect(bridge.sources.map((source) => source.id), ['personal-1', 'free']);
     expect(tester.takeException(), isNull);
   });
 
@@ -497,21 +571,17 @@ void main() {
       );
       expect(find.textContaining('Используется сейчас'), findsOneWidget);
       expect(
-        find.textContaining('Бесплатный · последний резерв'),
+        find.textContaining('Приоритет 2 · публичный бесплатный'),
         findsOneWidget,
       );
       final up = tester.widget<IconButton>(
-        find.byWidgetPredicate(
-          (w) => w is IconButton && w.tooltip == 'Выше по приоритету',
-        ),
+        find.byKey(const ValueKey('vpn-source-up-personal')),
       );
       final down = tester.widget<IconButton>(
-        find.byWidgetPredicate(
-          (w) => w is IconButton && w.tooltip == 'Ниже по приоритету',
-        ),
+        find.byKey(const ValueKey('vpn-source-down-personal')),
       );
       expect(up.onPressed, isNull);
-      expect(down.onPressed, isNull);
+      expect(down.onPressed, isNotNull);
       expect(tester.takeException(), isNull);
     });
   }

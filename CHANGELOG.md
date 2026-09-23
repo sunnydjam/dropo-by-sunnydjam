@@ -2,6 +2,30 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.33 — 2026-09-23
+
+### Windows interface and first connection
+
+- persistent adaptive navigation for connection, services, VPN sources, settings
+  and help; overlays no longer shift page layout and remain accessible;
+- DPI-aware client window sizing and per-user normal placement restoration,
+  with work-area clamping and compact/large-text layout regression tests;
+- the connection button and planet now distinguish idle, connecting, connected
+  and failed states without a duplicate large status heading; click cursors and
+  accessible state announcements are retained;
+- one VPN source page with optional public sources, personal subscriptions,
+  editable shared priority and a non-purchasable Boost coming-soon section;
+- public sources no longer override saved order. Failover remains between
+  independent sources, never an automatic ladder of nodes within a subscription;
+- fresh Windows installations default to full VPN and offer an explicit-consent
+  public-source onboarding path. Existing, legacy and recovery settings keep
+  their routing mode; no public source is enabled without consent;
+- disconnected full-VPN preferences can be saved without a source, with cached
+  configs invalidated. Start/build still reject a missing source; failed active
+  changes restore the previous state rather than falling back to direct traffic;
+- malformed direct keys lacking server/port are rejected before persistence.
+  Android network parity and actual Boost purchasing remain separate work.
+
 ## 3.0.32 — 2026-09-23
 
 ### Windows update hotfix

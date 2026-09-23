@@ -363,10 +363,27 @@ func (a *App) SetRoutingMode(mode string) map[string]interface{} {
 	previousSettings := cloneGlobalAppSettings(settings)
 	if routingMode == RoutingModeAllTraffic {
 		profile, err := a.storage.GetActiveProfile()
-		if err != nil || !hasConfiguredVPNSource(profile) {
+		if err != nil {
+			return map[string]interface{}{"success": false, "error": err.Error()}
+		}
+		if !hasConfiguredVPNSource(profile) && isRunning {
 			return map[string]interface{}{
 				"success": false,
-				"error":   "Для режима «Всё через VPN» добавьте и включите VPN-подписку или ключ в активном профиле.",
+				"error":   "Для режима «Всё через VPN» выберите и включите VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ.",
+			}
+		}
+		if !hasConfiguredVPNSource(profile) {
+			settings.RoutingMode = routingMode
+			if err := a.storage.saveUnreadyVPNProfile(*profile, &settings); err != nil {
+				return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка сохранения настроек: %v", err)}
+			}
+			if a.configBuilder != nil {
+				a.configBuilder.SetRoutingMode(routingMode)
+			}
+			return map[string]interface{}{
+				"success": true, "mode": string(routingMode), "restarted": false,
+				"sourceRequired": true,
+				"message":        "Режим сохранён. Перед подключением выберите бесплатный источник или добавьте свою подписку.",
 			}
 		}
 	}
@@ -1290,6 +1307,15 @@ func (a *App) RebuildActiveProfileConfig() error {
 	// Get routing mode from settings
 	settings := a.storage.GetAppSettings()
 	a.configBuilder.SetRoutingMode(settings.RoutingMode)
+	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic && !hasConfiguredVPNSource(profile) {
+		a.mu.Lock()
+		active := a.isRunning || a.isStarting
+		a.mu.Unlock()
+		if active {
+			return fmt.Errorf("для активного полного VPN нужен включённый VPN-источник")
+		}
+		return a.storage.saveUnreadyVPNProfile(*profile, nil)
+	}
 
 	// Rebuild using config builder
 	return a.configBuilder.BuildConfig(profile.SubscriptionURL)

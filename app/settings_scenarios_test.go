@@ -32,11 +32,18 @@ func TestWindowsServicePolicyAPIPersistsTheDisplayedChoices(t *testing.T) {
 }
 
 func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
-	app := newInitializedSettingsScenarioApp(t)
+	storage := NewStorage(t.TempDir())
+	if err := storage.Init(); err != nil {
+		t.Fatal(err)
+	}
 
-	settings := app.storage.GetAppSettings()
-	if settings.RoutingMode != RoutingModeBlockedOnly {
-		t.Fatalf("default routing mode = %q, want blocked_only", settings.RoutingMode)
+	settings := storage.GetAppSettings()
+	wantMode := RoutingModeBlockedOnly
+	if runtime.GOOS == "windows" {
+		wantMode = RoutingModeAllTraffic
+	}
+	if settings.RoutingMode != wantMode {
+		t.Fatalf("fresh routing mode = %q, want %q", settings.RoutingMode, wantMode)
 	}
 	if settings.NetworkMode != NetworkModeWindowsUnified {
 		t.Fatalf("default network mode = %q, want windows_unified", settings.NetworkMode)
@@ -68,7 +75,7 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	if !settings.EnableLogging || settings.LogLevel != LogLevelInfo {
 		t.Fatalf("logging defaults = enabled:%t level:%q, want enabled info", settings.EnableLogging, settings.LogLevel)
 	}
-	profile, err := app.storage.GetActiveProfile()
+	profile, err := storage.GetActiveProfile()
 	if err != nil {
 		t.Fatalf("get active profile failed: %v", err)
 	}
@@ -139,11 +146,11 @@ func TestSettingsAPIsMigrateLegacyRoutingAndPersistNetworkMode(t *testing.T) {
 
 func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
-	if result := app.SetRoutingMode(string(RoutingModeAllTraffic)); result["success"] != false {
-		t.Fatalf("full VPN without a source unexpectedly succeeded: %+v", result)
+	if result := app.SetRoutingMode(string(RoutingModeAllTraffic)); result["success"] != true || result["sourceRequired"] != true {
+		t.Fatalf("full VPN preference without a source was not saved as unready: %+v", result)
 	}
-	if got := app.storage.GetAppSettings().RoutingMode; got != RoutingModeBlockedOnly {
-		t.Fatalf("rejected full VPN persisted routing mode %q", got)
+	if got := app.storage.GetAppSettings().RoutingMode; got != RoutingModeAllTraffic {
+		t.Fatalf("full VPN preference persisted routing mode %q", got)
 	}
 	profile, err := app.storage.GetActiveProfile()
 	if err != nil {
@@ -153,9 +160,7 @@ func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := app.storage.UpdateProfileVPNSources(profile.ID, []VPNSource{source}, nil); err != nil {
-		t.Fatal(err)
-	}
+	requireAPISuccess(t, app.AddVPNSource(source.Name, source.URI))
 
 	result := app.SetRoutingMode(string(RoutingModeAllTraffic))
 	requireAPISuccess(t, result)

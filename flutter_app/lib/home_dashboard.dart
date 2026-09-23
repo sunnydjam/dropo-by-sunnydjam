@@ -99,6 +99,7 @@ class _HomeConnectionPanel extends StatelessWidget {
     required this.enabled,
     required this.onPressed,
     this.onDisabledPressed,
+    this.operationError = false,
     this.atlas = false,
   });
   final CoreStatus status;
@@ -107,17 +108,18 @@ class _HomeConnectionPanel extends StatelessWidget {
   final VoidCallback onPressed;
   final VoidCallback? onDisabledPressed;
   final bool atlas;
+  final bool operationError;
 
   @override
   Widget build(BuildContext context) {
-    final danger = !booting && (!online || status.hasError);
+    final danger = !booting && (!online || status.hasError || operationError);
     final connected = online && status.connected && !danger;
     final stopping = disconnecting || status.disconnecting;
     final title = booting
         ? 'Запуск приложения'
         : !online
         ? 'Нет связи с ядром'
-        : status.hasError
+        : status.hasError || operationError
         ? 'Требуется внимание'
         : stopping
         ? 'Отключение'
@@ -152,6 +154,7 @@ class _HomeConnectionPanel extends StatelessWidget {
         enabled: enabled,
         onPressed: onPressed,
         onDisabledPressed: onDisabledPressed,
+        hasError: danger,
       );
     }
     return _HomePanel(
@@ -306,9 +309,8 @@ class _HomeSourcePanel extends StatelessWidget {
       title = 'Подписка добавлена';
       detail = 'Данные об активном сервере ещё не получены.';
     } else {
-      title = 'Добавьте источник VPN';
-      detail =
-          'Своя подписка или бесплатный резерв. Обход без VPN настраивается в сервисах.';
+      title = 'Источники VPN';
+      detail = 'Бесплатное подключение или своя подписка';
     }
     if (atlas) {
       final known = source != null && loaded && online && !failed;
@@ -324,8 +326,8 @@ class _HomeSourcePanel extends StatelessWidget {
             : detail,
         publicNotice: known && source.isPublic
             ? (active
-                  ? 'Используется бесплатный резерв'
-                  : 'Бесплатный резерв · после личных подписок')
+                  ? 'Бесплатный публичный источник · скорость зависит от нагрузки'
+                  : 'Бесплатный публичный источник')
             : null,
         onPressed: onManage,
       );
@@ -355,8 +357,8 @@ class _HomeSourcePanel extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 active
-                    ? 'Используется бесплатный резерв'
-                    : 'Бесплатный резерв · после личных подписок',
+                    ? 'Бесплатный публичный источник · скорость зависит от нагрузки'
+                    : 'Бесплатный публичный источник',
                 style: const TextStyle(color: Color(0xFFFFD38B), fontSize: 13),
               ),
             ],
@@ -481,7 +483,9 @@ class _HomeRouteControls extends StatelessWidget {
                 child: Tooltip(
                   message: hasSubscription
                       ? 'Направить весь трафик через VPN'
-                      : 'Сначала добавьте VPN-подписку',
+                      : _isMobileShell
+                      ? 'Сначала добавьте VPN-подписку'
+                      : 'Бесплатный публичный источник или своя подписка',
                   child: _HomeRoutingModeButton(
                     key: const ValueKey('home-routing-all-vpn'),
                     icon: Icons.shield_outlined,

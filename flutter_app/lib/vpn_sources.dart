@@ -52,6 +52,7 @@ class VpnSourcesDialog extends StatefulWidget {
 class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   final controller = TextEditingController();
   final nameController = TextEditingController();
+  final personalFormAnchor = GlobalKey();
   String statusText = '';
   String statusKind = '';
   String catalogError = '';
@@ -61,6 +62,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   bool showPersonalForm = false;
   bool personalFormDismissed = false;
   bool showReadyAction = false;
+  String recentlyAddedId = '';
   List<VpnSourceInfo> sources = const [];
   List<PublicVpnProviderInfo> providers = const [];
 
@@ -207,6 +209,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       return;
     }
     final name = nameController.text.trim();
+    final previousIds = sources.map((source) => source.id).toSet();
     final wasFirstPersonalSource = !_hasPersonalSource(sources);
     var verifiedCount = 0;
     final added = await _changeSource(
@@ -234,6 +237,12 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       personalFormDismissed = true;
       showReadyAction =
           wasFirstPersonalSource && widget.onReadyToConnect != null;
+      recentlyAddedId =
+          sources
+              .where((source) => !previousIds.contains(source.id))
+              .firstOrNull
+              ?.id ??
+          '';
     });
   }
 
@@ -247,6 +256,22 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
         statusKind = '';
       }
     });
+    if (showPersonalForm) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !showPersonalForm) return;
+        final anchorContext = personalFormAnchor.currentContext;
+        if (anchorContext != null) {
+          unawaited(
+            Scrollable.ensureVisible(
+              anchorContext,
+              alignment: 0.1,
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeOut,
+            ),
+          );
+        }
+      });
+    }
   }
 
   void _clearPersonalInputError() {
@@ -267,7 +292,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             '${provider.name} — сторонний публичный список, не серверы Dropo. '
             'Оператор VPN может видеть адреса соединений и незашифрованный трафик. '
             'Скорость, конфиденциальность и доступность не гарантируются.\n\n'
-            'Источник будет включён последним резервом. Без личной подписки он станет единственным VPN-источником. '
+            'Источник будет добавлен в конец списка. Вы сможете изменить его приоритет. '
             'Маршруты сервисов и режим подключения не изменятся.',
           ),
         ),
@@ -285,12 +310,22 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       ),
     );
     if (consent != true || !mounted) return;
-    await _changeSource(
+    final added = await _changeSource(
       () => widget.bridge.addPublicVpnSource(provider.id, true),
       'Загружаем бесплатный список…',
       success:
-          'Бесплатный резерв добавлен. Выбран первый поддерживаемый сервер; доступность проверяется при подключении.',
+          'Бесплатный источник добавлен. Выбран первый поддерживаемый сервер; доступность проверяется при подключении.',
     );
+    if (mounted && added) {
+      setState(
+        () => recentlyAddedId =
+            sources
+                .where((source) => source.publicCatalogId == provider.id)
+                .firstOrNull
+                ?.id ??
+            '',
+      );
+    }
   }
 
   Future<void> _remove(VpnSourceInfo source) async {
@@ -332,22 +367,18 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
-          needsFirstPersonalSource
-              ? 'Первое подключение'
-              : mobile
-              ? 'VPN-подписка'
-              : 'Своя подписка или бесплатный резерв',
+          mobile ? 'VPN-подписка' : 'Подписки и приоритеты',
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
         ),
         const SizedBox(height: 8),
         Text(
-          needsFirstPersonalSource
+          mobile && needsFirstPersonalSource
               ? 'Вставьте HTTPS-ссылку подписки или поддерживаемый VPN-ключ. '
                     'Dropo проверит доступные серверы до сохранения.'
               : mobile
               ? 'На Android используется одна активная подписка. Новая ссылка заменит сохранённую после проверки.'
-              : 'Сначала используются ваши подписки, затем — включённый бесплатный источник. '
-                    'Переключение происходит только при недоступности текущего источника.',
+              : 'Собственные и бесплатные источники работают в указанном вами порядке. '
+                    'Если источник недоступен, Dropo переходит к следующему включённому.',
           style: const TextStyle(
             color: Color(0xFFB4C9C1),
             fontSize: 13,
@@ -370,6 +401,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           const SizedBox(height: 12),
           const LinearProgressIndicator(),
         ],
+        if (!mobile) ...[const SizedBox(height: 16), const _BoostPreview()],
         if (!widget.enabled) ...[
           const SizedBox(height: 10),
           Text(
@@ -405,6 +437,40 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             label: const Text('Перейти к подключению'),
           ),
         ],
+        if (!mobile &&
+            recentlyAddedId.isNotEmpty &&
+            sources.length > 1 &&
+            sources.first.id != recentlyAddedId)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              key: const ValueKey('new-source-make-primary'),
+              onPressed: disabled
+                  ? null
+                  : () => _changeSource(
+                      () => widget.bridge.moveVpnSource(recentlyAddedId, 0),
+                      'Сохраняем приоритет…',
+                    ),
+              icon: const Icon(Icons.vertical_align_top),
+              label: const Text('Сделать новый источник основным'),
+            ),
+          ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            key: const ValueKey('add-personal-vpn'),
+            onPressed: disabled ? null : _togglePersonalForm,
+            icon: Icon(showPersonalForm ? Icons.expand_less : Icons.add_link),
+            label: Text(
+              showPersonalForm
+                  ? 'Скрыть форму'
+                  : mobile && hasPersonalSource
+                  ? 'Заменить подписку'
+                  : 'Добавить свою подписку',
+            ),
+          ),
+        ),
         const SizedBox(height: 18),
         _VpnSectionTitle(
           mobile ? 'Моя VPN-подписка' : 'Мои источники · в порядке приоритета',
@@ -425,10 +491,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             singleSource: mobile,
             index: i,
             busy: disabled,
-            canMoveUp: i > 0 && sources[i].isPublic == sources[i - 1].isPublic,
-            canMoveDown:
-                i + 1 < sources.length &&
-                sources[i].isPublic == sources[i + 1].isPublic,
+            canMoveUp: i > 0,
+            canMoveDown: i + 1 < sources.length,
             onEnabled: (enabled) => _changeSource(
               () => widget.bridge.setVpnSourceEnabled(sources[i].id, enabled),
               'Сохраняем состояние источника…',
@@ -443,25 +507,11 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             ),
             onRemove: () => _remove(sources[i]),
           ),
-        if (hasPersonalSource || !showPersonalForm)
+        if (!mobile && sources.isNotEmpty)
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: [
-              OutlinedButton.icon(
-                key: const ValueKey('add-personal-vpn'),
-                onPressed: disabled ? null : _togglePersonalForm,
-                icon: Icon(
-                  showPersonalForm ? Icons.expand_less : Icons.add_link,
-                ),
-                label: Text(
-                  showPersonalForm
-                      ? 'Скрыть форму'
-                      : mobile && hasPersonalSource
-                      ? 'Заменить подписку'
-                      : 'Добавить свою подписку',
-                ),
-              ),
               if (!mobile && sources.isNotEmpty)
                 TextButton.icon(
                   onPressed: disabled
@@ -478,9 +528,10 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
         if (showPersonalForm) ...[
           if (hasPersonalSource || !needsFirstPersonalSource)
             const SizedBox(height: 12),
-          const Text(
+          Text(
             'Ссылка подписки или VPN-ключ',
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            key: personalFormAnchor,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 6),
           TextField(
@@ -690,6 +741,35 @@ class _VpnSectionTitle extends StatelessWidget {
   );
 }
 
+class _BoostPreview extends StatelessWidget {
+  const _BoostPreview();
+
+  @override
+  Widget build(BuildContext context) => Container(
+    key: const ValueKey('boost-preview'),
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: const Color(0xFF183128),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: const Color(0xFF3B6653)),
+    ),
+    child: const Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Dropo Boost · скоро',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+        ),
+        SizedBox(height: 6),
+        Text(
+          'Покупка VPN-подписки внутри Dropo — в разработке. Сейчас можно использовать свою подписку или бесплатный публичный источник.',
+          style: TextStyle(fontSize: 13, color: Color(0xFFB4C9C1), height: 1.4),
+        ),
+      ],
+    ),
+  );
+}
+
 class _PublicVpnProviderCard extends StatelessWidget {
   const _PublicVpnProviderCard({
     required this.provider,
@@ -735,7 +815,7 @@ class _PublicVpnProviderCard extends StatelessWidget {
               onPressed: busy || added ? null : onAdd,
               icon: Icon(added ? Icons.check : Icons.add),
               label: Text(
-                added ? 'Уже добавлен' : 'Добавить бесплатный резерв',
+                added ? 'Уже добавлен' : 'Подключить бесплатный источник',
               ),
             ),
             TextButton.icon(
@@ -839,7 +919,7 @@ class _VpnSourceTile extends StatelessWidget {
           Text(
             singleSource
                 ? '$state · ${_vpnServerCountLabel(source.nodeCount)}'
-                : '${source.isPublic ? 'Бесплатный · последний резерв' : 'Приоритет ${index + 1} · личный источник'} · $state',
+                : 'Приоритет ${index + 1} · ${source.isPublic ? 'публичный бесплатный' : 'своя подписка'} · $state',
             style: const TextStyle(color: Color(0xFFB4C9C1), fontSize: 12),
           ),
           if (singleSource) ...[
@@ -893,11 +973,19 @@ class _VpnSourceTile extends StatelessWidget {
                 ),
               ),
             ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
+          Wrap(
+            alignment: WrapAlignment.end,
             children: [
-              if (!singleSource && !source.isPublic) ...[
+              if (!singleSource) ...[
+                if (index > 0)
+                  TextButton.icon(
+                    key: ValueKey('vpn-source-first-${source.id}'),
+                    onPressed: busy ? null : () => onMove(0),
+                    icon: const Icon(Icons.vertical_align_top, size: 18),
+                    label: const Text('Сделать основным'),
+                  ),
                 IconButton(
+                  key: ValueKey('vpn-source-up-${source.id}'),
                   tooltip: 'Выше по приоритету',
                   icon: const Icon(Icons.arrow_upward, size: 18),
                   onPressed: busy || !canMoveUp
@@ -905,6 +993,7 @@ class _VpnSourceTile extends StatelessWidget {
                       : () => onMove(index - 1),
                 ),
                 IconButton(
+                  key: ValueKey('vpn-source-down-${source.id}'),
                   tooltip: 'Ниже по приоритету',
                   icon: const Icon(Icons.arrow_downward, size: 18),
                   onPressed: busy || !canMoveDown

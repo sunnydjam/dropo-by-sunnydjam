@@ -78,6 +78,28 @@ func (a *App) changeVPNSourcesTransaction(change func(*ProfileData) error, ops v
 			candidate.VPNSources[index].ID = nextVPNSourceID(candidate.VPNSources)
 		}
 	}
+	// The candidate list is an explicit replacement. In particular, an empty
+	// list must not be interpreted as a request to import the old summary URL.
+	candidate.SubscriptionURL = ""
+	normalizeProfileVPNSources(&candidate)
+	hasEnabledSource := false
+	for _, source := range candidate.VPNSources {
+		if !source.Disabled {
+			hasEnabledSource = true
+			break
+		}
+	}
+	// Only an actually empty/disabled chain can skip building. An enabled but
+	// malformed or unsupported newly added key must still fail validation.
+	if !wasRunning && NormalizeRoutingMode(a.storage.GetAppSettings().RoutingMode) == RoutingModeAllTraffic && !hasEnabledSource {
+		if err := a.storage.saveUnreadyVPNProfile(candidate, nil); err != nil {
+			result["error"] = "Не удалось сохранить VPN-источники: " + err.Error()
+			return result
+		}
+		result["success"] = true
+		result["connectionRestored"] = true
+		return a.finishVPNSourceChangeResult(result)
+	}
 
 	result["wasRunning"] = wasRunning
 	result["connectionRestored"] = !wasRunning
@@ -178,6 +200,7 @@ func (a *App) finishVPNSourceChangeResult(result map[string]interface{}) map[str
 	}
 	result["sources"] = publicVPNSources(updated.VPNSources)
 	result["sourceCount"] = len(updated.VPNSources)
+	result["sourceRequired"] = NormalizeRoutingMode(a.storage.GetAppSettings().RoutingMode) == RoutingModeAllTraffic && !hasConfiguredVPNSource(updated)
 	return result
 }
 

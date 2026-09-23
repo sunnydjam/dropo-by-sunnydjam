@@ -103,11 +103,6 @@ func (a *App) MoveVPNSource(id string, newIndex int) map[string]interface{} {
 		if oldIndex < 0 {
 			return fmt.Errorf("VPN source %q not found", id)
 		}
-		_, movingPublic := publicVPNProviderForURI(profile.VPNSources[oldIndex].URI)
-		_, targetPublic := publicVPNProviderForURI(profile.VPNSources[newIndex].URI)
-		if movingPublic != targetPublic {
-			return fmt.Errorf("бесплатный источник используется только после ваших подписок")
-		}
 		source := profile.VPNSources[oldIndex]
 		profile.VPNSources = append(profile.VPNSources[:oldIndex], profile.VPNSources[oldIndex+1:]...)
 		profile.VPNSources = append(profile.VPNSources, VPNSource{})

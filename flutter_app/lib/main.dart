@@ -5,10 +5,12 @@ import 'dart:math' as math;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 part 'vpn_sources.dart';
+part 'vpn_onboarding.dart';
 part 'home_dashboard.dart';
 part 'atlas_dashboard.dart';
 part 'compact_shell.dart';
@@ -123,6 +125,7 @@ ThemeMode themeModeFromSetting(String value) {
 
 ThemeData _dropoTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
+  final clickStyle = _withClickCursor(const ButtonStyle());
   return ThemeData(
     brightness: brightness,
     fontFamily: 'Inter',
@@ -134,6 +137,17 @@ ThemeData _dropoTheme(Brightness brightness) {
         ? const Color(0xFF101617)
         : const Color(0xFFF4F8F6),
     useMaterial3: true,
+    filledButtonTheme: FilledButtonThemeData(style: clickStyle),
+    elevatedButtonTheme: ElevatedButtonThemeData(style: clickStyle),
+    outlinedButtonTheme: OutlinedButtonThemeData(style: clickStyle),
+    textButtonTheme: TextButtonThemeData(style: clickStyle),
+    iconButtonTheme: IconButtonThemeData(style: clickStyle),
+    listTileTheme: const ListTileThemeData(
+      mouseCursor: WidgetStateMouseCursor.clickable,
+    ),
+    switchTheme: SwitchThemeData(mouseCursor: clickStyle.mouseCursor),
+    checkboxTheme: CheckboxThemeData(mouseCursor: clickStyle.mouseCursor),
+    radioTheme: RadioThemeData(mouseCursor: clickStyle.mouseCursor),
   );
 }
 
@@ -3684,6 +3698,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   int routeProbeExpectedCount = 0;
   bool windowVisible = true;
   String strategyTransitionNotice = '';
+  String lastPublicSourceNoticeId = '';
   bool depsFailureDialogShowing = false;
   String lastDepsFailureDialogMessage = '';
   DateTime? lastDepsFailureDialogAt;
@@ -3699,6 +3714,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool compatibilityNoticeShowing = false;
   double? updateProgressPercent;
   bool homeRoutesExpanded = true;
+  bool preparingFullVpnSource = false;
   final List<String> _sectionHistory = [];
 
   bool get connectionBusy {
@@ -3710,7 +3726,12 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool get _usesPushEvents => widget.bridge.prefersPushEvents;
 
   bool get controlsDisabled =>
-      booting || uiBusy || sectionBusy || quitting || !online;
+      booting ||
+      uiBusy ||
+      sectionBusy ||
+      quitting ||
+      !online ||
+      preparingFullVpnSource;
 
   bool get _mobileNeedsSubscription =>
       _isMobileShell && !status.connected && !subscription.hasSubscription;
@@ -3969,6 +3990,10 @@ class _DropoHomePageState extends State<DropoHomePage>
         return;
       }
       setState(() {
+        if ((status.hasError && !loadedStatus.hasError) || !online) {
+          connectionHint = '';
+          connectionHintDanger = false;
+        }
         refreshFailureCount = 0;
         online = true;
         if (status.connected != loadedStatus.connected) {
@@ -3989,11 +4014,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         if (all && !connectionBusy && !uiBusy) {
           routeHint = '';
         }
-        if (!loadedStatus.hasError &&
-            loadedStatus.connected &&
-            !connectionBusy) {
-          connectionHintDanger = false;
-        }
         if (all) {
           subscriptionController.text = loadedSubscription.url;
         }
@@ -4010,7 +4030,7 @@ class _DropoHomePageState extends State<DropoHomePage>
             if (loadedStatus.hasError && loadedStatus.error.trim().isNotEmpty) {
               connectionHint = loadedStatus.error.trim();
               connectionHintDanger = true;
-            } else {
+            } else if (!connectionHintDanger) {
               connectionHint = '';
               connectionHintDanger = loadedStatus.hasError;
             }
@@ -4076,6 +4096,21 @@ class _DropoHomePageState extends State<DropoHomePage>
         homeSourcesLoaded = true;
         homeSourcesFailed = false;
         homeSourcesCheckedAt = DateTime.now();
+        final activePublic = requestedConnected
+            ? loaded
+                  .where(
+                    (source) =>
+                        source.active && !source.disabled && source.isPublic,
+                  )
+                  .firstOrNull
+            : null;
+        if (activePublic != null &&
+            activePublic.id != lastPublicSourceNoticeId) {
+          _showStrategyTransition(
+            'Бесплатный публичный источник. Скорость и доступность зависят от оператора и нагрузки.',
+          );
+        }
+        lastPublicSourceNoticeId = activePublic?.id ?? '';
       });
     } catch (_) {
       if (!mounted || quitting || request != homeSourcesRequest) return;
@@ -4626,7 +4661,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _toggleConnection() async {
-    if (uiBusy || connectionBusy) {
+    if (controlsDisabled || connectionBusy) {
       return;
     }
     final target = !status.connected;
@@ -4634,6 +4669,13 @@ class _DropoHomePageState extends State<DropoHomePage>
       _showMobileSubscriptionRequiredNotice();
       return;
     }
+    if (target &&
+        !_isMobileShell &&
+        appConfig.routingMode == 'all_traffic' &&
+        !await _ensureFullVpnSource()) {
+      return;
+    }
+    if (!mounted || quitting) return;
     setState(() => _setConnectionPrimed(target));
     await _runBusy(() async {
       if (target) {
@@ -4695,6 +4737,55 @@ class _DropoHomePageState extends State<DropoHomePage>
         unawaited(_maybeShowAndroidCompatibilityNotice());
       }
     }, clearConnectionBusy: true);
+  }
+
+  Future<bool> _ensureFullVpnSource() async {
+    setState(() => preparingFullVpnSource = true);
+    try {
+      // Read the authoritative enabled list, not an old home-card snapshot.
+      final sources = await widget.bridge.vpnSources().timeout(
+        const Duration(seconds: 10),
+      );
+      if (!mounted || quitting) return false;
+      if (sources.any((source) => !source.disabled)) return true;
+      final action = await showDialog<_VpnOnboardingAction>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _VpnOnboardingDialog(
+          bridge: widget.bridge,
+          hasDisabledSources: sources.isNotEmpty,
+        ),
+      );
+      if (!mounted || quitting) return false;
+      if (action == _VpnOnboardingAction.manage) {
+        await _openSubscription();
+        return false;
+      }
+      if (action == _VpnOnboardingAction.services) {
+        await _setHomeRoutingMode('blocked_only');
+        return false;
+      }
+      if (action != _VpnOnboardingAction.ready) return false;
+      await _refresh(all: true);
+      final enabled = await widget.bridge.vpnSources();
+      if (!enabled.any((source) => !source.disabled)) {
+        throw StateError(
+          'Источник не готов. Откройте «Источники VPN» и повторите добавление.',
+        );
+      }
+      return true;
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          statusMessage = 'Не удалось подготовить VPN-источник';
+          connectionHint = _cleanError(error);
+          connectionHintDanger = true;
+        });
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => preparingFullVpnSource = false);
+    }
   }
 
   void _showMobileSubscriptionRequiredNotice() {
@@ -5685,7 +5776,9 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (uiBusy || mode == appConfig.routingMode) {
       return;
     }
-    if (mode == 'all_traffic' && !subscription.hasSubscription) {
+    if (mode == 'all_traffic' &&
+        !subscription.hasSubscription &&
+        _isMobileShell) {
       setState(() {
         statusMessage = 'Для режима «Всё через VPN» нужна VPN-подписка';
         connectionHint = 'Добавьте подписку, затем включите общий VPN-режим.';
@@ -5876,6 +5969,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         enabled: powerEnabled,
         onPressed: _toggleConnection,
         onDisabledPressed: disabledPowerAction,
+        operationError: connectionHintDanger && !status.connected,
       ),
       source: _HomeSourcePanel(
         atlas: true,
@@ -5888,57 +5982,79 @@ class _DropoHomePageState extends State<DropoHomePage>
         hasSubscription: subscription.hasSubscription,
         onManage: controlsDisabled ? null : _openSubscription,
       ),
-      notices: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (legacyTelegramProxy.injected &&
-              legacyTelegramProxy.recommendRemove)
-            _LegacyTelegramProxyStrip(
-              onOpenSettings: controlsDisabled
-                  ? null
-                  : _openLegacyTelegramProxySettings,
-              onAcknowledge: controlsDisabled
-                  ? null
-                  : _acknowledgeLegacyTelegramProxyRemoved,
+      notices:
+          !(strategyTransitionNotice.isNotEmpty ||
+              showHint ||
+              routeProbeActive ||
+              routeProbeFailed ||
+              (legacyTelegramProxy.injected &&
+                  legacyTelegramProxy.recommendRemove) ||
+              updateInfo?.hasUpdate == true ||
+              (!booting &&
+                  status.dependencies.managed &&
+                  !status.dependencies.bundled &&
+                  (!status.dependencies.ready || status.dependencies.degraded)))
+          ? null
+          : Column(
+              key: ValueKey(
+                '$strategyTransitionNotice/$normalizedHint/$hintDanger/$routeProbeFailed/${updateInfo?.latestVersion}/${legacyTelegramProxy.recommendRemove}/${status.dependencies.ready}',
+              ),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (strategyTransitionNotice.isNotEmpty && windowVisible)
+                  _StrategySearchBanner(
+                    message: strategyTransitionNotice,
+                    transitionNotice: true,
+                  ),
+                if (legacyTelegramProxy.injected &&
+                    legacyTelegramProxy.recommendRemove)
+                  _LegacyTelegramProxyStrip(
+                    onOpenSettings: controlsDisabled
+                        ? null
+                        : _openLegacyTelegramProxySettings,
+                    onAcknowledge: controlsDisabled
+                        ? null
+                        : _acknowledgeLegacyTelegramProxyRemoved,
+                  ),
+                _ConnectionHint(
+                  visible: showHint,
+                  title: _hintTitle(),
+                  message: normalizedHint,
+                  danger: hintDanger,
+                ),
+                _RouteProbePanel(
+                  visible: routeProbeActive || routeProbeFailed,
+                  active: routeProbeActive,
+                  failed: routeProbeFailed,
+                  expectedCount: routeProbeExpectedCount,
+                  items: routeProbeProgress.values.toList(growable: false),
+                ),
+                if (hintDanger && !booting && !online && !quitting)
+                  TextButton.icon(
+                    key: const ValueKey('home-retry-core'),
+                    onPressed: () => unawaited(_bootstrap()),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Повторить подключение к ядру'),
+                  ),
+                if (updateInfo?.hasUpdate == true)
+                  _UpdateStrip(
+                    info: updateInfo!,
+                    progressPercent: updateProgressPercent,
+                    onUpdate: controlsDisabled || uiBusy
+                        ? null
+                        : () => unawaited(_performUpdate(updateInfo!)),
+                  ),
+                if (!booting &&
+                    status.dependencies.managed &&
+                    !status.dependencies.bundled &&
+                    (!status.dependencies.ready ||
+                        status.dependencies.degraded))
+                  _DependencyStrip(
+                    status: status.dependencies,
+                    onDownload: controlsDisabled ? null : _downloadDependencies,
+                  ),
+              ],
             ),
-          _ConnectionHint(
-            visible: showHint,
-            title: _hintTitle(),
-            message: normalizedHint,
-            danger: hintDanger,
-          ),
-          _RouteProbePanel(
-            visible: routeProbeActive || routeProbeFailed,
-            active: routeProbeActive,
-            failed: routeProbeFailed,
-            expectedCount: routeProbeExpectedCount,
-            items: routeProbeProgress.values.toList(growable: false),
-          ),
-          if (hintDanger && !booting && !online && !quitting)
-            TextButton.icon(
-              key: const ValueKey('home-retry-core'),
-              onPressed: () => unawaited(_bootstrap()),
-              icon: const Icon(Icons.refresh),
-              label: const Text('Повторить подключение к ядру'),
-            ),
-          if (updateInfo?.hasUpdate == true)
-            _UpdateStrip(
-              info: updateInfo!,
-              progressPercent: updateProgressPercent,
-              onUpdate: controlsDisabled || uiBusy
-                  ? null
-                  : () => unawaited(_performUpdate(updateInfo!)),
-            ),
-          if (!booting &&
-              status.dependencies.managed &&
-              !status.dependencies.bundled &&
-              (!status.dependencies.ready || status.dependencies.degraded))
-            _DependencyStrip(
-              status: status.dependencies,
-              onDownload: controlsDisabled ? null : _downloadDependencies,
-            ),
-        ],
-      ),
       routes: _buildRouteControls(summaryOnly: true),
     );
   }
@@ -6132,7 +6248,10 @@ class _DropoHomePageState extends State<DropoHomePage>
       onWorkNetworks: controlsDisabled ? null : _openWireGuard,
       onExit: quitting ? null : _quitApp,
       version: status.version.fullVersion,
-      notice: strategyBannerMessage.isEmpty || !windowVisible
+      notice:
+          activeMenuSection == 'home' ||
+              strategyBannerMessage.isEmpty ||
+              !windowVisible
           ? null
           : _StrategySearchBanner(
               key: ValueKey(strategyBannerMessage),
@@ -6143,10 +6262,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           ? _QuitProgressOverlay(message: quitProgressMessage)
           : null,
       child: activeMenuSection == 'home'
-          ? SingleChildScrollView(
-              key: const ValueKey('home-scroll'),
-              child: _buildHomeDashboard(isBusy, hintMessage),
-            )
+          ? _buildHomeDashboard(isBusy, hintMessage)
           : _buildMenuSection(),
     );
   }
@@ -6538,7 +6654,6 @@ class _RouteProbePanel extends StatelessWidget {
 
     return Container(
       width: double.infinity,
-      constraints: const BoxConstraints(maxHeight: 176),
       padding: const EdgeInsets.all(11),
       decoration: BoxDecoration(
         color: background.withValues(alpha: 0.82),
@@ -6585,11 +6700,7 @@ class _RouteProbePanel extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          Flexible(
-            child: Scrollbar(
-              child: SingleChildScrollView(child: Column(children: rows)),
-            ),
-          ),
+          ...rows,
         ],
       ),
     );

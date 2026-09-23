@@ -16,31 +16,163 @@ class _AtlasHomeLayout extends StatelessWidget {
     required this.routes,
     required this.notices,
   });
-  final Widget connection, source, routes, notices;
+  final Widget connection, source, routes;
+  final Widget? notices;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    key: const ValueKey('home'),
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-    child: Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 400),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Errors and active probes stay visible even on the simple screen.
-            notices,
-            connection,
-            const SizedBox(height: 8),
-            source,
-            const SizedBox(height: 8),
-            routes,
-          ],
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => Stack(
+      key: const ValueKey('home'),
+      children: [
+        Positioned.fill(
+          child: SingleChildScrollView(
+            key: const ValueKey('home-scroll'),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 400),
+                child: _AtlasAdaptiveHomeBody(
+                  viewportHeight: math.max(0, constraints.maxHeight - 24),
+                  minimumConnectionExtent:
+                      160 *
+                      (MediaQuery.textScalerOf(context).scale(17) / 17).clamp(
+                        1.0,
+                        1.5,
+                      ),
+                  connection: connection,
+                  footer: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [source, const SizedBox(height: 8), routes],
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
-      ),
+        if (notices != null)
+          Positioned(
+            top: 4,
+            left: 12,
+            right: 12,
+            child: _AtlasNoticeOverlay(
+              identity: notices!.key,
+              maxHeight: MediaQuery.textScalerOf(context).scale(17) > 23
+                  ? 48
+                  : constraints.maxHeight < 460
+                  ? 56
+                  : 100,
+              child: notices!,
+            ),
+          ),
+      ],
     ),
   );
+}
+
+// Measure the real footer first: subscription names, public-source warnings and
+// text scaling must not be guessed from the monitor's height. The scroll view
+// supplies unbounded height; only genuinely insufficient space causes overflow.
+class _AtlasAdaptiveHomeBody extends MultiChildRenderObjectWidget {
+  _AtlasAdaptiveHomeBody({
+    required this.viewportHeight,
+    required this.minimumConnectionExtent,
+    required Widget connection,
+    required Widget footer,
+  }) : super(children: [connection, footer]);
+
+  final double viewportHeight;
+  final double minimumConnectionExtent;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderAtlasAdaptiveHomeBody(viewportHeight, minimumConnectionExtent);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _RenderAtlasAdaptiveHomeBody renderObject,
+  ) {
+    renderObject.viewportHeight = viewportHeight;
+    renderObject.minimumConnectionExtent = minimumConnectionExtent;
+  }
+}
+
+class _AtlasHomeParentData extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderAtlasAdaptiveHomeBody extends RenderBox
+    with
+        ContainerRenderObjectMixin<
+          RenderBox,
+          ContainerBoxParentData<RenderBox>
+        >,
+        RenderBoxContainerDefaultsMixin<
+          RenderBox,
+          ContainerBoxParentData<RenderBox>
+        > {
+  _RenderAtlasAdaptiveHomeBody(
+    this._viewportHeight,
+    this._minimumConnectionExtent,
+  );
+  double _viewportHeight;
+  double _minimumConnectionExtent;
+
+  set viewportHeight(double value) {
+    if (value == _viewportHeight) return;
+    _viewportHeight = value;
+    markNeedsLayout();
+  }
+
+  set minimumConnectionExtent(double value) {
+    if (value == _minimumConnectionExtent) return;
+    _minimumConnectionExtent = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! ContainerBoxParentData<RenderBox>) {
+      child.parentData = _AtlasHomeParentData();
+    }
+  }
+
+  @override
+  void performLayout() {
+    final connection = firstChild!;
+    final footer = lastChild!;
+    final width = constraints.maxWidth;
+    footer.layout(BoxConstraints.tightFor(width: width), parentUsesSize: true);
+    final planetExtent = math.min(
+      width,
+      math.max(
+        _minimumConnectionExtent,
+        math.min(280.0, _viewportHeight - footer.size.height - 8),
+      ),
+    );
+    connection.layout(
+      BoxConstraints.tightFor(width: width, height: planetExtent),
+      parentUsesSize: true,
+    );
+    final contentHeight = connection.size.height + 8 + footer.size.height;
+    size = constraints.constrain(
+      Size(width, math.max(contentHeight, _viewportHeight)),
+    );
+    final top = math.max(0.0, (size.height - contentHeight) / 2);
+    (connection.parentData! as ContainerBoxParentData<RenderBox>).offset =
+        Offset(0, top);
+    (footer.parentData! as ContainerBoxParentData<RenderBox>).offset = Offset(
+      0,
+      top + connection.size.height + 8,
+    );
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
 }
 
 class _AtlasConnectionPanel extends StatelessWidget {
@@ -54,10 +186,12 @@ class _AtlasConnectionPanel extends StatelessWidget {
     required this.enabled,
     required this.onPressed,
     this.onDisabledPressed,
+    this.hasError = false,
   });
   final String title;
   final Color accent;
   final bool connected, sessionActive, busy, stopping, enabled;
+  final bool hasError;
   final VoidCallback onPressed;
   final VoidCallback? onDisabledPressed;
 
@@ -67,131 +201,120 @@ class _AtlasConnectionPanel extends StatelessWidget {
       final largeText = MediaQuery.textScalerOf(context).scale(17) > 23;
       final planetSize = math.min(
         constraints.maxWidth,
-        math.min(
-          280.0,
-          math.max(
-            largeText ? 280.0 : 190.0,
-            MediaQuery.sizeOf(context).height - 310,
-          ),
-        ),
+        constraints.hasBoundedHeight ? constraints.maxHeight : 240.0,
       );
       final actionIcon = busy
-          ? const SizedBox(
+          ? SizedBox(
               width: 20,
               height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                value: MediaQuery.disableAnimationsOf(context) ? 0.65 : null,
+              ),
             )
-          : const Icon(Icons.power_settings_new, size: 24);
+          : Icon(
+              hasError && !sessionActive
+                  ? Icons.refresh
+                  : connected
+                  ? Icons.check_circle_outline
+                  : Icons.power_settings_new,
+              size: 24,
+            );
       final actionLabel = Text(
         busy
-            ? (stopping ? 'Отключаем…' : 'Подождите')
+            ? (stopping ? 'Отключаем…' : 'Подключаем…')
             : sessionActive
             ? 'Отключить'
+            : hasError
+            ? 'Повторить'
             : 'Подключить',
         textAlign: TextAlign.center,
       );
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Tooltip(
-            message: 'Доступность сервисов проверяется отдельно.',
-            child: Semantics(
-              liveRegion: true,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+      return Semantics(
+        key: const ValueKey('home-connection-state'),
+        label: title,
+        liveRegion: true,
+        child: Tooltip(
+          message: connected
+              ? 'Доступность сервисов проверяется отдельно.'
+              : title,
+          child: Center(
+            child: SizedBox.square(
+              dimension: planetSize,
+              child: Stack(
+                alignment: Alignment.center,
                 children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      color: accent,
-                      shape: BoxShape.circle,
+                  IgnorePointer(
+                    child: _AtlasAnimatedPlanet(
+                      connected: connected,
+                      busy: busy,
+                      hasError: hasError,
+                      size: planetSize,
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      title,
-                      key: const ValueKey('home-connection-state'),
-                      style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.4,
+                  SizedBox(
+                    width: largeText ? planetSize : math.min(216.0, planetSize),
+                    child: FilledButton(
+                      key: const ValueKey('home-connect'),
+                      onPressed: enabled ? onPressed : onDisabledPressed,
+                      style: FilledButton.styleFrom(
+                        enabledMouseCursor: SystemMouseCursors.click,
+                        disabledMouseCursor: SystemMouseCursors.basic,
+                        minimumSize: const Size(48, 52),
+                        backgroundColor: connected
+                            ? _atlasBackground.withValues(alpha: 0.94)
+                            : hasError
+                            ? const Color(0xFFFFB4AB)
+                            : _atlasMint,
+                        foregroundColor: connected
+                            ? _atlasText
+                            : _atlasBackground,
+                        disabledBackgroundColor: _atlasSurface,
+                        disabledForegroundColor: _atlasMuted,
+                        side: BorderSide(
+                          color: hasError
+                              ? const Color(0xFFFFB4AB)
+                              : enabled
+                              ? _atlasMint
+                              : _atlasBorder,
+                          width: 1.5,
+                        ),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 14,
+                        ),
+                        textStyle: const TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        shape: const StadiumBorder(),
                       ),
+                      child: largeText
+                          ? Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                actionIcon,
+                                const SizedBox(height: 8),
+                                actionLabel,
+                              ],
+                            )
+                          : Row(
+                              mainAxisSize: MainAxisSize.min,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                actionIcon,
+                                const SizedBox(width: 8),
+                                Flexible(child: actionLabel),
+                              ],
+                            ),
                     ),
                   ),
                 ],
               ),
             ),
           ),
-          const SizedBox(height: 8),
-          SizedBox.square(
-            dimension: planetSize,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                IgnorePointer(
-                  child: _AtlasAnimatedPlanet(
-                    connected: connected,
-                    size: planetSize,
-                  ),
-                ),
-                SizedBox(
-                  width: largeText
-                      ? planetSize
-                      : math.min(216.0, planetSize * 0.82),
-                  child: FilledButton(
-                    key: const ValueKey('home-connect'),
-                    onPressed: enabled ? onPressed : onDisabledPressed,
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size(48, 52),
-                      backgroundColor: connected
-                          ? _atlasBackground.withValues(alpha: 0.94)
-                          : _atlasMint,
-                      foregroundColor: connected
-                          ? _atlasText
-                          : _atlasBackground,
-                      disabledBackgroundColor: _atlasSurface,
-                      disabledForegroundColor: _atlasMuted,
-                      side: BorderSide(
-                        color: enabled ? _atlasMint : _atlasBorder,
-                        width: 1.5,
-                      ),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 14,
-                      ),
-                      textStyle: const TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 17,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      shape: const StadiumBorder(),
-                    ),
-                    child: largeText
-                        ? Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              actionIcon,
-                              const SizedBox(height: 8),
-                              actionLabel,
-                            ],
-                          )
-                        : Row(
-                            mainAxisSize: MainAxisSize.min,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              actionIcon,
-                              const SizedBox(width: 8),
-                              Flexible(child: actionLabel),
-                            ],
-                          ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
+        ),
       );
     },
   );
@@ -213,6 +336,8 @@ class _AtlasSourceTile extends StatelessWidget {
     key: const ValueKey('home-manage-sources'),
     onPressed: onPressed,
     style: OutlinedButton.styleFrom(
+      enabledMouseCursor: SystemMouseCursors.click,
+      disabledMouseCursor: SystemMouseCursors.basic,
       foregroundColor: _atlasText,
       backgroundColor: _atlasSurface,
       side: const BorderSide(color: _atlasBorder),
@@ -301,7 +426,9 @@ class _AtlasRouteControls extends StatelessWidget {
               Tooltip(
                 message: c.hasSubscription
                     ? 'Направить общий трафик через VPN; исключения рабочих сетей сохраняются'
-                    : 'Сначала добавьте VPN-подписку',
+                    : _isMobileShell
+                    ? 'Подключите свою VPN-подписку для этого режима'
+                    : 'Можно использовать бесплатный публичный источник или свою подписку',
                 child: _mode(
                   'all-vpn',
                   'Всё через VPN',
@@ -441,6 +568,8 @@ class _AtlasRouteControls extends StatelessWidget {
           ),
           label: Text(label),
           style: OutlinedButton.styleFrom(
+            enabledMouseCursor: SystemMouseCursors.click,
+            disabledMouseCursor: SystemMouseCursors.basic,
             foregroundColor: selected ? _atlasBackground : _atlasText,
             backgroundColor: selected ? _atlasMint : _atlasSurface,
             side: BorderSide(color: selected ? _atlasMint : _atlasBorder),

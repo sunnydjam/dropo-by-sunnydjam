@@ -7,15 +7,17 @@
 #include <memory>
 #include <string>
 
+#include "window_geometry.h"
+
 // A class abstraction for a high DPI-aware Win32 Window. Intended to be
 // inherited from by classes that wish to specialize with custom
 // rendering and input handling
 class Win32Window {
  public:
   struct Point {
-    unsigned int x;
-    unsigned int y;
-    Point(unsigned int x, unsigned int y) : x(x), y(y) {}
+    int x;
+    int y;
+    Point(int x, int y) : x(x), y(y) {}
   };
 
   struct Size {
@@ -29,10 +31,9 @@ class Win32Window {
   virtual ~Win32Window();
 
   // Creates a win32 window with |title| that is positioned and sized using
-  // |origin| and |size|. New windows are created on the default monitor. Window
-  // sizes are specified to the OS in physical pixels, hence to ensure a
-  // consistent size this function will scale the inputted width and height as
-  // as appropriate for the default monitor. The window is invisible until
+  // |origin| and logical client |size|, or the user's saved normal placement.
+  // Size is DPI-scaled and adjusted for the native frame. Restored placement is
+  // bounded by the current monitor work area. The window is invisible until
   // |Show| is called. Returns true if the window was created successfully.
   bool Create(const std::wstring& title, const Point& origin, const Size& size);
 
@@ -90,6 +91,12 @@ class Win32Window {
   // Update the window frame's theme to match the system theme.
   static void UpdateTheme(HWND const window);
 
+  // Observe without intercepting Flutter/plugin close, tray or resize handling.
+  void ObservePlacement(HWND window, UINT message, WPARAM wparam);
+  void RememberNormalPlacement(HWND window);
+  void SavePlacement() const;
+  void ConstrainToWorkArea(HWND window);
+
   bool quit_on_close_ = false;
 
   // window handle for top level window.
@@ -97,6 +104,11 @@ class Win32Window {
 
   // window handle for hosted content.
   HWND child_content_ = nullptr;
+
+  dropo::window_geometry::SavedPlacement normal_placement_{};
+  bool has_normal_placement_ = false;
+  bool constraining_placement_ = false;
+  bool needs_placement_constraint_ = false;
 };
 
 #endif  // RUNNER_WIN32_WINDOW_H_

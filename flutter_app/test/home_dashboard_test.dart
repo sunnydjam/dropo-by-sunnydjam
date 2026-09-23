@@ -487,7 +487,7 @@ void main() {
       final bridge = _HomeBridge();
       await bridge.saveSubscription('https://example.test/private-token');
       await _pumpHome(tester, bridge);
-      expect(find.text('Отключено'), findsOneWidget);
+      expect(find.byKey(const ValueKey('planet-disconnected')), findsOneWidget);
       expect(find.textContaining('первый по приоритету'), findsOneWidget);
       expect(find.textContaining('используется сейчас'), findsNothing);
       expect(find.textContaining('private-token'), findsNothing);
@@ -497,7 +497,7 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
       await tester.pump();
       expect(bridge.toggles, 1);
-      expect(find.text('Подключено'), findsOneWidget);
+      expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
       expect(
         find.byTooltip('Доступность сервисов проверяется отдельно.'),
         findsOneWidget,
@@ -806,7 +806,7 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
       await tester.pump();
       expect(bridge.toggles, 1);
-      expect(find.text('Подключено'), findsOneWidget);
+      expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
       expect(find.textContaining('используется сейчас'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
@@ -849,7 +849,7 @@ void main() {
             .onPressed,
         isNotNull,
       );
-      expect(find.text('Отключено'), findsOneWidget);
+      expect(find.byKey(const ValueKey('planet-disconnected')), findsOneWidget);
       await tester.pump(const Duration(seconds: 4));
       await tester.pump();
       expect(find.text('Источник не подтверждён'), findsOneWidget);
@@ -871,12 +871,13 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
       await tester.pump();
     }
-    expect(find.text('Нет связи с ядром'), findsOneWidget);
+    expect(find.byKey(const ValueKey('planet-error')), findsOneWidget);
     expect(find.textContaining('используется сейчас'), findsNothing);
     expect(find.byKey(const ValueKey('home-retry-core')), findsOneWidget);
     bridge.failStatus = false;
+    await tester.ensureVisible(find.byKey(const ValueKey('home-retry-core')));
     await _tap(tester, 'home-retry-core');
-    expect(find.text('Подключено'), findsOneWidget);
+    expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -887,11 +888,17 @@ void main() {
       ..connected = true
       ..activeSource = 'public';
     await _pumpHome(tester, bridge);
-    expect(find.text('Используется бесплатный резерв'), findsOneWidget);
+    expect(
+      find.text('Бесплатный публичный источник · скорость зависит от нагрузки'),
+      findsOneWidget,
+    );
     bridge.connected = false;
     await tester.pump(const Duration(seconds: 2));
     await tester.pump();
-    expect(find.text('Используется бесплатный резерв'), findsNothing);
+    expect(
+      find.text('Бесплатный публичный источник · скорость зависит от нагрузки'),
+      findsNothing,
+    );
     expect(find.textContaining('используется сейчас'), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -927,7 +934,7 @@ void main() {
     expect(find.text('Дополнительно'), findsOneWidget);
     await _tap(tester, 'nav-advanced');
     expect(find.text('Профили'), findsOneWidget);
-    expect(find.byKey(const ValueKey('nav-work')), findsOneWidget);
+    expect(find.byKey(const ValueKey('link-work')), findsOneWidget);
     await _tap(tester, 'nav-help');
     expect(find.text('Статистика'), findsOneWidget);
     expect(find.text('Выход'), findsOneWidget);
@@ -1064,7 +1071,7 @@ void main() {
         'home-connect',
         'home-routing-selected',
         'home-routing-all-vpn',
-        'nav-service-settings',
+        'link-service-settings',
       ]) {
         final rect = tester.getRect(find.byKey(ValueKey(key)));
         expect(rect.top, greaterThanOrEqualTo(0));
@@ -1131,15 +1138,20 @@ void main() {
             final action = tester.getRect(
               find.byKey(const ValueKey('home-connect')),
             );
-            final status = tester.getRect(
-              find.byKey(const ValueKey('home-connection-state')),
-            );
             expect((action.center - planet.center).distance, lessThan(0.1));
             expect(action.height, greaterThanOrEqualTo(48));
             expect(action.left, greaterThanOrEqualTo(planet.left));
             expect(action.right, lessThanOrEqualTo(planet.right));
             expect(action.bottom, lessThanOrEqualTo(planet.bottom));
-            expect(status.bottom, lessThan(planet.top));
+            expect(find.text('Отключено'), findsNothing);
+            final semantics = tester.widget<Semantics>(
+              find.byKey(const ValueKey('home-connection-state')),
+            );
+            expect(semantics.properties.liveRegion, isTrue);
+            expect(
+              semantics.properties.label,
+              bridge.connected ? 'Подключено' : 'Отключено',
+            );
             expect(tester.takeException(), isNull);
           }
 
@@ -1149,14 +1161,20 @@ void main() {
           await tester.pump(const Duration(seconds: 2));
           await tester.pump();
           expect(bridge.toggles, 1);
-          expect(find.text('Подключено'), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('planet-connected')),
+            findsOneWidget,
+          );
           expect(find.text('Отключить'), findsOneWidget);
           expectCentred();
           await _tap(tester, 'home-connect');
           await tester.pump(const Duration(seconds: 2));
           await tester.pump();
           expect(bridge.toggles, 2);
-          expect(find.text('Отключено'), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('planet-disconnected')),
+            findsOneWidget,
+          );
           expectCentred();
         },
       );
@@ -1346,7 +1364,7 @@ void main() {
   ) async {
     await _pumpHome(
       tester,
-      _HomeBridge(),
+      _HomeBridge()..connected = true,
       motion: true,
       size: const Size(700, 500),
     );
@@ -1368,7 +1386,7 @@ void main() {
     expect(painter()!.shouldRepaint(paused), isTrue);
     await _pumpHome(
       tester,
-      _HomeBridge(),
+      _HomeBridge()..connected = true,
       motion: false,
       size: const Size(700, 500),
     );

@@ -58,12 +58,12 @@ void main() {
 
       expect(find.text('Dropo'), findsOneWidget);
       expect(find.text('by sunnydjam'), findsOneWidget);
-      expect(find.byKey(const ValueKey('toggle-navigation')), findsOneWidget);
+      expect(find.byKey(const ValueKey('navigation-rail')), findsOneWidget);
       expect(find.byKey(const ValueKey('atlas-planet')), findsOneWidget);
       expect(find.byKey(const ValueKey('nav-settings')), findsOneWidget);
-      expect(find.text('Подключение'), findsOneWidget);
+      expect(find.text('Подключение'), findsWidgets);
       expect(find.text('Настроить сервисы'), findsOneWidget);
-      expect(find.byKey(const ValueKey('nav-sources')), findsNothing);
+      expect(find.byKey(const ValueKey('nav-sources')), findsOneWidget);
       expect(find.byKey(const ValueKey('nav-logs')), findsNothing);
       expect(find.byKey(const ValueKey('navigation-drawer')), findsNothing);
       expect(find.textContaining('Компоненты готовы:'), findsNothing);
@@ -491,7 +491,15 @@ void main() {
         findsOneWidget,
       );
       expect(
-        tester.widget<Text>(find.text('Сервисы').last).style?.color,
+        tester
+            .widget<Text>(
+              find.descendant(
+                of: find.byKey(const ValueKey('services-section')),
+                matching: find.text('Сервисы'),
+              ),
+            )
+            .style
+            ?.color,
         const Color(0xFFE8F3EF),
       );
       expect(

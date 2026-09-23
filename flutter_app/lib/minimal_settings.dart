@@ -21,8 +21,11 @@ class _SettingsLink extends StatelessWidget {
   Widget build(BuildContext context) => Material(
     color: Colors.transparent,
     child: ListTile(
-      key: ValueKey('nav-$section'),
+      key: ValueKey('link-$section'),
       enabled: onPressed != null,
+      mouseCursor: onPressed != null
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.basic,
       onTap: onPressed,
       minTileHeight: 48,
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -124,7 +127,12 @@ class _MinimalSettingsPage extends StatelessWidget {
         ('exit', 'Выход', 'Отключить соединение и закрыть Dropo', Icons.logout),
       ],
       _ => <(String, String, String, IconData)>[
-        ('sources', 'Подключение', 'Подписки и серверы', Icons.dns_outlined),
+        (
+          'sources',
+          'Источники VPN',
+          'Свои подписки и бесплатный источник',
+          Icons.dns_outlined,
+        ),
         (
           'service-settings',
           'Сервисы',

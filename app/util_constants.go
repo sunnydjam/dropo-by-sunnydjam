@@ -214,7 +214,7 @@ type RoutingMode string
 
 const (
 	// RoutingModeBlockedOnly routes only blocked sites (РКН + community lists) through VPN.
-	// This is the default mode - minimal VPN usage, optimal performance.
+	// This is the legacy/recovery default, with minimal VPN usage.
 	RoutingModeBlockedOnly RoutingMode = "blocked_only"
 
 	// RoutingModeExceptRussia is retained only to migrate settings written by
@@ -227,12 +227,13 @@ const (
 	RoutingModeAllTraffic RoutingMode = "all_traffic"
 )
 
-// DefaultRoutingMode is the default routing mode.
+// DefaultRoutingMode is the legacy/recovery default. Fresh Windows settings
+// select all_traffic explicitly in Storage.Load, never through normalization.
 const DefaultRoutingMode = RoutingModeBlockedOnly
 
 // NormalizeRoutingMode enforces the product routing contract: only positively
-// classified blocked traffic is eligible for bypass/VPN by default. Users may
-// still explicitly request the all-traffic privacy mode. The legacy
+// classified blocked traffic is eligible for bypass/VPN for missing/old values.
+// The saved all-traffic choice remains unchanged. The legacy
 // except_russia mode is deliberately migrated to blocked_only.
 func NormalizeRoutingMode(mode RoutingMode) RoutingMode {
 	switch mode {

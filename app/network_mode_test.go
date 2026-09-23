@@ -456,6 +456,13 @@ func newDeepWindowsTestApp(t *testing.T, config map[string]interface{}) (*App, s
 	if err := storage.Init(); err != nil {
 		t.Fatalf("storage init failed: %v", err)
 	}
+	// This fixture exercises an existing selected-services installation, not
+	// the fresh-install onboarding default.
+	settings := storage.GetAppSettings()
+	settings.RoutingMode = RoutingModeBlockedOnly
+	if err := storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
 	resourcesPath := filepath.Join(basePath, ResourcesFolder)
 	if err := os.MkdirAll(resourcesPath, 0755); err != nil {
 		t.Fatalf("create resources dir failed: %v", err)
