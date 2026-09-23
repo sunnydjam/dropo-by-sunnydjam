@@ -99,33 +99,24 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
 
   @override
   Widget build(BuildContext context) {
-    final state = widget.hasError
-        ? 'error'
-        : widget.busy
-        ? 'connecting'
-        : widget.connected
-        ? 'connected'
-        : 'disconnected';
-    final tone = widget.hasError
-        ? const Color(0xFFFF6969)
-        : widget.busy
-        ? const Color(0xFFFFCF78)
-        : widget.connected
-        ? _atlasMint
-        : const Color(0xFFAAB4B2);
+    final palette = _AtlasPlanetPalette.select(
+      connected: widget.connected,
+      busy: widget.busy,
+      hasError: widget.hasError,
+    );
     return ExcludeSemantics(
       child: RepaintBoundary(
         key: const ValueKey('atlas-planet'),
         child: SizedBox.square(
           dimension: widget.size,
           child: KeyedSubtree(
-            key: ValueKey('planet-$state'),
+            key: ValueKey('planet-${palette.name}'),
             child: CustomPaint(
               key: const ValueKey('atlas-planet-motion'),
               foregroundPainter: _AtlasGlobePainter(
                 phase: _phase,
                 texture: _texture,
-                tone: tone,
+                palette: palette,
                 connected: widget.connected && !widget.hasError && !widget.busy,
               ),
             ),
@@ -136,10 +127,40 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
   }
 }
 
-// Shared 1024x512 texture (~2 MiB), retained for the UI process lifetime.
-// Parsing/rasterization happens once, not during frames or status refreshes.
-class _AtlasGlobeTexture {
-  _AtlasGlobeTexture(this.image)
+// Surface colors are baked into each raster, not applied as a drawVertices
+// color filter. Both ocean and land must keep their state color on every GPU.
+enum _AtlasPlanetPalette {
+  disconnected(0xFFAAB4B2, 0xFF242424, 0xFFA0A0A0, 0xFFD3D3D3, 0xFF4B4B4B),
+  connected(0xFF5CF0B0, 0xFF0C542F, 0xFF32E879, 0xFF90FFC0, 0xFF178652),
+  error(0xFFFF6969, 0xFF531919, 0xFFF45454, 0xFFFFAAA4, 0xFF923535),
+  connecting(0xFFFFCF78, 0xFF58451A, 0xFFFFC252, 0xFFFFE7A7, 0xFF9D7B2C);
+
+  const _AtlasPlanetPalette(
+    this.toneARGB,
+    this.oceanARGB,
+    this.landARGB,
+    this.coastARGB,
+    this.gridARGB,
+  );
+  final int toneARGB, oceanARGB, landARGB, coastARGB, gridARGB;
+  Color get tone => Color(toneARGB);
+  Color get ocean => Color(oceanARGB);
+
+  static _AtlasPlanetPalette select({
+    required bool connected,
+    required bool busy,
+    required bool hasError,
+  }) => hasError
+      ? error
+      : busy
+      ? connecting
+      : connected
+      ? _AtlasPlanetPalette.connected
+      : disconnected;
+}
+
+class _AtlasGlobeSurface {
+  _AtlasGlobeSurface(this.image)
     : shader = ImageShader(
         image,
         TileMode.repeated,
@@ -149,28 +170,27 @@ class _AtlasGlobeTexture {
       );
   final ui.Image image;
   final ImageShader shader;
+}
+
+// Four shared 1024x512 state textures (~8 MiB total), retained for the UI
+// process lifetime. Geometry is parsed once; no rasterization on status changes
+// or animation frames, and switching state does not reset the longitude.
+class _AtlasGlobeTexture {
+  _AtlasGlobeTexture(this.surfaces);
+  final Map<_AtlasPlanetPalette, _AtlasGlobeSurface> surfaces;
   static Future<_AtlasGlobeTexture?>? _pending;
   static _AtlasGlobeTexture? ready;
   static Future<_AtlasGlobeTexture?> load() => _pending ??= _create();
 
   static Future<_AtlasGlobeTexture?> _create() async {
+    final surfaces = <_AtlasPlanetPalette, _AtlasGlobeSurface>{};
     try {
       final source = await rootBundle.loadString(
         'assets/maps/ne_110m_land.geojson',
       );
       final document = jsonDecode(source) as Map<String, dynamic>;
-      final recorder = ui.PictureRecorder();
-      final canvas = Canvas(recorder);
       const width = 1024.0, height = 512.0;
-      canvas.drawRect(
-        const Rect.fromLTWH(0, 0, width, height),
-        Paint()..color = const Color(0xFF121212),
-      );
-      final land = Paint()..color = const Color(0xFF999999);
-      final coast = Paint()
-        ..color = const Color(0xFFBBBBBB)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 0.55;
+      final paths = <Path>[];
       for (final feature in document['features'] as List<dynamic>) {
         final geometry = feature['geometry'] as Map<String, dynamic>;
         final coordinates = geometry['coordinates'] as List<dynamic>;
@@ -195,28 +215,51 @@ class _AtlasGlobeTexture {
             }
             path.close();
           }
+          paths.add(path);
+        }
+      }
+      for (final palette in _AtlasPlanetPalette.values) {
+        final recorder = ui.PictureRecorder();
+        final canvas = Canvas(recorder);
+        canvas.drawRect(
+          const Rect.fromLTWH(0, 0, width, height),
+          Paint()..color = palette.ocean,
+        );
+        final land = Paint()..color = Color(palette.landARGB);
+        final coast = Paint()
+          ..color = Color(palette.coastARGB)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.55;
+        for (final path in paths) {
           canvas.drawPath(path, land);
           canvas.drawPath(path, coast);
         }
+        final grid = Paint()
+          ..color = Color(palette.gridARGB)
+          ..strokeWidth = 0.7;
+        for (var lon = -180; lon <= 180; lon += 30) {
+          final x = (lon + 180) / 360 * width;
+          canvas.drawLine(Offset(x, 0), Offset(x, height), grid);
+        }
+        for (var lat = -60; lat <= 60; lat += 30) {
+          final y = (90 - lat) / 180 * height;
+          canvas.drawLine(Offset(0, y), Offset(width, y), grid);
+        }
+        final picture = recorder.endRecording();
+        try {
+          surfaces[palette] = _AtlasGlobeSurface(
+            await picture.toImage(1024, 512),
+          );
+        } finally {
+          picture.dispose();
+        }
       }
-      final grid = Paint()
-        ..color = const Color(0xFF3C3C3C)
-        ..strokeWidth = 0.7;
-      for (var lon = -180; lon <= 180; lon += 30) {
-        final x = (lon + 180) / 360 * width;
-        canvas.drawLine(Offset(x, 0), Offset(x, height), grid);
-      }
-      for (var lat = -60; lat <= 60; lat += 30) {
-        final y = (90 - lat) / 180 * height;
-        canvas.drawLine(Offset(0, y), Offset(width, y), grid);
-      }
-      final picture = recorder.endRecording();
-      try {
-        return ready = _AtlasGlobeTexture(await picture.toImage(1024, 512));
-      } finally {
-        picture.dispose();
-      }
+      return ready = _AtlasGlobeTexture(Map.unmodifiable(surfaces));
     } catch (_) {
+      for (final surface in surfaces.values) {
+        surface.shader.dispose();
+        surface.image.dispose();
+      }
       // Decorative asset failure cannot block the VPN; atmosphere remains.
       return null;
     }
@@ -227,13 +270,14 @@ class _AtlasGlobePainter extends CustomPainter {
   _AtlasGlobePainter({
     required this.phase,
     required this.texture,
-    required this.tone,
+    required this.palette,
     required this.connected,
   }) : super(repaint: phase);
 
   final ValueNotifier<double> phase;
   final _AtlasGlobeTexture? texture;
-  final Color tone;
+  final _AtlasPlanetPalette palette;
+  Color get tone => palette.tone;
   final bool connected;
   static const _columns = 73, _rows = 37;
   static final _sphere = _createSphere();
@@ -328,10 +372,10 @@ class _AtlasGlobePainter extends CustomPainter {
       ..color = tone.withValues(alpha: connected ? 0.27 : 0.12)
       ..maskFilter = MaskFilter.blur(BlurStyle.normal, radius * 0.045);
     canvas.drawCircle(center, radius * 1.015, glow);
-    canvas.drawCircle(center, radius, Paint()..color = const Color(0xFF091510));
+    canvas.drawCircle(center, radius, Paint()..color = palette.ocean);
     canvas.save();
     canvas.clipPath(Path()..addOval(globe));
-    final imageTexture = texture;
+    final imageTexture = texture?.surfaces[palette];
     if (imageTexture != null) {
       final longitude = (20 / 180 + phase.value * 2) * math.pi;
       final cos = math.cos(longitude), sin = math.sin(longitude);
@@ -362,9 +406,7 @@ class _AtlasGlobePainter extends CustomPainter {
       canvas.drawVertices(
         vertices,
         BlendMode.srcOver,
-        Paint()
-          ..shader = imageTexture.shader
-          ..colorFilter = ColorFilter.mode(tone, BlendMode.modulate),
+        Paint()..shader = imageTexture.shader,
       );
       vertices.dispose();
     }
@@ -375,7 +417,7 @@ class _AtlasGlobePainter extends CustomPainter {
         ..shader = RadialGradient(
           center: const Alignment(-0.35, -0.45),
           radius: 0.94,
-          colors: [Colors.transparent, Colors.black.withValues(alpha: 0.72)],
+          colors: [Colors.transparent, Colors.black.withValues(alpha: 0.55)],
           stops: const [0.1, 1],
         ).createShader(globe),
     );
@@ -465,7 +507,7 @@ class _AtlasGlobePainter extends CustomPainter {
   bool shouldRepaint(covariant _AtlasGlobePainter oldDelegate) =>
       oldDelegate.phase != phase ||
       oldDelegate.texture != texture ||
-      oldDelegate.tone != tone ||
+      oldDelegate.palette != palette ||
       oldDelegate.connected != connected;
 }
 
@@ -487,6 +529,20 @@ Widget buildAtlasPlanetForTesting({
 @visibleForTesting
 Future<bool> preloadAtlasPlanetForTesting() async =>
     await _AtlasGlobeTexture.load() != null;
+
+// Borrowed cached image: test callers must not dispose it.
+@visibleForTesting
+Future<ui.Image?> atlasPlanetTextureForTesting({
+  bool connected = false,
+  bool busy = false,
+  bool hasError = false,
+}) async => (await _AtlasGlobeTexture.load())
+    ?.surfaces[_AtlasPlanetPalette.select(
+      connected: connected,
+      busy: busy,
+      hasError: hasError,
+    )]
+    ?.image;
 
 @visibleForTesting
 double atlasPlanetPhaseForTesting(CustomPainter painter) =>

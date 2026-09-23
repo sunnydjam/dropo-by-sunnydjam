@@ -38,11 +38,11 @@ VPN», а обновления сохраняют прежний выбор по
 | Discord через выборочный VPN | Рекомендуемый стабильный маршрут для web, приложения и voice/video |
 | Discord через встроенный Zapret | Экспериментальный; web/API и voice/media проверяются раздельно |
 | Android | Исходники адаптируются отдельно; APK fork пока не проходит release gate |
-| Windows release fork | `v3.0.34`, unsigned |
+| Windows release fork | `v3.0.35`, unsigned |
 | Публичная Authenticode-подпись | Пока отсутствует |
 
 Текущая ветка разработки: `Dzhamuha-develop`. Текущая версия исходников
-и Windows-выпуска: `3.0.34`.
+и Windows-выпуска: `3.0.35`.
 
 ## Как работает маршрутизация
 
@@ -211,7 +211,7 @@ STUN/discovery и динамические voice/video/Go Live endpoints. Усп
 ## Установка и выпуск
 
 Текущий Windows-выпуск публикуется как
-[`v3.0.34`](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v3.0.34).
+[`v3.0.35`](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v3.0.35).
 Не выдавайте сборки upstream за сборки этого fork и не скачивайте исполняемые
 файлы из случайных источников.
 

@@ -2,6 +2,22 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.35 — 2026-09-23
+
+### Planet surface color hotfix
+
+- the globe now uses separate precolored geographic textures: green land and
+  ocean while connected, neutral gray while disconnected, red on error and
+  amber during a connection operation. Surface color no longer depends on a
+  color filter applied to a grayscale mesh;
+- the base sphere follows the same palette, with lighter shading so the state
+  remains visible across the globe. Rotation, reduced motion and fixed-button
+  behavior are preserved; all four textures are cached once, not regenerated
+  on animation frames or VPN status refreshes;
+- added pixel-level texture and rendered-surface regressions, including state
+  transitions. VPN routing, subscriptions and user-controlled updates are
+  unchanged from 3.0.34.
+
 ## 3.0.34 — 2026-09-23
 
 ### Windows dashboard and user-controlled updates
