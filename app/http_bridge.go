@@ -61,6 +61,7 @@ var bridgeCallableMethods = map[string]struct{}{
 	"ResolveAutoStartPrompt":          {},
 	"RunClientQuickCheck":             {},
 	"SaveAppConfig":                   {},
+	"SetReduceMotion":                 {},
 	"SelectTrafficStrategy":           {},
 	"SetActiveProfile":                {},
 	"SetDisableFreeAccess":            {},

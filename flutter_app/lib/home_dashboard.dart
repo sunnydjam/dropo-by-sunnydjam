@@ -100,6 +100,7 @@ class _HomeConnectionPanel extends StatelessWidget {
     required this.onPressed,
     this.onDisabledPressed,
     this.operationError = false,
+    this.motionEnabled = true,
     this.atlas = false,
   });
   final CoreStatus status;
@@ -109,6 +110,7 @@ class _HomeConnectionPanel extends StatelessWidget {
   final VoidCallback? onDisabledPressed;
   final bool atlas;
   final bool operationError;
+  final bool motionEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -155,6 +157,7 @@ class _HomeConnectionPanel extends StatelessWidget {
         onPressed: onPressed,
         onDisabledPressed: onDisabledPressed,
         hasError: danger,
+        motionEnabled: motionEnabled,
       );
     }
     return _HomePanel(

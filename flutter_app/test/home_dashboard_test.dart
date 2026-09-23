@@ -391,6 +391,7 @@ void main() {
     await (FontLoader(
       'MaterialIcons',
     )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
+    expect(await preloadAtlasPlanetForTesting(), isTrue);
   });
 
   test('health report normalizes Windows and Android result payloads', () {
@@ -1368,31 +1369,31 @@ void main() {
       motion: true,
       size: const Size(700, 500),
     );
-    CustomPainter? painter() => tester
+    double phase() => atlasPlanetPhaseForTesting(tester
         .widget<CustomPaint>(find.byKey(const ValueKey('atlas-planet-motion')))
-        .foregroundPainter;
-    final first = painter();
+        .foregroundPainter!);
+    final first = phase();
     await tester.pump(const Duration(seconds: 1));
-    final moved = painter();
-    expect(moved!.shouldRepaint(first!), isTrue);
+    final moved = phase();
+    expect(moved, greaterThan(first));
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
     await tester.pump(const Duration(seconds: 1));
-    final paused = painter();
+    final paused = phase();
     await tester.pump(const Duration(seconds: 2));
-    expect(painter()!.shouldRepaint(paused!), isFalse);
+    expect(phase(), paused);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
-    expect(painter()!.shouldRepaint(paused), isTrue);
+    expect(phase(), greaterThan(paused));
     await _pumpHome(
       tester,
       _HomeBridge()..connected = true,
       motion: false,
       size: const Size(700, 500),
     );
-    final still = painter();
+    final still = phase();
     await tester.pump(const Duration(seconds: 2));
-    expect(painter()!.shouldRepaint(still!), isFalse);
+    expect(phase(), still);
     await tester.pumpWidget(const SizedBox.shrink());
     expect(tester.binding.transientCallbackCount, 0);
   });

@@ -11,11 +11,17 @@ class _AtlasDesktopShell extends StatefulWidget {
     required this.onWorkNetworks,
     required this.onExit,
     required this.version,
+    this.onAbout,
+    this.homeTelemetry,
+    this.visible = true,
     required this.child,
     this.notice,
     this.overlay,
   });
   final String activeSection, version;
+  final VoidCallback? onAbout;
+  final Widget? homeTelemetry;
+  final bool visible;
   final bool disabled;
   final ValueChanged<String> onSelect;
   final VoidCallback? onBack;
@@ -185,6 +191,28 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
               ? 208.0 + math.max(0.0, navigationTextScale - 1) * 144
               : 56.0)
         : 0.0;
+    final contentWidth = screen.width - railWidth;
+    final reserveFooter =
+        widget.activeSection != 'home' ||
+        contentWidth < 608 ||
+        navigationTextScale > 1.3;
+    final compactTelemetry = contentWidth < 760 || navigationTextScale > 1.5;
+    Widget versionLink() => Tooltip(
+      message: 'О приложении',
+      child: TextButton(
+        key: const ValueKey('app-version'),
+        onPressed: widget.onAbout,
+        style: TextButton.styleFrom(
+          minimumSize: const Size(88, 48),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          alignment: Alignment.centerRight,
+        ),
+        child: Text(
+          'v${widget.version}',
+          style: const TextStyle(fontSize: 12, color: _atlasMuted),
+        ),
+      ),
+    );
     final title =
         _items
             .where((item) => item.$1 == widget.activeSection)
@@ -239,7 +267,8 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                   child: ExcludeSemantics(
                     excluding: _open,
                     child: TickerMode(
-                      enabled: !_open && widget.overlay == null,
+                      enabled:
+                          widget.visible && !_open && widget.overlay == null,
                       child: Padding(
                         padding: EdgeInsets.only(left: railWidth),
                         child: Column(
@@ -290,14 +319,21 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                   ],
                                   const SizedBox(width: 16),
                                   Expanded(
-                                    child: Text(
-                                      title,
-                                      textAlign: TextAlign.end,
-                                      style: const TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
+                                    child: widget.activeSection == 'home'
+                                        ? Align(
+                                            alignment: Alignment.centerRight,
+                                            child: compactTelemetry
+                                                ? widget.homeTelemetry
+                                                : null,
+                                          )
+                                        : Text(
+                                            title,
+                                            textAlign: TextAlign.end,
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
                                   ),
                                 ],
                               ),
@@ -314,12 +350,19 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                       ),
                                     ),
                             ),
+                            if (reserveFooter)
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: versionLink(),
+                              ),
                           ],
                         ),
                       ),
                     ),
                   ),
                 ),
+                if (!reserveFooter && !_open && widget.overlay == null)
+                  Positioned(right: 8, bottom: 0, child: versionLink()),
                 if (showRail && !_open)
                   Positioned(
                     left: 0,

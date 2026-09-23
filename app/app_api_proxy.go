@@ -4,6 +4,7 @@ package main
 // This file contains Clash API proxy operations
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -100,35 +101,43 @@ func (a *App) GetProxiesWithDelay() map[string]interface{} {
 	}
 }
 
-// TestProxyDelay tests delay of a specific proxy
+const vpnResponseProbeTarget = "http://www.gstatic.com/generate_204"
+
+// TestProxyDelay measures an HTTP URL-test through a specific outbound, not
+// ICMP or the latency of every service using that outbound.
 func (a *App) TestProxyDelay(proxyName string) map[string]interface{} {
+	delay, err := a.testProxyDelayContext(context.Background(), proxyName)
+	if err != nil {
+		return map[string]interface{}{"success": false, "delay": 0, "error": err.Error()}
+	}
+	return map[string]interface{}{"success": true, "delay": delay, "name": proxyName}
+}
+
+// The monitor supplies its session context so Stop cancels the in-flight HTTP
+// request as well as rejecting a late result. This never starts another probe.
+func (a *App) testProxyDelayContext(ctx context.Context, proxyName string) (int, error) {
 	if !a.isVPNRunning() {
-		return map[string]interface{}{
-			"success": false,
-			"error":   "VPN не запущен",
-		}
+		return 0, fmt.Errorf("VPN не запущен")
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-
-	// Test proxy delay
-	path := clashProxyAPIPath(proxyName) + "/delay?timeout=5000&url=http://www.gstatic.com/generate_204"
-	resp, err := a.clashAPIGet(client, path)
+	path := clashProxyAPIPath(proxyName) + "/delay?timeout=5000&url=" + vpnResponseProbeTarget
+	req, err := a.newClashAPIRequest(http.MethodGet, path, nil)
 	if err != nil {
-		return map[string]interface{}{
-			"success": false,
-			"delay":   0,
-			"error":   err.Error(),
-		}
+		return 0, err
+	}
+	resp, err := client.Do(req.WithContext(ctx))
+	if err != nil {
+		return 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("VPN response check returned HTTP %d", resp.StatusCode)
+	}
 
 	body, err := readHTTPBodyLimited(resp.Body, defaultMaxHTTPResponseBytes)
 	if err != nil {
-		return map[string]interface{}{
-			"success": false,
-			"delay":   0,
-		}
+		return 0, err
 	}
 
 	var delayResp struct {
@@ -137,25 +146,13 @@ func (a *App) TestProxyDelay(proxyName string) map[string]interface{} {
 	}
 
 	if err := json.Unmarshal(body, &delayResp); err != nil {
-		return map[string]interface{}{
-			"success": false,
-			"delay":   0,
-		}
+		return 0, fmt.Errorf("VPN response check returned an invalid result")
 	}
 
-	if delayResp.Delay == 0 && delayResp.Message != "" {
-		return map[string]interface{}{
-			"success": false,
-			"delay":   0,
-			"error":   delayResp.Message,
-		}
+	if delayResp.Delay <= 0 {
+		return 0, fmt.Errorf("VPN response check returned no measured response time")
 	}
-
-	return map[string]interface{}{
-		"success": true,
-		"delay":   delayResp.Delay,
-		"name":    proxyName,
-	}
+	return delayResp.Delay, nil
 }
 
 // TestAllProxiesDelay tests delay of all proxies in parallel

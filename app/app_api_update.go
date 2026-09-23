@@ -1,7 +1,8 @@
 package main
 
 // Update methods for dropo.
-// This file contains auto-update functionality
+// Background checks only report release metadata. Download/install is an
+// explicit UI action; this API must never be scheduled by an automatic check.
 
 import (
 	"fmt"
@@ -39,7 +40,8 @@ func (a *App) CheckForUpdates() map[string]interface{} {
 	}
 }
 
-// DownloadAndInstallUpdate загружает и устанавливает обновление
+// DownloadAndInstallUpdate downloads and installs only after the user confirms
+// the action in the trusted UI. CheckForUpdates never invokes this method.
 func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
 	if runtime.GOOS != "windows" || currentDistributionMode() != distributionModeInstalled {
 		return map[string]interface{}{

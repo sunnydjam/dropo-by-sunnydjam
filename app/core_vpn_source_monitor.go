@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
 const vpnSourceHealthInterval = 30 * time.Second
+const vpnResponseMaxAge = 90 * time.Second
 
 const (
 	vpnSourceStartupReadyTimeout = 5 * time.Second
@@ -21,6 +23,172 @@ type vpnSourceHealthState struct {
 	ConsecutiveFailures  int
 	ConsecutiveSuccesses int
 	OpenUntil            time.Time
+}
+
+type vpnSourceProbeBinding struct {
+	ProfileID         int
+	SourceID          string
+	NodeID            string
+	SessionGeneration uint64
+}
+
+type vpnSourceObservation struct {
+	Binding   vpnSourceProbeBinding
+	CheckedAt time.Time
+	LatencyMS int // zero is absence, never an observed 0 ms
+	Success   bool
+}
+
+// vpnResponse is presentation-only telemetry from existing source-health
+// work. Reading it never probes, changes selectors, or delays connection-ready.
+type vpnResponse struct {
+	State             string `json:"state"`
+	LatencyMS         *int   `json:"latencyMs"`
+	CheckedAt         string `json:"checkedAt"`
+	AgeSeconds        *int64 `json:"ageSeconds"`
+	SourceID          string `json:"sourceId"`
+	NodeID            string `json:"nodeId"`
+	ProfileID         int    `json:"profileId"`
+	SessionGeneration uint64 `json:"sessionGeneration"`
+	ProbeKind         string `json:"probeKind"`
+	Target            string `json:"target"`
+	Error             string `json:"error"`
+}
+
+func (a *App) vpnSourceProbeBinding(tag string) (vpnSourceProbeBinding, bool) {
+	if a == nil || a.storage == nil || !strings.HasPrefix(tag, "vpn-source-") {
+		return vpnSourceProbeBinding{}, false
+	}
+	s := a.storage
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.data == nil {
+		return vpnSourceProbeBinding{}, false
+	}
+	for _, profile := range s.data.Profiles {
+		if profile.ID != s.data.App.ActiveProfileID {
+			continue
+		}
+		outbounds, _ := profile.SingboxConfig["outbounds"].([]interface{})
+		if !outboundTagExists(outbounds, tag) {
+			return vpnSourceProbeBinding{}, false
+		}
+		for _, source := range profile.VPNSources {
+			if source.Disabled || "vpn-source-"+source.ID != tag {
+				continue
+			}
+			nodeID := source.SelectedNodeID
+			if len(source.NodeIDs) > 0 {
+				if source.SelectedNode < 0 || source.SelectedNode >= len(source.NodeIDs) {
+					return vpnSourceProbeBinding{}, false
+				}
+				selectedID := source.NodeIDs[source.SelectedNode]
+				if nodeID != "" && nodeID != selectedID {
+					return vpnSourceProbeBinding{}, false
+				}
+				nodeID = selectedID
+			}
+			if nodeID == "" && isDirectProxyLink(source.URI) {
+				if node, err := (&SubscriptionFetcher{}).ParseSingleLink(source.URI); err == nil && node.Server != "" {
+					nodeID = vpnNodeFingerprint(node)
+				}
+			}
+			if nodeID == "" {
+				return vpnSourceProbeBinding{}, false
+			}
+			return vpnSourceProbeBinding{
+				ProfileID: profile.ID, SourceID: source.ID, NodeID: nodeID,
+				SessionGeneration: a.reconnectGeneration.Load(),
+			}, true
+		}
+	}
+	return vpnSourceProbeBinding{}, false
+}
+
+func (a *App) recordVPNSourceObservation(ctx context.Context, generation uint64, tag string, binding vpnSourceProbeBinding, delay int, success bool, checkedAt time.Time) bool {
+	current, ok := a.vpnSourceProbeBinding(tag)
+	if !ok || current != binding || ctx.Err() != nil {
+		return false
+	}
+	a.vpnSourceMonitorMu.Lock()
+	defer a.vpnSourceMonitorMu.Unlock()
+	if ctx.Err() != nil || a.vpnSourceMonitorCancel == nil || a.vpnSourceMonitorGeneration != generation || binding.SessionGeneration != a.reconnectGeneration.Load() {
+		return false
+	}
+	if a.vpnSourceObservations == nil {
+		a.vpnSourceObservations = make(map[string]vpnSourceObservation)
+	}
+	if !success || delay <= 0 {
+		delay, success = 0, false
+	}
+	a.vpnSourceObservations[tag] = vpnSourceObservation{
+		Binding: binding, CheckedAt: checkedAt, LatencyMS: delay, Success: success,
+	}
+	return true
+}
+
+func (a *App) vpnResponseSnapshot(running bool, now time.Time) vpnResponse {
+	result := vpnResponse{State: "unavailable", ProbeKind: "http", Target: vpnResponseProbeTarget}
+	if a == nil {
+		return result
+	}
+	result.SessionGeneration = a.reconnectGeneration.Load()
+	if !running || a.vpnStopping.Load() {
+		return result
+	}
+	a.vpnSourceMonitorMu.Lock()
+	generation, tag := a.vpnSourceMonitorGeneration, a.vpnSourceActive
+	monitorActive := a.vpnSourceMonitorCancel != nil
+	known, available := a.vpnSourceHealthKnown, a.vpnSourceAvailable
+	a.vpnSourceMonitorMu.Unlock()
+	if !monitorActive {
+		return result
+	}
+	if tag == "" {
+		if len(a.configuredVPNSourceTags()) > 0 {
+			result.State = "pending"
+			if known && !available {
+				result.State, result.Error = "failed", vpnSourceUnavailableMessage
+			}
+		}
+		return result
+	}
+	binding, ok := a.vpnSourceProbeBinding(tag)
+	if !ok || binding.SessionGeneration != result.SessionGeneration {
+		return result
+	}
+	result.State = "pending"
+	result.SourceID, result.NodeID, result.ProfileID = binding.SourceID, binding.NodeID, binding.ProfileID
+	a.vpnSourceMonitorMu.Lock()
+	observation, measured := a.vpnSourceObservations[tag]
+	current := a.vpnSourceMonitorCancel != nil && a.vpnSourceMonitorGeneration == generation && a.vpnSourceActive == tag
+	a.vpnSourceMonitorMu.Unlock()
+	if !current || a.vpnStopping.Load() || a.reconnectGeneration.Load() != binding.SessionGeneration {
+		result.State, result.SourceID, result.NodeID, result.ProfileID = "unavailable", "", "", 0
+		return result
+	}
+	if !measured || observation.Binding != binding || observation.CheckedAt.IsZero() {
+		return result
+	}
+	age := now.Sub(observation.CheckedAt)
+	// A clock jump must not make a future sample appear newly measured.
+	if age < 0 {
+		return result
+	}
+	seconds := int64(age / time.Second)
+	result.CheckedAt, result.AgeSeconds = observation.CheckedAt.UTC().Format(time.RFC3339), &seconds
+	if age > vpnResponseMaxAge {
+		result.State = "stale"
+		return result
+	}
+	if observation.Success && observation.LatencyMS > 0 {
+		result.State = "ok"
+		latency := observation.LatencyMS
+		result.LatencyMS = &latency
+	} else {
+		result.State, result.Error = "failed", "Последняя HTTP-проверка через VPN-источник не получила ответ."
+	}
+	return result
 }
 
 func nextVPNSourceHealthState(state vpnSourceHealthState, healthy bool, now time.Time) vpnSourceHealthState {
@@ -89,18 +257,20 @@ func (a *App) selectFirstHealthyVPNSource(ctx context.Context, generation uint64
 }
 
 func (a *App) vpnSourceHealthy(ctx context.Context, generation uint64, tag string) (bool, bool) {
+	binding, hasBinding := a.vpnSourceProbeBinding(tag)
 	for attempt := 0; attempt < 2; attempt++ {
 		if !a.vpnSourceMonitorCurrent(ctx, generation) {
 			return false, false
 		}
-		result := a.TestProxyDelay(tag)
+		delay, err := a.testProxyDelayContext(ctx, tag)
 		if !a.vpnSourceMonitorCurrent(ctx, generation) {
 			return false, false
 		}
-		if success, _ := result["success"].(bool); success {
-			if delay, _ := result["delay"].(int); delay > 0 {
-				return true, true
+		if err == nil && delay > 0 {
+			if hasBinding {
+				a.recordVPNSourceObservation(ctx, generation, tag, binding, delay, true, time.Now())
 			}
+			return true, true
 		}
 		if attempt == 0 {
 			timer := time.NewTimer(300 * time.Millisecond)
@@ -111,6 +281,9 @@ func (a *App) vpnSourceHealthy(ctx context.Context, generation uint64, tag strin
 			case <-timer.C:
 			}
 		}
+	}
+	if hasBinding {
+		a.recordVPNSourceObservation(ctx, generation, tag, binding, 0, false, time.Now())
 	}
 	return false, a.vpnSourceMonitorCurrent(ctx, generation)
 }
@@ -126,6 +299,7 @@ func (a *App) startVPNSourceMonitor() {
 	generation := a.vpnSourceMonitorGeneration
 	a.vpnSourceMonitorCancel = cancel
 	a.vpnSourceHealth = make(map[string]vpnSourceHealthState)
+	a.vpnSourceObservations = make(map[string]vpnSourceObservation)
 	a.vpnSourceManual = ""
 	a.vpnSourceLastSwitch = time.Time{}
 	a.vpnSourceHealthKnown = false
@@ -189,6 +363,7 @@ func (a *App) stopVPNSourceMonitor() {
 	a.vpnSourceManual = ""
 	a.vpnSourceLastSwitch = time.Time{}
 	a.vpnSourceHealth = nil
+	a.vpnSourceObservations = nil
 	a.vpnSourceHealthKnown = false
 	a.vpnSourceAvailable = false
 	a.vpnSourceHealthError = ""
@@ -433,6 +608,11 @@ func (a *App) vpnSourceCanAttempt(tag string, now time.Time) bool {
 
 func (a *App) activateVPNSource(tag string, manual bool) {
 	a.vpnSourceMonitorMu.Lock()
+	if manual || a.vpnSourceActive != tag {
+		// A user-selected source must wait for its own next monitor observation;
+		// an old candidate sample is not proof of this new active selection.
+		a.vpnSourceObservations = make(map[string]vpnSourceObservation)
+	}
 	a.vpnSourceActive = tag
 	a.vpnSourceLastSwitch = time.Now()
 	if manual {

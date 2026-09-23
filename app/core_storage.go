@@ -50,8 +50,9 @@ type GlobalAppSettings struct {
 	LogLevel      LogLevel `json:"log_level"`
 
 	// Appearance
-	Theme    Theme    `json:"theme"`
-	Language Language `json:"language"`
+	Theme        Theme    `json:"theme"`
+	Language     Language `json:"language"`
+	ReduceMotion bool     `json:"reduce_motion"`
 
 	// Routing settings
 	RoutingMode RoutingMode `json:"routing_mode"` // persisted choice; fresh Windows installs start in all_traffic

@@ -14,6 +14,12 @@ CC0-1.0. Текст лицензии поставляется в Flutter assets 
 Рендерер [flutter_svg](https://pub.dev/packages/flutter_svg) — MIT;
 лицензии Dart/Flutter-зависимостей входят в стандартный Flutter license bundle.
 
+Поверхность анимированной планеты построена из локально включённых данных
+Natural Earth 1:110m land (`flutter_app/assets/maps/ne_110m_land.geojson`).
+Made with Natural Earth. Данные находятся в public domain согласно
+[условиям Natural Earth](https://www.naturalearthdata.com/about/terms-of-use/).
+Это декоративная географическая карта, не карта серверов или реальных замеров.
+
 | Компонент | Назначение | Лицензия / источник |
 | --- | --- | --- |
 | WinDivert 2.2.2 | Перехват и reinjection пакетов в собственном Windows engine | [Официальный сайт и документация](https://reqrypt.org/windivert.html), LGPL-3.0-only / GPL-2.0-only; текст лицензии включается в `licenses/WinDivert-LICENSE.txt` |

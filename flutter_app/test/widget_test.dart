@@ -643,7 +643,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
 
-      expect(find.text('Подключение'), findsOneWidget);
+      expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
       expect(find.byKey(const ValueKey('navigation-rail')), findsNothing);
       expect(find.text('Еще'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('toggle-navigation')));
@@ -726,7 +726,7 @@ void main() {
     expect(decision, isTrue);
   });
 
-  testWidgets('cold start starts an installed Windows update automatically', (
+  testWidgets('cold start only announces an installed Windows update', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1280, 860);
@@ -748,11 +748,12 @@ void main() {
     );
     expect(
       bridge.updateInstallCalls,
-      1,
-      reason: 'an installed Windows release must update without another click',
+      0,
+      reason: 'startup may check metadata but never install without consent',
     );
 
     await tester.pump(const Duration(seconds: 12));
+    expect(bridge.updateInstallCalls, 0);
   });
 
   testWidgets(
@@ -1046,7 +1047,7 @@ void main() {
     expect(info.hasUpdate, isFalse);
   });
 
-  test('automatic update policy is limited to installed self-updates', () {
+  test('UpdateInfo preserves manual installer capability', () {
     UpdateInfo info({required bool selfUpdate, bool hasUpdate = true}) {
       return UpdateInfo.fromJson({
         'success': true,
@@ -1064,25 +1065,9 @@ void main() {
       });
     }
 
-    expect(
-      shouldAutomaticallyInstallUpdate(info(selfUpdate: true), enabled: true),
-      isTrue,
-    );
-    expect(
-      shouldAutomaticallyInstallUpdate(info(selfUpdate: false), enabled: true),
-      isFalse,
-    );
-    expect(
-      shouldAutomaticallyInstallUpdate(info(selfUpdate: true), enabled: false),
-      isFalse,
-    );
-    expect(
-      shouldAutomaticallyInstallUpdate(
-        info(selfUpdate: true, hasUpdate: false),
-        enabled: true,
-      ),
-      isFalse,
-    );
+    expect(info(selfUpdate: true).selfUpdate, isTrue);
+    expect(info(selfUpdate: false).selfUpdate, isFalse);
+    expect(info(selfUpdate: true, hasUpdate: false).hasUpdate, isFalse);
   });
 
   test('core compatibility rejects a stale build on the local bridge', () {

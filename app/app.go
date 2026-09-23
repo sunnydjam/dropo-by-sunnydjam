@@ -103,6 +103,7 @@ type App struct {
 	vpnSourceManual             string
 	vpnSourceLastSwitch         time.Time
 	vpnSourceHealth             map[string]vpnSourceHealthState
+	vpnSourceObservations       map[string]vpnSourceObservation
 	vpnSourceHealthKnown        bool
 	vpnSourceAvailable          bool
 	vpnSourceHealthError        string

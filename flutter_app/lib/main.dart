@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show AppExitResponse;
+import 'dart:ui' as ui;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -15,6 +17,8 @@ part 'home_dashboard.dart';
 part 'atlas_dashboard.dart';
 part 'compact_shell.dart';
 part 'planet_animation.dart';
+part 'vpn_response.dart';
+part 'app_about.dart';
 part 'service_routes.dart';
 part 'minimal_settings.dart';
 part 'connection_health.dart';
@@ -82,14 +86,6 @@ bool? debugAndroidPlatformOverride;
 
 bool get _isAndroidPlatform =>
     debugAndroidPlatformOverride ?? Platform.isAndroid;
-
-@visibleForTesting
-bool shouldAutomaticallyInstallUpdate(
-  UpdateInfo update, {
-  required bool enabled,
-}) {
-  return enabled && update.success && update.hasUpdate && update.selfUpdate;
-}
 
 ButtonStyle _withClickCursor(ButtonStyle style) {
   return style.copyWith(
@@ -219,6 +215,10 @@ abstract class CoreBridge {
   Future<Map<String, dynamic>> updateProfile(int id, String name);
   Future<Map<String, dynamic>> deleteProfile(int id);
   Future<Map<String, dynamic>> saveAppConfig(AppConfig config);
+  Future<Map<String, dynamic>> setReduceMotion(bool reduced) async => {
+    'success': false,
+    'error': 'Настройка анимации на этой платформе недоступна.',
+  };
   Future<Map<String, dynamic>> resolveAutoStartPrompt(bool enable);
   Future<Map<String, dynamic>> routingMode();
   Future<Map<String, dynamic>> setRoutingMode(String mode);
@@ -505,6 +505,10 @@ class HttpCoreBridge implements CoreBridge {
       ],
     );
   }
+
+  @override
+  Future<Map<String, dynamic>> setReduceMotion(bool reduced) =>
+      callMap('SetReduceMotion', args: [reduced]);
 
   // resolveAutoStartPrompt records the user's answer to the first-run autostart
   // dialog. enable=true keeps launch-at-logon on and registers it; enable=false
@@ -1122,6 +1126,11 @@ class HttpCoreBridge implements CoreBridge {
 }
 
 class ChannelCoreBridge implements CoreBridge {
+  @override
+  Future<Map<String, dynamic>> setReduceMotion(bool reduced) async => {
+    'success': false,
+    'error': 'Используйте системную настройку уменьшения движения.',
+  };
   ChannelCoreBridge({MethodChannel? channel, EventChannel? events})
     : _channel = channel ?? const MethodChannel('dropo/core'),
       _events = events ?? const EventChannel('dropo/core/events');
@@ -1847,6 +1856,7 @@ class MockCoreBridge implements CoreBridge {
     'checkUpdates': _config.checkUpdates,
     'notifications': _config.notifications,
     'autoUpdateSub': _config.autoUpdateSub,
+    'reduceMotion': _config.reduceMotion,
     'theme': _config.theme,
     'language': _config.language,
     'logLevel': _config.logLevel,
@@ -1942,6 +1952,12 @@ class MockCoreBridge implements CoreBridge {
   Future<Map<String, dynamic>> saveAppConfig(AppConfig config) async {
     _config = config;
     return {'success': true, 'message': 'Mock settings saved'};
+  }
+
+  @override
+  Future<Map<String, dynamic>> setReduceMotion(bool reduced) async {
+    _config = _config.copyWith(reduceMotion: reduced);
+    return {'success': true};
   }
 
   @override
@@ -2478,6 +2494,7 @@ class BridgeEvent {
 
 class CoreStatus {
   const CoreStatus({
+    this.vpnResponse = const VpnResponseSnapshot(),
     required this.connected,
     required this.running,
     required this.connecting,
@@ -2496,6 +2513,7 @@ class CoreStatus {
   });
 
   final bool connected;
+  final VpnResponseSnapshot vpnResponse;
   final bool running;
   final bool connecting;
   final bool disconnecting;
@@ -2544,10 +2562,12 @@ class CoreStatus {
       networkDescription: json['networkModeDescription']?.toString() ?? '',
       dependencies: DepsStatus.fromJson(_asMap(json['dependencies'])),
       version: VersionInfo.fromJson(_asMap(json['version'])),
+      vpnResponse: VpnResponseSnapshot.fromJson(_asMap(json['vpnResponse'])),
     );
   }
 
   CoreStatus copyWith({
+    VpnResponseSnapshot? vpnResponse,
     bool? connected,
     bool? running,
     bool? connecting,
@@ -2573,6 +2593,7 @@ class CoreStatus {
       networkDescription: networkDescription,
       dependencies: dependencies,
       version: version,
+      vpnResponse: vpnResponse ?? this.vpnResponse,
     );
   }
 }
@@ -2784,6 +2805,7 @@ class ProfileInfo {
 
 class AppConfig {
   const AppConfig({
+    this.reduceMotion = false,
     required this.autoStart,
     required this.autoStartPrompted,
     required this.enableLogging,
@@ -2806,6 +2828,7 @@ class AppConfig {
   });
 
   final bool autoStart;
+  final bool reduceMotion;
   final bool autoStartPrompted;
   final bool enableLogging;
   final bool checkUpdates;
@@ -2856,6 +2879,7 @@ class AppConfig {
       autoStartPrompted: json['autoStartPrompted'] != false,
       enableLogging: json['enableLogging'] != false,
       checkUpdates: json['checkUpdates'] != false,
+      reduceMotion: json['reduceMotion'] == true,
       notifications: json['notifications'] != false,
       autoUpdateSub: json['autoUpdateSub'] != false,
       theme: json['theme']?.toString() ?? 'system',
@@ -2880,6 +2904,7 @@ class AppConfig {
   }
 
   AppConfig copyWith({
+    bool? reduceMotion,
     bool? autoStart,
     bool? autoStartPrompted,
     bool? enableLogging,
@@ -2905,6 +2930,7 @@ class AppConfig {
       autoStartPrompted: autoStartPrompted ?? this.autoStartPrompted,
       enableLogging: enableLogging ?? this.enableLogging,
       checkUpdates: checkUpdates ?? this.checkUpdates,
+      reduceMotion: reduceMotion ?? this.reduceMotion,
       notifications: notifications ?? this.notifications,
       autoUpdateSub: autoUpdateSub ?? this.autoUpdateSub,
       theme: theme ?? this.theme,
@@ -4188,7 +4214,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
     startupUpdateCheckScheduled = true;
     Future<void>.delayed(const Duration(seconds: 1), () async {
-      if (!mounted || quitting) {
+      if (!mounted || quitting || !appConfig.checkUpdates) {
         return;
       }
       for (var attempt = 0; attempt < 2; attempt++) {
@@ -4198,34 +4224,22 @@ class _DropoHomePageState extends State<DropoHomePage>
         } catch (_) {
           result = null;
         }
-        if (!mounted || quitting) {
+        if (!mounted || quitting || !appConfig.checkUpdates) {
           return;
         }
         final checked = result;
         if (checked != null && checked.success) {
-          final autoInstall = shouldAutomaticallyInstallUpdate(
-            checked,
-            enabled: appConfig.checkUpdates,
-          );
           setState(() {
             updateInfo = checked;
             if (checked.hasUpdate && !connectionBusy && !uiBusy) {
-              statusMessage = autoInstall
-                  ? 'Автоматически обновляем до ${checked.latestVersion}'
-                  : 'Доступна версия ${checked.latestVersion}';
-              connectionHint = autoInstall
-                  ? 'Сначала загрузим и проверим установщик, затем перезапустим dropo.'
-                  : checked.selfUpdate
+              statusMessage = 'Доступна версия ${checked.latestVersion}';
+              connectionHint = checked.selfUpdate
                   ? 'Нажмите «Обновить и перезапустить».'
                   : checked.platform.toLowerCase() == 'windows'
                   ? 'Скачайте portable-архив и замените папку приложения.'
                   : 'Нажмите «Скачать APK» для установки обновления.';
             }
           });
-          if (autoInstall) {
-            await _performAutomaticUpdate(checked);
-            return;
-          }
           if (checked.hasUpdate) {
             _showUpdateSnackBar(checked, manual: false);
           }
@@ -5200,34 +5214,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     return '';
   }
 
-  Future<void> _performAutomaticUpdate(UpdateInfo result) async {
-    // A settings save or another short UI operation can overlap the delayed
-    // startup check. Wait for that operation instead of silently dropping the
-    // automatic update. The release remains visible for a manual retry if the
-    // UI stays busy for an unusually long time.
-    for (var attempt = 0; attempt < 60; attempt++) {
-      if (!mounted || quitting || !appConfig.checkUpdates) {
-        return;
-      }
-      if (!uiBusy) {
-        await _performUpdate(result, requireConfirmation: false);
-        return;
-      }
-      await Future<void>.delayed(const Duration(seconds: 1));
-    }
-    if (mounted) {
-      setState(() {
-        statusMessage = 'Доступна версия ${result.latestVersion}';
-        connectionHint = 'Нажмите «Обновить и перезапустить».';
-      });
-      _showUpdateSnackBar(result, manual: false);
-    }
-  }
-
-  Future<void> _performUpdate(
-    UpdateInfo result, {
-    bool requireConfirmation = true,
-  }) async {
+  Future<void> _performUpdate(UpdateInfo result) async {
     if (!result.success || !result.hasUpdate || uiBusy || quitting) {
       return;
     }
@@ -5299,7 +5286,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       return;
     }
 
-    if (requireConfirmation) {
+    {
       final confirmed = await showDialog<bool>(
         context: context,
         barrierDismissible: false,
@@ -5312,7 +5299,7 @@ class _DropoHomePageState extends State<DropoHomePage>
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Text(
-                'Приложение скачает установщик из GitHub Releases, проверит размер и SHA-256, запустит обновление и перезапустится.',
+                'После подтверждения приложение скачает установщик из GitHub Releases, проверит размер и SHA-256 и перезапустится. На время установки VPN будет отключён.',
                 style: TextStyle(color: Color(0xFFD8E4E0), height: 1.35),
               ),
               const SizedBox(height: 16),
@@ -5958,6 +5945,9 @@ class _DropoHomePageState extends State<DropoHomePage>
             externalVpnConflictBlocked ||
             depsProgress.trim().isNotEmpty);
     return _AtlasHomeLayout(
+      telemetry: online && status.connected && refreshFailureCount == 0
+          ? _VpnResponseTile(snapshot: status.vpnResponse)
+          : null,
       connection: _HomeConnectionPanel(
         atlas: true,
         status: status,
@@ -5970,6 +5960,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         onPressed: _toggleConnection,
         onDisabledPressed: disabledPowerAction,
         operationError: connectionHintDanger && !status.connected,
+        motionEnabled: !appConfig.reduceMotion,
       ),
       source: _HomeSourcePanel(
         atlas: true,
@@ -6247,7 +6238,12 @@ class _DropoHomePageState extends State<DropoHomePage>
             },
       onWorkNetworks: controlsDisabled ? null : _openWireGuard,
       onExit: quitting ? null : _quitApp,
-      version: status.version.fullVersion,
+      version: status.version.version,
+      onAbout: quitting ? null : _openAbout,
+      visible: windowVisible,
+      homeTelemetry: online && status.connected && refreshFailureCount == 0
+          ? _VpnResponseTile(snapshot: status.vpnResponse, compact: true)
+          : null,
       notice:
           activeMenuSection == 'home' ||
               strategyBannerMessage.isEmpty ||
@@ -6353,35 +6349,17 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
   }
 
-  // ignore: unused_element
   Future<void> _openAbout() async {
     await showDialog<void>(
       context: context,
       builder: (context) => _AppDialog(
         title: 'О приложении',
+        centered: true,
         icon: Icons.info_outline,
-        child: Column(
-          children: [
-            const _HomeBrand(),
-            const SizedBox(height: 12),
-            _FactRow(label: 'Версия', value: status.version.fullVersion),
-            _LinkFactRow(
-              label: 'Telegram',
-              value: appConfig.telegramName,
-              onPressed: () =>
-                  widget.bridge.openExternal(appConfig.telegramUrl),
-            ),
-            _LinkFactRow(
-              label: 'GitHub',
-              value: appConfig.githubRepo,
-              onPressed: () => widget.bridge.openExternal(appConfig.githubUrl),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Официальная сборка Dropo by sunnydjam. Скачивайте приложение только из GitHub Releases основного репозитория.',
-              style: TextStyle(color: Color(0xFF9BB0AB), height: 1.35),
-            ),
-          ],
+        child: _AboutContent(
+          status: status,
+          appConfig: appConfig,
+          onOpenExternal: widget.bridge.openExternal,
         ),
       ),
     );
@@ -7241,9 +7219,9 @@ class _AppDialog extends StatelessWidget {
                   Expanded(
                     child: Text(
                       title,
-                      style: const TextStyle(
-                        color: Color(0xFFE8F3EF),
-                        fontSize: 18,
+                      style: TextStyle(
+                        color: const Color(0xFFE8F3EF),
+                        fontSize: media.size.width < 420 ? 16 : 18,
                         fontWeight: FontWeight.w800,
                       ),
                     ),
@@ -7650,30 +7628,10 @@ class _AboutSection extends StatelessWidget {
     return _MenuPageSurface(
       title: 'О приложении',
       icon: Icons.info_outline,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Center(child: _HomeBrand()),
-          const SizedBox(height: 14),
-          _FactRow(label: 'Версия', value: status.version.fullVersion),
-          _LinkFactRow(
-            label: 'Telegram',
-            value: appConfig.telegramName,
-            onPressed: () => onOpenExternal(appConfig.telegramUrl),
-          ),
-          _LinkFactRow(
-            label: 'GitHub',
-            value: appConfig.githubRepo,
-            onPressed: () => onOpenExternal(appConfig.githubUrl),
-          ),
-          const SizedBox(height: 10),
-          const _InfoBand(
-            icon: Icons.verified_user_outlined,
-            title: 'Официальная сборка',
-            body:
-                'Скачивайте приложение только из GitHub Releases основного репозитория.',
-          ),
-        ],
+      child: _AboutContent(
+        status: status,
+        appConfig: appConfig,
+        onOpenExternal: onOpenExternal,
       ),
     );
   }
@@ -9976,9 +9934,9 @@ class _SettingsDialogState extends State<_SettingsDialog>
             title: 'Обновления',
             children: [
               _SwitchSetting(
-                title: 'Автоматические обновления',
+                title: 'Проверять обновления автоматически',
                 description:
-                    'Установленная Windows-версия скачивает проверенные стабильные релизы из GitHub и перезапускается автоматически',
+                    'Сообщать о новых версиях. Скачивание и установка — только по вашему нажатию',
                 value: config.checkUpdates,
                 onChanged: canUseLiveSafe
                     ? (value) =>
@@ -10034,6 +9992,19 @@ class _SettingsDialogState extends State<_SettingsDialog>
           _SettingsGroup(
             title: 'Внешний вид',
             children: [
+              if (!isMobile)
+                _SwitchSetting(
+                  title: 'Анимация планеты',
+                  description:
+                      'Вращение останавливается в трее. Системное уменьшение движения имеет приоритет.',
+                  value: !config.reduceMotion,
+                  onChanged: canUseLiveSafe
+                      ? (value) => _applySpecial(
+                          () => widget.bridge.setReduceMotion(!value),
+                          config.copyWith(reduceMotion: !value),
+                        )
+                      : null,
+                ),
               const ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: Text('Atlas'),
@@ -10455,7 +10426,11 @@ class _SwitchSetting extends StatelessWidget {
     return _SettingShell(
       title: title,
       description: description,
-      trailing: Switch(value: value, onChanged: onChanged),
+      trailing: Switch(
+        key: ValueKey('setting-switch-$title'),
+        value: value,
+        onChanged: onChanged,
+      ),
     );
   }
 }
@@ -11478,89 +11453,6 @@ class _EmptyState extends StatelessWidget {
       child: Text(
         text,
         style: const TextStyle(color: Color(0xFF4A5568), fontSize: 12),
-      ),
-    );
-  }
-}
-
-class _FactRow extends StatelessWidget {
-  const _FactRow({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 126,
-            child: Text(
-              label,
-              style: const TextStyle(color: Color(0xFF8EA2A0)),
-            ),
-          ),
-          Expanded(
-            child: SelectableText(
-              value,
-              textAlign: TextAlign.right,
-              style: const TextStyle(color: Color(0xFFE8F5F1)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _LinkFactRow extends StatelessWidget {
-  const _LinkFactRow({
-    required this.label,
-    required this.value,
-    required this.onPressed,
-  });
-
-  final String label;
-  final String value;
-  final Future<void> Function() onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 126,
-            child: Text(
-              label,
-              style: const TextStyle(color: Color(0xFF8EA2A0)),
-            ),
-          ),
-          Expanded(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                onPressed: () => unawaited(onPressed()),
-                icon: const Icon(Icons.open_in_new, size: 14),
-                label: Text(value, overflow: TextOverflow.ellipsis),
-                style: _withClickCursor(
-                  TextButton.styleFrom(
-                    foregroundColor: const Color(0xFFBAF7D0),
-                    padding: EdgeInsets.zero,
-                    minimumSize: const Size(0, 28),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    textStyle: const TextStyle(fontWeight: FontWeight.w400),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

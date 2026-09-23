@@ -32,6 +32,7 @@ func (a *App) GetAppConfig() map[string]interface{} {
 		"autoStartPrompted": settings.AutoStartPrompted,
 		"enableLogging":     settings.EnableLogging,
 		"checkUpdates":      settings.CheckUpdates,
+		"reduceMotion":      settings.ReduceMotion,
 		"notifications":     settings.Notifications,
 		"theme":             settings.Theme,
 		"language":          settings.Language,
@@ -59,9 +60,27 @@ func (a *App) GetAppConfig() map[string]interface{} {
 	}
 }
 
+// SetReduceMotion changes presentation only, without rebuilding a profile.
+func (a *App) SetReduceMotion(reduced bool) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	if a.storage == nil {
+		return map[string]interface{}{"success": false, "error": "Хранилище не инициализировано"}
+	}
+	settings := a.storage.GetAppSettings()
+	settings.ReduceMotion = reduced
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	return map[string]interface{}{"success": true, "reduceMotion": reduced}
+}
+
 // SaveAppConfig сохраняет настройки приложения (API для фронтенда)
 func (a *App) SaveAppConfig(autoStart, enableLogging, checkUpdates, notifications, autoUpdateSub bool, theme, language, logLevel string, subUpdateInterval int) map[string]interface{} {
 	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
 
 	if a.storage == nil {
 		return map[string]interface{}{

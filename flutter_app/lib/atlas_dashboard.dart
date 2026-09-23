@@ -15,9 +15,11 @@ class _AtlasHomeLayout extends StatelessWidget {
     required this.source,
     required this.routes,
     required this.notices,
+    this.telemetry,
   });
   final Widget connection, source, routes;
   final Widget? notices;
+  final Widget? telemetry;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -50,6 +52,10 @@ class _AtlasHomeLayout extends StatelessWidget {
             ),
           ),
         ),
+        if (telemetry != null &&
+            constraints.maxWidth >= 760 &&
+            MediaQuery.textScalerOf(context).scale(12) <= 18)
+          Positioned(top: 24, right: 12, width: 160, child: telemetry!),
         if (notices != null)
           Positioned(
             top: 4,
@@ -187,10 +193,12 @@ class _AtlasConnectionPanel extends StatelessWidget {
     required this.onPressed,
     this.onDisabledPressed,
     this.hasError = false,
+    this.motionEnabled = true,
   });
   final String title;
   final Color accent;
   final bool connected, sessionActive, busy, stopping, enabled;
+  final bool motionEnabled;
   final bool hasError;
   final VoidCallback onPressed;
   final VoidCallback? onDisabledPressed;
@@ -249,6 +257,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
                       connected: connected,
                       busy: busy,
                       hasError: hasError,
+                      motionEnabled: motionEnabled,
                       size: planetSize,
                     ),
                   ),

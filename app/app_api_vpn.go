@@ -109,6 +109,7 @@ func (a *App) GetStatus() map[string]interface{} {
 		"routingMode":               string(routingMode),
 		"vpnSourceHealthKnown":      healthKnown,
 		"vpnSourceAvailable":        sourceAvailable,
+		"vpnResponse":               a.vpnResponseSnapshot(running, time.Now()),
 		"configPath":                configPath,
 		"singboxPath":               singboxPath,
 		"configExists":              hasConfig,

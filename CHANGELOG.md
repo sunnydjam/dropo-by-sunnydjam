@@ -2,6 +2,30 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.34 — 2026-09-23
+
+### Windows dashboard and user-controlled updates
+
+- removed the redundant home heading; added a compact monospace VPN response
+  indicator with measurement age and an explanation of what it measures;
+- response data reuses the existing background HTTP probe, is fenced to the
+  current source/node/profile/session and never substitutes a stale or failed
+  result for a live latency. This is not ICMP or per-game latency;
+- the planet now rotates its geographic surface, with gray idle, green online,
+  red error and amber busy states. Decorative repaint is capped at 30 fps;
+  hidden/modal/reduced-motion states pause it without resetting the rotation;
+- a per-user animation preference persists without restarting or reconfiguring
+  the VPN. Existing network settings, modes, source order and routing stay intact;
+- the bottom-right metadata version opens a shared About dialog with developer
+  attribution, upstream credit, repository, release, issue and license links;
+- background update checks only notify. Download and installation require an
+  explicit user action and confirmation; the dialog warns about interruption
+  of an active VPN connection. Older clients retain their old update policy
+  until this version is installed;
+- regression coverage includes small windows, 200% text, animation lifecycle,
+  source/session freshness, presentation preference persistence, and every
+  manual update entry point. Android APK is not part of this Windows release.
+
 ## 3.0.33 — 2026-09-23
 
 ### Windows interface and first connection
