@@ -2,11 +2,11 @@ part of 'main.dart';
 
 // Adaptive presentation only. Policy changes still go through the existing
 // session-aware callbacks; no traffic decisions belong in these widgets.
-const _atlasBackground = Color(0xFF071F17);
-const _atlasSurface = Color(0xFF10271F);
-const _atlasBorder = Color(0xFF29483C);
+const _atlasBackground = Color(0xFF05070A);
+const _atlasSurface = Color(0xFF0D1217);
+const _atlasBorder = Color(0xFF253137);
 const _atlasText = Color(0xFFEDF5EF);
-const _atlasMuted = Color(0xFFADC2B7);
+const _atlasMuted = Color(0xFFADB8C2);
 const _atlasMint = Color(0xFF5CF0B0);
 
 class _AtlasHomeLayout extends StatelessWidget {

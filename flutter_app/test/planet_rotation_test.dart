@@ -14,7 +14,9 @@ class _PlanetFlags extends ChangeNotifier {
   bool enabled = true;
   bool reducedMotion = false;
   bool ticker = true;
+  bool textureAvailable = true;
   int parentBuilds = 0;
+  int buttonPresses = 0;
   void update(void Function() change) {
     change();
     notifyListeners();
@@ -35,7 +37,7 @@ Future<void> _pumpPlanet(WidgetTester tester, _PlanetFlags flags) async {
   await tester.pumpWidget(
     MaterialApp(
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF071F17),
+        scaffoldBackgroundColor: const Color(0xFF05070A),
         textTheme: ThemeData.dark().textTheme.apply(fontFamily: 'Inter'),
       ),
       home: Scaffold(
@@ -53,7 +55,7 @@ Future<void> _pumpPlanet(WidgetTester tester, _PlanetFlags flags) async {
                   child: RepaintBoundary(
                     key: const ValueKey('rotation-capture'),
                     child: ColoredBox(
-                      color: const Color(0xFF071F17),
+                      color: const Color(0xFF05070A),
                       child: Stack(
                         alignment: Alignment.center,
                         children: [
@@ -62,13 +64,14 @@ Future<void> _pumpPlanet(WidgetTester tester, _PlanetFlags flags) async {
                             busy: flags.busy,
                             hasError: flags.error,
                             motionEnabled: flags.enabled,
+                            textureAvailable: flags.textureAvailable,
                             size: 320,
                           ),
                           FilledButton(
                             key: const ValueKey('fixed-button'),
-                            onPressed: () {},
+                            onPressed: () => flags.buttonPresses++,
                             style: FilledButton.styleFrom(
-                              backgroundColor: const Color(0xEE071F17),
+                              backgroundColor: const Color(0xEE05070A),
                               foregroundColor: Colors.white,
                             ),
                             child: Text(
@@ -94,21 +97,26 @@ Future<void> _pumpPlanet(WidgetTester tester, _PlanetFlags flags) async {
 
 Future<void> _capture(WidgetTester tester, String name) async {
   if (!const bool.fromEnvironment('DROPO_UI_CAPTURE')) return;
-  const directory = String.fromEnvironment(
-    'DROPO_UI_CAPTURE_DIR',
-    defaultValue: 'build/planet-rotation-review',
-  );
+  const directory = String.fromEnvironment('DROPO_UI_CAPTURE_DIR');
+  if (directory.isEmpty) {
+    throw StateError(
+      'Set DROPO_UI_CAPTURE_DIR to a directory outside the repository.',
+    );
+  }
   await tester.runAsync(() async {
     final boundary = tester.renderObject<RenderRepaintBoundary>(
       _key('rotation-capture'),
     );
     final image = await boundary.toImage();
-    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-    await Directory(directory).create(recursive: true);
-    await File(
-      '$directory/$name.png',
-    ).writeAsBytes(bytes!.buffer.asUint8List());
-    image.dispose();
+    try {
+      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+      await Directory(directory).create(recursive: true);
+      await File(
+        '$directory/$name.png',
+      ).writeAsBytes(bytes!.buffer.asUint8List());
+    } finally {
+      image.dispose();
+    }
   });
 }
 
@@ -121,7 +129,7 @@ void main() {
     expect(
       await preloadAtlasPlanetForTesting(),
       isTrue,
-      reason: 'Bundled geographic texture must decode without a network',
+      reason: 'Bundled detailed night texture must decode without a network',
     );
   });
   setUp(() {
@@ -325,4 +333,113 @@ void main() {
       flags.dispose();
     },
   );
+
+  testWidgets('error then busy take precedence over an existing connection', (
+    tester,
+  ) async {
+    final flags = _PlanetFlags()
+      ..connected = true
+      ..busy = true
+      ..error = true;
+    await _pumpPlanet(tester, flags);
+    final initial = _phase(tester);
+    expect(_key('planet-error'), findsOneWidget);
+    expect(
+      atlasPlanetColorForTesting(_painter(tester)),
+      const Color(0xFFFF6969),
+    );
+    flags.update(() => flags.error = false);
+    await tester.pump();
+    expect(_phase(tester), initial);
+    expect(_key('planet-connecting'), findsOneWidget);
+    expect(
+      atlasPlanetColorForTesting(_painter(tester)),
+      const Color(0xFFFFCF78),
+    );
+    flags.update(() => flags.busy = false);
+    await tester.pump();
+    expect(_phase(tester), initial);
+    expect(_key('planet-connected'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    flags.dispose();
+  });
+
+  testWidgets(
+    'reconnecting lights cities gradually without rebuilding controls',
+    (tester) async {
+      final flags = _PlanetFlags();
+      await _pumpPlanet(tester, flags);
+      final initial = _phase(tester);
+      expect(atlasPlanetLightsForTesting(_painter(tester)), 0);
+      flags.update(() => flags.connected = true);
+      await tester.pump();
+      expect(_phase(tester), initial);
+      expect(atlasPlanetLightsForTesting(_painter(tester)), 0);
+      final builds = flags.parentBuilds;
+      final button = tester.getRect(_key('fixed-button'));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        atlasPlanetLightsForTesting(_painter(tester)),
+        inExclusiveRange(0, 1),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(atlasPlanetLightsForTesting(_painter(tester)), 1);
+      expect(flags.parentBuilds, builds);
+      expect(tester.getRect(_key('fixed-button')), button);
+      expect(_phase(tester), greaterThan(initial));
+      for (final state in ['error', 'busy', 'disconnected']) {
+        flags.update(() {
+          flags.error = state == 'error';
+          flags.busy = state == 'busy';
+          flags.connected = state != 'disconnected';
+        });
+        await tester.pump();
+        expect(atlasPlanetLightsForTesting(_painter(tester)), 0);
+      }
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(tester.binding.transientCallbackCount, 0);
+      flags.dispose();
+    },
+  );
+
+  testWidgets(
+    'reduced motion lights cities immediately with no transition ticker',
+    (tester) async {
+      final flags = _PlanetFlags()..reducedMotion = true;
+      await _pumpPlanet(tester, flags);
+      flags.update(() => flags.connected = true);
+      await tester.pump();
+      expect(atlasPlanetLightsForTesting(_painter(tester)), 1);
+      final stopped = _phase(tester);
+      await tester.pump(const Duration(seconds: 2));
+      expect(_phase(tester), stopped);
+      expect(tester.binding.transientCallbackCount, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+      flags.dispose();
+    },
+  );
+
+  testWidgets('missing decorative texture leaves connection controls usable', (
+    tester,
+  ) async {
+    final flags = _PlanetFlags()
+      ..connected = true
+      ..enabled = false
+      ..textureAvailable = false;
+    await _pumpPlanet(tester, flags);
+    expect(_key('planet-connected'), findsOneWidget);
+    expect(_key('fixed-button').hitTestable(), findsOneWidget);
+    await tester.tap(_key('fixed-button'));
+    await tester.pump();
+    expect(flags.buttonPresses, 1);
+    expect(
+      atlasPlanetColorForTesting(_painter(tester)),
+      const Color(0xFF5CF0B0),
+    );
+    await _capture(tester, 'connected-texture-fallback');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(tester.binding.transientCallbackCount, 0);
+    flags.dispose();
+  });
 }

@@ -14,6 +14,7 @@ class _AtlasDesktopShell extends StatefulWidget {
     this.onAbout,
     this.homeTelemetry,
     this.visible = true,
+    this.motionEnabled = true,
     required this.child,
     this.notice,
     this.overlay,
@@ -22,6 +23,7 @@ class _AtlasDesktopShell extends StatefulWidget {
   final VoidCallback? onAbout;
   final Widget? homeTelemetry;
   final bool visible;
+  final bool motionEnabled;
   final bool disabled;
   final ValueChanged<String> onSelect;
   final VoidCallback? onBack;
@@ -204,6 +206,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
         onPressed: widget.onAbout,
         style: TextButton.styleFrom(
           minimumSize: const Size(88, 48),
+          backgroundColor: _atlasBackground,
           padding: const EdgeInsets.symmetric(horizontal: 8),
           alignment: Alignment.centerRight,
         ),
@@ -262,6 +265,19 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
           body: SafeArea(
             child: Stack(
               children: [
+                Positioned.fill(
+                  left: railWidth,
+                  top: 48,
+                  bottom: reserveFooter ? 48 : 0,
+                  child: _AtlasSpaceBackground(
+                    active: widget.activeSection == 'home',
+                    motionEnabled:
+                        widget.motionEnabled &&
+                        widget.visible &&
+                        !_open &&
+                        widget.overlay == null,
+                  ),
+                ),
                 ExcludeFocus(
                   excluding: _open,
                   child: ExcludeSemantics(
@@ -281,6 +297,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                 right: 16,
                               ),
                               decoration: const BoxDecoration(
+                                color: _atlasBackground,
                                 border: Border(
                                   bottom: BorderSide(color: _atlasBorder),
                                 ),
@@ -351,9 +368,12 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                     ),
                             ),
                             if (reserveFooter)
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: versionLink(),
+                              ColoredBox(
+                                color: _atlasBackground,
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: versionLink(),
+                                ),
                               ),
                           ],
                         ),

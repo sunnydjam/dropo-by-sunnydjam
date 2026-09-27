@@ -17,6 +17,7 @@ part 'home_dashboard.dart';
 part 'atlas_dashboard.dart';
 part 'compact_shell.dart';
 part 'planet_animation.dart';
+part 'space_background.dart';
 part 'vpn_response.dart';
 part 'app_about.dart';
 part 'service_routes.dart';
@@ -6241,6 +6242,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       version: status.version.version,
       onAbout: quitting ? null : _openAbout,
       visible: windowVisible,
+      motionEnabled: !appConfig.reduceMotion,
       homeTelemetry: online && status.connected && refreshFailureCount == 0
           ? _VpnResponseTile(snapshot: status.vpnResponse, compact: true)
           : null,
@@ -9994,9 +9996,9 @@ class _SettingsDialogState extends State<_SettingsDialog>
             children: [
               if (!isMobile)
                 _SwitchSetting(
-                  title: 'Анимация планеты',
+                  title: 'Анимации интерфейса',
                   description:
-                      'Вращение останавливается в трее. Системное уменьшение движения имеет приоритет.',
+                      'Планета, звёзды и мягкий рассвет. Движение останавливается в трее; системное уменьшение движения имеет приоритет.',
                   value: !config.reduceMotion,
                   onChanged: canUseLiveSafe
                       ? (value) => _applySpecial(
@@ -10009,7 +10011,7 @@ class _SettingsDialogState extends State<_SettingsDialog>
                 contentPadding: EdgeInsets.zero,
                 title: Text('Atlas'),
                 subtitle: Text(
-                  'Компактное зелёное оформление. Размер текста и уменьшение движения задаются в настройках устройства.',
+                  'Тёмный космический фон с зелёными акцентами. Размер текста и уменьшение движения задаются в настройках устройства.',
                 ),
               ),
             ],

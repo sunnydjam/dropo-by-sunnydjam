@@ -1,6 +1,6 @@
 part of 'main.dart';
 
-// The surface is projected from bundled map data, not a rotating photograph.
+// A bundled equirectangular night atlas is projected onto an axial sphere.
 // City lights are decorative; they never report real VPN probes or traffic.
 class _AtlasAnimatedPlanet extends StatefulWidget {
   const _AtlasAnimatedPlanet({
@@ -9,8 +9,9 @@ class _AtlasAnimatedPlanet extends StatefulWidget {
     this.busy = false,
     this.hasError = false,
     this.motionEnabled = true,
+    this.textureAvailable = true,
   });
-  final bool connected, busy, hasError, motionEnabled;
+  final bool connected, busy, hasError, motionEnabled, textureAvailable;
   final double size;
 
   @override
@@ -21,9 +22,13 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _controller;
   final _phase = ValueNotifier<double>(0);
+  final _lights = ValueNotifier<double>(0);
   _AtlasGlobeTexture? _texture;
   bool _visible = true;
   int _lastFrame = -1;
+  double _previousPhase = 0;
+  double _lightElapsed = 0;
+  bool get _lit => widget.connected && !widget.hasError && !widget.busy;
 
   @override
   void initState() {
@@ -34,13 +39,18 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     )..addListener(_advance);
     WidgetsBinding.instance.addObserver(this);
     _visible = _isVisible(WidgetsBinding.instance.lifecycleState);
-    _texture = _AtlasGlobeTexture.ready;
-    if (_texture == null) unawaited(_loadTexture());
+    _lights.value = _lit ? 1 : 0;
+    if (widget.textureAvailable) {
+      _texture = _AtlasGlobeTexture.ready;
+      if (_texture == null) unawaited(_loadTexture());
+    }
   }
 
   Future<void> _loadTexture() async {
     final texture = await _AtlasGlobeTexture.load();
-    if (mounted && texture != null) setState(() => _texture = texture);
+    if (mounted && widget.textureAvailable && texture != null) {
+      setState(() => _texture = texture);
+    }
   }
 
   // Quantize decorative repaint to 30 fps, independent of monitor refresh.
@@ -49,6 +59,13 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     final frame = (_controller.value * 1800).floor();
     if (frame == _lastFrame) return;
     _lastFrame = frame;
+    final delta = (_controller.value - _previousPhase) % 1;
+    _previousPhase = _controller.value;
+    if (_lit && _lights.value < 1) {
+      _lightElapsed += delta * 60;
+      final progress = (_lightElapsed / 0.6).clamp(0.0, 1.0);
+      _lights.value = progress * progress * (3 - 2 * progress);
+    }
     _phase.value = _controller.value;
   }
 
@@ -66,6 +83,18 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
   @override
   void didUpdateWidget(covariant _AtlasAnimatedPlanet oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final wasLit =
+        oldWidget.connected && !oldWidget.hasError && !oldWidget.busy;
+    if (_lit != wasLit) {
+      _lightElapsed = 0;
+      _lights.value = 0;
+    }
+    if (oldWidget.textureAvailable != widget.textureAvailable) {
+      _texture = widget.textureAvailable ? _AtlasGlobeTexture.ready : null;
+      if (widget.textureAvailable && _texture == null) {
+        unawaited(_loadTexture());
+      }
+    }
     _updateMotion();
   }
 
@@ -87,6 +116,9 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     } else if (!animate && _controller.isAnimating) {
       _controller.stop(canceled: false);
     }
+    // Hidden/reduced-motion views settle immediately, never resume a stale
+    // transition or require another ticker just to light the cities.
+    if (!animate) _lights.value = _lit ? 1 : 0;
   }
 
   @override
@@ -94,6 +126,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     _phase.dispose();
+    _lights.dispose();
     super.dispose();
   }
 
@@ -115,6 +148,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
               key: const ValueKey('atlas-planet-motion'),
               foregroundPainter: _AtlasGlobePainter(
                 phase: _phase,
+                lights: _lights,
                 texture: _texture,
                 palette: palette,
                 connected: widget.connected && !widget.hasError && !widget.busy,
@@ -130,19 +164,13 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
 // Surface colors are baked into each raster, not applied as a drawVertices
 // color filter. Both ocean and land must keep their state color on every GPU.
 enum _AtlasPlanetPalette {
-  disconnected(0xFFAAB4B2, 0xFF242424, 0xFFA0A0A0, 0xFFD3D3D3, 0xFF4B4B4B),
-  connected(0xFF5CF0B0, 0xFF0C542F, 0xFF32E879, 0xFF90FFC0, 0xFF178652),
-  error(0xFFFF6969, 0xFF531919, 0xFFF45454, 0xFFFFAAA4, 0xFF923535),
-  connecting(0xFFFFCF78, 0xFF58451A, 0xFFFFC252, 0xFFFFE7A7, 0xFF9D7B2C);
+  disconnected(0xFFAAB4B2, 0xFF1A1A1A),
+  connected(0xFF5CF0B0, 0xFF03251A),
+  error(0xFFFF6969, 0xFF321012),
+  connecting(0xFFFFCF78, 0xFF322511);
 
-  const _AtlasPlanetPalette(
-    this.toneARGB,
-    this.oceanARGB,
-    this.landARGB,
-    this.coastARGB,
-    this.gridARGB,
-  );
-  final int toneARGB, oceanARGB, landARGB, coastARGB, gridARGB;
+  const _AtlasPlanetPalette(this.toneARGB, this.oceanARGB);
+  final int toneARGB, oceanARGB;
   Color get tone => Color(toneARGB);
   Color get ocean => Color(oceanARGB);
 
@@ -173,7 +201,7 @@ class _AtlasGlobeSurface {
 }
 
 // Four shared 1024x512 state textures (~8 MiB total), retained for the UI
-// process lifetime. Geometry is parsed once; no rasterization on status changes
+// process lifetime. The atlas is decoded once; no rasterization on status changes
 // or animation frames, and switching state does not reset the longitude.
 class _AtlasGlobeTexture {
   _AtlasGlobeTexture(this.surfaces);
@@ -182,77 +210,216 @@ class _AtlasGlobeTexture {
   static _AtlasGlobeTexture? ready;
   static Future<_AtlasGlobeTexture?> load() => _pending ??= _create();
 
+  static double _luminance(int r, int g, int b) =>
+      r * 0.2126 + g * 0.7152 + b * 0.0722;
+
+  // Warm pixels belong to the decorative city emission, not the green terrain.
+  // A continuous mask retains anti-aliased edges without yellow dots in the
+  // disconnected/error textures. Neutral clouds cannot activate this mask.
+  static double _emission(int r, int g, int b) =>
+      math.min(
+        ((r - g * 0.88 - 3) / 20).clamp(0.0, 1.0),
+        ((g - b * 1.10 - 2) / 24).clamp(0.0, 1.0),
+      ) *
+      ((math.max(r, g) - 35) / 35).clamp(0.0, 1.0);
+
+  static double _emissionWithNeighbor(
+    int r,
+    int g,
+    int b,
+    double warmNeighbor,
+  ) {
+    final warm = _emission(r, g, b);
+    final luminance = _luminance(r, g, b);
+    // Bright city cores can be almost white. Only classify those as emission
+    // when adjacent to a strong warm light; isolated neutral clouds stay intact.
+    if (luminance <= 95 || warmNeighbor <= 0.4) return warm;
+    return math.max(
+      warm,
+      warmNeighbor * ((luminance - 70) / 60).clamp(0.0, 1.0),
+    );
+  }
+
+  static double _emissionAt(Uint8List pixels, int x, int y) {
+    final i = (y * 1024 + x) * 4;
+    final r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+    var warmNeighbor = 0.0;
+    if (_luminance(r, g, b) > 95 && _emission(r, g, b) < 1) {
+      for (final distance in const [1, 2]) {
+        for (final dy in [-distance, 0, distance]) {
+          for (final dx in [-distance, 0, distance]) {
+            if (dx == 0 && dy == 0) continue;
+            final n = (((y + dy).clamp(0, 511) * 1024) + (x + dx) % 1024) * 4;
+            warmNeighbor = math.max(
+              warmNeighbor,
+              _emission(pixels[n], pixels[n + 1], pixels[n + 2]),
+            );
+          }
+        }
+      }
+    }
+    return _emissionWithNeighbor(r, g, b, warmNeighbor);
+  }
+
+  static (int, int, int) _mapPixel(
+    int r,
+    int g,
+    int b,
+    _AtlasPlanetPalette palette, {
+    double? unlitLuminance,
+    double? emissionAmount,
+  }) {
+    final light = emissionAmount ?? _emission(r, g, b);
+    final luminance = _luminance(r, g, b);
+    final terrain =
+        luminance * (1 - light) +
+        (unlitLuminance ?? math.min(luminance, 28.0)) * light;
+    int channel(double value) => value.round().clamp(0, 255);
+    switch (palette) {
+      case _AtlasPlanetPalette.connected:
+        // Preserve texture detail and the original warm light color. The broad
+        // surface remains emerald, including the ocean and soft cloud layer.
+        final green = math.max(g.toDouble(), 14 + luminance * 0.80);
+        final red = math.min(r.toDouble(), green * 0.57);
+        final blue = math.min(b.toDouble(), green * 0.72);
+        return (
+          channel(red * (1 - light) + r * light),
+          channel(green * (1 - light) + g * light),
+          channel(blue * (1 - light) + b * light),
+        );
+      case _AtlasPlanetPalette.disconnected:
+        final gray = channel(9 + terrain * 1.10);
+        return (gray, gray, gray);
+      case _AtlasPlanetPalette.error:
+        return (
+          channel(18 + terrain * 1.12),
+          channel(4 + terrain * 0.32),
+          channel(6 + terrain * 0.33),
+        );
+      case _AtlasPlanetPalette.connecting:
+        return (
+          channel(23 + terrain * 1.12),
+          channel(13 + terrain * 0.75),
+          channel(4 + terrain * 0.27),
+        );
+    }
+  }
+
+  static double _unlitNeighborhood(
+    Uint8List pixels,
+    Float32List emission,
+    int x,
+    int y,
+  ) {
+    var sum = 0.0, weight = 0.0;
+    // Bounded local estimate replaces emission, not the surrounding landscape.
+    // Longitude wraps; latitude clamps, exactly like the projected atlas.
+    for (final dy in const [-4, 0, 4]) {
+      for (final dx in const [-4, 0, 4]) {
+        final i = (((y + dy).clamp(0, 511) * 1024) + (x + dx) % 1024) * 4;
+        final r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+        final unlit = 1 - emission[i ~/ 4];
+        sum += _luminance(r, g, b) * unlit;
+        weight += unlit;
+      }
+    }
+    return weight > 0.2 ? sum / weight : 28;
+  }
+
+  static void _closeSeam(Uint8List pixels) {
+    // Blend only an eight-pixel strip at the atlas edges, not the source asset.
+    // Exact matching edge colors prevent a vertical seam during axial rotation.
+    for (var y = 0; y < 512; y++) {
+      final left = y * 1024 * 4, right = left + 1023 * 4;
+      for (var channel = 0; channel < 3; channel++) {
+        final seam = (pixels[left + channel] + pixels[right + channel]) / 2;
+        for (var x = 0; x < 8; x++) {
+          final t = 1 - x / 8;
+          for (final i in [left + x * 4 + channel, right - x * 4 + channel]) {
+            pixels[i] = (pixels[i] * (1 - t) + seam * t).round();
+          }
+        }
+      }
+    }
+  }
+
+  static Future<ui.Image> _imageFromPixels(Uint8List pixels) {
+    final completer = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      pixels,
+      1024,
+      512,
+      ui.PixelFormat.rgba8888,
+      completer.complete,
+    );
+    return completer.future;
+  }
+
   static Future<_AtlasGlobeTexture?> _create() async {
     final surfaces = <_AtlasPlanetPalette, _AtlasGlobeSurface>{};
     try {
-      final source = await rootBundle.loadString(
-        'assets/maps/ne_110m_land.geojson',
+      final source = await rootBundle.load('assets/maps/earth_night_atlas.png');
+      final codec = await ui.instantiateImageCodec(
+        source.buffer.asUint8List(source.offsetInBytes, source.lengthInBytes),
+        targetWidth: 1024,
+        targetHeight: 512,
       );
-      final document = jsonDecode(source) as Map<String, dynamic>;
-      const width = 1024.0, height = 512.0;
-      final paths = <Path>[];
-      for (final feature in document['features'] as List<dynamic>) {
-        final geometry = feature['geometry'] as Map<String, dynamic>;
-        final coordinates = geometry['coordinates'] as List<dynamic>;
-        final polygons = geometry['type'] == 'Polygon'
-            ? <List<dynamic>>[coordinates]
-            : geometry['type'] == 'MultiPolygon'
-            ? coordinates.cast<List<dynamic>>()
-            : const <List<dynamic>>[];
-        for (final polygon in polygons) {
-          final path = Path()..fillType = PathFillType.evenOdd;
-          for (final ring in polygon) {
-            var first = true;
-            for (final point in ring) {
-              final x = ((point[0] as num).toDouble() + 180) / 360 * width;
-              final y = (90 - (point[1] as num).toDouble()) / 180 * height;
-              if (first) {
-                path.moveTo(x, y);
-                first = false;
-              } else {
-                path.lineTo(x, y);
-              }
-            }
-            path.close();
-          }
-          paths.add(path);
-        }
-      }
-      for (final palette in _AtlasPlanetPalette.values) {
-        final recorder = ui.PictureRecorder();
-        final canvas = Canvas(recorder);
-        canvas.drawRect(
-          const Rect.fromLTWH(0, 0, width, height),
-          Paint()..color = palette.ocean,
-        );
-        final land = Paint()..color = Color(palette.landARGB);
-        final coast = Paint()
-          ..color = Color(palette.coastARGB)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.55;
-        for (final path in paths) {
-          canvas.drawPath(path, land);
-          canvas.drawPath(path, coast);
-        }
-        final grid = Paint()
-          ..color = Color(palette.gridARGB)
-          ..strokeWidth = 0.7;
-        for (var lon = -180; lon <= 180; lon += 30) {
-          final x = (lon + 180) / 360 * width;
-          canvas.drawLine(Offset(x, 0), Offset(x, height), grid);
-        }
-        for (var lat = -60; lat <= 60; lat += 30) {
-          final y = (90 - lat) / 180 * height;
-          canvas.drawLine(Offset(0, y), Offset(width, y), grid);
-        }
-        final picture = recorder.endRecording();
+      late final Uint8List pixels;
+      try {
+        final image = (await codec.getNextFrame()).image;
         try {
-          surfaces[palette] = _AtlasGlobeSurface(
-            await picture.toImage(1024, 512),
+          final data = await image.toByteData(
+            format: ui.ImageByteFormat.rawRgba,
+          );
+          if (data == null) return null;
+          pixels = data.buffer.asUint8List(
+            data.offsetInBytes,
+            data.lengthInBytes,
           );
         } finally {
-          picture.dispose();
+          image.dispose();
         }
+      } finally {
+        codec.dispose();
+      }
+      final emission = Float32List(1024 * 512);
+      for (var y = 0; y < 512; y++) {
+        for (var x = 0; x < 1024; x++) {
+          emission[y * 1024 + x] = _emissionAt(pixels, x, y);
+        }
+        if (y % 32 == 31) await Future<void>.delayed(Duration.zero);
+      }
+      final terrain = Float32List(1024 * 512);
+      for (var y = 0; y < 512; y++) {
+        for (var x = 0; x < 1024; x++) {
+          final i = (y * 1024 + x) * 4;
+          terrain[y * 1024 + x] = emission[i ~/ 4] > 0
+              ? _unlitNeighborhood(pixels, emission, x, y)
+              : _luminance(pixels[i], pixels[i + 1], pixels[i + 2]);
+        }
+        if (y % 32 == 31) await Future<void>.delayed(Duration.zero);
+      }
+      for (final palette in _AtlasPlanetPalette.values) {
+        final mapped = Uint8List(pixels.length);
+        for (var i = 0; i < pixels.length; i += 4) {
+          final (r, g, b) = _mapPixel(
+            pixels[i],
+            pixels[i + 1],
+            pixels[i + 2],
+            palette,
+            unlitLuminance: terrain[i ~/ 4],
+            emissionAmount: emission[i ~/ 4],
+          );
+          mapped[i] = r;
+          mapped[i + 1] = g;
+          mapped[i + 2] = b;
+          mapped[i + 3] = 255;
+          if (i % 131072 == 131068) {
+            await Future<void>.delayed(Duration.zero);
+          }
+        }
+        _closeSeam(mapped);
+        surfaces[palette] = _AtlasGlobeSurface(await _imageFromPixels(mapped));
       }
       return ready = _AtlasGlobeTexture(Map.unmodifiable(surfaces));
     } catch (_) {
@@ -269,12 +436,14 @@ class _AtlasGlobeTexture {
 class _AtlasGlobePainter extends CustomPainter {
   _AtlasGlobePainter({
     required this.phase,
+    required this.lights,
     required this.texture,
     required this.palette,
     required this.connected,
-  }) : super(repaint: phase);
+  }) : super(repaint: Listenable.merge([phase, lights]));
 
   final ValueNotifier<double> phase;
+  final ValueNotifier<double> lights;
   final _AtlasGlobeTexture? texture;
   final _AtlasPlanetPalette palette;
   Color get tone => palette.tone;
@@ -286,24 +455,6 @@ class _AtlasGlobePainter extends CustomPainter {
   final _positions = Float32List(_columns * _rows * 2);
   final _depths = Float32List(_columns * _rows);
   final _visibleTriangles = Uint16List((_columns - 1) * (_rows - 1) * 6);
-  static final _cities = <(double, double)>[
-    (51.5, -0.1),
-    (48.9, 2.4),
-    (52.5, 13.4),
-    (41.0, 29.0),
-    (30.0, 31.2),
-    (25.2, 55.3),
-    (-1.3, 36.8),
-    (-26.2, 28.0),
-    (40.7, -74.0),
-    (34.1, -118.2),
-    (-23.5, -46.6),
-    (19.4, -99.1),
-    (1.4, 103.8),
-    (35.7, 139.7),
-    (-33.9, 151.2),
-    (28.6, 77.2),
-  ].map((city) => _unit(city.$1, city.$2)).toList(growable: false);
 
   static (double, double, double) _unit(double latitude, double longitude) {
     final lat = latitude * math.pi / 180, lon = longitude * math.pi / 180;
@@ -369,9 +520,9 @@ class _AtlasGlobePainter extends CustomPainter {
     final radius = math.min(size.width, size.height) * 0.435;
     final globe = Rect.fromCircle(center: center, radius: radius);
     final glow = Paint()
-      ..color = tone.withValues(alpha: connected ? 0.27 : 0.12)
-      ..maskFilter = MaskFilter.blur(BlurStyle.normal, radius * 0.045);
-    canvas.drawCircle(center, radius * 1.015, glow);
+      ..color = tone.withValues(alpha: connected ? 0.17 : 0.09)
+      ..maskFilter = MaskFilter.blur(BlurStyle.normal, radius * 0.025);
+    canvas.drawCircle(center, radius * 1.005, glow);
     canvas.drawCircle(center, radius, Paint()..color = palette.ocean);
     canvas.save();
     canvas.clipPath(Path()..addOval(globe));
@@ -403,11 +554,37 @@ class _AtlasGlobePainter extends CustomPainter {
         textureCoordinates: _texCoords,
         indices: Uint16List.sublistView(_visibleTriangles, 0, visible),
       );
-      canvas.drawVertices(
-        vertices,
-        BlendMode.srcOver,
-        Paint()..shader = imageTexture.shader,
-      );
+      final surfacePaint = Paint()..shader = imageTexture.shader;
+      if (connected && lights.value < 1) {
+        // Briefly attenuate warm emission in the already-green connected
+        // surface, never blend from a gray state texture. If a renderer ignores
+        // this optional effect the cities simply appear immediately; the baked
+        // whole-surface green state is still correct on that renderer.
+        final dim = 1 - lights.value;
+        surfacePaint.colorFilter = ColorFilter.matrix([
+          1 - 0.92 * dim,
+          0,
+          0,
+          0,
+          0,
+          -0.60 * dim,
+          1,
+          0,
+          0,
+          4 * dim,
+          0,
+          0,
+          1 - 0.75 * dim,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+        ]);
+      }
+      canvas.drawVertices(vertices, BlendMode.srcOver, surfacePaint);
       vertices.dispose();
     }
     canvas.drawCircle(
@@ -416,96 +593,39 @@ class _AtlasGlobePainter extends CustomPainter {
       Paint()
         ..shader = RadialGradient(
           center: const Alignment(-0.35, -0.45),
-          radius: 0.94,
-          colors: [Colors.transparent, Colors.black.withValues(alpha: 0.55)],
-          stops: const [0.1, 1],
+          radius: 1.05,
+          colors: [Colors.transparent, Colors.black.withValues(alpha: 0.30)],
+          stops: const [0.30, 1],
         ).createShader(globe),
     );
-    _paintCities(canvas, center, radius);
     canvas.restore();
     canvas.drawCircle(
       center,
       radius,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.1
+        ..strokeWidth = 0.85
         ..shader = LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [tone.withValues(alpha: 0.9), tone.withValues(alpha: 0.16)],
+          colors: [
+            Color.lerp(
+              tone,
+              Colors.white,
+              connected ? 0.30 : 0,
+            )!.withValues(alpha: 0.95),
+            tone.withValues(alpha: 0.55),
+            tone.withValues(alpha: 0.10),
+          ],
+          stops: const [0, 0.4, 1],
         ).createShader(globe),
     );
-  }
-
-  void _paintCities(Canvas canvas, Offset center, double radius) {
-    final projected = <(Offset, double)>[];
-    for (final (x, y, z) in _cities) {
-      final (px, py, depth) = project(x, y, z);
-      projected.add((
-        Offset(center.dx + px * radius, center.dy - py * radius),
-        depth,
-      ));
-    }
-    final light = Paint();
-    for (var i = 0; i < projected.length; i++) {
-      final (point, depth) = projected[i];
-      if (depth <= 0) continue;
-      final fade = math.min(1.0, depth * 5);
-      final pulse = connected
-          ? (math.sin(phase.value * math.pi * 24 + i) + 1) / 2
-          : 0.0;
-      light.color = tone.withValues(
-        alpha: (connected ? 0.14 + pulse * 0.18 : 0.11) * fade,
-      );
-      canvas.drawCircle(
-        point,
-        (connected ? 4 + pulse * 2 : 3) * radius / 120,
-        light,
-      );
-      light.color = Color.lerp(
-        tone,
-        Colors.white,
-        connected ? 0.72 : 0.25,
-      )!.withValues(alpha: (connected ? 0.9 : 0.45) * fade);
-      canvas.drawCircle(point, math.max(0.65, radius / 105), light);
-    }
-    if (!connected) return;
-    for (final (from, to) in const [
-      (0, 2),
-      (2, 3),
-      (3, 5),
-      (4, 6),
-      (6, 7),
-      (8, 9),
-      (12, 13),
-    ]) {
-      final (a, depthA) = projected[from];
-      final (b, depthB) = projected[to];
-      if (depthA <= 0.12 || depthB <= 0.12) continue;
-      final control = (a + b) / 2 + Offset(0, -radius * 0.07);
-      final arc = Path()
-        ..moveTo(a.dx, a.dy)
-        ..quadraticBezierTo(control.dx, control.dy, b.dx, b.dy);
-      canvas.drawPath(
-        arc,
-        Paint()
-          ..color = tone.withValues(alpha: 0.2)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.6,
-      );
-      final t = (phase.value * 18 + from * 0.13) % 1, u = 1 - t;
-      final point = a * (u * u) + control * (2 * u * t) + b * (t * t);
-      canvas.drawCircle(
-        point,
-        1.15,
-        light..color = tone.withValues(alpha: 0.85),
-      );
-    }
   }
 
   @override
   bool shouldRepaint(covariant _AtlasGlobePainter oldDelegate) =>
       oldDelegate.phase != phase ||
+      oldDelegate.lights != lights ||
       oldDelegate.texture != texture ||
       oldDelegate.palette != palette ||
       oldDelegate.connected != connected;
@@ -517,12 +637,14 @@ Widget buildAtlasPlanetForTesting({
   bool busy = false,
   bool hasError = false,
   bool motionEnabled = true,
+  bool textureAvailable = true,
   double size = 280,
 }) => _AtlasAnimatedPlanet(
   connected: connected,
   busy: busy,
   hasError: hasError,
   motionEnabled: motionEnabled,
+  textureAvailable: textureAvailable,
   size: size,
 );
 
@@ -547,6 +669,59 @@ Future<ui.Image?> atlasPlanetTextureForTesting({
 @visibleForTesting
 double atlasPlanetPhaseForTesting(CustomPainter painter) =>
     (painter as _AtlasGlobePainter).phase.value;
+
+@visibleForTesting
+double atlasPlanetLightsForTesting(CustomPainter painter) =>
+    (painter as _AtlasGlobePainter).lights.value;
+
+@visibleForTesting
+Color atlasPlanetMappedPixelForTesting(
+  Color source, {
+  bool connected = false,
+  bool busy = false,
+  bool hasError = false,
+  List<Color> neighbors = const [],
+}) {
+  final argb = source.toARGB32();
+  final (r, g, b) = _AtlasGlobeTexture._mapPixel(
+    (argb >> 16) & 255,
+    (argb >> 8) & 255,
+    argb & 255,
+    _AtlasPlanetPalette.select(
+      connected: connected,
+      busy: busy,
+      hasError: hasError,
+    ),
+    emissionAmount: atlasPlanetEmissionForTesting(source, neighbors: neighbors),
+  );
+  return Color.fromARGB(255, r, g, b);
+}
+
+@visibleForTesting
+double atlasPlanetEmissionForTesting(
+  Color source, {
+  List<Color> neighbors = const [],
+}) {
+  var warmNeighbor = 0.0;
+  for (final neighbor in neighbors.take(16)) {
+    final argb = neighbor.toARGB32();
+    warmNeighbor = math.max(
+      warmNeighbor,
+      _AtlasGlobeTexture._emission(
+        (argb >> 16) & 255,
+        (argb >> 8) & 255,
+        argb & 255,
+      ),
+    );
+  }
+  final argb = source.toARGB32();
+  return _AtlasGlobeTexture._emissionWithNeighbor(
+    (argb >> 16) & 255,
+    (argb >> 8) & 255,
+    argb & 255,
+    warmNeighbor,
+  );
+}
 
 @visibleForTesting
 Color atlasPlanetColorForTesting(CustomPainter painter) =>

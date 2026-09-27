@@ -192,7 +192,7 @@ void main() {
     expect(find.byKey(const ValueKey('vpn-response-compact')), findsNothing);
     await openSection(tester, 'app-settings');
     final toggle = find.byKey(
-      const ValueKey('setting-switch-Анимация планеты'),
+      const ValueKey('setting-switch-Анимации интерфейса'),
     );
     await tester.ensureVisible(toggle);
     await tester.tap(toggle);

@@ -14,8 +14,14 @@ CC0-1.0. Текст лицензии поставляется в Flutter assets 
 Рендерер [flutter_svg](https://pub.dev/packages/flutter_svg) — MIT;
 лицензии Dart/Flutter-зависимостей входят в стандартный Flutter license bundle.
 
-Поверхность анимированной планеты построена из локально включённых данных
-Natural Earth 1:110m land (`flutter_app/assets/maps/ne_110m_land.geojson`).
+Ночная поверхность анимированной планеты использует оригинальную декоративную
+текстуру `flutter_app/assets/maps/earth_night_atlas.png`, включённую в приложение.
+Её описание и исходный brief находятся в `flutter_app/assets/maps/EARTH_NIGHT_ASSET.md`.
+Это художественное изображение, не спутниковые наблюдения и не карта серверов.
+
+Предыдущая поверхность использовала Natural Earth 1:110m land; исходные данные
+сохранены в репозитории (`flutter_app/assets/maps/ne_110m_land.geojson`),
+но больше не включаются в Flutter asset bundle.
 Made with Natural Earth. Данные находятся в public domain согласно
 [условиям Natural Earth](https://www.naturalearthdata.com/about/terms-of-use/).
 Это декоративная географическая карта, не карта серверов или реальных замеров.

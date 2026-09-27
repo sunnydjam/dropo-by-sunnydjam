@@ -2,6 +2,22 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.36 — 2026-09-27
+
+### Cosmic dashboard and night Earth
+
+- replaced the dark-green background with a near-black star field, slow subtle
+  twinkling and an occasional warm sunrise at the lower edge of the home screen;
+- added a detailed rotating night Earth with a bundled artistic texture,
+  terrain, clouds and warm city lights while connected. The complete globe
+  remains green online, gray offline, red on error and amber while connecting;
+- city lights fade in on connection and turn off immediately on disconnect or
+  error. Status textures are cached once; no network texture downloads are used;
+- decorative animations pause when hidden or covered, respect reduced motion
+  and the existing preference, now named "Анимации интерфейса";
+- added rendering, status-transition, animation and responsive-layout tests.
+  VPN modes, routing, source priorities and user-controlled updates are unchanged.
+
 ## 3.0.35 — 2026-09-23
 
 ### Planet surface color hotfix
