@@ -25,9 +25,10 @@ type App struct {
 	initialized            bool        // Initialization complete flag
 	windowVisible          bool        // Window visibility flag for ping optimization
 	mu                     sync.Mutex
-	basePath               string // Base path (exe directory)
-	dataPath               string // Per-user writable state directory
-	runtimePath            string // Protected base for executable dependencies
+	updateInProgress       atomic.Bool // Only one verified installer hand-off at a time.
+	basePath               string      // Base path (exe directory)
+	dataPath               string      // Per-user writable state directory
+	runtimePath            string      // Protected base for executable dependencies
 	runtimePathErr         error
 	depsIntegrityMu        sync.Mutex
 	depsIntegrityFor       string

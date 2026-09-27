@@ -302,8 +302,8 @@ func TestMakeUpdateScriptForSingleExecutable(t *testing.T) {
 	}
 	for _, part := range []string{
 		"--from-update",
-		"/VERYSILENT",
-		"/SUPPRESSMSGBOXES",
+		"/SILENT",
+		"/SP-",
 		"/NORESTART",
 		"/CLOSEAPPLICATIONS",
 		"WaitForExit",

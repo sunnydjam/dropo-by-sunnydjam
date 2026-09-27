@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:dropo/main.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'navigation_helpers.dart';
@@ -15,6 +19,10 @@ class _ManualUpdateBridge extends MockCoreBridge {
   int finalizeQuitCalls = 0;
   final connectionChanges = <bool>[];
   final externalLinks = <String>[];
+  Completer<Map<String, dynamic>>? installResult;
+
+  void updateEvent(String name, Map<String, dynamic> payload) =>
+      _events.add(BridgeEvent(id: _eventId++, name: name, payload: payload));
 
   @override
   bool get prefersPushEvents => true;
@@ -67,6 +75,7 @@ class _ManualUpdateBridge extends MockCoreBridge {
   @override
   Future<Map<String, dynamic>> installUpdate() async {
     installCalls++;
+    if (installResult != null) return installResult!.future;
     // Never let the widget test take the production success/exit(0) branch.
     return {'success': false, 'error': 'Test installer did not download files'};
   }
@@ -112,7 +121,15 @@ Future<_ManualUpdateBridge> _pumpUpdater(
   await bridge.saveAppConfig(
     AppConfig.defaults.copyWith(checkUpdates: checkUpdates, reduceMotion: true),
   );
-  await tester.pumpWidget(MaterialApp(home: DropoHomePage(bridge: bridge)));
+  await tester.pumpWidget(
+    RepaintBoundary(
+      key: const ValueKey('update-capture'),
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: DropoHomePage(bridge: bridge),
+      ),
+    ),
+  );
   await tester.pump();
   if (connectionBusy) {
     bridge.setConnectionBusy(true);
@@ -138,11 +155,88 @@ Finder _confirmationButton(String label) =>
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(() async {
+    final fonts = FontLoader('Inter')
+      ..addFont(rootBundle.load('assets/fonts/InterVariable.ttf'));
+    await fonts.load();
+    await (FontLoader(
+      'MaterialIcons',
+    )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
+  });
   setUp(() {
     binding.platformDispatcher.accessibilityFeaturesTestValue =
         const FakeAccessibilityFeatures(disableAnimations: true);
   });
   tearDown(binding.platformDispatcher.clearAccessibilityFeaturesTestValue);
+
+  testWidgets('update overlay shows stages, bytes and actionable failure', (
+    tester,
+  ) async {
+    final bridge = await _pumpUpdater(tester);
+    bridge.installResult = Completer<Map<String, dynamic>>();
+    await _openUpdateConfirmation(tester);
+    await tester.tap(_confirmationButton('Обновить'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      find.byKey(const ValueKey('update-progress-overlay')),
+      findsOneWidget,
+    );
+    expect(find.text('Проверяем новую версию'), findsOneWidget);
+    bridge.updateEvent('update-stage', {'stage': 'downloading'});
+    bridge.updateEvent('update-progress', {
+      'percent': 50,
+      'downloaded': 1048576,
+      'total': 2097152,
+    });
+    await tester.pump();
+    expect(find.text('50% · 1.0 из 2.0 МБ'), findsOneWidget);
+    for (final size in [const Size(820, 560), const Size(390, 568)]) {
+      tester.view.physicalSize = size;
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      const captureDirectory = String.fromEnvironment('DROPO_UI_CAPTURE_DIR');
+      if (captureDirectory.isNotEmpty) {
+        await tester.runAsync(() async {
+          final picture = await tester
+              .renderObject<RenderRepaintBoundary>(
+                find.byKey(const ValueKey('update-capture')),
+              )
+              .toImage();
+          final bytes = await picture.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          await Directory(captureDirectory).create(recursive: true);
+          await File(
+            '$captureDirectory/update-${size.width.round()}.png',
+          ).writeAsBytes(bytes!.buffer.asUint8List());
+          picture.dispose();
+        });
+      }
+    }
+    tester.view.physicalSize = const Size(1280, 860);
+    for (final stage in ['verifying', 'stopping', 'installing']) {
+      bridge.updateEvent('update-stage', {'stage': stage});
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('update-progress-overlay')),
+        findsOneWidget,
+      );
+      expect(find.text('50% · 1.0 из 2.0 МБ'), findsNothing);
+    }
+    bridge.installResult!.complete({'success': false, 'error': 'Файл занят'});
+    await tester.pump();
+    expect(find.textContaining('Файл занят'), findsWidgets);
+    expect(find.text('Понятно'), findsOneWidget);
+    bridge.updateEvent('update-progress', {'percent': 100});
+    await tester.pump();
+    expect(find.text('100%'), findsNothing);
+    await tester.tap(find.text('Понятно'));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('update-progress-overlay')), findsNothing);
+    expect(bridge.installCalls, 1);
+    await tester.pump(const Duration(seconds: 30));
+  });
 
   testWidgets(
     'startup checks and notifies without interrupting an active VPN',

@@ -72,7 +72,7 @@ function Invoke-DefenderScan {
 }
 
 function Invoke-WindowsInstallSmoke {
-    param([string]$SetupPath, [string]$GateRoot)
+    param([string]$SetupPath, [string]$GateRoot, [string]$ExpectedPayload)
     $installRoot = Join-Path $GateRoot "installed"
     $setupArgs = @(
         "/VERYSILENT",
@@ -108,6 +108,33 @@ function Invoke-WindowsInstallSmoke {
         )) {
             if (-not (Test-Path -LiteralPath (Join-Path $installRoot $required) -PathType Leaf)) {
                 throw "Installed application is missing $required after pass $pass."
+            }
+        }
+        # Version resources and a visible runner are insufficient: a failed
+        # upgrade can leave an old app.so/assets beside a new dropo-ui.exe.
+        foreach ($payloadFile in Get-ChildItem -LiteralPath $ExpectedPayload -Recurse -File) {
+            $relative = $payloadFile.FullName.Substring($ExpectedPayload.Length).TrimStart('\', '/')
+            $installedFile = Join-Path $installRoot $relative
+            if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash -ne
+                (Get-FileHash -LiteralPath $payloadFile.FullName -Algorithm SHA256).Hash) {
+                throw "Installed payload differs from the verified package after pass ${pass}: $relative"
+            }
+        }
+        if ($pass -eq 1) {
+            # Keep the real Flutter engine and AOT mapped during the upgrade.
+            # The former test upgraded an idle installation, missing locked DLLs.
+            Start-Process -FilePath (Join-Path $installRoot 'dropo.exe') -WorkingDirectory $installRoot -WindowStyle Hidden
+            $readyDeadline = (Get-Date).AddSeconds(45)
+            do {
+                $mappedUI = @(Get-Process -Name 'dropo-ui' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Path -and (Get-Item -LiteralPath $_.Path).FullName -eq
+                        (Get-Item -LiteralPath (Join-Path $installRoot 'resources\dropo-ui.exe')).FullName })
+                if ($mappedUI.Count -eq 1 -and $mappedUI[0].MainWindowHandle -ne [IntPtr]::Zero) { break }
+                Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $readyDeadline)
+            if ($mappedUI.Count -ne 1 -or $mappedUI[0].MainWindowHandle -eq [IntPtr]::Zero) {
+                throw 'Could not start the installed UI before the in-place upgrade test.'
             }
         }
     }
@@ -238,7 +265,7 @@ try {
         # The Internet-marked copy was already scanned above. Use the original
         # byte-identical artifact for unattended execution so SmartScreen does
         # not require an interactive desktop on the CI runner.
-        Invoke-WindowsInstallSmoke -SetupPath $installer -GateRoot $gateRoot
+        Invoke-WindowsInstallSmoke -SetupPath $installer -GateRoot $gateRoot -ExpectedPayload $extract
     }
 } finally {
     Remove-Item -LiteralPath $gateRoot -Recurse -Force -ErrorAction SilentlyContinue

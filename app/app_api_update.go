@@ -43,12 +43,25 @@ func (a *App) CheckForUpdates() map[string]interface{} {
 // DownloadAndInstallUpdate downloads and installs only after the user confirms
 // the action in the trusted UI. CheckForUpdates never invokes this method.
 func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
+	if !a.updateInProgress.CompareAndSwap(false, true) {
+		return map[string]interface{}{"success": false, "error": "Обновление уже выполняется"}
+	}
+	installerStarted := false
+	defer func() {
+		if !installerStarted {
+			a.updateInProgress.Store(false)
+		}
+	}()
+	stage := func(value string) {
+		a.emitEvent("update-stage", map[string]interface{}{"stage": value})
+	}
 	if runtime.GOOS != "windows" || currentDistributionMode() != distributionModeInstalled {
 		return map[string]interface{}{
 			"success": false,
 			"error":   "Self-update is not implemented for " + CurrentPlatformTarget().ReleaseOS,
 		}
 	}
+	stage("checking")
 	updateInfo, err := CheckForUpdates()
 	if err != nil {
 		return map[string]interface{}{"success": false, "error": "Failed to resolve update: " + err.Error()}
@@ -61,11 +74,14 @@ func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
 	}
 
 	a.AddToLogBuffer("Downloading update...")
+	stage("downloading")
+	var lastProgress time.Time
 
 	// Download the update
 	tempFile, err := DownloadUpdate(updateInfo.DownloadURL, updateInfo.FileSize, updateInfo.SHA256, func(downloaded, total int64) {
 		// Progress callback - can emit events if needed
-		if total > 0 {
+		if total > 0 && (downloaded == total || time.Since(lastProgress) >= 200*time.Millisecond) {
+			lastProgress = time.Now()
 			progress := float64(downloaded) / float64(total) * 100
 			a.emitEvent("update-progress", map[string]interface{}{
 				"downloaded": downloaded,
@@ -84,6 +100,7 @@ func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
 	}
 
 	a.AddToLogBuffer("Update downloaded to: " + tempFile)
+	stage("verifying")
 
 	stagedFile, err := stageInstalledUpdate(tempFile, updateInfo.Version, updateInfo.FileSize, updateInfo.SHA256)
 	if err != nil {
@@ -99,8 +116,10 @@ func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
 	// who need Dropo to reach GitHub would otherwise lose the update transport
 	// before the first byte was downloaded.
 	if a.isVPNRunning() {
+		stage("stopping")
 		a.Stop()
 	}
+	stage("installing")
 	if err := startInstalledUpdate(stagedFile, updateInfo.FileSize, updateInfo.SHA256); err != nil {
 		return map[string]interface{}{
 			"success": false,
@@ -109,6 +128,7 @@ func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
 	}
 
 	a.AddToLogBuffer("Update installer started; the current app will close...")
+	installerStarted = true
 
 	// Quit the app
 	go func() {
@@ -178,7 +198,7 @@ func renderUpdateScript(scriptDir, tempFile, execPath, execDir, expectedSHA256 s
 Start-Sleep -Seconds 2
 $package = %s
 %s
-$process = Start-Process -FilePath $package -ArgumentList @("--from-update", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS") -PassThru
+$process = Start-Process -FilePath $package -ArgumentList @("--from-update", "/SILENT", "/SP-", "/NORESTART", "/CLOSEAPPLICATIONS") -PassThru
 $process.WaitForExit()
 if ($process.ExitCode -ne 0) { throw "Update installer exited with code $($process.ExitCode)" }
 Remove-Item -LiteralPath $package -Force -ErrorAction SilentlyContinue

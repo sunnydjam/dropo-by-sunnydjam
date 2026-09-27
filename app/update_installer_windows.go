@@ -89,8 +89,8 @@ func stageInstalledUpdate(downloadPath, version string, expectedSize int64, expe
 func installedUpdateArguments() []string {
 	return []string{
 		"--from-update",
-		"/VERYSILENT",
-		"/SUPPRESSMSGBOXES",
+		"/SILENT",
+		"/SP-",
 		"/NORESTART",
 		"/CLOSEAPPLICATIONS",
 	}

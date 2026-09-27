@@ -279,9 +279,9 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                   ),
                 ),
                 ExcludeFocus(
-                  excluding: _open,
+                  excluding: _open || widget.overlay != null,
                   child: ExcludeSemantics(
-                    excluding: _open,
+                    excluding: _open || widget.overlay != null,
                     child: TickerMode(
                       enabled:
                           widget.visible && !_open && widget.overlay == null,

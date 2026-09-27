@@ -56,12 +56,12 @@ func TestInstallerRelaunchesOnlyUpdatedLauncherWithoutFinishPage(t *testing.T) {
 	}
 }
 
-func TestInstalledUpdateArgumentsAreSilentAndBounded(t *testing.T) {
+func TestInstalledUpdateArgumentsShowProgressAndErrors(t *testing.T) {
 	arguments := installedUpdateArguments()
 	for _, required := range []string{
 		"--from-update",
-		"/VERYSILENT",
-		"/SUPPRESSMSGBOXES",
+		"/SILENT",
+		"/SP-",
 		"/NORESTART",
 		"/CLOSEAPPLICATIONS",
 	} {
@@ -69,9 +69,28 @@ func TestInstalledUpdateArgumentsAreSilentAndBounded(t *testing.T) {
 			t.Fatalf("installed update arguments missing %q: %v", required, arguments)
 		}
 	}
-	for _, forbidden := range []string{"/SILENT", "/FORCECLOSEAPPLICATIONS", "/RESTARTEXITCODE"} {
+	for _, forbidden := range []string{"/VERYSILENT", "/SUPPRESSMSGBOXES", "/FORCECLOSEAPPLICATIONS", "/RESTARTEXITCODE"} {
 		if slices.Contains(arguments, forbidden) {
 			t.Fatalf("installed update arguments include forbidden %q: %v", forbidden, arguments)
+		}
+	}
+}
+
+func TestInstallerGuardsMappedFlutterFilesBeforePayloadCopy(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "packaging", "windows", "dropo.iss"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, required := range []string{
+		"CloseApplicationsFilter=*.exe,*.dll,*.so",
+		"BeforeInstall: EnsureRuntimeUnlocked",
+		"resources\\flutter_windows.dll",
+		"resources\\data\\app.so",
+		"refusing a partial update",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("missing update lock guard %q", required)
 		}
 	}
 }

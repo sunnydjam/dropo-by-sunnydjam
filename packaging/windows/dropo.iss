@@ -41,7 +41,8 @@ PrivilegesRequiredOverridesAllowed=commandline
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=force
-CloseApplicationsFilter=dropo.exe,dropo-ui.exe,dropo-core.exe,tg-ws-proxy.exe
+; Include mapped Flutter DLL/AOT files, not just the small runner executable.
+CloseApplicationsFilter=*.exe,*.dll,*.so
 ; The installer owns the single post-update launch. Restart Manager must not
 ; race it by restarting old UI/core commands independently.
 RestartApplications=no
@@ -68,7 +69,7 @@ Type: files; Name: "{app}\resources\bin\tg-ws-proxy.exe"; Check: IsUpgradeInstal
 Type: files; Name: "{app}\resources\licenses\tg-ws-proxy-LICENSE.txt"; Check: IsUpgradeInstall
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs notimestamp
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs notimestamp; BeforeInstall: EnsureRuntimeUnlocked
 Source: "{#SourcePath}\install-mode.json"; DestDir: "{app}"; Flags: ignoreversion notimestamp
 
 [Icons]
@@ -99,6 +100,49 @@ const
 var
   PreserveInstallerChoices: Boolean;
   PreviousBackgroundCoreChoice: Boolean;
+  RuntimeUnlocked: Boolean;
+  UpdateInstallStarted: Boolean;
+  UpdateInstallCompleted: Boolean;
+
+function CreateFileForUpdate(FileName: String; DesiredAccess, ShareMode,
+  SecurityAttributes, CreationDisposition, Flags, Template: LongWord): THandle;
+  external 'CreateFileW@kernel32.dll stdcall';
+function CloseUpdateHandle(Handle: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function CanReplaceRuntimeFile(const Name: String): Boolean;
+var
+  Handle: THandle;
+begin
+  Result := True;
+  if not FileExists(Name) then exit;
+  { Request write access without sharing; running image mappings must be gone. }
+  Handle := CreateFileForUpdate(Name, $40000000, 0, 0, 3, 0, 0);
+  Result := Handle <> THandle(-1);
+  if Result then CloseUpdateHandle(Handle);
+end;
+
+procedure EnsureRuntimeUnlocked();
+var
+  Attempt: Integer;
+begin
+  if RuntimeUnlocked then exit;
+  { BeforeInstall runs after Restart Manager closes owners, before payload copy.
+    A blocked DLL must not leave a new version label with the old Dart snapshot. }
+  for Attempt := 1 to 40 do begin
+    if CanReplaceRuntimeFile(ExpandConstant('{app}\dropo.exe')) and
+       CanReplaceRuntimeFile(ExpandConstant('{app}\resources\dropo-ui.exe')) and
+       CanReplaceRuntimeFile(ExpandConstant('{app}\resources\dropo-core.exe')) and
+       CanReplaceRuntimeFile(ExpandConstant('{app}\resources\flutter_windows.dll')) and
+       CanReplaceRuntimeFile(ExpandConstant('{app}\resources\data\app.so')) then begin
+      RuntimeUnlocked := True;
+      exit;
+    end;
+    Sleep(250);
+  end;
+  MsgBox('Обновление не установлено: файлы Dropo заняты или недоступны. Закройте все окна Dropo и повторите установку. Новые файлы приложения ещё не копировались.', mbError, MB_OK);
+  RaiseException('Dropo runtime is still locked; refusing a partial update.');
+end;
 
 function IsUpgradeInstall(): Boolean;
 begin
@@ -177,8 +221,34 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if IsFromUpdate() then begin
+    if CurStep = ssInstall then begin
+      UpdateInstallStarted := True;
+      WizardForm.Caption := 'Обновление Dropo {#AppVersion}';
+      WizardForm.Show;
+    end;
+    if CurStep = ssDone then UpdateInstallCompleted := True;
+  end;
   if CurStep = ssPostInstall then
     ConfigureAutoStart();
+end;
+
+procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+begin
+  if IsFromUpdate() and (MaxProgress > 0) then begin
+    { Older clients still pass /VERYSILENT. Keep their update visible too. }
+    WizardForm.Show;
+    WizardForm.StatusLabel.Caption := 'Устанавливаем Dropo {#AppVersion}: ' +
+      IntToStr(Round(100.0 * CurProgress / MaxProgress)) +
+      '%. После успешной установки приложение откроется автоматически.';
+  end;
+end;
+
+procedure DeinitializeSetup();
+begin
+  if UpdateInstallStarted and not UpdateInstallCompleted then
+    { Deliberately not suppressible, including updates from legacy clients. }
+    MsgBox('Обновление Dropo не завершено. Не запускайте несколько копий приложения. Закройте Dropo и повторите установку. Подробности сохранены в журнале установки Windows.', mbError, MB_OK);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

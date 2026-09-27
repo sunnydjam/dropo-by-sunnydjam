@@ -2,6 +2,23 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.37 — 2026-09-27
+
+### Visible, verifiable Windows updates
+
+- show a dedicated update overlay across all pages with download percentage and
+  bytes, verification, VPN shutdown and installer hand-off stages; failures stay
+  visible and do not trigger automatic retries or close the UI;
+- show the native installer progress and errors, including progress and failure
+  notices for older clients that still request very-silent installation;
+- register Flutter DLLs and AOT snapshots with Restart Manager, and reject a
+  locked runtime before copying application payload files. This prevents the
+  observed partial update with new version metadata and the old interface;
+- keep exactly one post-install launcher invocation, preserve user settings,
+  and serialize update requests. Download events are rate-limited;
+- strengthen the clean-Windows gate to upgrade a running UI and compare every
+  installed payload file against the verified portable package after both passes.
+
 ## 3.0.36 — 2026-09-27
 
 ### Cosmic dashboard and night Earth

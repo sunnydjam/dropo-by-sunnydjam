@@ -18,6 +18,7 @@ part 'atlas_dashboard.dart';
 part 'compact_shell.dart';
 part 'planet_animation.dart';
 part 'space_background.dart';
+part 'update_progress.dart';
 part 'vpn_response.dart';
 part 'app_about.dart';
 part 'service_routes.dart';
@@ -3740,6 +3741,11 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool startupUpdateCheckScheduled = false;
   bool compatibilityNoticeShowing = false;
   double? updateProgressPercent;
+  String? updateStage;
+  String updateVersion = '';
+  String updateError = '';
+  int updateDownloaded = 0;
+  int updateTotal = 0;
   bool homeRoutesExpanded = true;
   bool preparingFullVpnSource = false;
   final List<String> _sectionHistory = [];
@@ -3754,6 +3760,7 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   bool get controlsDisabled =>
       booting ||
+      updateStage != null ||
       uiBusy ||
       sectionBusy ||
       quitting ||
@@ -4255,7 +4262,18 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   void _applyEvent(BridgeEvent event) {
     switch (event.name) {
+      case 'update-stage':
+        final stage = event.payload['stage']?.toString();
+        if (updateStage != null &&
+            updateStage != 'failed' &&
+            _updateStages.contains(stage)) {
+          updateStage = stage;
+        }
+        break;
       case 'update-progress':
+        if (updateStage == null || updateStage == 'failed') break;
+        updateDownloaded = (event.payload['downloaded'] as num?)?.toInt() ?? 0;
+        updateTotal = (event.payload['total'] as num?)?.toInt() ?? updateTotal;
         final value = event.payload['percent'];
         updateProgressPercent = value is num
             ? value.toDouble().clamp(0, 100).toDouble()
@@ -5334,19 +5352,40 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
 
     await _runBusy(() async {
+      ScaffoldMessenger.maybeOf(context)?.clearSnackBars();
       setState(() {
-        updateProgressPercent = 0;
+        updateStage = 'checking';
+        updateVersion = result.latestVersion;
+        updateError = '';
+        updateDownloaded = 0;
+        updateTotal = result.fileSize;
+        updateProgressPercent = null;
         statusMessage = 'Загружаем обновление';
         connectionHint = 'Не закрывайте dropo до завершения проверки.';
       });
-      final response = await widget.bridge.installUpdate();
-      if (response['success'] != true) {
-        throw StateError(
-          response['error']?.toString() ?? 'Не удалось установить обновление',
-        );
+      try {
+        final response = await widget.bridge.installUpdate();
+        if (response['success'] != true) {
+          throw StateError(
+            response['error']?.toString() ?? 'Не удалось установить обновление',
+          );
+        }
+      } catch (error) {
+        if (mounted) {
+          setState(() {
+            updateStage = 'failed';
+            updateError = _cleanError(error).replaceFirst('Bad state: ', '');
+            updateProgressPercent = null;
+            statusMessage = 'Обновление не установлено';
+            connectionHint = updateError;
+            connectionHintDanger = true;
+          });
+        }
+        return;
       }
       if (mounted) {
         setState(() {
+          updateStage = 'installing';
           quitting = true;
           quitProgressMessage =
               'Устанавливаем обновление и перезапускаем dropo...';
@@ -6256,7 +6295,17 @@ class _DropoHomePageState extends State<DropoHomePage>
               message: strategyBannerMessage,
               transitionNotice: true,
             ),
-      overlay: quitting
+      overlay: updateStage != null
+          ? _UpdateProgressOverlay(
+              stage: updateStage!,
+              version: updateVersion,
+              percent: updateProgressPercent,
+              downloaded: updateDownloaded,
+              total: updateTotal,
+              error: updateError,
+              onClose: () => setState(() => updateStage = null),
+            )
+          : quitting
           ? _QuitProgressOverlay(message: quitProgressMessage)
           : null,
       child: activeMenuSection == 'home'
