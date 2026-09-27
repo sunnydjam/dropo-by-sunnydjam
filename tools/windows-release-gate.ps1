@@ -172,8 +172,15 @@ function Invoke-WindowsInstallSmoke {
     Write-Host "[GATE] Silent update reopened one visible installed UI (PID $($visibleUI.Id))." -ForegroundColor Green
 
     $runCommand = (Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "dropo" -ErrorAction SilentlyContinue).dropo
-    if ([string]::IsNullOrWhiteSpace([string]$runCommand) -or $runCommand -notlike "*$installRoot*") {
-        throw "Installer did not configure the selected per-user UI autostart entry."
+    $runMatch = [regex]::Match([string]$runCommand, '^(?:"([^"]+)"|(\S+))\s+--autostart$')
+    $runLauncher = if ($runMatch.Groups[1].Success) { $runMatch.Groups[1].Value } else { $runMatch.Groups[2].Value }
+    $expectedLauncher = (Get-Item -LiteralPath (Join-Path $installRoot 'dropo.exe')).FullName
+    # The running core normalizes an inherited RUNNER~1 install path to its
+    # long form. Compare resolved launcher identity, not a substring spelling.
+    if (-not $runMatch.Success -or -not (Test-Path -LiteralPath $runLauncher -PathType Leaf) -or
+        -not [string]::Equals((Get-Item -LiteralPath $runLauncher).FullName, $expectedLauncher,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unexpected per-user UI autostart entry: '$runCommand'; expected launcher '$expectedLauncher'."
     }
     $scheduledTask = Get-ScheduledTask -TaskName "dropo-background-core" -ErrorAction SilentlyContinue
     if (-not $scheduledTask) {

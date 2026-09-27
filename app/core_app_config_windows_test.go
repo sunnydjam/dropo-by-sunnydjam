@@ -31,3 +31,15 @@ func TestWindowsAutoStartKeepsStandaloneExecutable(t *testing.T) {
 		t.Fatalf("autostart launcher = %q, want %q", got, exe)
 	}
 }
+
+func TestWindowsAutoStartCommandUsesWindowsQuoting(t *testing.T) {
+	for _, tc := range []struct{ path, command string }{
+		{`C:\Program Files\dropo\dropo.exe`, `"C:\Program Files\dropo\dropo.exe" --autostart`},
+		{`C:\Users\runneradmin\dropo.exe`, `C:\Users\runneradmin\dropo.exe --autostart`},
+		{`D:\Приложения VPN\dropo.exe`, `"D:\Приложения VPN\dropo.exe" --autostart`},
+	} {
+		if got := windowsAutoStartCommand(tc.path); got != tc.command {
+			t.Fatalf("command = %q, want %q", got, tc.command)
+		}
+	}
+}

@@ -16,6 +16,8 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
   observed partial update with new version metadata and the old interface;
 - keep exactly one post-install launcher invocation, preserve user settings,
   and serialize update requests. Download events are rate-limited;
+- use Windows command-line quoting for the autostart entry instead of Go string
+  escaping, and verify the resolved launcher path after the core starts;
 - strengthen the clean-Windows gate to upgrade a running UI and compare every
   installed payload file against the verified portable package after both passes.
 

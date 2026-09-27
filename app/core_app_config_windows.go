@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -101,10 +102,15 @@ func createLauncherRunAutoStart() error {
 		return fmt.Errorf("failed to open HKCU Run: %w", err)
 	}
 	defer key.Close()
-	if err := key.SetStringValue(AppName, fmt.Sprintf("%q --autostart", launcher)); err != nil {
+	if err := key.SetStringValue(AppName, windowsAutoStartCommand(launcher)); err != nil {
 		return fmt.Errorf("failed to register UI autostart: %w", err)
 	}
 	return nil
+}
+
+func windowsAutoStartCommand(launcher string) string {
+	// Go %q writes Go-string escapes (C:\\...), not a Windows command line.
+	return syscall.EscapeArg(launcher) + " --autostart"
 }
 
 func removeAutoStartTask() error {
