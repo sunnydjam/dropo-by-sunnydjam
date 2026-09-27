@@ -26,12 +26,21 @@ VpnSourceInfo _source(
   bool public = false,
   bool active = false,
   int count = 2,
+  String responseState = 'unavailable',
+  int? latency,
+  bool disabled = false,
 }) => VpnSourceInfo.fromJson({
   'id': id,
   'name': public ? _provider.name : 'Моя подписка',
   'kind': 'subscription',
   'public_catalog_id': public ? _provider.id : '',
   'active': active,
+  'disabled': disabled,
+  'response': {
+    'state': responseState,
+    'latencyMs': latency,
+    'checkedAt': DateTime.now().toUtc().toIso8601String(),
+  },
   'selected_node': 0,
   'node_count': count,
   'node_names': [
@@ -47,10 +56,20 @@ class _SourceBridge extends MockCoreBridge {
   int personalTests = 0;
   int personalAdds = 0;
   int autoSelections = 0;
+  bool autoSelect = false;
+  bool running = true;
+
+  @override
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async => VpnSourcesSnapshot(
+    sources: await vpnSources(),
+    autoSelect: autoSelect,
+    running: running,
+  );
 
   @override
   Future<Map<String, dynamic>> enableVpnSourceAutoSelect() async {
     autoSelections++;
+    autoSelect = true;
     return {'success': true};
   }
 
@@ -67,6 +86,7 @@ class _SourceBridge extends MockCoreBridge {
   @override
   Future<Map<String, dynamic>> moveVpnSource(String id, int index) async {
     moves.add((id, index));
+    autoSelect = false;
     final moved = sources.firstWhere((source) => source.id == id);
     sources = [...sources.where((source) => source.id != id)]
       ..insert(index, moved);
@@ -182,6 +202,130 @@ Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  test(
+    'source snapshot retains mode and running state without inventing legacy values',
+    () {
+      final legacy = VpnSourcesSnapshot.fromJson({'sources': []});
+      expect(legacy.autoSelect, isNull);
+      expect(legacy.running, isNull);
+      final current = VpnSourcesSnapshot.fromJson({
+        'autoSelect': false,
+        'running': true,
+        'sources': [
+          {
+            'id': 'one',
+            'response': {
+              'state': 'ok',
+              'latencyMs': 42,
+              'checkedAt': DateTime.now().toUtc().toIso8601String(),
+            },
+          },
+        ],
+      });
+      expect(current.autoSelect, isFalse);
+      expect(current.running, isTrue);
+      expect(current.sources.single.response.current, isTrue);
+      expect(current.sources.single.response.label, '42 мс');
+    },
+  );
+  testWidgets('sources lead the page and optional offers stay secondary', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..sources = [
+        _source('personal', active: true, responseState: 'ok', latency: 42),
+      ];
+    await _pumpEditor(tester, bridge, size: const Size(820, 560));
+    expect(
+      find.byKey(const ValueKey('vpn-source-personal')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(find.text('HTTP · 42 мс'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('choose-vpn-node-personal')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('add-public-vpn-test-public')),
+      findsNothing,
+    );
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('vpn-source-personal'))).dy,
+      lessThan(
+        tester.getTopLeft(find.byKey(const ValueKey('boost-preview'))).dy,
+      ),
+    );
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('toggle-free-catalog')),
+    );
+    expect(
+      find.byKey(const ValueKey('add-public-vpn-test-public')),
+      findsOneWidget,
+    );
+    expect(bridge.publicAdds, 0);
+  });
+
+  testWidgets('selecting the first source also leaves automatic mode', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..autoSelect = true
+      ..sources = [_source('one'), _source('two')];
+    await _pumpEditor(tester, bridge);
+    expect(find.text('Автоматически · по отклику'), findsOneWidget);
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('vpn-source-first-one')),
+    );
+    expect(bridge.moves, [('one', 0)]);
+    expect(find.text('Вручную · по вашему порядку'), findsOneWidget);
+    expect(find.text('Выбран'), findsOneWidget);
+    expect(find.textContaining('Используется сейчас'), findsNothing);
+  });
+
+  for (final state in ['pending', 'failed', 'stale', 'unavailable']) {
+    testWidgets('source response $state never shows fake milliseconds', (
+      tester,
+    ) async {
+      final bridge = _SourceBridge()
+        ..sources = [_source('one', responseState: state, latency: 42)];
+      await _pumpEditor(tester, bridge);
+      expect(find.textContaining('42 мс'), findsNothing);
+      final expected = switch (state) {
+        'pending' => 'Проверяем…',
+        'failed' => 'Нет ответа',
+        'stale' => 'Данные устарели',
+        _ => 'Нет данных',
+      };
+      expect(find.text('HTTP · $expected'), findsOneWidget);
+    });
+  }
+
+  testWidgets('disconnected and disabled sources suppress recorded latency', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..running = false
+      ..sources = [
+        _source('one', responseState: 'ok', latency: 42),
+        _source('two', disabled: true, responseState: 'ok', latency: 14),
+      ];
+    await _pumpEditor(tester, bridge);
+    expect(find.text('Отклик · После подключения'), findsOneWidget);
+    expect(find.text('Отклик · Выключен'), findsOneWidget);
+    expect(find.textContaining('42 мс'), findsNothing);
+    expect(find.textContaining('14 мс'), findsNothing);
+    expect(
+      tester
+          .widget<TextButton>(
+            find.byKey(const ValueKey('vpn-source-first-two')),
+          )
+          .onPressed,
+      isNull,
+    );
+  });
+
   testWidgets('source page restores automatic latency choice explicitly', (
     tester,
   ) async {
@@ -210,7 +354,7 @@ void main() {
     (tester) async {
       final bridge = _SourceBridge();
       await _pumpEditor(tester, bridge);
-      expect(find.text('Подписки и приоритеты'), findsOneWidget);
+      expect(find.text('Источники VPN'), findsOneWidget);
       expect(find.text('Dropo Boost · скоро'), findsOneWidget);
       expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
       expect(find.byKey(const ValueKey('submit-personal-vpn')), findsOneWidget);
@@ -276,9 +420,10 @@ void main() {
       );
       expect(bridge.moves, [('free', 0)]);
       expect(bridge.sources.map((source) => source.id), ['free', 'personal']);
-      expect(
-        find.textContaining('Приоритет 1 · публичный бесплатный'),
-        findsOneWidget,
+      expect(find.textContaining('Бесплатный · Основной'), findsOneWidget);
+      await _tapVisible(
+        tester,
+        find.byKey(const PageStorageKey('source-details-free')),
       );
       await _tapVisible(
         tester,
@@ -530,7 +675,7 @@ void main() {
       ),
     );
 
-    expect(find.text('VPN-подписка'), findsOneWidget);
+    expect(find.text('Источники VPN'), findsOneWidget);
     expect(find.textContaining('одна активная подписка'), findsOneWidget);
     expect(find.textContaining('4 сервера'), findsOneWidget);
     expect(find.byType(Switch), findsNothing);
@@ -590,8 +735,12 @@ void main() {
       );
       expect(find.textContaining('Используется сейчас'), findsOneWidget);
       expect(
-        find.textContaining('Приоритет 2 · публичный бесплатный'),
+        find.textContaining('Бесплатный · Готов к выбору'),
         findsOneWidget,
+      );
+      await _tapVisible(
+        tester,
+        find.byKey(const PageStorageKey('source-details-personal')),
       );
       final up = tester.widget<IconButton>(
         find.byKey(const ValueKey('vpn-source-up-personal')),
@@ -667,7 +816,11 @@ void main() {
       await tester.runAsync(() async {
         final image = await boundary.toImage(pixelRatio: 1);
         final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-        final directory = Directory('build/ui-review');
+        const captureDirectory = String.fromEnvironment('DROPO_UI_CAPTURE_DIR');
+        if (captureDirectory.isEmpty) {
+          throw StateError('Set an external capture directory');
+        }
+        final directory = Directory(captureDirectory);
         await directory.create(recursive: true);
         await File(
           '${directory.path}/vpn-sources-${configured ? 'configured' : 'empty'}.png',

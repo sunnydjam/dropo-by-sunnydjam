@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 )
 
 func (a *App) GetVPNSources() map[string]interface{} {
@@ -14,11 +15,14 @@ func (a *App) GetVPNSources() map[string]interface{} {
 		return map[string]interface{}{"success": false, "error": err.Error()}
 	}
 	active := a.activeVPNSource()
+	running, now := a.isVPNRunning() && !a.vpnStopping.Load(), time.Now()
 	views := publicVPNSources(profile.VPNSources)
 	for _, view := range views {
-		view["active"] = a.isVPNRunning() && active == "vpn-source-"+view["id"].(string)
+		tag := "vpn-source-" + view["id"].(string)
+		view["active"] = running && active == tag
+		view["response"] = a.vpnSourceResponseSnapshot(tag, running, now)
 	}
-	return map[string]interface{}{"success": true, "sources": views, "activeSource": active, "autoSelect": profile.VPNSourceSelectionMode != "priority"}
+	return map[string]interface{}{"success": true, "sources": views, "activeSource": active, "running": running, "autoSelect": profile.VPNSourceSelectionMode != "priority"}
 }
 
 func (a *App) AddVPNSource(name, uri string) map[string]interface{} {

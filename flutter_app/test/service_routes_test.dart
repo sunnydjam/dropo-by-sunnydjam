@@ -306,7 +306,7 @@ void main() {
       final bridge = _CatalogBridge();
       bool enabled = true;
       late StateSetter update;
-      List<VpnSourceInfo>? snapshot;
+      VpnSourcesSnapshot? snapshot;
       await _pump(
         tester,
         StatefulBuilder(
@@ -330,13 +330,23 @@ void main() {
       await _tap(tester, 'add-personal-vpn');
       expect(find.text('Скрыть форму'), findsOneWidget);
       final sources = await bridge.vpnSources();
-      update(() => snapshot = sources);
+      update(() => snapshot = VpnSourcesSnapshot(sources: sources));
       await tester.pumpAndSettle();
       expect(find.text('Скрыть форму'), findsOneWidget);
       update(() => enabled = false);
       await tester.pumpAndSettle();
       expect(find.textContaining('Используется сейчас'), findsNothing);
       expect(find.textContaining('Статус уточняется'), findsOneWidget);
+      update(() {
+        enabled = true;
+        snapshot = null;
+      });
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Используется сейчас'), findsNothing);
+      expect(find.text('Отклик · Нет данных'), findsOneWidget);
+      update(() => snapshot = VpnSourcesSnapshot(sources: sources));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Используется сейчас'), findsOneWidget);
       expect(find.byType(LinearProgressIndicator), findsNothing);
       expect(tester.takeException(), isNull);
     },

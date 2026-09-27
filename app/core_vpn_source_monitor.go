@@ -128,6 +128,12 @@ func (a *App) recordVPNSourceObservation(ctx context.Context, generation uint64,
 }
 
 func (a *App) vpnResponseSnapshot(running bool, now time.Time) vpnResponse {
+	return a.vpnSourceResponseSnapshot("", running, now)
+}
+
+// An empty tag follows the active source. Explicit tags expose already recorded
+// independent-source observations without probing or changing a selector.
+func (a *App) vpnSourceResponseSnapshot(sourceTag string, running bool, now time.Time) vpnResponse {
 	result := vpnResponse{State: "unavailable", ProbeKind: "http", Target: vpnResponseProbeTarget}
 	if a == nil {
 		return result
@@ -143,6 +149,9 @@ func (a *App) vpnResponseSnapshot(running bool, now time.Time) vpnResponse {
 	a.vpnSourceMonitorMu.Unlock()
 	if !monitorActive {
 		return result
+	}
+	if sourceTag != "" {
+		tag = sourceTag
 	}
 	if tag == "" {
 		if len(a.configuredVPNSourceTags()) > 0 {
@@ -161,7 +170,7 @@ func (a *App) vpnResponseSnapshot(running bool, now time.Time) vpnResponse {
 	result.SourceID, result.NodeID, result.ProfileID = binding.SourceID, binding.NodeID, binding.ProfileID
 	a.vpnSourceMonitorMu.Lock()
 	observation, measured := a.vpnSourceObservations[tag]
-	current := a.vpnSourceMonitorCancel != nil && a.vpnSourceMonitorGeneration == generation && a.vpnSourceActive == tag
+	current := a.vpnSourceMonitorCancel != nil && a.vpnSourceMonitorGeneration == generation && (sourceTag != "" || a.vpnSourceActive == tag)
 	a.vpnSourceMonitorMu.Unlock()
 	if !current || a.vpnStopping.Load() || a.reconnectGeneration.Load() != binding.SessionGeneration {
 		result.State, result.SourceID, result.NodeID, result.ProfileID = "unavailable", "", "", 0

@@ -287,6 +287,7 @@ abstract class CoreBridge {
   Future<VpnConflictInfo> externalVpnConflicts();
   Future<Map<String, dynamic>> downloadDependencies();
   Future<List<VpnSourceInfo>> vpnSources();
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot();
   Future<List<PublicVpnProviderInfo>> publicVpnProviders();
   Future<Map<String, dynamic>> addPublicVpnSource(String id, bool consent);
   Future<Map<String, dynamic>> addVpnSource(String name, String uri);
@@ -778,15 +779,16 @@ class HttpCoreBridge implements CoreBridge {
   }
 
   @override
-  Future<List<VpnSourceInfo>> vpnSources() async {
+  Future<List<VpnSourceInfo>> vpnSources() async =>
+      (await vpnSourcesSnapshot()).sources;
+
+  @override
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async {
     final result = await callMap('GetVPNSources');
     if (result['success'] == false || result['sources'] is! List) {
       throw StateError('Не удалось получить источники VPN');
     }
-    final raw = result['sources'];
-    return raw is List
-        ? raw.map(_asMap).map(VpnSourceInfo.fromJson).toList(growable: false)
-        : const <VpnSourceInfo>[];
+    return VpnSourcesSnapshot.fromJson(result);
   }
 
   @override
@@ -1491,6 +1493,10 @@ class ChannelCoreBridge implements CoreBridge {
   Future<Map<String, dynamic>> downloadDependencies() async {
     return {'success': true, 'dependencies': _androidDepsJson};
   }
+
+  @override
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async =>
+      VpnSourcesSnapshot(sources: await vpnSources());
 
   @override
   Future<List<VpnSourceInfo>> vpnSources() async {
@@ -2273,6 +2279,10 @@ class MockCoreBridge implements CoreBridge {
   }
 
   @override
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async =>
+      VpnSourcesSnapshot(sources: await vpnSources());
+
+  @override
   Future<List<VpnSourceInfo>> vpnSources() async {
     if (_subscriptionUrl.isEmpty) return const [];
     return const [
@@ -2727,8 +2737,10 @@ class VpnSourceInfo {
     this.publicCatalogId = '',
     this.usingCache = false,
     this.active = false,
+    this.response = const VpnResponseSnapshot(),
   });
 
+  final VpnResponseSnapshot response;
   final String id;
   final String name;
   final String kind;
@@ -2757,6 +2769,7 @@ class VpnSourceInfo {
       publicCatalogId: json['public_catalog_id']?.toString() ?? '',
       usingCache: json['using_cache'] == true,
       active: json['active'] == true,
+      response: VpnResponseSnapshot.fromJson(_asMap(json['response'])),
     );
   }
 }
@@ -3721,6 +3734,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool liveRoutesConfirmed = false;
   List<WireGuardInfo> wireGuards = const [];
   List<VpnSourceInfo> homeSources = const [];
+  VpnSourcesSnapshot? homeSourceSnapshot;
   bool homeSourcesLoaded = false;
   bool homeSourcesFailed = false;
   bool homeSourcesLoading = false;
@@ -4140,9 +4154,10 @@ class _DropoHomePageState extends State<DropoHomePage>
       if (force) homeSourcesLoaded = false;
     });
     try {
-      final loaded = await widget.bridge.vpnSources().timeout(
+      final snapshot = await widget.bridge.vpnSourcesSnapshot().timeout(
         const Duration(seconds: 3),
       );
+      final loaded = snapshot.sources;
       if (!mounted || quitting || request != homeSourcesRequest) return;
       if (requestedProfile != activeProfile?.id ||
           requestedConnected != status.connected) {
@@ -4151,6 +4166,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       setState(() {
         homeSources = loaded;
+        homeSourceSnapshot = snapshot;
         homeSourcesLoaded = true;
         homeSourcesFailed = false;
         homeSourcesCheckedAt = DateTime.now();
@@ -6194,7 +6210,9 @@ class _DropoHomePageState extends State<DropoHomePage>
               !uiBusy &&
               !connectionBusy &&
               (!_isMobileShell || !status.connected),
-          sourceSnapshot: homeSourcesLoaded && online ? homeSources : null,
+          sourceSnapshot: homeSourcesLoaded && online
+              ? homeSourceSnapshot
+              : null,
           onBusyChanged: _setSectionBusy,
           onChanged: () => unawaited(_refresh(all: true)),
           onReadyToConnect: () => unawaited(_selectMenuSection('home')),
@@ -7031,7 +7049,8 @@ class _MiniStrip extends StatelessWidget {
   }
 }
 
-class _MenuPageSurface extends StatefulWidget {
+// Embedded sections share the shell's star field, never a nested window.
+class _MenuPageSurface extends StatelessWidget {
   const _MenuPageSurface({
     required this.title,
     required this.icon,
@@ -7043,82 +7062,12 @@ class _MenuPageSurface extends StatefulWidget {
   final Widget child;
 
   @override
-  State<_MenuPageSurface> createState() => _MenuPageSurfaceState();
-}
-
-class _MenuPageSurfaceState extends State<_MenuPageSurface> {
-  final ScrollController scrollController = ScrollController();
-
-  @override
-  void dispose() {
-    scrollController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isMobile = _isMobileShell;
-    return Container(
-      key: ValueKey(widget.title),
-      width: double.infinity,
-      constraints: BoxConstraints(maxHeight: isMobile ? 720 : 640),
-      padding: EdgeInsets.all(isMobile ? 14 : 18),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xE8142121), Color(0xE811181A), Color(0xE8211921)],
-          stops: [0, 0.58, 1],
-        ),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.11)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.42),
-            blurRadius: 42,
-            offset: const Offset(0, 18),
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Icon(widget.icon, color: const Color(0xFFBAF7D0), size: 22),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  widget.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFFE8F3EF),
-                    fontSize: 18,
-                    fontWeight: FontWeight.w400,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Flexible(
-            child: Scrollbar(
-              controller: scrollController,
-              thumbVisibility: !isMobile,
-              child: SingleChildScrollView(
-                controller: scrollController,
-                primary: false,
-                child: widget.child,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => _FeaturePage(
+    key: ValueKey(title),
+    title: title,
+    icon: icon,
+    child: child,
+  );
 }
 
 class _QuitProgressOverlay extends StatelessWidget {
@@ -7254,12 +7203,7 @@ class _AppDialog extends StatelessWidget {
             centered ? 20 : media.padding.bottom + 18,
           ),
           decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFA142121), Color(0xFA11181A), Color(0xFA211921)],
-              stops: [0, 0.58, 1],
-            ),
+            color: _atlasSurface,
             borderRadius: centered
                 ? BorderRadius.circular(18)
                 : const BorderRadius.horizontal(right: Radius.circular(18)),
@@ -7272,41 +7216,44 @@ class _AppDialog extends StatelessWidget {
               ),
             ],
           ),
-          child: Column(
-            mainAxisSize: centered ? MainAxisSize.min : MainAxisSize.max,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Icon(icon, color: const Color(0xFFBAF7D0)),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: TextStyle(
-                        color: const Color(0xFFE8F3EF),
-                        fontSize: media.size.width < 420 ? 16 : 18,
-                        fontWeight: FontWeight.w800,
+          child: Material(
+            color: Colors.transparent,
+            child: Column(
+              mainAxisSize: centered ? MainAxisSize.min : MainAxisSize.max,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Icon(icon, color: const Color(0xFFBAF7D0)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: TextStyle(
+                          color: const Color(0xFFE8F3EF),
+                          fontSize: media.size.width < 420 ? 16 : 18,
+                          fontWeight: FontWeight.w800,
+                        ),
                       ),
                     ),
-                  ),
-                  _AccessibleIconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    color: const Color(0xFFCDE7DE),
-                    icon: const Icon(Icons.close),
-                    tooltip: 'Закрыть',
-                    mouseCursor: SystemMouseCursors.click,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              Flexible(
-                child: Scrollbar(
-                  thumbVisibility: true,
-                  child: SingleChildScrollView(child: child),
+                    _AccessibleIconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      color: const Color(0xFFCDE7DE),
+                      icon: const Icon(Icons.close),
+                      tooltip: 'Закрыть',
+                      mouseCursor: SystemMouseCursors.click,
+                    ),
+                  ],
                 ),
-              ),
-            ],
+                const SizedBox(height: 14),
+                Flexible(
+                  child: Scrollbar(
+                    thumbVisibility: true,
+                    child: SingleChildScrollView(child: child),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -7378,41 +7325,39 @@ class _LogsDialogState extends State<_LogsDialog> {
           children: [
             Icon(Icons.article_outlined, color: Color(0xFFBAF7D0), size: 20),
             SizedBox(width: 9),
-            Text(
-              'Технический журнал',
-              style: TextStyle(
-                color: Color(0xFFE8F3EF),
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
+            Expanded(
+              child: Text(
+                'Технический журнал',
+                style: TextStyle(
+                  color: Color(0xFFE8F3EF),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ],
         ),
         const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                isMobile
-                    ? 'Android core, VpnService и sing-box.'
-                    : 'Текст можно выделять мышью и копировать.',
-                style: const TextStyle(color: Color(0xFF9BB0AB), fontSize: 12),
-              ),
-            ),
-            _ActionButton(
-              label: 'Копировать всё',
-              icon: Icons.copy,
-              compact: true,
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: text));
-                if (context.mounted) {
-                  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                    const SnackBar(content: Text('Логи скопированы')),
-                  );
-                }
-              },
-            ),
-          ],
+        _HomeAdaptiveAction(
+          content: Text(
+            isMobile
+                ? 'Android core, VpnService и sing-box.'
+                : 'Текст можно выделять мышью и копировать.',
+            style: const TextStyle(color: Color(0xFF9BB0AB), fontSize: 12),
+          ),
+          action: _ActionButton(
+            label: 'Копировать всё',
+            icon: Icons.copy,
+            compact: true,
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: text));
+              if (context.mounted) {
+                ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                  const SnackBar(content: Text('Логи скопированы')),
+                );
+              }
+            },
+          ),
         ),
         if (onCopyDiagnostics != null) ...[
           const SizedBox(height: 8),
@@ -7645,6 +7590,7 @@ class _ActionButton extends StatelessWidget {
               vertical: compact ? 8 : 13,
             ),
             textStyle: TextStyle(
+              fontFamily: 'Inter',
               fontSize: compact ? 12 : 13,
               fontWeight: FontWeight.w400,
             ),
@@ -11245,14 +11191,19 @@ class _StatsGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GridView.count(
-      crossAxisCount: 2,
-      mainAxisSpacing: 10,
-      crossAxisSpacing: 10,
-      childAspectRatio: 1.62,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      children: children,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final scale = MediaQuery.textScalerOf(context).scale(17) / 17;
+        final columns = constraints.maxWidth >= 300 * scale ? 2 : 1;
+        final width = (constraints.maxWidth - (columns - 1) * 10) / columns;
+        return Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            for (final child in children) SizedBox(width: width, child: child),
+          ],
+        );
+      },
     );
   }
 }

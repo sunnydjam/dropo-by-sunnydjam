@@ -2,6 +2,20 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.39 — 2026-09-28
+
+- put saved VPN sources first, with selected server, active status, real HTTP
+  response and explicit source selection; expose automatic/manual selection mode;
+- reuse existing session/profile/node-bound measurements without extra probes;
+  hide latency for expired, failed, disabled and disconnected sources;
+- collapse server selection, priority and removal controls under source settings;
+  keep public sources optional and move the upcoming Boost offer below the list;
+- remove tinted nested-window panels from embedded pages. Sources and services
+  use flat divider-separated rows over the same black star field as the home page;
+- preserve readable neutral modal surfaces, reduced-motion behavior and source
+  fallback semantics. Improve diagnostics/statistics layout at enlarged text sizes;
+- retain both VPN modes, saved subscriptions/routes and user-confirmed updates.
+
 ## 3.0.38 — 2026-09-28
 
 - remove visual tooltips while retaining accessible control names; move Dropo

@@ -1,8 +1,8 @@
 part of 'main.dart';
 
 // Home-only presentation tokens. Network state stays in the shared core bridge.
-const _homeSurface = Color(0xFF172421);
-const _homeBorder = Color(0xFF30453D);
+const _homeSurface = _atlasSurface;
+const _homeBorder = _atlasBorder;
 const _homeText = Color(0xFFE8F3EF);
 const _homeMuted = Color(0xFFA8BAB5);
 const _homeAccent = Color(0xFF75E3AD);
@@ -525,10 +525,8 @@ class _HomeRouteServiceRow extends StatelessWidget {
       padding: const EdgeInsets.only(top: 6),
       child: Container(
         padding: const EdgeInsets.fromLTRB(9, 8, 7, 8),
-        decoration: BoxDecoration(
-          color: const Color(0xFF172824),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFF314B43)),
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: _atlasBorder)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -676,9 +674,9 @@ class _HomeZapretStrategyControls extends StatelessWidget {
       key: ValueKey('home-zapret-strategy-${service.tag}'),
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: const Color(0xFF0E1D19),
+          color: _atlasSurface,
         borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: const Color(0xFF2A493F)),
+          border: Border.all(color: _atlasBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

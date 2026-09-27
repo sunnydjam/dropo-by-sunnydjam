@@ -3,6 +3,7 @@ part of 'main.dart';
 /// Scrollable native section; long catalogs are built lazily.
 class _FeaturePage extends StatefulWidget {
   const _FeaturePage({
+    super.key,
     required this.title,
     required this.icon,
     this.child,
@@ -26,49 +27,42 @@ class _FeaturePageState extends State<_FeaturePage> {
   }
 
   @override
-  Widget build(BuildContext context) => Container(
-    margin: const EdgeInsets.all(12),
-    decoration: BoxDecoration(
-      color: _homeSurface,
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: _homeBorder),
-    ),
-    child: Material(
-      color: Colors.transparent,
-      child: Scrollbar(
+  Widget build(BuildContext context) => Material(
+    key: const ValueKey('flat-feature-page'),
+    color: Colors.transparent,
+    child: Scrollbar(
+      controller: scroll,
+      child: CustomScrollView(
         controller: scroll,
-        child: CustomScrollView(
-          controller: scroll,
-          slivers: [
-            SliverPadding(
-              padding: const EdgeInsets.all(20),
-              sliver: SliverToBoxAdapter(
-                child: Row(
-                  children: [
-                    Icon(widget.icon, color: _homeAccent),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        widget.title,
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w700,
-                          color: _homeText,
-                        ),
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.all(20),
+            sliver: SliverToBoxAdapter(
+              child: Row(
+                children: [
+                  Icon(widget.icon, color: _homeAccent),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      widget.title,
+                      style: const TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w700,
+                        color: _homeText,
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-            if (widget.child != null)
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-                sliver: SliverToBoxAdapter(child: widget.child),
-              ),
-            ...widget.slivers,
-          ],
-        ),
+          ),
+          if (widget.child != null)
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+              sliver: SliverToBoxAdapter(child: widget.child),
+            ),
+          ...widget.slivers,
+        ],
       ),
     ),
   );

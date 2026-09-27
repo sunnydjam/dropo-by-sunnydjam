@@ -195,6 +195,7 @@ void main() {
       const ValueKey('setting-switch-Анимации интерфейса'),
     );
     await tester.ensureVisible(toggle);
+    await tester.pump();
     await tester.tap(toggle);
     await tester.pumpAndSettle();
     expect((await bridge.appConfig())['reduceMotion'], isTrue);

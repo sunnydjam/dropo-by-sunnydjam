@@ -13,6 +13,13 @@ class _SpaceBridge extends MockCoreBridge {
   bool hasError = false;
   bool connecting = false;
   int toggles = 0;
+  List<VpnSourceInfo>? sourcesOverride;
+  @override
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async => VpnSourcesSnapshot(
+    sources: await vpnSources(),
+    autoSelect: true,
+    running: connected,
+  );
   @override
   Future<Map<String, dynamic>> appConfig() async => {
     ...await super.appConfig(),
@@ -35,17 +42,24 @@ class _SpaceBridge extends MockCoreBridge {
         : 'stopped',
   );
   @override
-  Future<List<VpnSourceInfo>> vpnSources() async => [
-    VpnSourceInfo.fromJson({
-      'id': 'preview-source',
-      'name': 'Моя подписка',
-      'kind': 'subscription',
-      'selected_node': 0,
-      'node_count': 1,
-      'node_names': ['Сервер 1'],
-      'active': connected,
-    }),
-  ];
+  Future<List<VpnSourceInfo>> vpnSources() async =>
+      sourcesOverride ??
+      [
+        VpnSourceInfo.fromJson({
+          'id': 'preview-source',
+          'name': 'Моя подписка',
+          'kind': 'subscription',
+          'selected_node': 0,
+          'node_count': 1,
+          'node_names': ['Сервер 1'],
+          'active': connected,
+          'response': {
+            'state': connected ? 'ok' : 'unavailable',
+            'latencyMs': connected ? 42 : null,
+            'checkedAt': DateTime.now().toUtc().toIso8601String(),
+          },
+        }),
+      ];
   @override
   Future<Map<String, dynamic>> setConnected(bool value) async {
     toggles++;
@@ -123,6 +137,106 @@ Future<void> _capture(
 }
 
 void main() {
+  for (final (size, scale) in [
+    (const Size(1100, 760), 1.0),
+    (const Size(390, 568), 2.0),
+  ]) {
+    testWidgets(
+      'all embedded pages share the unframed star field $size $scale',
+      (tester) async {
+        await _pumpScene(tester, _SpaceBridge(), size, scale);
+        for (final section in [
+          'sources',
+          'services',
+          'settings',
+          'app-settings',
+          'technical-settings',
+          'profiles',
+          'help',
+          'logs',
+          'stats',
+          'about',
+        ]) {
+          await openSection(tester, section);
+          expect(
+            find.byKey(const ValueKey('atlas-space-background')),
+            findsOneWidget,
+          );
+          expect(
+            tester.getRect(
+              find.byKey(const ValueKey('atlas-space-background')),
+            ),
+            Offset.zero & size,
+          );
+          final surface = find.byKey(const ValueKey('flat-feature-page'));
+          if (section != 'settings' && section != 'help') {
+            expect(surface, findsOneWidget);
+            expect(tester.widget<Material>(surface).color, Colors.transparent);
+          }
+          if (section == 'sources') {
+            final source = tester.widget<Container>(
+              find.byKey(const ValueKey('source-row-surface-preview-source')),
+            );
+            final decoration = source.decoration! as BoxDecoration;
+            expect(decoration.color, isNull);
+            expect(decoration.gradient, isNull);
+            expect(decoration.borderRadius, isNull);
+          }
+          await _capture(tester, 'flat-$section-${size.width.toInt()}-$scale');
+          expect(tester.takeException(), isNull);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+  for (final (size, scale) in [
+    (const Size(1100, 760), 1.0),
+    (const Size(820, 560), 1.0),
+    (const Size(390, 568), 2.0),
+  ]) {
+    testWidgets('source list and expanded settings fit $size at $scale', (
+      tester,
+    ) async {
+      final bridge = _SpaceBridge();
+      bridge.sourcesOverride = [
+        ...(await bridge.vpnSources()),
+        VpnSourceInfo.fromJson({
+          'id': 'free-preview',
+          'name': 'Бесплатный источник',
+          'public_catalog_id': 'preview-public',
+          'node_count': 2,
+          'node_names': ['Нидерланды · 1', 'Германия · 2'],
+          'response': {
+            'state': 'ok',
+            'latencyMs': 86,
+            'checkedAt': DateTime.now().toUtc().toIso8601String(),
+          },
+        }),
+      ];
+      await _pumpScene(tester, bridge, size, scale);
+      await openSection(tester, 'sources');
+      await _capture(tester, 'source-list-${size.width.toInt()}-$scale');
+      final details = find.byKey(
+        const PageStorageKey('source-details-preview-source'),
+      );
+      await tester.ensureVisible(details);
+      await tester.pump();
+      await tester.tap(details);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final server = find.byKey(
+        const ValueKey('choose-vpn-node-preview-source'),
+      );
+      if (server.hitTestable().evaluate().isEmpty) {
+        await tester.ensureVisible(server);
+      }
+      await tester.pump();
+      await _capture(tester, 'source-settings-${size.width.toInt()}-$scale');
+      expect(server, findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
     await (FontLoader(
@@ -247,6 +361,7 @@ void main() {
       const ValueKey('setting-switch-Анимации интерфейса'),
     );
     await tester.ensureVisible(toggle);
+    await tester.pump();
     await tester.tap(toggle);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
