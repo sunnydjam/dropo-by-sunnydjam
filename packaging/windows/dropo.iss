@@ -109,6 +109,71 @@ function CreateFileForUpdate(FileName: String; DesiredAccess, ShareMode,
   external 'CreateFileW@kernel32.dll stdcall';
 function CloseUpdateHandle(Handle: THandle): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
+function OpenUpdateProcess(Access: LongWord; Inherit: Boolean; ProcessID: LongWord): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function QueryUpdateProcessName(Handle: THandle; Flags: LongWord; Name: String; var Size: LongWord): Boolean;
+  external 'QueryFullProcessImageNameW@kernel32.dll stdcall';
+function TerminateUpdateProcess(Handle: THandle; ExitCode: LongWord): Boolean;
+  external 'TerminateProcess@kernel32.dll stdcall';
+function WaitForUpdateProcess(Handle: THandle; Milliseconds: LongWord): LongWord;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function GetUpdateLongPath(Name, Buffer: String; Size: LongWord): LongWord;
+  external 'GetLongPathNameW@kernel32.dll stdcall';
+
+function UpdateLongPath(const Name: String): String;
+var
+  Buffer: String;
+  Count: LongWord;
+begin
+  SetLength(Buffer, 32768);
+  Count := GetUpdateLongPath(Name, Buffer, 32768);
+  Result := Name;
+  if (Count > 0) and (Count < 32768) then begin
+    SetLength(Buffer, Count);
+    Result := Buffer;
+  end;
+end;
+
+procedure CloseInstalledUpdateUI();
+var
+  Locator, Services, Processes, Process: Variant;
+  I: Integer;
+  Handle: THandle;
+  Name, Expected: String;
+  Size: LongWord;
+begin
+  { WM_CLOSE can hide Dropo in the tray rather than release the Flutter DLL.
+    Only terminate the exact installed UI, never by basename or a shell command.
+    Re-query its image through the opened handle to avoid a PID-reuse race. }
+  Expected := UpdateLongPath(ExpandConstant('{app}\resources\dropo-ui.exe'));
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Services := Locator.ConnectServer('', 'root\CIMV2');
+    Processes := Services.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE Name=''dropo-ui.exe''');
+    for I := 0 to Processes.Count - 1 do begin
+      Process := Processes.ItemIndex(I);
+      Handle := OpenUpdateProcess($00101001, False, Process.ProcessId);
+      if Handle <> 0 then begin
+        try
+          Size := 32768;
+          SetLength(Name, Size);
+          if QueryUpdateProcessName(Handle, 0, Name, Size) then begin
+            SetLength(Name, Size);
+            if CompareText(UpdateLongPath(Name), Expected) = 0 then begin
+              Log('Closing mapped installed Flutter UI: ' + Name);
+              if TerminateUpdateProcess(Handle, 0) then
+                WaitForUpdateProcess(Handle, 5000);
+            end;
+          end;
+        finally
+          CloseUpdateHandle(Handle);
+        end;
+      end;
+    end;
+  except
+    Log('Could not close installed UI: ' + GetExceptionMessage);
+  end;
+end;
 
 function CanReplaceRuntimeFile(const Name: String): Boolean;
 var
@@ -127,6 +192,7 @@ var
   Attempt: Integer;
 begin
   if RuntimeUnlocked then exit;
+  CloseInstalledUpdateUI();
   { BeforeInstall runs after Restart Manager closes owners, before payload copy.
     A blocked DLL must not leave a new version label with the old Dart snapshot. }
   for Attempt := 1 to 40 do begin
@@ -140,6 +206,7 @@ begin
     end;
     Sleep(250);
   end;
+  Log('Runtime remained locked before application payload copy.');
   MsgBox('Обновление не установлено: файлы Dropo заняты или недоступны. Закройте все окна Dropo и повторите установку. Новые файлы приложения ещё не копировались.', mbError, MB_OK);
   RaiseException('Dropo runtime is still locked; refusing a partial update.');
 end;

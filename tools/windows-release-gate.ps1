@@ -95,9 +95,13 @@ function Invoke-WindowsInstallSmoke {
         # UI that must stay alive. Wait only for Setup itself, with a time limit.
         $process = Start-Process -FilePath $SetupPath -ArgumentList $passArgs -WindowStyle Hidden -PassThru
         if (-not $process.WaitForExit(180000)) {
+            Get-Content -LiteralPath $setupLog -Tail 100 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+            Get-Process -Name 'dropo', 'dropo-ui', 'dropo-core' -ErrorAction SilentlyContinue |
+                Select-Object Id, Path, MainWindowTitle | Format-List | Out-String | Write-Host
             throw "Installer smoke pass $pass did not exit within 180 seconds."
         }
         if ($process.ExitCode -ne 0) {
+            Get-Content -LiteralPath $setupLog -Tail 100 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
             throw "Installer smoke pass $pass failed with exit code $($process.ExitCode)."
         }
         foreach ($required in @(

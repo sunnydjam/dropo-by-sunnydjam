@@ -85,6 +85,8 @@ func TestInstallerGuardsMappedFlutterFilesBeforePayloadCopy(t *testing.T) {
 	for _, required := range []string{
 		"CloseApplicationsFilter=*.exe,*.dll,*.so",
 		"BeforeInstall: EnsureRuntimeUnlocked",
+		"QueryFullProcessImageNameW@kernel32.dll",
+		"CompareText(UpdateLongPath(Name), Expected) = 0",
 		"resources\\flutter_windows.dll",
 		"resources\\data\\app.so",
 		"refusing a partial update",
