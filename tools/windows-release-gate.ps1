@@ -90,6 +90,41 @@ function Invoke-WindowsInstallSmoke {
             # Exercise the actual installed updater, including clients released
             # before the relaunch fix. A plain silent reinstall is not this path.
             $passArgs += @("--from-update", "/CLOSEAPPLICATIONS")
+            # DownloadAndInstallUpdate stops the VPN and exits the headless core
+            # before payload replacement. Restart Manager cannot reliably close
+            # a headless Go core. Reproduce that authenticated hand-off, while
+            # deliberately retaining the mapped old UI to test the DLL failure.
+            $expectedCorePath = (Get-Item -LiteralPath (Join-Path $installRoot 'resources\dropo-core.exe')).FullName
+            $coreDeadline = (Get-Date).AddSeconds(20)
+            do {
+                $coreOwners = @(Get-Process -Name 'dropo-core' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Path -and (Get-Item -LiteralPath $_.Path).FullName -eq $expectedCorePath })
+                $bridgeOwners = @(Get-NetTCPConnection -LocalPort 17890 -State Listen -ErrorAction SilentlyContinue |
+                    Where-Object { $_.OwningProcess -in $coreOwners.Id })
+                if ($bridgeOwners.Count -gt 0) { break }
+                Start-Sleep -Milliseconds 250
+            } while ((Get-Date) -lt $coreDeadline)
+            if ($coreOwners.Count -ne 1 -or $bridgeOwners.Count -eq 0) {
+                throw 'The test installation does not own the updater bridge.'
+            }
+            $updateHeaders = @{ 'X-Dropo-Token' = (Get-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'dropo\bridge-token') -Raw).Trim() }
+            $null = Invoke-RestMethod -Uri 'http://127.0.0.1:17890/api/quit' -Method Post -Headers $updateHeaders -TimeoutSec 15
+            try {
+                $null = Invoke-RestMethod -Uri 'http://127.0.0.1:17890/api/quit/finalize' -Method Post -Headers $updateHeaders -TimeoutSec 10
+            } catch {
+                # FinalizeQuit may close the socket before its response flushes;
+                # the process-exit assertion below is authoritative.
+                Write-Host '[GATE] Core finalize closed its bridge connection.'
+            }
+            $updateHeaders = $null
+            if (-not $coreOwners[0].WaitForExit(10000)) {
+                throw 'The updater core did not exit after graceful shutdown.'
+            }
+            $oldUI = @(Get-Process -Name 'dropo-ui' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -and (Get-Item -LiteralPath $_.Path).FullName -eq
+                    (Get-Item -LiteralPath (Join-Path $installRoot 'resources\dropo-ui.exe')).FullName })
+            if ($oldUI.Count -ne 1) { throw 'The mapped old Flutter UI must remain alive for the upgrade regression.' }
+            Write-Host '[GATE] Core hand-off completed; old Flutter UI remains mapped for the upgrade regression.'
         }
         # Start-Process -Wait waits for descendants too, including the reopened
         # UI that must stay alive. Wait only for Setup itself, with a time limit.
