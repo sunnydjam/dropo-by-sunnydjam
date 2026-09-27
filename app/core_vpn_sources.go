@@ -119,6 +119,14 @@ func normalizeProfileVPNSources(profile *ProfileData) {
 	if profile == nil {
 		return
 	}
+	if profile.VPNSourceSelectionMode != "latency" && profile.VPNSourceSelectionMode != "priority" {
+		// Old profiles never recorded whether their ordering was manual. Preserve
+		// an existing multi-source chain rather than overwrite possible user intent.
+		profile.VPNSourceSelectionMode = "latency"
+		if len(profile.VPNSources) > 1 {
+			profile.VPNSourceSelectionMode = "priority"
+		}
+	}
 	if len(profile.VPNSources) == 0 && strings.TrimSpace(profile.SubscriptionURL) != "" {
 		if source, err := newVPNSource("source-1", "Primary", profile.SubscriptionURL); err == nil {
 			source.NodeCount = profile.ProxyCount

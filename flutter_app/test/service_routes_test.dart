@@ -199,7 +199,8 @@ void main() {
       find.byKey(const ValueKey('pin-service-discord')),
     );
     expect(pin.onPressed, isNull);
-    expect(pin.tooltip, 'Основной сервис');
+    expect(pin.tooltip, isNull);
+    expect((pin.icon as Semantics).properties.label, 'Основной сервис');
     expect(tester.takeException(), isNull);
   });
 

@@ -301,6 +301,7 @@ func (a *App) startVPNSourceMonitor() {
 	a.vpnSourceHealth = make(map[string]vpnSourceHealthState)
 	a.vpnSourceObservations = make(map[string]vpnSourceObservation)
 	a.vpnSourceManual = ""
+	a.vpnSourceRankedTags = nil
 	a.vpnSourceLastSwitch = time.Time{}
 	a.vpnSourceHealthKnown = false
 	a.vpnSourceAvailable = false
@@ -338,7 +339,7 @@ func (a *App) runVPNSourceMonitor(ctx context.Context, generation uint64) {
 	if !a.vpnSourceMonitorCurrent(ctx, generation) {
 		return
 	}
-	a.selectFirstHealthyVPNSource(ctx, generation)
+	a.selectInitialVPNSource(ctx, generation)
 	ticker := time.NewTicker(vpnSourceHealthInterval)
 	defer ticker.Stop()
 	for {
@@ -364,6 +365,7 @@ func (a *App) stopVPNSourceMonitor() {
 	a.vpnSourceLastSwitch = time.Time{}
 	a.vpnSourceHealth = nil
 	a.vpnSourceObservations = nil
+	a.vpnSourceRankedTags = nil
 	a.vpnSourceHealthKnown = false
 	a.vpnSourceAvailable = false
 	a.vpnSourceHealthError = ""
@@ -371,13 +373,16 @@ func (a *App) stopVPNSourceMonitor() {
 	if cancel != nil {
 		cancel()
 	}
+	// Drain a selector write before another session can start its engine.
+	a.vpnSourceSelectionMu.Lock()
+	a.vpnSourceSelectionMu.Unlock()
 }
 
 func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 	if !a.vpnSourceMonitorCurrent(ctx, generation) {
 		return
 	}
-	tags := a.configuredVPNSourceTags()
+	tags := a.sessionVPNSourceTags()
 	if len(tags) == 0 {
 		return
 	}
@@ -386,7 +391,7 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 		return
 	}
 	if active == "" {
-		a.selectFirstHealthyVPNSource(ctx, generation)
+		a.selectInitialVPNSource(ctx, generation)
 		return
 	}
 	now := time.Now()
@@ -444,6 +449,11 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 }
 
 func (a *App) maybeRecoverPreferredVPNSource(ctx context.Context, generation uint64, tags []string, active string, now time.Time) {
+	// Automatic latency selection runs once per connection, not on each ping.
+	// Keep a healthy session stable; failures still follow the ranked chain.
+	if a.automaticVPNSourceSelection() {
+		return
+	}
 	activeIndex := -1
 	a.vpnSourceMonitorMu.Lock()
 	if a.vpnSourceMonitorGeneration != generation || a.vpnSourceMonitorCancel == nil {
@@ -576,6 +586,14 @@ func (a *App) clearManualVPNSourceForMonitor(generation uint64, tag string) bool
 }
 
 func (a *App) switchVPNSourceForMonitor(ctx context.Context, generation uint64, tag string) bool {
+	a.vpnSourceSelectionMu.Lock()
+	defer a.vpnSourceSelectionMu.Unlock()
+	a.vpnSourceMonitorMu.Lock()
+	manual := a.vpnSourceManual
+	a.vpnSourceMonitorMu.Unlock()
+	if manual != "" && manual != tag {
+		return false
+	}
 	if !a.vpnSourceMonitorCurrent(ctx, generation) || !a.switchOutboundSelectorContext(ctx, "auto-select", tag) {
 		return false
 	}
@@ -636,6 +654,8 @@ func (a *App) activeVPNSource() string {
 }
 
 func (a *App) SelectVPNSource(id string) map[string]interface{} {
+	a.vpnSourceSelectionMu.Lock()
+	defer a.vpnSourceSelectionMu.Unlock()
 	tag := "vpn-source-" + normalizeVPNSourceID(id)
 	found := false
 	for _, candidate := range a.configuredVPNSourceTags() {

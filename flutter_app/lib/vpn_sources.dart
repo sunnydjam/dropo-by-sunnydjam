@@ -377,8 +377,9 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                     'Dropo проверит доступные серверы до сохранения.'
               : mobile
               ? 'На Android используется одна активная подписка. Новая ссылка заменит сохранённую после проверки.'
-              : 'Собственные и бесплатные источники работают в указанном вами порядке. '
-                    'Если источник недоступен, Dropo переходит к следующему включённому.',
+              : 'По умолчанию Dropo выбирает источник с наименьшим измеренным откликом. '
+                    'Перемещение источников задаёт ручной приоритет вместо автовыбора. '
+                    'При сбое используется следующий рабочий источник.',
           style: const TextStyle(
             color: Color(0xFFB4C9C1),
             fontSize: 13,
@@ -472,9 +473,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           ),
         ),
         const SizedBox(height: 18),
-        _VpnSectionTitle(
-          mobile ? 'Моя VPN-подписка' : 'Мои источники · в порядке приоритета',
-        ),
+        _VpnSectionTitle(mobile ? 'Моя VPN-подписка' : 'Мои источники'),
         if (!loading && sourcesFresh && sources.isEmpty && !showPersonalForm)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 10),
@@ -512,6 +511,19 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             spacing: 8,
             runSpacing: 8,
             children: [
+              TextButton.icon(
+                key: const ValueKey('source-auto-select'),
+                onPressed: disabled
+                    ? null
+                    : () => _changeSource(
+                        widget.bridge.enableVpnSourceAutoSelect,
+                        'Включаем автовыбор…',
+                        success:
+                            'Автовыбор включён. При подключении сравнивается отклик отдельных источников; сервер внутри подписки не меняется.',
+                      ),
+                icon: const Icon(Icons.auto_awesome_outlined),
+                label: const Text('Автовыбор по пингу'),
+              ),
               if (!mobile && sources.isNotEmpty)
                 TextButton.icon(
                   onPressed: disabled
@@ -546,7 +558,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             onChanged: (_) => _clearPersonalInputError(),
             decoration: _fieldDecoration(
               hint: 'https://… или vless://…',
-              suffixIcon: IconButton(
+              suffixIcon: _AccessibleIconButton(
                 tooltip: 'Вставить ссылку',
                 icon: const Icon(Icons.content_paste),
                 onPressed: disabled
@@ -905,7 +917,7 @@ class _VpnSourceTile extends StatelessWidget {
                 ),
               ),
               if (!singleSource)
-                Tooltip(
+                _AccessibleDescription(
                   message: source.disabled
                       ? 'Включить источник'
                       : 'Выключить источник',
@@ -984,7 +996,7 @@ class _VpnSourceTile extends StatelessWidget {
                     icon: const Icon(Icons.vertical_align_top, size: 18),
                     label: const Text('Сделать основным'),
                   ),
-                IconButton(
+                _AccessibleIconButton(
                   key: ValueKey('vpn-source-up-${source.id}'),
                   tooltip: 'Выше по приоритету',
                   icon: const Icon(Icons.arrow_upward, size: 18),
@@ -992,7 +1004,7 @@ class _VpnSourceTile extends StatelessWidget {
                       ? null
                       : () => onMove(index - 1),
                 ),
-                IconButton(
+                _AccessibleIconButton(
                   key: ValueKey('vpn-source-down-${source.id}'),
                   tooltip: 'Ниже по приоритету',
                   icon: const Icon(Icons.arrow_downward, size: 18),
@@ -1001,7 +1013,7 @@ class _VpnSourceTile extends StatelessWidget {
                       : () => onMove(index + 1),
                 ),
               ],
-              IconButton(
+              _AccessibleIconButton(
                 tooltip: 'Удалить источник',
                 icon: const Icon(Icons.delete_outline, size: 18),
                 onPressed: busy ? null : onRemove,

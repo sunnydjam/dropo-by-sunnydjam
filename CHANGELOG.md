@@ -2,6 +2,18 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.38 — 2026-09-28
+
+- remove visual tooltips while retaining accessible control names; move Dropo
+  into the left navigation header and extend the star field throughout the shell;
+- remove the home VPN-source card and duplicate settings link; retain source
+  management in primary navigation;
+- add bounded, session-cancellable lowest-HTTP-latency selection between independent
+  Windows VPN sources. Preserve chosen subscription nodes, manual priorities and
+  existing multi-source profile order; expose an explicit return to automatic mode.
+- keep healthy sessions stable and use the ranked source chain for failure recovery.
+  The larger source-page/Boost redesign is deferred.
+
 ## 3.0.37 — 2026-09-27
 
 ### Visible, verifiable Windows updates

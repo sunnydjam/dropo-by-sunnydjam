@@ -125,7 +125,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     }
   }
 
-  Widget _toggle({bool close = false}) => IconButton(
+  Widget _toggle({bool close = false}) => _AccessibleIconButton(
     key: ValueKey(close ? 'close-navigation' : 'toggle-navigation'),
     focusNode: close ? null : _toggleFocus,
     tooltip: close ? 'Закрыть меню' : 'Открыть меню',
@@ -143,7 +143,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
         (section != 'work' || widget.onWorkNetworks != null);
     return Semantics(
       selected: selected,
-      child: Tooltip(
+      child: _AccessibleDescription(
         message: compact ? label : '',
         excludeFromSemantics: compact,
         child: TextButton(
@@ -199,14 +199,14 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
         contentWidth < 608 ||
         navigationTextScale > 1.3;
     final compactTelemetry = contentWidth < 760 || navigationTextScale > 1.5;
-    Widget versionLink() => Tooltip(
+    Widget versionLink() => _AccessibleDescription(
       message: 'О приложении',
       child: TextButton(
         key: const ValueKey('app-version'),
         onPressed: widget.onAbout,
         style: TextButton.styleFrom(
           minimumSize: const Size(88, 48),
-          backgroundColor: _atlasBackground,
+          backgroundColor: Colors.transparent,
           padding: const EdgeInsets.symmetric(horizontal: 8),
           alignment: Alignment.centerRight,
         ),
@@ -266,11 +266,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
             child: Stack(
               children: [
                 Positioned.fill(
-                  left: railWidth,
-                  top: 48,
-                  bottom: reserveFooter ? 48 : 0,
                   child: _AtlasSpaceBackground(
-                    active: widget.activeSection == 'home',
                     motionEnabled:
                         widget.motionEnabled &&
                         widget.visible &&
@@ -278,104 +274,112 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                         widget.overlay == null,
                   ),
                 ),
-                ExcludeFocus(
-                  excluding: _open || widget.overlay != null,
-                  child: ExcludeSemantics(
+                Opacity(
+                  opacity: _open ? 0 : 1,
+                  child: ExcludeFocus(
                     excluding: _open || widget.overlay != null,
-                    child: TickerMode(
-                      enabled:
-                          widget.visible && !_open && widget.overlay == null,
-                      child: Padding(
-                        padding: EdgeInsets.only(left: railWidth),
-                        child: Column(
-                          children: [
-                            Container(
-                              key: const ValueKey('compact-header'),
-                              constraints: const BoxConstraints(minHeight: 48),
-                              padding: EdgeInsets.only(
-                                left: showRail ? 16 : 0,
-                                right: 16,
-                              ),
-                              decoration: const BoxDecoration(
-                                color: _atlasBackground,
-                                border: Border(
-                                  bottom: BorderSide(color: _atlasBorder),
+                    child: ExcludeSemantics(
+                      excluding: _open || widget.overlay != null,
+                      child: TickerMode(
+                        enabled:
+                            widget.visible && !_open && widget.overlay == null,
+                        child: Padding(
+                          padding: EdgeInsets.only(left: railWidth),
+                          child: Column(
+                            children: [
+                              Container(
+                                key: const ValueKey('compact-header'),
+                                constraints: const BoxConstraints(
+                                  minHeight: 48,
                                 ),
-                              ),
-                              child: Row(
-                                children: [
-                                  if (!showRail) _toggle(),
-                                  if (_hasParent)
-                                    IconButton(
-                                      key: const ValueKey('section-back'),
-                                      tooltip: 'Назад',
-                                      onPressed: widget.disabled ? null : _back,
-                                      icon: const Icon(Icons.arrow_back),
-                                    ),
-                                  const Text(
-                                    'Dropo',
-                                    style: TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.w800,
-                                      letterSpacing: -0.8,
-                                    ),
+                                padding: EdgeInsets.only(
+                                  left: showRail ? 16 : 0,
+                                  right: 16,
+                                ),
+                                decoration: const BoxDecoration(
+                                  border: Border(
+                                    bottom: BorderSide(color: _atlasBorder),
                                   ),
-                                  if (screen.width >= 600 &&
-                                      MediaQuery.textScalerOf(
-                                            context,
-                                          ).scale(14) <=
-                                          20) ...[
-                                    const SizedBox(width: 8),
-                                    const Text(
-                                      'by sunnydjam',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: _atlasMuted,
+                                ),
+                                child: Row(
+                                  children: [
+                                    if (!showRail) _toggle(),
+                                    if (_hasParent)
+                                      _AccessibleIconButton(
+                                        key: const ValueKey('section-back'),
+                                        tooltip: 'Назад',
+                                        onPressed: widget.disabled
+                                            ? null
+                                            : _back,
+                                        icon: const Icon(Icons.arrow_back),
                                       ),
+                                    if (!expandedRail)
+                                      const Text(
+                                        'Dropo',
+                                        style: TextStyle(
+                                          fontSize: 24,
+                                          fontWeight: FontWeight.w800,
+                                          letterSpacing: -0.8,
+                                        ),
+                                      ),
+                                    if (!expandedRail &&
+                                        screen.width >= 600 &&
+                                        MediaQuery.textScalerOf(
+                                              context,
+                                            ).scale(14) <=
+                                            20) ...[
+                                      const SizedBox(width: 8),
+                                      const Text(
+                                        'by sunnydjam',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: _atlasMuted,
+                                        ),
+                                      ),
+                                    ],
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: widget.activeSection == 'home'
+                                          ? Align(
+                                              alignment: Alignment.centerRight,
+                                              child: compactTelemetry
+                                                  ? widget.homeTelemetry
+                                                  : null,
+                                            )
+                                          : Text(
+                                              title,
+                                              textAlign: TextAlign.end,
+                                              style: const TextStyle(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
                                     ),
                                   ],
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: widget.activeSection == 'home'
-                                        ? Align(
-                                            alignment: Alignment.centerRight,
-                                            child: compactTelemetry
-                                                ? widget.homeTelemetry
-                                                : null,
-                                          )
-                                        : Text(
-                                            title,
-                                            textAlign: TextAlign.end,
-                                            style: const TextStyle(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Expanded(
-                              child: widget.activeSection == 'home'
-                                  ? widget.child
-                                  : Padding(
-                                      padding: const EdgeInsets.all(12),
-                                      child: Column(
-                                        children: [
-                                          Expanded(child: widget.child),
-                                        ],
-                                      ),
-                                    ),
-                            ),
-                            if (reserveFooter)
-                              ColoredBox(
-                                color: _atlasBackground,
-                                child: Align(
-                                  alignment: Alignment.centerRight,
-                                  child: versionLink(),
                                 ),
                               ),
-                          ],
+                              Expanded(
+                                child: widget.activeSection == 'home'
+                                    ? widget.child
+                                    : Padding(
+                                        padding: const EdgeInsets.all(12),
+                                        child: Column(
+                                          children: [
+                                            Expanded(child: widget.child),
+                                          ],
+                                        ),
+                                      ),
+                              ),
+                              if (reserveFooter)
+                                ColoredBox(
+                                  color: Colors.transparent,
+                                  child: Align(
+                                    alignment: Alignment.centerRight,
+                                    child: versionLink(),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -393,7 +397,6 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                       key: const ValueKey('navigation-rail'),
                       child: DecoratedBox(
                         decoration: const BoxDecoration(
-                          color: _atlasSurface,
                           border: Border(
                             right: BorderSide(color: _atlasBorder),
                           ),
@@ -408,8 +411,13 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                   child: Padding(
                                     padding: EdgeInsets.only(left: 18),
                                     child: Text(
-                                      'Навигация',
-                                      style: TextStyle(color: _atlasMuted),
+                                      'Dropo',
+                                      key: ValueKey('navigation-brand'),
+                                      style: TextStyle(
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: -0.8,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -474,8 +482,8 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                         },
                         child: Material(
                           key: const ValueKey('navigation-drawer'),
-                          color: _atlasSurface,
-                          elevation: 16,
+                          color: Colors.transparent,
+                          elevation: 0,
                           child: Column(
                             children: [
                               Row(
@@ -570,7 +578,7 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
                 Row(
                   children: [
                     const Expanded(child: Text('Сообщения подключения')),
-                    IconButton(
+                    _AccessibleIconButton(
                       tooltip: 'Закрыть',
                       mouseCursor: SystemMouseCursors.click,
                       onPressed: () => Navigator.pop(context),
@@ -616,14 +624,14 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
                         child: SingleChildScrollView(child: widget.child),
                       ),
                     ),
-                    IconButton(
+                    _AccessibleIconButton(
                       key: const ValueKey('expand-notice'),
                       tooltip: 'Открыть сообщение полностью',
                       mouseCursor: SystemMouseCursors.click,
                       onPressed: _showDetails,
                       icon: const Icon(Icons.open_in_full, size: 16),
                     ),
-                    IconButton(
+                    _AccessibleIconButton(
                       key: const ValueKey('dismiss-notice'),
                       tooltip: 'Свернуть сообщение',
                       mouseCursor: SystemMouseCursors.click,

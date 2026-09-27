@@ -254,142 +254,6 @@ class _HomeConnectionPanel extends StatelessWidget {
   }
 }
 
-class _HomeSourcePanel extends StatelessWidget {
-  const _HomeSourcePanel({
-    required this.sources,
-    required this.loaded,
-    required this.failed,
-    required this.connected,
-    required this.online,
-    required this.hasSubscription,
-    required this.onManage,
-    this.atlas = false,
-  });
-  final List<VpnSourceInfo> sources;
-  final bool loaded, failed, connected, online, hasSubscription;
-  final VoidCallback? onManage;
-  final bool atlas;
-
-  @override
-  Widget build(BuildContext context) {
-    VpnSourceInfo? source;
-    final available = sources
-        .where((source) => !source.disabled)
-        .toList(growable: false);
-    for (final candidate in available) {
-      if (connected && candidate.active && loaded) {
-        source = candidate;
-        break;
-      }
-    }
-    final active = source != null;
-    if (!connected && loaded && available.isNotEmpty) source = available.first;
-    String title;
-    String detail;
-    if (!online || failed) {
-      title = 'Источник не подтверждён';
-      detail =
-          'Нет актуальных данных от ядра. Сохранённые источники доступны в настройках.';
-    } else if (!loaded) {
-      title = 'Получаем источники…';
-      detail = 'Это не задерживает подключение.';
-    } else if (source != null) {
-      title = source.name;
-      final node = source.selectedNode;
-      final nodeName = node >= 0 && node < source.nodeNames.length
-          ? source.nodeNames[node]
-          : 'Первый поддерживаемый сервер';
-      detail =
-          '$nodeName · ${active ? 'используется сейчас' : 'первый по приоритету'}';
-    } else if (connected && available.isNotEmpty) {
-      title = 'VPN-источник не подтверждён';
-      detail =
-          'Ядро не сообщило активный источник. Подключение не подтверждает использование VPN.';
-    } else if (sources.isNotEmpty) {
-      title = 'Источники выключены';
-      detail = 'Включите нужный источник для подключения через VPN.';
-    } else if (hasSubscription) {
-      title = 'Подписка добавлена';
-      detail = 'Данные об активном сервере ещё не получены.';
-    } else {
-      title = 'Источники VPN';
-      detail = 'Бесплатное подключение или своя подписка';
-    }
-    if (atlas) {
-      final known = source != null && loaded && online && !failed;
-      final node = known ? source.selectedNode : -1;
-      return _AtlasSourceTile(
-        title: known
-            ? (node >= 0 && node < source.nodeNames.length
-                  ? source.nodeNames[node]
-                  : 'Первый поддерживаемый сервер')
-            : title,
-        detail: known
-            ? '${source.name} · ${active ? 'используется сейчас' : 'первый по приоритету'}'
-            : detail,
-        publicNotice: known && source.isPublic
-            ? (active
-                  ? 'Бесплатный публичный источник · скорость зависит от нагрузки'
-                  : 'Бесплатный публичный источник')
-            : null,
-        onPressed: onManage,
-      );
-    }
-    return _HomePanel(
-      child: _HomeAdaptiveAction(
-        content: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Источник VPN',
-              style: TextStyle(color: _homeMuted, fontSize: 13),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              title,
-              key: const ValueKey('home-source-title'),
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              detail,
-              key: const ValueKey('home-source-detail'),
-              style: const TextStyle(color: _homeMuted, fontSize: 13),
-            ),
-            if (source != null && loaded && online && source.isPublic) ...[
-              const SizedBox(height: 8),
-              Text(
-                active
-                    ? 'Бесплатный публичный источник · скорость зависит от нагрузки'
-                    : 'Бесплатный публичный источник',
-                style: const TextStyle(color: Color(0xFFFFD38B), fontSize: 13),
-              ),
-            ],
-          ],
-        ),
-        action: OutlinedButton(
-          key: const ValueKey('home-manage-sources'),
-          onPressed: onManage,
-          style: OutlinedButton.styleFrom(
-            foregroundColor: _homeText,
-            side: const BorderSide(color: Color(0xFF587068)),
-            minimumSize: const Size(0, 44),
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
-            ),
-          ),
-          child: Text(
-            loaded && sources.isEmpty && !hasSubscription
-                ? 'Добавить'
-                : 'Изменить',
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _HomeRouteControls extends StatelessWidget {
   const _HomeRouteControls({
     required this.services,
@@ -483,7 +347,7 @@ class _HomeRouteControls extends StatelessWidget {
               const SizedBox(width: 8, height: 8),
               Flexible(
                 fit: FlexFit.loose,
-                child: Tooltip(
+                child: _AccessibleDescription(
                   message: hasSubscription
                       ? 'Направить весь трафик через VPN'
                       : _isMobileShell
@@ -683,7 +547,7 @@ class _HomeRouteServiceRow extends StatelessWidget {
                 ),
                 ?headerAction,
                 if (onRemove != null)
-                  IconButton(
+                  _AccessibleIconButton(
                     key: ValueKey('remove-home-route-${service.tag}'),
                     tooltip: 'Убрать из быстрого списка',
                     onPressed: enabled ? onRemove : null,
@@ -707,7 +571,7 @@ class _HomeRouteServiceRow extends StatelessWidget {
                 _homeRouteButton(service, 'direct', 'Напрямую', selected),
                 _homeRouteButton(service, 'vpn', 'VPN', selected),
                 if (!_isMobileShell)
-                  Tooltip(
+                  _AccessibleDescription(
                     message: service.zapretSupported
                         ? service.tag == 'discord'
                               ? 'Эксперимент: web/API могут работать, voice/video не гарантируются'

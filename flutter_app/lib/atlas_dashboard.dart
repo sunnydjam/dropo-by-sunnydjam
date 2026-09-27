@@ -12,12 +12,11 @@ const _atlasMint = Color(0xFF5CF0B0);
 class _AtlasHomeLayout extends StatelessWidget {
   const _AtlasHomeLayout({
     required this.connection,
-    required this.source,
     required this.routes,
     required this.notices,
     this.telemetry,
   });
-  final Widget connection, source, routes;
+  final Widget connection, routes;
   final Widget? notices;
   final Widget? telemetry;
 
@@ -42,11 +41,7 @@ class _AtlasHomeLayout extends StatelessWidget {
                         1.5,
                       ),
                   connection: connection,
-                  footer: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [source, const SizedBox(height: 8), routes],
-                  ),
+                  footer: routes,
                 ),
               ),
             ),
@@ -76,8 +71,8 @@ class _AtlasHomeLayout extends StatelessWidget {
   );
 }
 
-// Measure the real footer first: subscription names, public-source warnings and
-// text scaling must not be guessed from the monitor's height. The scroll view
+// Measure the real routing controls first: text scaling must not be guessed
+// from the monitor's height. The scroll view
 // supplies unbounded height; only genuinely insufficient space causes overflow.
 class _AtlasAdaptiveHomeBody extends MultiChildRenderObjectWidget {
   _AtlasAdaptiveHomeBody({
@@ -242,7 +237,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
         key: const ValueKey('home-connection-state'),
         label: title,
         liveRegion: true,
-        child: Tooltip(
+        child: _AccessibleDescription(
           message: connected
               ? 'Доступность сервисов проверяется отдельно.'
               : title,
@@ -329,77 +324,6 @@ class _AtlasConnectionPanel extends StatelessWidget {
   );
 }
 
-class _AtlasSourceTile extends StatelessWidget {
-  const _AtlasSourceTile({
-    required this.title,
-    required this.detail,
-    required this.onPressed,
-    this.publicNotice,
-  });
-  final String title, detail;
-  final String? publicNotice;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) => OutlinedButton(
-    key: const ValueKey('home-manage-sources'),
-    onPressed: onPressed,
-    style: OutlinedButton.styleFrom(
-      enabledMouseCursor: SystemMouseCursors.click,
-      disabledMouseCursor: SystemMouseCursors.basic,
-      foregroundColor: _atlasText,
-      backgroundColor: _atlasSurface,
-      side: const BorderSide(color: _atlasBorder),
-      padding: const EdgeInsets.all(10),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ),
-    child: Row(
-      children: [
-        const Icon(Icons.dns_outlined, size: 22),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                key: const ValueKey('home-source-title'),
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 5),
-              Text(
-                detail,
-                key: const ValueKey('home-source-detail'),
-                style: const TextStyle(
-                  color: _atlasMuted,
-                  fontSize: 12,
-                  height: 1.4,
-                ),
-              ),
-              if (publicNotice != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    publicNotice!,
-                    style: const TextStyle(
-                      color: Color(0xFFFFD38B),
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(width: 8),
-        const Icon(Icons.chevron_right, size: 20),
-      ],
-    ),
-  );
-}
-
 class _AtlasRouteControls extends StatelessWidget {
   const _AtlasRouteControls({required this.controls, required this.services});
   final _HomeRouteControls controls;
@@ -432,7 +356,7 @@ class _AtlasRouteControls extends StatelessWidget {
                 !allTraffic,
                 () => c.onRoutingModeChanged('blocked_only'),
               ),
-              Tooltip(
+              _AccessibleDescription(
                 message: c.hasSubscription
                     ? 'Направить общий трафик через VPN; исключения рабочих сетей сохраняются'
                     : _isMobileShell
@@ -488,7 +412,7 @@ class _AtlasRouteControls extends StatelessWidget {
                   letterSpacing: -0.6,
                 ),
               ),
-              IconButton(
+              _AccessibleIconButton(
                 key: const ValueKey('toggle-home-route-services'),
                 onPressed: () => c.onExpandedChanged(!c.expanded),
                 icon: Icon(c.expanded ? Icons.expand_less : Icons.expand_more),
@@ -673,7 +597,7 @@ class _AtlasServiceRow extends StatelessWidget {
         _AtlasServiceIcon(tag: service.tag),
         const SizedBox(width: 8),
         Expanded(
-          child: Tooltip(
+          child: _AccessibleDescription(
             message: !controls.connected
                 ? 'Сохранённая настройка · подключение выключено'
                 : allTraffic
@@ -686,7 +610,7 @@ class _AtlasServiceRow extends StatelessWidget {
           ),
         ),
         if (!isPrimaryHomeRouteService(service.tag))
-          IconButton(
+          _AccessibleIconButton(
             key: ValueKey('remove-home-route-${service.tag}'),
             tooltip: 'Убрать из быстрого списка',
             onPressed: controls.enabled

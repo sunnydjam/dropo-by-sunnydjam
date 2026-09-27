@@ -57,7 +57,8 @@ void main() {
       await tester.pump();
 
       expect(find.text('Dropo'), findsOneWidget);
-      expect(find.text('by sunnydjam'), findsOneWidget);
+      expect(find.byKey(const ValueKey('navigation-brand')), findsOneWidget);
+      expect(find.text('Навигация'), findsNothing);
       expect(find.byKey(const ValueKey('navigation-rail')), findsOneWidget);
       expect(find.byKey(const ValueKey('atlas-planet')), findsOneWidget);
       expect(find.byKey(const ValueKey('nav-settings')), findsOneWidget);

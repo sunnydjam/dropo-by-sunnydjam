@@ -153,6 +153,7 @@ void main() {
     (const Size(820, 560), 1.0),
     (const Size(684, 461), 1.0),
     (const Size(1100, 760), 1.0),
+    (const Size(390, 568), 1.0),
     (const Size(390, 568), 2.0),
   ]) {
     testWidgets('space shell keeps controls usable at $size scale $scale', (
@@ -160,6 +161,19 @@ void main() {
     ) async {
       final bridge = _SpaceBridge();
       await _pumpScene(tester, bridge, size, scale);
+      expect(
+        tester.getRect(find.byKey(const ValueKey('atlas-space-background'))),
+        Offset.zero & size,
+      );
+      expect(find.text('Навигация'), findsNothing);
+      expect(find.text('Dropo'), findsOneWidget);
+      expect(find.byKey(const ValueKey('home-manage-sources')), findsNothing);
+      if (size.width >= 800 && scale <= 1.5) {
+        expect(
+          tester.getRect(find.byKey(const ValueKey('navigation-brand'))).right,
+          lessThan(208),
+        );
+      }
       expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
       final action = find.byKey(const ValueKey('home-connect'));
       expect(action.hitTestable(), findsOneWidget);
@@ -221,10 +235,13 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     await openSection(tester, 'settings');
+    expect(find.byKey(const ValueKey('link-sources')), findsNothing);
     paused = _phase(tester);
     await tester.pump(const Duration(seconds: 5));
-    expect(_phase(tester), paused);
+    expect(_phase(tester), greaterThan(paused));
     await _capture(tester, 'settings-820');
+    await openSection(tester, 'sources');
+    await _capture(tester, 'sources-820');
     await openSection(tester, 'app-settings');
     final toggle = find.byKey(
       const ValueKey('setting-switch-Анимации интерфейса'),
@@ -238,6 +255,69 @@ void main() {
     paused = _phase(tester);
     await tester.pump(const Duration(seconds: 5));
     expect(_phase(tester), paused);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'production app hides hover and long-press tooltips across routes',
+    (tester) async {
+      tester.view.physicalSize = const Size(684, 560);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(DropoApp(bridge: _SpaceBridge()));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      final mouse = await tester.createGesture(
+        kind: ui.PointerDeviceKind.mouse,
+      );
+      await mouse.addPointer(location: Offset.zero);
+      final menu = find.byKey(const ValueKey('toggle-navigation'));
+      expect(TooltipVisibility.of(tester.element(menu)), isFalse);
+      final semantics = tester.ensureSemantics();
+      expect(tester.getSemantics(menu).label, contains('Открыть меню'));
+      await mouse.moveTo(tester.getCenter(menu));
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('Открыть меню'), findsNothing);
+      await tester.longPress(menu);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Открыть меню'), findsNothing);
+      if (find
+          .byKey(const ValueKey('close-navigation'))
+          .evaluate()
+          .isNotEmpty) {
+        await tester.tap(find.byKey(const ValueKey('close-navigation')));
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(const ValueKey('app-version')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final dialog = find.byType(Dialog);
+      expect(dialog, findsOneWidget);
+      expect(TooltipVisibility.of(tester.element(dialog)), isFalse);
+      semantics.dispose();
+      await mouse.removePointer();
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('compact drawer keeps the same full-window star field', (
+    tester,
+  ) async {
+    await _pumpScene(tester, _SpaceBridge(), const Size(390, 568), 1);
+    await tester.tap(find.byKey(const ValueKey('toggle-navigation')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    final phase = _phase(tester);
+    await tester.pump(const Duration(seconds: 5));
+    expect(_phase(tester), phase);
+    await _capture(tester, 'drawer-390');
+    await tester.tap(find.byKey(const ValueKey('nav-sources')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.byType(VpnSourcesDialog), findsOneWidget);
+    await _capture(tester, 'sources-390');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

@@ -128,12 +128,6 @@ class _MinimalSettingsPage extends StatelessWidget {
       ],
       _ => <(String, String, String, IconData)>[
         (
-          'sources',
-          'Источники VPN',
-          'Свои подписки и бесплатный источник',
-          Icons.dns_outlined,
-        ),
-        (
           'service-settings',
           'Сервисы',
           'Маршруты приложений и сайтов',

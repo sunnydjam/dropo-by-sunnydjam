@@ -141,7 +141,7 @@ func (a *App) changeVPNSourcesTransaction(change func(*ProfileData) error, ops v
 
 	busyID := a.beginBusy("Обновляем цепочку VPN-источников...")
 	defer a.endBusy(busyID)
-	if err := a.configBuilder.BuildConfigForProfileSources(candidate.ID, candidate.VPNSources, candidate.WireGuardConfigs); err != nil {
+	if err := a.configBuilder.BuildConfigForProfileSources(candidate.ID, candidate.VPNSources, candidate.WireGuardConfigs, candidate.VPNSourceSelectionMode == "priority"); err != nil {
 		rollbackErr := a.restoreVPNSourceProfileWith(previous, ops.restore)
 		result["rolledBack"] = rollbackErr == nil
 		recovery := rollbackRecoveryMessage(rollbackErr, wasRunning)

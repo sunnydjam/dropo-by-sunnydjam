@@ -24,11 +24,12 @@ type ProfileData struct {
 	CreatedAt time.Time `json:"created_at"`
 
 	// Subscription settings (was user_settings.json)
-	SubscriptionURL  string                `json:"subscription_url,omitempty"`
-	VPNSources       []VPNSource           `json:"vpn_sources,omitempty"`
-	LastUpdated      string                `json:"last_updated,omitempty"`
-	ProxyCount       int                   `json:"proxy_count,omitempty"`
-	WireGuardConfigs []UserWireGuardConfig `json:"wireguard_configs,omitempty"`
+	SubscriptionURL        string                `json:"subscription_url,omitempty"`
+	VPNSources             []VPNSource           `json:"vpn_sources,omitempty"`
+	VPNSourceSelectionMode string                `json:"vpn_source_selection_mode,omitempty"`
+	LastUpdated            string                `json:"last_updated,omitempty"`
+	ProxyCount             int                   `json:"proxy_count,omitempty"`
+	WireGuardConfigs       []UserWireGuardConfig `json:"wireguard_configs,omitempty"`
 
 	// Generated sing-box config (was config.json)
 	SingboxConfig   map[string]interface{} `json:"singbox_config,omitempty"`
@@ -365,9 +366,10 @@ func (s *Storage) normalizeAppSettings() {
 // createDefaultProfile creates a default profile.
 func (s *Storage) createDefaultProfile() ProfileData {
 	return ProfileData{
-		ID:        DefaultProfileID,
-		Name:      DefaultProfileName,
-		CreatedAt: time.Now(),
+		ID:                     DefaultProfileID,
+		Name:                   DefaultProfileName,
+		VPNSourceSelectionMode: "latency",
+		CreatedAt:              time.Now(),
 	}
 }
 
@@ -594,9 +596,10 @@ func (s *Storage) CreateProfile(name string) (*ProfileData, error) {
 	}
 
 	profile := ProfileData{
-		ID:        maxID + 1,
-		Name:      name,
-		CreatedAt: time.Now(),
+		ID:                     maxID + 1,
+		Name:                   name,
+		VPNSourceSelectionMode: "latency",
+		CreatedAt:              time.Now(),
 	}
 
 	s.data.Profiles = append(s.data.Profiles, profile)
@@ -716,7 +719,7 @@ func (s *Storage) UpdateProfileSubscription(id int, subscriptionURL string, prox
 
 // UpdateProfileVPNSources atomically replaces the ordered source chain and
 // keeps legacy summary fields in sync for older UI bindings.
-func (s *Storage) UpdateProfileVPNSources(id int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig) error {
+func (s *Storage) UpdateProfileVPNSources(id int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig, manualPriority ...bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for index := range s.data.Profiles {
@@ -724,6 +727,12 @@ func (s *Storage) UpdateProfileVPNSources(id int, sources []VPNSource, wireGuard
 			continue
 		}
 		s.data.Profiles[index].VPNSources = append([]VPNSource(nil), sources...)
+		if len(manualPriority) > 0 {
+			s.data.Profiles[index].VPNSourceSelectionMode = "latency"
+			if manualPriority[0] {
+				s.data.Profiles[index].VPNSourceSelectionMode = "priority"
+			}
+		}
 		// This is an explicit replacement, not a legacy profile migration. In
 		// particular, removing the last source must not resurrect its old URL.
 		s.data.Profiles[index].SubscriptionURL = ""
@@ -1548,7 +1557,7 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfile(profileID int, subscript
 // BuildConfigForProfileSources builds one selected node per ordered source.
 // Provider order chooses node zero by default; source failover order is kept in
 // the generated selector and never expands to sibling nodes automatically.
-func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig) error {
+func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig, manualPriority ...bool) error {
 	normalized := ProfileData{VPNSources: append([]VPNSource(nil), sources...)}
 	normalizeProfileVPNSources(&normalized)
 	sources = normalized.VPNSources
@@ -1675,7 +1684,7 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 	delete(template, "_comment_outbounds")
 
 	// Update profile in storage
-	if err := b.storage.UpdateProfileVPNSources(profileID, updatedSources, wireGuardConfigs); err != nil {
+	if err := b.storage.UpdateProfileVPNSources(profileID, updatedSources, wireGuardConfigs, manualPriority...); err != nil {
 		return err
 	}
 

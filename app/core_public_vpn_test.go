@@ -231,8 +231,21 @@ func TestPublicVPNCanBeDisabledAndMoveAbovePersonal(t *testing.T) {
 	if profile.VPNSources[0].ID != freeID {
 		t.Fatal("reload discarded the user's public-first priority")
 	}
+	if profile.VPNSourceSelectionMode != "priority" {
+		t.Fatal("explicit source reorder did not persist manual priority")
+	}
 	if got := app.configuredVPNSourceTags(); !reflect.DeepEqual(got, []string{"vpn-source-" + freeID, "vpn-source-" + profile.VPNSources[1].ID}) {
 		t.Fatalf("monitor priority = %v", got)
+	}
+	if result := app.EnableVPNSourceAutoSelect(); result["success"] != true {
+		t.Fatalf("enable automatic latency selection: %v", result)
+	}
+	if err := storage.Load(); err != nil {
+		t.Fatal(err)
+	}
+	profile, _ = storage.GetActiveProfile()
+	if profile.VPNSourceSelectionMode != "latency" || profile.VPNSources[0].ID != freeID {
+		t.Fatal("automatic selection must persist without rewriting saved source order")
 	}
 }
 

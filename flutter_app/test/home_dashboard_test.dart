@@ -483,13 +483,13 @@ void main() {
   });
 
   testWidgets(
-    'home separates saved source from active session and retains actions',
+    'home omits source details and connects without a source selection',
     (tester) async {
       final bridge = _HomeBridge();
       await bridge.saveSubscription('https://example.test/private-token');
       await _pumpHome(tester, bridge);
       expect(find.byKey(const ValueKey('planet-disconnected')), findsOneWidget);
-      expect(find.textContaining('первый по приоритету'), findsOneWidget);
+      expect(find.textContaining('первый по приоритету'), findsNothing);
       expect(find.textContaining('используется сейчас'), findsNothing);
       expect(find.textContaining('private-token'), findsNothing);
       expect(find.text('Стратегии обхода'), findsNothing);
@@ -500,8 +500,8 @@ void main() {
       expect(bridge.toggles, 1);
       expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
       expect(
-        find.byTooltip('Доступность сервисов проверяется отдельно.'),
-        findsOneWidget,
+        find.byType(Tooltip),
+        findsNothing,
       );
       await _tap(tester, 'nav-logs');
       expect(find.text('Копировать всё'), findsOneWidget);
@@ -758,7 +758,7 @@ void main() {
     tester,
   ) async {
     await _pumpHome(tester, _HomeBridge());
-    await _tap(tester, 'home-manage-sources');
+    await _tap(tester, 'nav-sources');
     expect(find.byType(VpnSourcesDialog), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -781,7 +781,7 @@ void main() {
         find.text('Добавьте VPN-подписку для запуска на Android.'),
         findsOneWidget,
       );
-      await _tap(tester, 'home-manage-sources');
+      await _tap(tester, 'nav-sources');
       expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
       await tester.enterText(
         find.byKey(const ValueKey('personal-vpn-uri')),
@@ -797,7 +797,7 @@ void main() {
 
       await _tap(tester, 'onboarding-ready-connect');
       expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
-      expect(find.text('Нидерланды · 1'), findsOneWidget);
+      expect(find.text('Нидерланды · 1'), findsNothing);
       final readyConnect = tester.widget<FilledButton>(
         find.byKey(const ValueKey('home-connect')),
       );
@@ -808,7 +808,7 @@ void main() {
       await tester.pump();
       expect(bridge.toggles, 1);
       expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
-      expect(find.textContaining('используется сейчас'), findsOneWidget);
+      expect(find.textContaining('используется сейчас'), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
@@ -832,7 +832,7 @@ void main() {
           ..connected = true
           ..activeSource = '',
       );
-      expect(find.text('VPN-источник не подтверждён'), findsOneWidget);
+      expect(find.text('VPN-источник не подтверждён'), findsNothing);
       expect(find.textContaining('используется сейчас'), findsNothing);
       expect(find.text('Моя подписка'), findsNothing);
     },
@@ -853,7 +853,7 @@ void main() {
       expect(find.byKey(const ValueKey('planet-disconnected')), findsOneWidget);
       await tester.pump(const Duration(seconds: 4));
       await tester.pump();
-      expect(find.text('Источник не подтверждён'), findsOneWidget);
+      expect(find.text('Источник не подтверждён'), findsNothing);
       expect(find.text('Нет связи с ядром'), findsNothing);
       bridge.pendingSources!.complete([]);
       await tester.pump();
@@ -866,7 +866,7 @@ void main() {
   ) async {
     final bridge = _HomeBridge()..connected = true;
     await _pumpHome(tester, bridge);
-    expect(find.textContaining('используется сейчас'), findsOneWidget);
+    expect(find.textContaining('используется сейчас'), findsNothing);
     bridge.failStatus = true;
     for (var i = 0; i < 4; i++) {
       await tester.pump(const Duration(seconds: 2));
@@ -882,7 +882,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('public fallback is clearly labelled and cleared after stop', (
+  testWidgets('public source details stay off the home before and after stop', (
     tester,
   ) async {
     final bridge = _HomeBridge()
@@ -891,7 +891,7 @@ void main() {
     await _pumpHome(tester, bridge);
     expect(
       find.text('Бесплатный публичный источник · скорость зависит от нагрузки'),
-      findsOneWidget,
+      findsNothing,
     );
     bridge.connected = false;
     await tester.pump(const Duration(seconds: 2));

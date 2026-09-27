@@ -151,7 +151,7 @@ void main() {
         expect(_homeScroll(tester).position.maxScrollExtent, 0);
         for (final key in [
           'home-connect',
-          'home-manage-sources',
+          'nav-sources',
           'home-routing-all-vpn',
           'link-service-settings',
         ]) {
@@ -242,7 +242,7 @@ void main() {
     final bridge = _FeedbackBridge();
     await _pump(tester, bridge, size: const Size(684, 461));
     final connectBefore = tester.getRect(_key('home-connect'));
-    final sourceBefore = tester.getRect(_key('home-manage-sources'));
+    final sourceBefore = tester.getRect(_key('nav-sources'));
     final scrollBefore = _homeScroll(tester).position.pixels;
     bridge.error = true;
     await tester.pump(const Duration(seconds: 3));
@@ -250,7 +250,7 @@ void main() {
     expect(_key('notice-overlay'), findsOneWidget);
     await _capture(tester, 'error-overlay');
     expect(tester.getRect(_key('home-connect')), connectBefore);
-    expect(tester.getRect(_key('home-manage-sources')), sourceBefore);
+    expect(tester.getRect(_key('nav-sources')), sourceBefore);
     expect(_homeScroll(tester).position.pixels, scrollBefore);
     expect(
       tester.getRect(_key('notice-overlay')).overlaps(connectBefore),
@@ -320,7 +320,7 @@ void main() {
     await _pump(tester, _FeedbackBridge());
     final mouse = await tester.createGesture(kind: ui.PointerDeviceKind.mouse);
     await mouse.addPointer(location: Offset.zero);
-    for (final key in ['home-connect', 'home-manage-sources', 'nav-services']) {
+    for (final key in ['home-connect', 'nav-sources', 'nav-services']) {
       await mouse.moveTo(tester.getCenter(_key(key)));
       await tester.pump();
       expect(

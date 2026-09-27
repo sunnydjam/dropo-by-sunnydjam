@@ -259,7 +259,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                     prefixIcon: const Icon(Icons.search),
                     suffixIcon: search.text.isEmpty
                         ? null
-                        : IconButton(
+                        : _AccessibleIconButton(
                             tooltip: 'Очистить поиск',
                             onPressed: () => setState(search.clear),
                             icon: const Icon(Icons.close),
@@ -354,7 +354,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                     allTraffic: widget.routingMode == 'all_traffic',
                     enabled: editing,
                     onRemove: null,
-                    headerAction: IconButton(
+                    headerAction: _AccessibleIconButton(
                       key: ValueKey('pin-service-${service.tag}'),
                       tooltip: primary
                           ? 'Основной сервис'

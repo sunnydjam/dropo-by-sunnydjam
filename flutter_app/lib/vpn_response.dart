@@ -69,7 +69,7 @@ class _VpnResponseTile extends StatelessWidget {
       color: color,
       fontFeatures: const [ui.FontFeature.tabularFigures()],
     );
-    return Tooltip(
+    return _AccessibleDescription(
       message:
           'HTTP-проверка через текущий VPN-источник. Не игровой пинг и не скорость скачивания.',
       child: TextButton(

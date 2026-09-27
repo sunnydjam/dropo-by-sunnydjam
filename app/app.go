@@ -98,6 +98,8 @@ type App struct {
 	busySeq                     uint64
 	vpnStopping                 atomic.Bool
 	vpnSourceMonitorMu          sync.Mutex
+	vpnSourceSelectionMu        sync.Mutex
+	vpnSourceRankedTags         []string
 	vpnSourceMonitorCancel      context.CancelFunc
 	vpnSourceMonitorGeneration  uint64
 	vpnSourceActive             string

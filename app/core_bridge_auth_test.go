@@ -217,6 +217,7 @@ func TestBridgeCallAllowlistRejectsExportedMaintenanceMethods(t *testing.T) {
 	for _, method := range []string{
 		"GetVPNSources", "AddVPNSource", "RemoveVPNSource", "RefreshVPNSources",
 		"SetVPNSourceEnabled", "SetVPNSourceNode", "MoveVPNSource",
+		"EnableVPNSourceAutoSelect",
 		"SetFreeAccessServiceMethod", "SetZapretServiceStrategy", "SetHomeRouteServiceVisible",
 		"TelegramProxyStatus", "OpenTelegramProxySettings", "AcknowledgeTelegramProxyRemoved",
 	} {

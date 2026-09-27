@@ -18,7 +18,7 @@ func (a *App) GetVPNSources() map[string]interface{} {
 	for _, view := range views {
 		view["active"] = a.isVPNRunning() && active == "vpn-source-"+view["id"].(string)
 	}
-	return map[string]interface{}{"success": true, "sources": views, "activeSource": active}
+	return map[string]interface{}{"success": true, "sources": views, "activeSource": active, "autoSelect": profile.VPNSourceSelectionMode != "priority"}
 }
 
 func (a *App) AddVPNSource(name, uri string) map[string]interface{} {
@@ -108,12 +108,22 @@ func (a *App) MoveVPNSource(id string, newIndex int) map[string]interface{} {
 		profile.VPNSources = append(profile.VPNSources, VPNSource{})
 		copy(profile.VPNSources[newIndex+1:], profile.VPNSources[newIndex:])
 		profile.VPNSources[newIndex] = source
+		profile.VPNSourceSelectionMode = "priority"
 		return nil
 	})
 }
 
 func (a *App) RefreshVPNSources() map[string]interface{} {
 	return a.changeVPNSources(func(_ *ProfileData) error { return nil })
+}
+
+// Reordering is an explicit user preference. This action restores automatic
+// latency selection without discarding the list's tie-break/fallback order.
+func (a *App) EnableVPNSourceAutoSelect() map[string]interface{} {
+	return a.changeVPNSources(func(profile *ProfileData) error {
+		profile.VPNSourceSelectionMode = "latency"
+		return nil
+	})
 }
 
 func (a *App) changeVPNSources(change func(*ProfileData) error) map[string]interface{} {

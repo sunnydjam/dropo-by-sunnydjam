@@ -46,6 +46,14 @@ class _SourceBridge extends MockCoreBridge {
   int publicAdds = 0;
   int personalTests = 0;
   int personalAdds = 0;
+  int autoSelections = 0;
+
+  @override
+  Future<Map<String, dynamic>> enableVpnSourceAutoSelect() async {
+    autoSelections++;
+    return {'success': true};
+  }
+
   bool consentReceived = false;
   bool throwOnPublicAdd = false;
   bool throwOnCatalog = false;
@@ -174,6 +182,17 @@ Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  testWidgets('source page restores automatic latency choice explicitly', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()..sources = [_source('one'), _source('two')];
+    await _pumpEditor(tester, bridge);
+    await _tapVisible(tester, find.byKey(const ValueKey('source-auto-select')));
+    expect(bridge.autoSelections, 1);
+    expect(bridge.moves, isEmpty);
+    expect(find.textContaining('Автовыбор включён.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
     if (const bool.fromEnvironment('DROPO_UI_CAPTURE')) {

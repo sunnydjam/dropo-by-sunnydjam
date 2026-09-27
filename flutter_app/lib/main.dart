@@ -16,6 +16,7 @@ part 'vpn_onboarding.dart';
 part 'home_dashboard.dart';
 part 'atlas_dashboard.dart';
 part 'compact_shell.dart';
+part 'accessible_controls.dart';
 part 'planet_animation.dart';
 part 'space_background.dart';
 part 'update_progress.dart';
@@ -168,7 +169,9 @@ SystemUiOverlayStyle _systemOverlayFor(Brightness brightness) {
 }
 
 class DropoApp extends StatelessWidget {
-  const DropoApp({super.key});
+  const DropoApp({super.key, this.bridge});
+
+  final CoreBridge? bridge;
 
   @override
   Widget build(BuildContext context) {
@@ -184,9 +187,14 @@ class DropoApp extends StatelessWidget {
         darkTheme: _dropoTheme(Brightness.dark),
         builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
           value: _systemOverlayFor(Theme.of(context).brightness),
-          child: child ?? const SizedBox.shrink(),
+          // Also suppress implicit framework tooltips on every route/dialog.
+          // App controls carry explicit labels in accessible_controls.dart.
+          child: TooltipVisibility(
+            visible: false,
+            child: child ?? const SizedBox.shrink(),
+          ),
         ),
-        home: DropoHomePage(bridge: createCoreBridge()),
+        home: DropoHomePage(bridge: bridge ?? createCoreBridge()),
       ),
     );
   }
@@ -286,6 +294,7 @@ abstract class CoreBridge {
   Future<Map<String, dynamic>> setVpnSourceNode(String id, int nodeIndex);
   Future<Map<String, dynamic>> setVpnSourceEnabled(String id, bool enabled);
   Future<Map<String, dynamic>> moveVpnSource(String id, int newIndex);
+  Future<Map<String, dynamic>> enableVpnSourceAutoSelect();
   Future<Map<String, dynamic>> refreshVpnSources();
   Future<Map<String, dynamic>> saveSubscription(String value);
   Future<TelegramExitInfo> telegramProxyStatus();
@@ -853,6 +862,10 @@ class HttpCoreBridge implements CoreBridge {
   Future<Map<String, dynamic>> refreshVpnSources() {
     return callMap('RefreshVPNSources', timeout: const Duration(minutes: 3));
   }
+
+  @override
+  Future<Map<String, dynamic>> enableVpnSourceAutoSelect() =>
+      callMap('EnableVPNSourceAutoSelect', timeout: const Duration(minutes: 3));
 
   @override
   Future<Map<String, dynamic>> saveSubscription(String value) {
@@ -1540,6 +1553,12 @@ class ChannelCoreBridge implements CoreBridge {
   Future<Map<String, dynamic>> moveVpnSource(String id, int newIndex) async => {
     'success': false,
     'error': 'Порядок источников доступен на Windows',
+  };
+
+  @override
+  Future<Map<String, dynamic>> enableVpnSourceAutoSelect() async => {
+    'success': false,
+    'error': 'Автовыбор источников доступен на Windows',
   };
 
   @override
@@ -2293,6 +2312,11 @@ class MockCoreBridge implements CoreBridge {
 
   @override
   Future<Map<String, dynamic>> moveVpnSource(String id, int newIndex) async => {
+    'success': true,
+  };
+
+  @override
+  Future<Map<String, dynamic>> enableVpnSourceAutoSelect() async => {
     'success': true,
   };
 
@@ -6002,17 +6026,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         operationError: connectionHintDanger && !status.connected,
         motionEnabled: !appConfig.reduceMotion,
       ),
-      source: _HomeSourcePanel(
-        atlas: true,
-        sources: homeSources,
-        loaded: homeSourcesLoaded,
-        failed: homeSourcesFailed,
-        connected:
-            online && status.connected && !connectionBusy && !status.hasError,
-        online: online,
-        hasSubscription: subscription.hasSubscription,
-        onManage: controlsDisabled ? null : _openSubscription,
-      ),
       notices:
           !(strategyTransitionNotice.isNotEmpty ||
               showHint ||
@@ -7277,7 +7290,7 @@ class _AppDialog extends StatelessWidget {
                       ),
                     ),
                   ),
-                  IconButton(
+                  _AccessibleIconButton(
                     onPressed: () => Navigator.of(context).pop(),
                     color: const Color(0xFFCDE7DE),
                     icon: const Icon(Icons.close),
@@ -8291,7 +8304,7 @@ class _ProfileTile extends StatelessWidget {
               ),
               const SizedBox(width: 6),
               if (showEditActions) ...[
-                IconButton(
+                _AccessibleIconButton(
                   onPressed: busy || !editable ? null : onRename,
                   icon: const Icon(Icons.edit, size: 17),
                   tooltip: 'Переименовать',
@@ -8299,7 +8312,7 @@ class _ProfileTile extends StatelessWidget {
                       ? SystemMouseCursors.basic
                       : SystemMouseCursors.click,
                 ),
-                IconButton(
+                _AccessibleIconButton(
                   onPressed: busy || !editable ? null : onDelete,
                   icon: const Icon(Icons.delete, size: 17),
                   tooltip: profile.isDefault
@@ -8910,9 +8923,9 @@ class _IconMiniButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
+    return _AccessibleDescription(
       message: tooltip,
-      child: IconButton(
+      child: _AccessibleIconButton(
         onPressed: onPressed,
         icon: Icon(icon, size: 17),
         color: const Color(0xFFBAF7D0),
@@ -11429,7 +11442,7 @@ class _WireGuardTile extends StatelessWidget {
                   ],
                 ),
               ),
-              IconButton(
+              _AccessibleIconButton(
                 onPressed: onEdit,
                 icon: const Icon(Icons.edit, size: 16),
                 tooltip: 'Редактировать',
@@ -11478,7 +11491,7 @@ class _LabeledField extends StatelessWidget {
           maxLines: maxLines,
           decoration: _fieldDecoration(
             hint: hint,
-            suffixIcon: IconButton(
+            suffixIcon: _AccessibleIconButton(
               onPressed: onPaste,
               icon: const Icon(Icons.content_paste),
               tooltip: 'Вставить из буфера',
