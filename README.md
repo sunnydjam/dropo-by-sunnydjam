@@ -22,6 +22,7 @@ VPN», а обновления сохраняют прежний выбор по
 
 [Лицензия](LICENSE) · [Конфиденциальность](PRIVACY.md) ·
 [Безопасность](SECURITY.md) · [История изменений](CHANGELOG.md) ·
+[Account backend](https://github.com/sunnydjam/DropoVPN-Backend) ·
 [Исходный проект](https://github.com/Droponevedimka/dropo)
 
 ## Статус проекта
@@ -40,9 +41,20 @@ VPN», а обновления сохраняют прежний выбор по
 | Android | Исходники адаптируются отдельно; APK fork пока не проходит release gate |
 | Windows release fork | `v3.0.40`, unsigned |
 | Публичная Authenticode-подпись | Пока отсутствует |
+| Аккаунт, Telegram-подтверждения и Stars | Клиент реализован; backend вынесен в отдельный приватный репозиторий |
 
 Текущая ветка разработки: `Dzhamuha-develop`. Текущая версия исходников
 и Windows-выпуска: `3.0.40`.
+
+## Аккаунт и Telegram
+
+Раздел **Аккаунт** поддерживает passwordless-вход и восстановление через
+Telegram, управление сессиями и покупку `Dropo Speed` за Telegram Stars. Код
+сервиса, локальный тестовый режим и production-инструкции находятся в отдельном
+репозитории [DropoVPN-Backend](https://github.com/sunnydjam/DropoVPN-Backend).
+
+Backend не журналирует VPN-трафик, DNS-запросы или посещённые сайты. Его аудит
+ограничен событиями аккаунта: входами, выходами, сессиями и покупками.
 
 ## Как работает маршрутизация
 

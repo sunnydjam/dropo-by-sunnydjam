@@ -42,6 +42,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     ('sources', 'Источники VPN', Icons.dns_outlined),
     ('logs', 'Диагностика', Icons.monitor_heart_outlined),
     ('settings', 'Настройки', Icons.settings_outlined),
+    ('account', 'Аккаунт', Icons.person_outline_rounded),
     ('profiles', 'Профили', Icons.layers_outlined),
     ('work', 'Рабочие сети', Icons.hub_outlined),
     ('dropo_space', 'Dropo Space', Icons.workspaces_outline),
@@ -58,6 +59,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     'services',
     'sources',
     'settings',
+    'account',
     'help',
   };
   bool _open = false;

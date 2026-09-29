@@ -2,6 +2,16 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## Unreleased
+
+- add the Dropo account section with Telegram passwordless authentication,
+  recovery, session management and Telegram Stars purchase confirmation;
+- keep the account backend in the separate private `DropoVPN-Backend`
+  repository and make its endpoint configurable at build time;
+- add widget coverage for the login, approval, purchase and entitlement flow;
+- do not collect VPN traffic, DNS queries or browsing history as account audit
+  data.
+
 ## 3.0.40 — 2026-09-29
 
 - pin the VPN-source add action above long lists and expose automatic/manual

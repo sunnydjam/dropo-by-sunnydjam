@@ -26,6 +26,7 @@ part 'service_routes.dart';
 part 'minimal_settings.dart';
 part 'connection_health.dart';
 part 'android_vpn_protection.dart';
+part 'account.dart';
 
 const String _coreEndpoint = String.fromEnvironment(
   'DROPO_CORE_ENDPOINT',
@@ -42,6 +43,10 @@ const String _bundledAppVersion = String.fromEnvironment(
 const String _bundledBuildHash = String.fromEnvironment(
   'DROPO_BUILD_HASH',
   defaultValue: '',
+);
+const String _accountEndpoint = String.fromEnvironment(
+  'DROPO_ACCOUNT_ENDPOINT',
+  defaultValue: 'http://127.0.0.1:18080',
 );
 
 @visibleForTesting
@@ -6186,6 +6191,15 @@ class _DropoHomePageState extends State<DropoHomePage>
           onSelect: (section) => unawaited(_selectMenuSection(section)),
           onWorkNetworks: controlsDisabled ? null : _openWireGuard,
           onExit: quitting ? null : _quitApp,
+        );
+      case 'account':
+        return AccountPage(
+          key: const ValueKey('account-section'),
+          endpoint: _accountEndpoint,
+          onOpenExternal: widget.bridge.openExternal,
+          persistSession: debugAccountTransport == null,
+          transport: debugAccountTransport,
+          initialToken: debugAccountSessionToken,
         );
       case 'services':
         return ServiceRoutesPage(
