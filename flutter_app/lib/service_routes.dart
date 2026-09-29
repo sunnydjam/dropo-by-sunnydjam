@@ -7,11 +7,13 @@ class _FeaturePage extends StatefulWidget {
     required this.title,
     required this.icon,
     this.child,
+    this.headerAction,
     this.slivers = const [],
   });
   final String title;
   final IconData icon;
   final Widget? child;
+  final Widget? headerAction;
   final List<Widget> slivers;
 
   @override
@@ -27,44 +29,80 @@ class _FeaturePageState extends State<_FeaturePage> {
   }
 
   @override
-  Widget build(BuildContext context) => Material(
-    key: const ValueKey('flat-feature-page'),
-    color: Colors.transparent,
-    child: Scrollbar(
-      controller: scroll,
-      child: CustomScrollView(
-        controller: scroll,
-        slivers: [
-          SliverPadding(
-            padding: const EdgeInsets.all(20),
-            sliver: SliverToBoxAdapter(
-              child: Row(
-                children: [
-                  Icon(widget.icon, color: _homeAccent),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      widget.title,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w700,
-                        color: _homeText,
-                      ),
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, pageConstraints) {
+      final compact =
+          pageConstraints.maxWidth < 500 ||
+          MediaQuery.textScalerOf(context).scale(1) > 1.4;
+      final heading = Padding(
+        padding: const EdgeInsets.all(20),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final title = Row(
+              children: [
+                Icon(widget.icon, color: _homeAccent),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    widget.title,
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                      color: _homeText,
                     ),
                   ),
+                ),
+              ],
+            );
+            if (widget.headerAction == null || compact) return title;
+            return Row(
+              children: [
+                Expanded(child: title),
+                const SizedBox(width: 12),
+                widget.headerAction!,
+              ],
+            );
+          },
+        ),
+      );
+      final body = Scrollbar(
+        controller: scroll,
+        child: CustomScrollView(
+          controller: scroll,
+          slivers: [
+            if (widget.headerAction == null || compact)
+              SliverToBoxAdapter(child: heading),
+            if (widget.child != null)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                sliver: SliverToBoxAdapter(child: widget.child),
+              ),
+            ...widget.slivers,
+          ],
+        ),
+      );
+      return Material(
+        key: const ValueKey('flat-feature-page'),
+        color: Colors.transparent,
+        child: widget.headerAction == null
+            ? body
+            : Column(
+                children: [
+                  if (compact)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: widget.headerAction!,
+                      ),
+                    )
+                  else
+                    heading,
+                  Expanded(child: body),
                 ],
               ),
-            ),
-          ),
-          if (widget.child != null)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-              sliver: SliverToBoxAdapter(child: widget.child),
-            ),
-          ...widget.slivers,
-        ],
-      ),
-    ),
+      );
+    },
   );
 }
 

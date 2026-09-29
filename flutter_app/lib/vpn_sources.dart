@@ -76,6 +76,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   final controller = TextEditingController();
   final nameController = TextEditingController();
   final personalFormAnchor = GlobalKey();
+  final addFlowAnchor = GlobalKey();
   String statusText = '';
   String statusKind = '';
   String catalogError = '';
@@ -86,7 +87,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   bool? running;
   bool showFreeCatalog = false;
   bool showPersonalForm = false;
-  bool personalFormDismissed = false;
+  bool showAddOptions = false;
+  bool showOrder = false;
   bool showReadyAction = false;
   String recentlyAddedId = '';
   List<VpnSourceInfo> sources = const [];
@@ -119,9 +121,6 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       autoSelect = widget.sourceSnapshot!.autoSelect;
       running = widget.sourceSnapshot!.running;
       sourcesFresh = true;
-      if (!_hasPersonalSource(sources) && !personalFormDismissed) {
-        showPersonalForm = true;
-      }
     }
   }
 
@@ -145,9 +144,6 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           autoSelect = snapshot.autoSelect;
           running = snapshot.running;
           sourcesFresh = true;
-          if (!_hasPersonalSource(loaded) && !personalFormDismissed) {
-            showPersonalForm = true;
-          }
         });
       }
     } catch (error) {
@@ -268,7 +264,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
     nameController.clear();
     setState(() {
       showPersonalForm = false;
-      personalFormDismissed = true;
+      showAddOptions = false;
+      showFreeCatalog = false;
       showReadyAction =
           wasFirstPersonalSource && widget.onReadyToConnect != null;
       recentlyAddedId =
@@ -283,7 +280,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   void _togglePersonalForm() {
     setState(() {
       showPersonalForm = !showPersonalForm;
-      personalFormDismissed = !showPersonalForm;
+      showAddOptions = true;
+      showFreeCatalog = false;
       showReadyAction = false;
       if (showPersonalForm && statusKind == 'error') {
         statusText = '';
@@ -389,61 +387,130 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
     );
   }
 
+  void _toggleAddOptions() {
+    setState(() {
+      showAddOptions = !showAddOptions;
+      if (!showAddOptions) {
+        showPersonalForm = false;
+        showFreeCatalog = false;
+      }
+    });
+    if (showAddOptions) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !showAddOptions) return;
+        final target = addFlowAnchor.currentContext;
+        if (target != null) {
+          unawaited(
+            Scrollable.ensureVisible(
+              target,
+              alignment: 0,
+              duration: const Duration(milliseconds: 200),
+            ),
+          );
+        }
+      });
+    }
+  }
+
+  Future<void> _selectManualMode() async {
+    final first = sources.where((source) => !source.disabled).firstOrNull;
+    if (first == null) return;
+    await _changeSource(
+      () => widget.bridge.moveVpnSource(first.id, 0),
+      'Включаем ручной выбор…',
+      success: 'Ручной выбор включён. Основной источник — «${first.name}».',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final mobile = _isMobileShell;
     final disabled = busy || loading || !widget.enabled;
+    final controlsDisabled = disabled || !sourcesFresh;
     final hasPersonalSource = _hasPersonalSource(sources);
-    final needsFirstPersonalSource = sourcesFresh
-        ? !hasPersonalSource
-        : !widget.subscription.hasSubscription;
+    final firstEnabled = sources
+        .where((source) => !source.disabled)
+        .firstOrNull;
+    final adding = showAddOptions || (sourcesFresh && sources.isEmpty);
+    final addButton = FilledButton.icon(
+      key: const ValueKey('add-personal-vpn'),
+      style: FilledButton.styleFrom(
+        foregroundColor: const Color(0xFF06251B),
+        backgroundColor: _atlasMint,
+        disabledBackgroundColor: _atlasSurface,
+        disabledForegroundColor: _atlasMuted,
+      ),
+      onPressed: disabled ? null : _toggleAddOptions,
+      icon: Icon(showAddOptions ? Icons.close : Icons.add, size: 18),
+      label: Text(showAddOptions ? 'Закрыть добавление' : 'Добавить'),
+    );
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (mobile) ...[
-          Text(
-            needsFirstPersonalSource
-                ? 'Добавьте подписку или выберите бесплатный источник ниже.'
-                : 'На Android используется одна активная подписка.',
-            style: const TextStyle(color: _atlasMuted, fontSize: 13),
+        if (!widget.embedded)
+          Align(alignment: Alignment.centerRight, child: addButton),
+        if (mobile)
+          const Text(
+            'На Android используется одна активная подписка.',
+            style: TextStyle(color: _atlasMuted, fontSize: 13),
           ),
-          const SizedBox(height: 12),
-        ] else if (sources.isNotEmpty) ...[
+        if (!mobile && sources.isNotEmpty) ...[
+          Wrap(
+            key: const ValueKey('source-selection-mode'),
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ChoiceChip(
+                key: const ValueKey('source-auto-select'),
+                label: const Text('Автоматически'),
+                selected: sourcesFresh && autoSelect == true,
+                onSelected: controlsDisabled
+                    ? null
+                    : (_) => autoSelect == true
+                          ? null
+                          : _changeSource(
+                              widget.bridge.enableVpnSourceAutoSelect,
+                              'Включаем автовыбор…',
+                              success:
+                                  'Автовыбор включён. При подключении сравнивается отклик отдельных источников; сервер внутри подписки не меняется.',
+                            ),
+              ),
+              ChoiceChip(
+                key: const ValueKey('source-manual-select'),
+                label: const Text('Вручную'),
+                selected: sourcesFresh && autoSelect == false,
+                onSelected: controlsDisabled || firstEnabled == null
+                    ? null
+                    : (_) => autoSelect == false ? null : _selectManualMode(),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
           Text(
             !sourcesFresh || autoSelect == null
-                ? 'Выбор источника'
+                ? 'Уточняем способ выбора источника…'
                 : autoSelect!
-                ? 'Автоматически · по отклику'
-                : 'Вручную · по вашему порядку',
-            key: const ValueKey('source-selection-mode'),
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            autoSelect == false
-                ? 'Первый включённый источник — основной. Остальные подстрахуют при сбое.'
-                : 'Dropo сравнит отклик источников при подключении. Выбор вручную отключает автовыбор.',
+                ? 'При подключении выбираем источник с минимальным откликом. Работающее соединение не переключаем.'
+                : 'Первый включённый источник — основной. Остальные подстрахуют при сбое.',
             style: const TextStyle(
               color: _atlasMuted,
               fontSize: 12,
               height: 1.4,
             ),
           ),
-          const SizedBox(height: 14),
-        ],
-        if (busy || loading) ...[
           const SizedBox(height: 12),
-          const LinearProgressIndicator(),
         ],
-        if (!widget.enabled) ...[
-          const SizedBox(height: 10),
-          Text(
-            mobile
-                ? 'Отключите VPN и дождитесь связи с ядром, чтобы изменить подписку.'
-                : 'Управление временно недоступно. Дождитесь связи с ядром и завершения подключения.',
-            style: const TextStyle(color: Color(0xFFFFD38B), fontSize: 12),
+        if (busy || loading) const LinearProgressIndicator(),
+        if (!widget.enabled)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            child: Text(
+              mobile
+                  ? 'Отключите VPN и дождитесь связи с ядром, чтобы изменить подписку.'
+                  : 'Управление временно недоступно. Дождитесь связи с ядром и завершения подключения.',
+              style: const TextStyle(color: Color(0xFFFFD38B), fontSize: 12),
+            ),
           ),
-        ],
         if (!loading && !sourcesFresh)
           TextButton(
             onPressed: busy
@@ -458,42 +525,221 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           const SizedBox(height: 12),
           _StatusBox(kind: statusKind, text: statusText),
         ],
-        if (showReadyAction && widget.onReadyToConnect != null) ...[
-          const SizedBox(height: 10),
+        if (showReadyAction && widget.onReadyToConnect != null)
           FilledButton.icon(
             key: const ValueKey('onboarding-ready-connect'),
             onPressed: disabled ? null : widget.onReadyToConnect,
-            style: FilledButton.styleFrom(
-              minimumSize: const Size(double.infinity, 48),
-            ),
             icon: const Icon(Icons.arrow_forward),
             label: const Text('Перейти к подключению'),
           ),
-        ],
         if (!mobile &&
             recentlyAddedId.isNotEmpty &&
+            sources.any(
+              (source) => source.id == recentlyAddedId && !source.disabled,
+            ) &&
             sources.length > 1 &&
             sources.first.id != recentlyAddedId)
           Align(
             alignment: Alignment.centerLeft,
             child: TextButton.icon(
               key: const ValueKey('new-source-make-primary'),
-              onPressed: disabled
+              onPressed: controlsDisabled
                   ? null
                   : () => _changeSource(
                       () => widget.bridge.moveVpnSource(recentlyAddedId, 0),
                       'Сохраняем приоритет…',
                     ),
               icon: const Icon(Icons.vertical_align_top),
-              label: const Text('Сделать новый источник основным'),
+              label: const Text('Выбрать новый источник вручную'),
             ),
           ),
-        if (!loading && sourcesFresh && sources.isEmpty && !showPersonalForm)
+        if (adding) ...[
+          const SizedBox(height: 12),
+          Column(
+            key: addFlowAnchor,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (sources.isEmpty) ...[
+                const Text(
+                  'Добавьте первый источник',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Используйте свою подписку или выберите сторонний бесплатный источник.',
+                  style: TextStyle(color: _atlasMuted, fontSize: 12),
+                ),
+                const SizedBox(height: 12),
+              ],
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    key: const ValueKey('choose-personal-source'),
+                    onPressed: disabled ? null : _togglePersonalForm,
+                    icon: const Icon(Icons.vpn_key_outlined, size: 18),
+                    label: Text(
+                      showPersonalForm
+                          ? 'Скрыть форму'
+                          : mobile && hasPersonalSource
+                          ? 'Заменить подписку'
+                          : 'Своя подписка',
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    key: const ValueKey('toggle-free-catalog'),
+                    onPressed: disabled
+                        ? null
+                        : () => setState(() {
+                            showFreeCatalog = !showFreeCatalog;
+                            showPersonalForm = false;
+                            showAddOptions = true;
+                          }),
+                    icon: const Icon(Icons.public_outlined, size: 18),
+                    label: const Text('Бесплатные источники'),
+                  ),
+                ],
+              ),
+              if (showPersonalForm) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Ссылка подписки или VPN-ключ',
+                  key: personalFormAnchor,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                TextField(
+                  key: const ValueKey('personal-vpn-uri'),
+                  controller: controller,
+                  enabled: !disabled,
+                  minLines: 1,
+                  maxLines: 4,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  keyboardType: TextInputType.url,
+                  onChanged: (_) => _clearPersonalInputError(),
+                  decoration: _fieldDecoration(
+                    hint: 'https://… или vless://…',
+                    suffixIcon: _AccessibleIconButton(
+                      tooltip: 'Вставить ссылку',
+                      icon: const Icon(Icons.content_paste),
+                      onPressed: disabled
+                          ? null
+                          : () async {
+                              final data = await Clipboard.getData(
+                                Clipboard.kTextPlain,
+                              );
+                              if (mounted && data?.text != null) {
+                                controller.text = data!.text!;
+                                _clearPersonalInputError();
+                              }
+                            },
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Поддерживаются безопасные HTTPS-подписки и ключи VLESS, Trojan, Shadowsocks, VMess, Hysteria2 и TUIC.',
+                  style: TextStyle(color: Color(0xFF9CAEA8), fontSize: 11),
+                ),
+                if (!mobile) ...[
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Название (необязательно)',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 6),
+                  TextField(
+                    key: const ValueKey('personal-vpn-name'),
+                    controller: nameController,
+                    enabled: !disabled,
+                    onChanged: (_) => _clearPersonalInputError(),
+                    decoration: _fieldDecoration(
+                      hint: 'Например, «Моя подписка»',
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  key: const ValueKey('submit-personal-vpn'),
+                  onPressed: disabled ? null : _addPersonal,
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 48),
+                  ),
+                  icon: const Icon(Icons.fact_check_outlined),
+                  label: Text(
+                    mobile && hasPersonalSource
+                        ? 'Проверить и заменить'
+                        : 'Проверить и добавить',
+                  ),
+                ),
+              ],
+
+              if (showFreeCatalog) ...[
+                const SizedBox(height: 20),
+                const _VpnSectionTitle('Бесплатный VPN · по желанию'),
+                const Text(
+                  'Нет подписки? Можно использовать публичный список. '
+                  'Это сторонние серверы с переменной доступностью, а не гарантия обхода блокировок.',
+                  style: TextStyle(color: Color(0xFFB4C9C1), fontSize: 12),
+                ),
+                const SizedBox(height: 10),
+                if (catalogError.isNotEmpty) ...[
+                  Text(catalogError),
+                  TextButton(
+                    onPressed: _loadCatalog,
+                    child: const Text('Повторить загрузку каталога'),
+                  ),
+                ],
+                if (providers.isEmpty && catalogError.isEmpty)
+                  const Text(
+                    'Загружаем каталог…',
+                    style: TextStyle(color: _atlasMuted),
+                  ),
+                for (final provider in providers)
+                  _PublicVpnProviderCard(
+                    provider: provider,
+                    busy: disabled,
+                    added: sources.any((s) => s.publicCatalogId == provider.id),
+                    onAdd: () => _addPublic(provider),
+                    onWebsite: () async {
+                      try {
+                        await widget.bridge.openExternal(provider.website);
+                      } catch (error) {
+                        if (mounted) {
+                          setState(() {
+                            statusKind = 'error';
+                            statusText = _cleanError(error);
+                          });
+                        }
+                      }
+                    },
+                  ),
+              ],
+
+              if (!mobile)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    'Dropo Boost · скоро',
+                    key: ValueKey('boost-preview'),
+                    style: TextStyle(color: _atlasMuted, fontSize: 12),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+        ],
+        if (sources.isNotEmpty && !mobile && running == true)
           const Padding(
-            padding: EdgeInsets.symmetric(vertical: 10),
+            padding: EdgeInsets.only(bottom: 6),
             child: Text(
-              'VPN-подписка пока не добавлена.',
-              style: TextStyle(color: Color(0xFFB4C9C1)),
+              'Смена источника или сервера переподключит VPN. Маршруты сервисов сохранятся.',
+              style: TextStyle(color: _atlasMuted, fontSize: 11),
             ),
           ),
         for (var i = 0; i < sources.length; i++)
@@ -504,10 +750,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             singleSource: mobile,
             running: running,
             autoSelect: autoSelect,
-            index: i,
-            busy: disabled,
-            canMoveUp: i > 0,
-            canMoveDown: i + 1 < sources.length,
+            primary: sources[i].id == firstEnabled?.id,
+            busy: controlsDisabled,
             onEnabled: (enabled) => _changeSource(
               () => widget.bridge.setVpnSourceEnabled(sources[i].id, enabled),
               'Сохраняем состояние источника…',
@@ -516,200 +760,98 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
               () => widget.bridge.setVpnSourceNode(sources[i].id, node),
               'Сохраняем выбранный сервер…',
             ),
-            onMove: (index) => _changeSource(
-              () => widget.bridge.moveVpnSource(sources[i].id, index),
-              'Сохраняем приоритет…',
+            onSelect: () => _changeSource(
+              () => widget.bridge.moveVpnSource(sources[i].id, 0),
+              'Выбираем источник вручную…',
             ),
             onRemove: () => _remove(sources[i]),
           ),
-        if (!mobile && sources.isNotEmpty)
+        if (!mobile && sources.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          const Text(
+            'Отклик — HTTP-проверка, не игровой пинг и не скорость скачивания.',
+            style: TextStyle(color: _atlasMuted, fontSize: 11),
+          ),
           Wrap(
             spacing: 8,
-            runSpacing: 8,
+            runSpacing: 4,
             children: [
+              if (sources.length > 1 && autoSelect == false)
+                TextButton.icon(
+                  key: const ValueKey('source-order'),
+                  onPressed: () => setState(() => showOrder = !showOrder),
+                  icon: Icon(
+                    showOrder ? Icons.expand_less : Icons.reorder,
+                    size: 18,
+                  ),
+                  label: const Text('Порядок резервных источников'),
+                ),
               TextButton.icon(
-                key: const ValueKey('source-auto-select'),
-                onPressed: disabled || autoSelect == true
+                key: const ValueKey('refresh-source-lists'),
+                onPressed: controlsDisabled
                     ? null
                     : () => _changeSource(
-                        widget.bridge.enableVpnSourceAutoSelect,
-                        'Включаем автовыбор…',
-                        success:
-                            'Автовыбор включён. При подключении сравнивается отклик отдельных источников; сервер внутри подписки не меняется.',
+                        widget.bridge.refreshVpnSources,
+                        'Обновляем списки серверов…',
                       ),
-                icon: const Icon(Icons.auto_awesome_outlined),
-                label: Text(
-                  autoSelect == true
-                      ? 'Автовыбор включён'
-                      : 'Автовыбор по пингу',
-                ),
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('Обновить списки'),
               ),
-              if (!mobile && sources.isNotEmpty)
-                TextButton.icon(
-                  onPressed: disabled
-                      ? null
-                      : () => _changeSource(
-                          widget.bridge.refreshVpnSources,
-                          'Обновляем списки серверов…',
-                        ),
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Обновить списки'),
-                ),
             ],
           ),
-        const SizedBox(height: 12),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: OutlinedButton.icon(
-            key: const ValueKey('add-personal-vpn'),
-            onPressed: disabled ? null : _togglePersonalForm,
-            icon: Icon(showPersonalForm ? Icons.expand_less : Icons.add_link),
-            label: Text(
-              showPersonalForm
-                  ? 'Скрыть форму'
-                  : mobile && hasPersonalSource
-                  ? 'Заменить подписку'
-                  : 'Добавить свою подписку',
-            ),
-          ),
-        ),
-
-        if (showPersonalForm) ...[
-          if (hasPersonalSource || !needsFirstPersonalSource)
-            const SizedBox(height: 12),
-          Text(
-            'Ссылка подписки или VPN-ключ',
-            key: personalFormAnchor,
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 6),
-          TextField(
-            key: const ValueKey('personal-vpn-uri'),
-            controller: controller,
-            enabled: !disabled,
-            minLines: 1,
-            maxLines: 4,
-            autocorrect: false,
-            enableSuggestions: false,
-            keyboardType: TextInputType.url,
-            onChanged: (_) => _clearPersonalInputError(),
-            decoration: _fieldDecoration(
-              hint: 'https://… или vless://…',
-              suffixIcon: _AccessibleIconButton(
-                tooltip: 'Вставить ссылку',
-                icon: const Icon(Icons.content_paste),
-                onPressed: disabled
-                    ? null
-                    : () async {
-                        final data = await Clipboard.getData(
-                          Clipboard.kTextPlain,
-                        );
-                        if (mounted && data?.text != null) {
-                          controller.text = data!.text!;
-                          _clearPersonalInputError();
-                        }
-                      },
-              ),
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Поддерживаются безопасные HTTPS-подписки и ключи VLESS, Trojan, Shadowsocks, VMess, Hysteria2 и TUIC.',
-            style: TextStyle(color: Color(0xFF9CAEA8), fontSize: 11),
-          ),
-          if (!mobile) ...[
-            const SizedBox(height: 10),
+          if (sources.length > 1 && autoSelect == false && showOrder) ...[
             const Text(
-              'Название (необязательно)',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+              'Первый включённый — основной. Выключенные пропускаются.',
+              style: TextStyle(color: _atlasMuted, fontSize: 12),
             ),
-            const SizedBox(height: 6),
-            TextField(
-              key: const ValueKey('personal-vpn-name'),
-              controller: nameController,
-              enabled: !disabled,
-              onChanged: (_) => _clearPersonalInputError(),
-              decoration: _fieldDecoration(hint: 'Например, «Моя подписка»'),
-            ),
-          ],
-          const SizedBox(height: 10),
-          FilledButton.icon(
-            key: const ValueKey('submit-personal-vpn'),
-            onPressed: disabled ? null : _addPersonal,
-            style: FilledButton.styleFrom(
-              minimumSize: const Size(double.infinity, 48),
-            ),
-            icon: const Icon(Icons.fact_check_outlined),
-            label: Text(
-              mobile && hasPersonalSource
-                  ? 'Проверить и заменить'
-                  : 'Проверить и добавить',
-            ),
-          ),
-        ],
-        const SizedBox(height: 16),
-        Text(
-          mobile
-              ? 'Чтобы изменить подписку, отключите VPN. Маршруты сервисов сохранятся.'
-              : 'Изменение источника переподключит активный VPN. Маршруты сервисов сохранятся.',
-          style: const TextStyle(color: _atlasMuted, fontSize: 11, height: 1.4),
-        ),
-        if (hasPersonalSource &&
-            (providers.isNotEmpty || catalogError.isNotEmpty))
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              key: const ValueKey('toggle-free-catalog'),
-              onPressed: () =>
-                  setState(() => showFreeCatalog = !showFreeCatalog),
-              icon: Icon(
-                showFreeCatalog ? Icons.expand_less : Icons.expand_more,
+            for (var i = 0; i < sources.length; i++)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      '${i + 1}. ${sources[i].name}${sources[i].disabled ? ' · Выключен' : ''}',
+                    ),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        TextButton.icon(
+                          key: ValueKey('vpn-source-up-${sources[i].id}'),
+                          onPressed: controlsDisabled || i == 0
+                              ? null
+                              : () => _changeSource(
+                                  () => widget.bridge.moveVpnSource(
+                                    sources[i].id,
+                                    i - 1,
+                                  ),
+                                  'Сохраняем порядок…',
+                                ),
+                          icon: const Icon(Icons.arrow_upward, size: 16),
+                          label: const Text('Выше'),
+                        ),
+                        TextButton.icon(
+                          key: ValueKey('vpn-source-down-${sources[i].id}'),
+                          onPressed: controlsDisabled || i == sources.length - 1
+                              ? null
+                              : () => _changeSource(
+                                  () => widget.bridge.moveVpnSource(
+                                    sources[i].id,
+                                    i + 1,
+                                  ),
+                                  'Сохраняем порядок…',
+                                ),
+                          icon: const Icon(Icons.arrow_downward, size: 16),
+                          label: const Text('Ниже'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-              label: const Text('Бесплатные источники'),
-            ),
-          ),
-        if ((!hasPersonalSource || showFreeCatalog) &&
-            (providers.isNotEmpty || catalogError.isNotEmpty)) ...[
-          const SizedBox(height: 20),
-          const _VpnSectionTitle('Бесплатный VPN · по желанию'),
-          const Text(
-            'Нет подписки? Можно использовать публичный список. '
-            'Это сторонние серверы с переменной доступностью, а не гарантия обхода блокировок.',
-            style: TextStyle(color: Color(0xFFB4C9C1), fontSize: 12),
-          ),
-          const SizedBox(height: 10),
-          if (catalogError.isNotEmpty) Text(catalogError),
-          for (final provider in providers)
-            _PublicVpnProviderCard(
-              provider: provider,
-              busy: disabled,
-              added: sources.any((s) => s.publicCatalogId == provider.id),
-              onAdd: () => _addPublic(provider),
-              onWebsite: () async {
-                try {
-                  await widget.bridge.openExternal(provider.website);
-                } catch (error) {
-                  if (mounted) {
-                    setState(() {
-                      statusKind = 'error';
-                      statusText = _cleanError(error);
-                    });
-                  }
-                }
-              },
-            ),
+          ],
         ],
-        if (!mobile) ...[const SizedBox(height: 20), const _BoostPreview()],
-        const SizedBox(height: 12),
-        Text(
-          mobile
-              ? 'На Android VPN-ядро выбирает доступный сервер из подписки при подключении.'
-              : 'Внутри источника используется один выбранный сервер. '
-                    'Если он не работает, выберите другой вручную. Автоперебора серверов нет.',
-          style: const TextStyle(color: Color(0xFF9CAEA8), fontSize: 12),
-        ),
-        if (!widget.embedded) ...[
-          const SizedBox(height: 14),
+        if (!widget.embedded)
           Align(
             alignment: Alignment.centerRight,
             child: TextButton(
@@ -717,13 +859,13 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
               child: const Text('Готово'),
             ),
           ),
-        ],
       ],
     );
     if (widget.embedded) {
       return _FeaturePage(
         title: 'Источники VPN',
         icon: Icons.vpn_key_outlined,
+        headerAction: addButton,
         child: content,
       );
     }
@@ -813,33 +955,6 @@ class _VpnSectionTitle extends StatelessWidget {
   );
 }
 
-class _BoostPreview extends StatelessWidget {
-  const _BoostPreview();
-
-  @override
-  Widget build(BuildContext context) => Container(
-    key: const ValueKey('boost-preview'),
-    padding: const EdgeInsets.symmetric(vertical: 16),
-    decoration: const BoxDecoration(
-      border: Border(top: BorderSide(color: _atlasBorder)),
-    ),
-    child: const Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Dropo Boost · скоро',
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-        ),
-        SizedBox(height: 6),
-        Text(
-          'VPN-подписки внутри приложения. Покупка пока недоступна.',
-          style: TextStyle(fontSize: 13, color: Color(0xFFB4C9C1), height: 1.4),
-        ),
-      ],
-    ),
-  );
-}
-
 class _PublicVpnProviderCard extends StatelessWidget {
   const _PublicVpnProviderCard({
     required this.provider,
@@ -906,28 +1021,20 @@ class _VpnSourceTile extends StatefulWidget {
     required this.singleSource,
     required this.running,
     required this.autoSelect,
-    required this.index,
+    required this.primary,
     required this.busy,
-    required this.canMoveUp,
-    required this.canMoveDown,
     required this.onEnabled,
     required this.onNode,
-    required this.onMove,
+    required this.onSelect,
     required this.onRemove,
   });
 
   final VpnSourceInfo source;
-  final bool statusKnown;
-  final bool singleSource;
+  final bool statusKnown, singleSource, primary, busy;
   final bool? running, autoSelect;
-  final int index;
-  final bool busy;
-  final bool canMoveUp;
-  final bool canMoveDown;
   final ValueChanged<bool> onEnabled;
   final ValueChanged<int> onNode;
-  final ValueChanged<int> onMove;
-  final VoidCallback onRemove;
+  final VoidCallback onSelect, onRemove;
 
   @override
   State<_VpnSourceTile> createState() => _VpnSourceTileState();
@@ -936,36 +1043,165 @@ class _VpnSourceTile extends StatefulWidget {
 class _VpnSourceTileState extends State<_VpnSourceTile> {
   bool expanded = false;
 
+  Future<void> _chooseNode() async {
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) => VpnNodePicker(source: widget.source),
+    );
+    if (!mounted ||
+        widget.busy ||
+        result == null ||
+        result == widget.source.selectedNode) {
+      return;
+    }
+    widget.onNode(result);
+  }
+
   @override
   Widget build(BuildContext context) {
     final source = widget.source;
-    final statusKnown = widget.statusKnown;
-    final singleSource = widget.singleSource;
-    final running = widget.running;
-    final autoSelect = widget.autoSelect;
-    final index = widget.index;
-    final busy = widget.busy;
-    final canMoveUp = widget.canMoveUp;
-    final canMoveDown = widget.canMoveDown;
-    final onEnabled = widget.onEnabled;
-    final onNode = widget.onNode;
-    final onMove = widget.onMove;
-    final onRemove = widget.onRemove;
-    final selected = source.selectedNode;
-    final node = selected >= 0 && selected < source.nodeNames.length
-        ? source.nodeNames[selected]
+    final active =
+        widget.statusKnown &&
+        widget.running == true &&
+        source.active &&
+        !source.disabled;
+    final selected =
+        widget.statusKnown &&
+        widget.autoSelect == false &&
+        widget.primary &&
+        !source.disabled;
+    final node =
+        source.selectedNode >= 0 &&
+            source.selectedNode < source.nodeNames.length
+        ? source.nodeNames[source.selectedNode]
         : 'Список серверов ещё не загружен';
-    final state = singleSource
-        ? 'Сохранена'
-        : !statusKnown
+    final state = !widget.statusKnown
         ? 'Статус уточняется'
+        : widget.singleSource
+        ? 'Сохранена'
         : source.disabled
         ? 'Выключен'
-        : source.active
-        ? 'Используется сейчас'
-        : index == 0 && autoSelect == false
-        ? 'Основной'
-        : 'Готов к выбору';
+        : active
+        ? 'Подключён сейчас'
+        : selected
+        ? 'Выбран для подключения'
+        : widget.autoSelect == false
+        ? 'Резервный'
+        : widget.autoSelect == true
+        ? 'Участвует в автовыборе'
+        : 'Способ выбора уточняется';
+    final response = Text(
+      !widget.statusKnown || widget.running == null
+          ? 'Отклик · Нет данных'
+          : source.disabled
+          ? 'Отклик · Выключен'
+          : widget.running != true
+          ? 'Отклик · После подключения'
+          : 'Отклик · ${source.response.label}',
+      key: ValueKey('source-response-${source.id}'),
+      style: TextStyle(
+        fontFamily: source.response.current ? 'Consolas' : 'Inter',
+        fontFamilyFallback: const ['Inter'],
+        fontSize: 12,
+        color:
+            widget.statusKnown &&
+                widget.running == true &&
+                !source.disabled &&
+                source.response.current
+            ? _atlasMint
+            : _atlasMuted,
+      ),
+    );
+    final actions = Wrap(
+      spacing: 4,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        if (!widget.singleSource)
+          TextButton.icon(
+            key: ValueKey('vpn-source-first-${source.id}'),
+            onPressed: widget.busy || source.disabled || selected
+                ? null
+                : widget.onSelect,
+            icon: Icon(selected ? Icons.check : Icons.arrow_forward, size: 16),
+            label: Text(
+              selected
+                  ? 'Выбран'
+                  : widget.autoSelect == false
+                  ? 'Выбрать'
+                  : 'Выбрать вручную',
+            ),
+          ),
+        TextButton.icon(
+          key: PageStorageKey('source-details-${source.id}'),
+          onPressed: () => setState(() => expanded = !expanded),
+          icon: Icon(expanded ? Icons.expand_less : Icons.more_horiz, size: 18),
+          label: const Text('Ещё'),
+          style: TextButton.styleFrom(foregroundColor: _atlasMuted),
+        ),
+      ],
+    );
+    final identity = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Icon(
+              source.isPublic ? Icons.public_outlined : Icons.vpn_key_outlined,
+              color: active ? _atlasMint : _atlasMuted,
+              size: 18,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                source.name,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          widget.singleSource
+              ? '$state · ${_vpnServerCountLabel(source.nodeCount)}'
+              : '${source.isPublic ? 'Бесплатный' : 'Своя подписка'} · $state',
+          style: TextStyle(
+            color: active ? _atlasMint : _atlasMuted,
+            fontSize: 12,
+          ),
+        ),
+        if (!widget.singleSource) ...[
+          const SizedBox(height: 4),
+          Text(
+            node,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: _atlasMuted, fontSize: 12),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: ValueKey('choose-vpn-node-${source.id}'),
+              onPressed: widget.busy || source.nodeCount < 1
+                  ? null
+                  : _chooseNode,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 4),
+                minimumSize: const Size(48, 36),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text(
+                'Сменить сервер',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
     return Container(
       key: ValueKey('source-row-surface-${source.id}'),
       padding: const EdgeInsets.symmetric(vertical: 12),
@@ -975,234 +1211,94 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Icon(
-                source.isPublic
-                    ? Icons.public_outlined
-                    : Icons.vpn_key_outlined,
-                color: source.active && statusKnown ? _atlasMint : _atlasMuted,
-                size: 20,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  source.name,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-              ),
-            ],
-          ),
-          Text(
-            singleSource
-                ? '$state · ${_vpnServerCountLabel(source.nodeCount)}'
-                : '${source.isPublic ? 'Бесплатный' : 'Своя подписка'} · $state',
-            style: TextStyle(
-              color: source.active && statusKnown ? _atlasMint : _atlasMuted,
-              fontSize: 12,
-            ),
-          ),
-          if (!singleSource) ...[
-            const SizedBox(height: 6),
-            Text(
-              node,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: _atlasMuted, fontSize: 12),
-            ),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 12,
-              runSpacing: 4,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              alignment: WrapAlignment.spaceBetween,
-              children: [
-                Text(
-                  !statusKnown
-                      ? 'Отклик · Нет данных'
-                      : source.disabled
-                      ? 'Отклик · Выключен'
-                      : running == false
-                      ? 'Отклик · После подключения'
-                      : 'HTTP · ${source.response.label}',
-                  key: ValueKey('source-response-${source.id}'),
-                  style: TextStyle(
-                    fontFamily: source.response.current ? 'Consolas' : 'Inter',
-                    fontFamilyFallback: const ['Inter'],
-                    fontSize: 12,
-                    color:
-                        statusKnown &&
-                            running != false &&
-                            !source.disabled &&
-                            source.response.current
-                        ? _atlasMint
-                        : _atlasMuted,
-                  ),
-                ),
-              ],
-            ),
-          ],
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              TextButton.icon(
-                key: PageStorageKey('source-details-${source.id}'),
-                onPressed: () => setState(() => expanded = !expanded),
-                icon: Icon(
-                  expanded ? Icons.expand_less : Icons.expand_more,
-                  size: 18,
-                ),
-                label: const Text('Настройки', style: TextStyle(fontSize: 12)),
-                style: TextButton.styleFrom(foregroundColor: _atlasMuted),
-              ),
-              if (!singleSource)
-                TextButton.icon(
-                  key: ValueKey('vpn-source-first-${source.id}'),
-                  onPressed:
-                      busy ||
-                          source.disabled ||
-                          (autoSelect == false && index == 0)
-                      ? null
-                      : () => onMove(0),
-                  icon: Icon(
-                    autoSelect == false && index == 0
-                        ? Icons.check
-                        : Icons.arrow_forward,
-                    size: 16,
-                  ),
-                  label: Text(
-                    autoSelect == false && index == 0 ? 'Выбран' : 'Выбрать',
-                  ),
-                ),
-            ],
-          ),
-          if (expanded)
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (!singleSource)
-                  Row(
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final wide =
+                  constraints.maxWidth >= 480 &&
+                  MediaQuery.textScalerOf(context).scale(1) <= 1.3;
+              if (!wide) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    identity,
+                    if (!widget.singleSource) response,
+                    actions,
+                  ],
+                );
+              }
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: identity),
+                  const SizedBox(width: 16),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      const Expanded(
-                        child: Text(
-                          'Использовать источник',
-                          style: TextStyle(fontSize: 12),
-                        ),
-                      ),
-                      _AccessibleDescription(
-                        message: source.disabled
-                            ? 'Включить источник'
-                            : 'Выключить источник',
-                        child: Switch.adaptive(
-                          value: !source.disabled,
-                          onChanged: busy ? null : onEnabled,
-                        ),
-                      ),
+                      if (!widget.singleSource) response,
+                      const SizedBox(height: 8),
+                      actions,
                     ],
-                  ),
-                if (!singleSource)
-                  Text(
-                    'Приоритет ${index + 1} · ${_vpnServerCountLabel(source.nodeCount)}',
-                    style: const TextStyle(color: _atlasMuted, fontSize: 12),
-                  ),
-                if (!singleSource)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 6),
-                    child: Text(
-                      'HTTP-отклик — не игровой пинг и не скорость скачивания.',
-                      style: TextStyle(color: _atlasMuted, fontSize: 11),
-                    ),
-                  ),
-                if (singleSource) ...[
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Доступный сервер выбирается VPN-ядром автоматически при подключении.',
-                    style: TextStyle(color: Color(0xFF9CAEA8), fontSize: 11),
-                  ),
-                ] else ...[
-                  const SizedBox(height: 8),
-                  Material(
-                    color: Colors.transparent,
-                    child: ListTile(
-                      key: ValueKey('choose-vpn-node-${source.id}'),
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      title: Text(
-                        node,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Text(
-                        '${_vpnServerCountLabel(source.nodeCount)} · выбрать вручную',
-                      ),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: busy || source.nodeCount < 1
-                          ? null
-                          : () async {
-                              final result = await showDialog<int>(
-                                context: context,
-                                builder: (context) =>
-                                    VpnNodePicker(source: source),
-                              );
-                              if (result != null && result != selected) {
-                                onNode(result);
-                              }
-                            },
-                    ),
                   ),
                 ],
-                if (source.lastUpdated.isNotEmpty)
-                  Text(
-                    'Список обновлён: ${source.lastUpdated}',
-                    style: const TextStyle(
-                      color: Color(0xFF9CAEA8),
-                      fontSize: 11,
-                    ),
-                  ),
-                if (source.lastError.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(
-                      source.lastError,
-                      style: TextStyle(
-                        color: source.usingCache
-                            ? const Color(0xFFFCD34D)
-                            : const Color(0xFFFCA5A5),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                Wrap(
-                  alignment: WrapAlignment.end,
-                  children: [
-                    if (!singleSource) ...[
-                      _AccessibleIconButton(
-                        key: ValueKey('vpn-source-up-${source.id}'),
-                        tooltip: 'Выше по приоритету',
-                        icon: const Icon(Icons.arrow_upward, size: 18),
-                        onPressed: busy || !canMoveUp
-                            ? null
-                            : () => onMove(index - 1),
-                      ),
-                      _AccessibleIconButton(
-                        key: ValueKey('vpn-source-down-${source.id}'),
-                        tooltip: 'Ниже по приоритету',
-                        icon: const Icon(Icons.arrow_downward, size: 18),
-                        onPressed: busy || !canMoveDown
-                            ? null
-                            : () => onMove(index + 1),
-                      ),
-                    ],
-                    _AccessibleIconButton(
-                      tooltip: 'Удалить источник',
-                      icon: const Icon(Icons.delete_outline, size: 18),
-                      onPressed: busy ? null : onRemove,
-                    ),
-                  ],
-                ),
-              ],
+              );
+            },
+          ),
+          if (!expanded && source.lastError.isNotEmpty)
+            const Text(
+              'Есть проблема с источником. Подробности — в «Ещё».',
+              style: TextStyle(color: Color(0xFFFFD38B), fontSize: 12),
             ),
+          if (expanded) ...[
+            if (!widget.singleSource)
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Использовать источник',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  Switch.adaptive(
+                    key: ValueKey('source-enabled-${source.id}'),
+                    value: !source.disabled,
+                    onChanged: widget.busy ? null : widget.onEnabled,
+                  ),
+                ],
+              ),
+            Text(
+              widget.singleSource
+                  ? 'На Android доступный сервер выбирается VPN-ядром при подключении.'
+                  : '${_vpnServerCountLabel(source.nodeCount)}. Используется выбранный сервер; автоматического перебора внутри подписки нет.',
+              style: const TextStyle(color: _atlasMuted, fontSize: 12),
+            ),
+            if (source.lastUpdated.isNotEmpty)
+              Text(
+                'Список обновлён: ${source.lastUpdated}',
+                style: const TextStyle(color: _atlasMuted, fontSize: 11),
+              ),
+            if (source.lastError.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  source.lastError,
+                  style: TextStyle(
+                    color: source.usingCache
+                        ? const Color(0xFFFCD34D)
+                        : const Color(0xFFFCA5A5),
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                key: ValueKey('remove-source-${source.id}'),
+                onPressed: widget.busy ? null : widget.onRemove,
+                icon: const Icon(Icons.delete_outline, size: 18),
+                label: const Text('Удалить источник'),
+              ),
+            ),
+          ],
         ],
       ),
     );

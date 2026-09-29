@@ -192,6 +192,7 @@ void main() {
   for (final (size, scale) in [
     (const Size(1100, 760), 1.0),
     (const Size(820, 560), 1.0),
+    (const Size(390, 568), 1.0),
     (const Size(390, 568), 2.0),
   ]) {
     testWidgets('source list and expanded settings fit $size at $scale', (
@@ -215,6 +216,8 @@ void main() {
       ];
       await _pumpScene(tester, bridge, size, scale);
       await openSection(tester, 'sources');
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 300));
       await _capture(tester, 'source-list-${size.width.toInt()}-$scale');
       final details = find.byKey(
         const PageStorageKey('source-details-preview-source'),
@@ -233,6 +236,36 @@ void main() {
       await tester.pump();
       await _capture(tester, 'source-settings-${size.width.toInt()}-$scale');
       expect(server, findsOneWidget);
+      final add = find.byKey(const ValueKey('add-personal-vpn'));
+      expect(add.hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+  for (final size in [const Size(1100, 760), const Size(390, 568)]) {
+    testWidgets('empty source page exposes explicit add choices $size', (
+      tester,
+    ) async {
+      final bridge = _SpaceBridge()..sourcesOverride = [];
+      await _pumpScene(tester, bridge, size, 1);
+      await openSection(tester, 'sources');
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('personal-vpn-uri')), findsNothing);
+      await _capture(tester, 'sources-empty-${size.width.toInt()}');
+      final personal = find.byKey(const ValueKey('choose-personal-source'));
+      await tester.ensureVisible(personal);
+      await tester.pump();
+      await tester.tap(personal);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      // The post-frame ensureVisible starts its scroll on the following frame.
+      await tester.pump(const Duration(milliseconds: 400));
+      await _capture(tester, 'sources-add-${size.width.toInt()}');
+      expect(
+        find.byKey(const ValueKey('personal-vpn-uri')).hitTestable(),
+        findsOneWidget,
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     });

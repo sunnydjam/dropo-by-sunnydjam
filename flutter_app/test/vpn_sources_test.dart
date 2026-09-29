@@ -58,6 +58,22 @@ class _SourceBridge extends MockCoreBridge {
   int autoSelections = 0;
   bool autoSelect = false;
   bool running = true;
+  bool failMove = false;
+  final List<(String, int)> nodeChanges = [];
+  int removals = 0;
+
+  @override
+  Future<Map<String, dynamic>> setVpnSourceNode(String id, int node) async {
+    nodeChanges.add((id, node));
+    return {'success': true};
+  }
+
+  @override
+  Future<Map<String, dynamic>> removeVpnSource(String id) async {
+    removals++;
+    sources = sources.where((source) => source.id != id).toList();
+    return {'success': true};
+  }
 
   @override
   Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async => VpnSourcesSnapshot(
@@ -86,6 +102,9 @@ class _SourceBridge extends MockCoreBridge {
   @override
   Future<Map<String, dynamic>> moveVpnSource(String id, int index) async {
     moves.add((id, index));
+    if (failMove) {
+      return {'success': false, 'error': 'Не удалось переключить источник'};
+    }
     autoSelect = false;
     final moved = sources.firstWhere((source) => source.id == id);
     sources = [...sources.where((source) => source.id != id)]
@@ -155,12 +174,16 @@ Future<void> _pumpEditor(
   VoidCallback? onChanged,
   VoidCallback? onReadyToConnect,
   bool settle = true,
+  bool openPersonal = false,
+  bool openFree = false,
+  bool embedded = false,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   final editor = VpnSourcesDialog(
+    embedded: embedded,
     bridge: bridge,
     subscription: subscription,
     onChanged: onChanged,
@@ -191,6 +214,15 @@ Future<void> _pumpEditor(
   } else {
     await tester.pump();
     await tester.pump();
+  }
+  if (openPersonal || openFree) {
+    final choice = find.byKey(
+      ValueKey(openPersonal ? 'choose-personal-source' : 'toggle-free-catalog'),
+    );
+    if (choice.evaluate().isEmpty) {
+      await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
+    }
+    await _tapVisible(tester, choice);
   }
 }
 
@@ -240,21 +272,17 @@ void main() {
       find.byKey(const ValueKey('vpn-source-personal')).hitTestable(),
       findsOneWidget,
     );
-    expect(find.text('HTTP · 42 мс'), findsOneWidget);
+    expect(find.text('Отклик · 42 мс'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('choose-vpn-node-personal')),
-      findsNothing,
+      findsOneWidget,
     );
     expect(
       find.byKey(const ValueKey('add-public-vpn-test-public')),
       findsNothing,
     );
-    expect(
-      tester.getTopLeft(find.byKey(const ValueKey('vpn-source-personal'))).dy,
-      lessThan(
-        tester.getTopLeft(find.byKey(const ValueKey('boost-preview'))).dy,
-      ),
-    );
+    expect(find.byKey(const ValueKey('boost-preview')), findsNothing);
+    await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
     await _tapVisible(
       tester,
       find.byKey(const ValueKey('toggle-free-catalog')),
@@ -273,15 +301,27 @@ void main() {
       ..autoSelect = true
       ..sources = [_source('one'), _source('two')];
     await _pumpEditor(tester, bridge);
-    expect(find.text('Автоматически · по отклику'), findsOneWidget);
+    expect(
+      tester
+          .widget<ChoiceChip>(find.byKey(const ValueKey('source-auto-select')))
+          .selected,
+      isTrue,
+    );
     await _tapVisible(
       tester,
       find.byKey(const ValueKey('vpn-source-first-one')),
     );
     expect(bridge.moves, [('one', 0)]);
-    expect(find.text('Вручную · по вашему порядку'), findsOneWidget);
+    expect(
+      tester
+          .widget<ChoiceChip>(
+            find.byKey(const ValueKey('source-manual-select')),
+          )
+          .selected,
+      isTrue,
+    );
     expect(find.text('Выбран'), findsOneWidget);
-    expect(find.textContaining('Используется сейчас'), findsNothing);
+    expect(find.textContaining('Подключён сейчас'), findsNothing);
   });
 
   for (final state in ['pending', 'failed', 'stale', 'unavailable']) {
@@ -298,7 +338,7 @@ void main() {
         'stale' => 'Данные устарели',
         _ => 'Нет данных',
       };
-      expect(find.text('HTTP · $expected'), findsOneWidget);
+      expect(find.text('Отклик · $expected'), findsOneWidget);
     });
   }
 
@@ -350,18 +390,18 @@ void main() {
   });
 
   testWidgets(
-    'public catalog is visible without a subscription and never auto-enabled',
+    'empty state offers two explicit choices and never auto-enables public sources',
     (tester) async {
       final bridge = _SourceBridge();
       await _pumpEditor(tester, bridge);
       expect(find.text('Источники VPN'), findsOneWidget);
       expect(find.text('Dropo Boost · скоро'), findsOneWidget);
-      expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
-      expect(find.byKey(const ValueKey('submit-personal-vpn')), findsOneWidget);
+      expect(find.byKey(const ValueKey('personal-vpn-uri')), findsNothing);
+      expect(find.byKey(const ValueKey('submit-personal-vpn')), findsNothing);
       expect(find.byKey(const ValueKey('add-personal-vpn')), findsOneWidget);
       expect(
         find.byKey(const ValueKey('add-public-vpn-test-public')),
-        findsOneWidget,
+        findsNothing,
       );
       expect(bridge.publicAdds, 0);
       expect(tester.takeException(), isNull);
@@ -375,7 +415,15 @@ void main() {
       ..sources = [for (var i = 0; i < 8; i++) _source('personal-$i')];
     await _pumpEditor(tester, bridge, size: const Size(820, 560));
     expect(find.byKey(const ValueKey('personal-vpn-uri')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('add-personal-vpn')).hitTestable(),
+      findsOneWidget,
+    );
     await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('choose-personal-source')),
+    );
     expect(
       find.byKey(const ValueKey('personal-vpn-uri')).hitTestable(),
       findsOneWidget,
@@ -387,7 +435,7 @@ void main() {
     tester,
   ) async {
     final bridge = _SourceBridge();
-    await _pumpEditor(tester, bridge);
+    await _pumpEditor(tester, bridge, openFree: true);
     await _tapVisible(
       tester,
       find.byKey(const ValueKey('add-public-vpn-test-public')),
@@ -420,11 +468,11 @@ void main() {
       );
       expect(bridge.moves, [('free', 0)]);
       expect(bridge.sources.map((source) => source.id), ['free', 'personal']);
-      expect(find.textContaining('Бесплатный · Основной'), findsOneWidget);
-      await _tapVisible(
-        tester,
-        find.byKey(const PageStorageKey('source-details-free')),
+      expect(
+        find.textContaining('Бесплатный · Выбран для подключения'),
+        findsOneWidget,
       );
+      await _tapVisible(tester, find.byKey(const ValueKey('source-order')));
       await _tapVisible(
         tester,
         find.byKey(const ValueKey('vpn-source-down-free')),
@@ -438,7 +486,7 @@ void main() {
     tester,
   ) async {
     final bridge = _SourceBridge()..sources = [_source('free', public: true)];
-    await _pumpEditor(tester, bridge);
+    await _pumpEditor(tester, bridge, openPersonal: true);
     await tester.enterText(
       find.byKey(const ValueKey('personal-vpn-uri')),
       'https://example.test/subscription',
@@ -461,7 +509,7 @@ void main() {
     tester,
   ) async {
     final bridge = _SourceBridge()..throwOnPublicAdd = true;
-    await _pumpEditor(tester, bridge);
+    await _pumpEditor(tester, bridge, openFree: true);
     await _tapVisible(
       tester,
       find.byKey(const ValueKey('add-public-vpn-test-public')),
@@ -480,9 +528,14 @@ void main() {
     tester,
   ) async {
     final bridge = _SourceBridge()..throwOnCatalog = true;
-    await _pumpEditor(tester, bridge);
+    await _pumpEditor(tester, bridge, openPersonal: true);
     expect(find.text('Проверить и добавить'), findsOneWidget);
     expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
+    expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('toggle-free-catalog')),
+    );
     expect(find.textContaining('Каталог недоступен'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -492,7 +545,7 @@ void main() {
   ) async {
     final catalog = Completer<List<PublicVpnProviderInfo>>();
     final bridge = _SourceBridge()..pendingCatalog = catalog;
-    await _pumpEditor(tester, bridge, settle: false);
+    await _pumpEditor(tester, bridge, settle: false, openPersonal: true);
 
     final input = tester.widget<TextField>(
       find.byKey(const ValueKey('personal-vpn-uri')),
@@ -506,6 +559,10 @@ void main() {
 
     catalog.complete([_provider]);
     await tester.pumpAndSettle();
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('toggle-free-catalog')),
+    );
     expect(
       find.byKey(const ValueKey('add-public-vpn-test-public')),
       findsOneWidget,
@@ -537,7 +594,7 @@ void main() {
     tester,
   ) async {
     final bridge = _SourceBridge();
-    await _pumpEditor(tester, bridge);
+    await _pumpEditor(tester, bridge, openPersonal: true);
     final input = find.byKey(const ValueKey('personal-vpn-uri'));
     final submit = find.byKey(const ValueKey('submit-personal-vpn'));
 
@@ -586,6 +643,7 @@ void main() {
     await _pumpEditor(
       tester,
       bridge,
+      openPersonal: true,
       onChanged: () => changes++,
       onReadyToConnect: () => readyActions++,
     );
@@ -637,7 +695,7 @@ void main() {
       ..failPersonalAdd = true
       ..personalAddError =
           'VPN subscription could not be downloaded or contains no supported Android servers';
-    await _pumpEditor(tester, bridge);
+    await _pumpEditor(tester, bridge, openPersonal: true);
     await tester.enterText(
       find.byKey(const ValueKey('personal-vpn-uri')),
       'https://example.test/subscription',
@@ -685,6 +743,10 @@ void main() {
     );
     expect(find.text('Обновить списки'), findsNothing);
     await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('choose-personal-source')),
+    );
     expect(find.text('Проверить и заменить'), findsOneWidget);
     expect(find.byKey(const ValueKey('personal-vpn-name')), findsNothing);
     expect(tester.takeException(), isNull);
@@ -702,6 +764,7 @@ void main() {
             _SourceBridge(),
             size: viewport,
             textScale: scale,
+            openPersonal: true,
           );
           final input = find.byKey(const ValueKey('personal-vpn-uri'));
           final submit = find.byKey(const ValueKey('submit-personal-vpn'));
@@ -733,19 +796,13 @@ void main() {
         size: const Size(960, 640),
         textScale: scale,
       );
-      expect(find.textContaining('Используется сейчас'), findsOneWidget);
-      expect(
-        find.textContaining('Бесплатный · Готов к выбору'),
-        findsOneWidget,
-      );
-      await _tapVisible(
-        tester,
-        find.byKey(const PageStorageKey('source-details-personal')),
-      );
-      final up = tester.widget<IconButton>(
+      expect(find.textContaining('Подключён сейчас'), findsOneWidget);
+      expect(find.textContaining('Бесплатный · Резервный'), findsOneWidget);
+      await _tapVisible(tester, find.byKey(const ValueKey('source-order')));
+      final up = tester.widget<TextButton>(
         find.byKey(const ValueKey('vpn-source-up-personal')),
       );
-      final down = tester.widget<IconButton>(
+      final down = tester.widget<TextButton>(
         find.byKey(const ValueKey('vpn-source-down-personal')),
       );
       expect(up.onPressed, isNull);
@@ -788,6 +845,199 @@ void main() {
       await tester.pumpAndSettle();
       expect(selected, 455);
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('add stays reachable after scrolling a long embedded list', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..sources = [for (var i = 0; i < 20; i++) _source('long-$i')];
+    await _pumpEditor(
+      tester,
+      bridge,
+      embedded: true,
+      size: const Size(820, 560),
+    );
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('vpn-source-long-19')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('add-personal-vpn')).hitTestable(),
+      findsOneWidget,
+    );
+    await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
+    expect(
+      find.byKey(const ValueKey('choose-personal-source')).hitTestable(),
+      findsOneWidget,
+    );
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('choose-personal-source')),
+    );
+    expect(
+      find.byKey(const ValueKey('personal-vpn-uri')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(bridge.moves, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'manual mode skips disabled sources and preserves enabled fallback order',
+    (tester) async {
+      final bridge = _SourceBridge()
+        ..autoSelect = true
+        ..sources = [
+          _source('disabled', disabled: true),
+          _source('one'),
+          _source('two'),
+        ];
+      await _pumpEditor(tester, bridge);
+      expect(find.byKey(const ValueKey('source-order')), findsNothing);
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('source-manual-select')),
+      );
+      expect(bridge.moves, [('one', 0)]);
+      expect(bridge.sources.map((s) => s.id), ['one', 'disabled', 'two']);
+      expect(find.textContaining('Выбран для подключения'), findsOneWidget);
+      expect(find.byKey(const ValueKey('source-order')), findsOneWidget);
+    },
+  );
+
+  testWidgets('failed manual selection leaves automatic choice selected', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..autoSelect = true
+      ..failMove = true
+      ..sources = [_source('one')];
+    await _pumpEditor(tester, bridge);
+    expect(find.text('Выбрать вручную'), findsOneWidget);
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('vpn-source-first-one')),
+    );
+    expect(bridge.autoSelect, isTrue);
+    expect(
+      tester
+          .widget<ChoiceChip>(find.byKey(const ValueKey('source-auto-select')))
+          .selected,
+      isTrue,
+    );
+    expect(
+      find.textContaining('Не удалось переключить источник'),
+      findsOneWidget,
+    );
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+  });
+
+  testWidgets(
+    'details and cancelled server selection do not mutate the source',
+    (tester) async {
+      final bridge = _SourceBridge()
+        ..autoSelect = true
+        ..sources = [_source('one')];
+      await _pumpEditor(tester, bridge);
+      await _tapVisible(
+        tester,
+        find.byKey(const PageStorageKey('source-details-one')),
+      );
+      expect(find.text('Удалить источник'), findsOneWidget);
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('choose-vpn-node-one')),
+      );
+      await _tapVisible(tester, find.text('Отмена'));
+      expect(bridge.moves, isEmpty);
+      expect(bridge.nodeChanges, isEmpty);
+      expect(bridge.autoSelect, isTrue);
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('choose-vpn-node-one')),
+      );
+      await _tapVisible(tester, find.byKey(const ValueKey('vpn-node-1')));
+      expect(bridge.nodeChanges, [('one', 1)]);
+      expect(bridge.moves, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'remove remains explicit and cancelling it preserves the source',
+    (tester) async {
+      final bridge = _SourceBridge()..sources = [_source('one')];
+      await _pumpEditor(tester, bridge);
+      await _tapVisible(
+        tester,
+        find.byKey(const PageStorageKey('source-details-one')),
+      );
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('remove-source-one')),
+      );
+      await _tapVisible(tester, find.text('Отмена'));
+      expect(bridge.removals, 0);
+      expect(bridge.sources.length, 1);
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('remove-source-one')),
+      );
+      await _tapVisible(tester, find.text('Удалить'));
+      expect(bridge.removals, 1);
+      expect(find.text('Добавьте первый источник'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('choose-personal-source')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('offline active flag cannot claim a connected source', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..running = false
+      ..sources = [_source('one', active: true)];
+    await _pumpEditor(tester, bridge);
+    expect(find.textContaining('Подключён сейчас'), findsNothing);
+    expect(find.textContaining('Выбран для подключения'), findsOneWidget);
+    expect(find.byKey(const ValueKey('source-order')), findsNothing);
+  });
+
+  testWidgets(
+    'manual primary is first enabled even when a disabled entry is first',
+    (tester) async {
+      final bridge = _SourceBridge()
+        ..sources = [
+          _source('off', disabled: true),
+          _source('main'),
+          _source('fallback', active: true),
+        ];
+      await _pumpEditor(tester, bridge);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('vpn-source-main')),
+          matching: find.textContaining('Выбран для подключения'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('vpn-source-fallback')),
+          matching: find.textContaining('Подключён сейчас'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byKey(const ValueKey('vpn-source-first-main')),
+            )
+            .onPressed,
+        isNull,
+      );
     },
   );
 

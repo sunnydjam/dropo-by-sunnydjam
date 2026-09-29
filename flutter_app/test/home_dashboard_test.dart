@@ -782,6 +782,7 @@ void main() {
         findsOneWidget,
       );
       await _tap(tester, 'nav-sources');
+      await _tap(tester, 'choose-personal-source');
       expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
       await tester.enterText(
         find.byKey(const ValueKey('personal-vpn-uri')),

@@ -10,6 +10,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'navigation_helpers.dart';
 
 class _CatalogBridge extends MockCoreBridge {
+  @override
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async => VpnSourcesSnapshot(
+    sources: await vpnSources(),
+    autoSelect: true,
+    running: true,
+  );
   bool failRead = false, failWrite = false, failSources = false;
   int writes = 0;
   Completer<void>? pendingWrite;
@@ -326,27 +332,32 @@ void main() {
           },
         ),
       );
-      expect(find.textContaining('Используется сейчас'), findsOneWidget);
+      expect(find.textContaining('Подключён сейчас'), findsOneWidget);
       await _tap(tester, 'add-personal-vpn');
+      await _tap(tester, 'choose-personal-source');
       expect(find.text('Скрыть форму'), findsOneWidget);
       final sources = await bridge.vpnSources();
-      update(() => snapshot = VpnSourcesSnapshot(sources: sources));
+      update(
+        () => snapshot = VpnSourcesSnapshot(sources: sources, running: true),
+      );
       await tester.pumpAndSettle();
       expect(find.text('Скрыть форму'), findsOneWidget);
       update(() => enabled = false);
       await tester.pumpAndSettle();
-      expect(find.textContaining('Используется сейчас'), findsNothing);
+      expect(find.textContaining('Подключён сейчас'), findsNothing);
       expect(find.textContaining('Статус уточняется'), findsOneWidget);
       update(() {
         enabled = true;
         snapshot = null;
       });
       await tester.pumpAndSettle();
-      expect(find.textContaining('Используется сейчас'), findsNothing);
+      expect(find.textContaining('Подключён сейчас'), findsNothing);
       expect(find.text('Отклик · Нет данных'), findsOneWidget);
-      update(() => snapshot = VpnSourcesSnapshot(sources: sources));
+      update(
+        () => snapshot = VpnSourcesSnapshot(sources: sources, running: true),
+      );
       await tester.pumpAndSettle();
-      expect(find.textContaining('Используется сейчас'), findsOneWidget);
+      expect(find.textContaining('Подключён сейчас'), findsOneWidget);
       expect(find.byType(LinearProgressIndicator), findsNothing);
       expect(tester.takeException(), isNull);
     },
@@ -372,6 +383,7 @@ void main() {
           expect(bridge.policies['discord'], 'vpn');
           await _tap(tester, 'nav-sources');
           await _tap(tester, 'add-personal-vpn');
+          await _tap(tester, 'choose-personal-source');
           expect(find.text('Скрыть форму'), findsOneWidget);
           expect(tester.takeException(), isNull);
         },

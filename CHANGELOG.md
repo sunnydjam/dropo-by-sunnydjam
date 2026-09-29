@@ -2,6 +2,23 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.0.40 — 2026-09-29
+
+- pin the VPN-source add action above long lists and expose automatic/manual
+  selection as an explicit mode switch;
+- make source rows more compact, with selected server, HTTP response and distinct
+  connected/selected/disabled states; expose server selection directly in the row;
+- move fallback ordering into a separate manual-mode section and keep enable,
+  removal and diagnostic details under the labelled More action;
+- offer personal subscriptions and the optional public catalog through one add
+  flow; empty profiles start with two clear choices, without an unsolicited form;
+- retain explicit public-source consent, input validation, failure recovery and
+  truthful stale/offline measurements; keep Boost secondary and unavailable;
+- preserve the shared star field, both routing modes, independent-source fallback,
+  user-selected subscription nodes and user-confirmed application updates;
+- cover selection failure, disabled priorities, actual fallback status, cancellation,
+  long-list access, Android onboarding and narrow/enlarged-text layouts in UI tests.
+
 ## 3.0.39 — 2026-09-28
 
 - put saved VPN sources first, with selected server, active status, real HTTP
