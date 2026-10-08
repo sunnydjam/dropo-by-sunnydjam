@@ -15,9 +15,9 @@ const _subscription = SubscriptionInfo(
 );
 const _provider = PublicVpnProviderInfo(
   id: 'test-public',
-  name: 'VPN Checker · RU',
+  name: 'Dropo Free',
   description:
-      'Сторонний публичный список. Приоритет можно изменить; доступность и скорость не гарантируются.',
+      'Бесплатная подписка Dropo. Приоритет можно изменить; доступность и скорость не гарантируются.',
   website: 'https://example.com/public',
 );
 
@@ -543,7 +543,7 @@ void main() {
       tester,
       find.byKey(const ValueKey('toggle-free-catalog')),
     );
-    expect(find.textContaining('Каталог недоступен'), findsOneWidget);
+    expect(find.textContaining('Dropo Free сейчас недоступен'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -1084,6 +1084,33 @@ void main() {
     expect(find.textContaining('Выбран для подключения'), findsOneWidget);
     expect(find.byKey(const ValueKey('source-order')), findsNothing);
   });
+
+  testWidgets(
+    'retired aggregator stays saved with an explicit removal warning',
+    (tester) async {
+      final legacy = VpnSourceInfo.fromJson({
+        'id': 'legacy',
+        'name': 'VPN Checker · RU',
+        'public_catalog_id': 'vpn-checker-ru-part9',
+        'node_count': 1,
+        'node_names': ['Сохранённый сервер'],
+        'selected_node': 0,
+      });
+      final bridge = _SourceBridge()..sources = [legacy];
+      await _pumpEditor(tester, bridge);
+      expect(find.text('VPN Checker · RU'), findsOneWidget);
+      expect(
+        find.textContaining(
+          'Этот старый публичный список больше не предлагается',
+        ),
+        findsOneWidget,
+      );
+      expect(bridge.sources.single.id, 'legacy');
+      expect(bridge.removals, 0);
+      expect(bridge.publicAdds, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets(
     'manual primary is first enabled even when a disabled entry is first',

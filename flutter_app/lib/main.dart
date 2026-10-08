@@ -6,12 +6,15 @@ import 'dart:ui' show AppExitResponse;
 import 'dart:ui' as ui;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'account_session_store.dart';
 
 part 'vpn_sources.dart';
+part 'managed_free_source.dart';
 part 'vpn_onboarding.dart';
 part 'home_dashboard.dart';
 part 'atlas_dashboard.dart';
@@ -48,16 +51,10 @@ const String _bundledBuildHash = String.fromEnvironment(
 );
 const String _accountEndpoint = String.fromEnvironment(
   'DROPO_ACCOUNT_ENDPOINT',
-  defaultValue: 'http://127.0.0.1:18080',
+  defaultValue: '',
 );
 
-bool get _mobileAccountAvailable {
-  final uri = Uri.tryParse(_accountEndpoint);
-  return uri != null &&
-      uri.scheme == 'https' &&
-      uri.host.isNotEmpty &&
-      !const {'localhost', '127.0.0.1', '::1'}.contains(uri.host.toLowerCase());
-}
+bool get _accountConfigured => accountEndpointAvailable(_accountEndpoint);
 
 @visibleForTesting
 String? coreCompatibilityError(
@@ -817,25 +814,19 @@ class HttpCoreBridge implements CoreBridge {
 
   @override
   Future<List<PublicVpnProviderInfo>> publicVpnProviders() async {
-    final result = await callMap('GetPublicVPNProviders');
-    if (result['success'] == false) {
-      throw StateError(result['error']?.toString() ?? 'Каталог недоступен');
-    }
-    final raw = result['providers'];
-    return raw is List
-        ? raw
-              .map(_asMap)
-              .map(PublicVpnProviderInfo.fromJson)
-              .toList(growable: false)
-        : const [];
+    return _managedFreeSourceClient.providers;
   }
 
   @override
   Future<Map<String, dynamic>> addPublicVpnSource(String id, bool consent) {
-    return callMap(
-      'AddPublicVPNSource',
-      args: [id, consent],
-      timeout: const Duration(minutes: 3),
+    return _managedFreeSourceClient.add(
+      id,
+      consent,
+      save: (providerId, name, uri, accepted) => callMap(
+        'AddManagedVPNSource',
+        args: [providerId, name, uri, accepted],
+        timeout: const Duration(minutes: 3),
+      ),
     );
   }
 
@@ -1530,20 +1521,19 @@ class ChannelCoreBridge implements CoreBridge {
 
   @override
   Future<List<PublicVpnProviderInfo>> publicVpnProviders() async {
-    final result = await callMap('GetPublicVPNProviders');
-    if (result['success'] != true) throw StateError('Каталог недоступен');
-    return (result['providers'] as List? ?? const [])
-        .map(_asMap)
-        .map(PublicVpnProviderInfo.fromJson)
-        .toList(growable: false);
+    return _managedFreeSourceClient.providers;
   }
 
   @override
   Future<Map<String, dynamic>> addPublicVpnSource(String id, bool consent) =>
-      callMap(
-        'AddPublicVPNSource',
-        args: [id, consent],
-        timeout: const Duration(minutes: 3),
+      _managedFreeSourceClient.add(
+        id,
+        consent,
+        save: (providerId, name, uri, accepted) => callMap(
+          'AddManagedVPNSource',
+          args: [providerId, name, uri, accepted],
+          timeout: const Duration(minutes: 3),
+        ),
       );
 
   @override
@@ -1812,7 +1802,7 @@ class MockCoreBridge implements CoreBridge {
   Future<List<PublicVpnProviderInfo>> publicVpnProviders() async => const [
     PublicVpnProviderInfo(
       id: 'demo-public',
-      name: 'Бесплатный резерв · демо',
+      name: 'Dropo Free · демо',
       description: 'Тестовый каталог без подключения к реальным серверам.',
       website: 'https://example.com',
     ),
@@ -1824,7 +1814,7 @@ class MockCoreBridge implements CoreBridge {
     bool consent,
   ) async => {
     'success': false,
-    'error': 'В деморежиме подключение к публичным серверам недоступно',
+    'error': 'В деморежиме подключение к бесплатным серверам недоступно',
   };
   bool _connected = false;
   String _subscriptionUrl = '';
@@ -4292,18 +4282,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         if (checked != null && checked.success) {
           setState(() {
             updateInfo = checked;
-            if (checked.hasUpdate && !connectionBusy && !uiBusy) {
-              statusMessage = 'Доступна версия ${checked.latestVersion}';
-              connectionHint = checked.selfUpdate
-                  ? 'Нажмите «Обновить и перезапустить».'
-                  : checked.platform.toLowerCase() == 'windows'
-                  ? 'Скачайте portable-архив и замените папку приложения.'
-                  : 'Нажмите «Скачать APK» для установки обновления.';
-            }
           });
-          if (checked.hasUpdate) {
-            _showUpdateSnackBar(checked, manual: false);
-          }
           return;
         }
         if (attempt == 0) {
@@ -5207,21 +5186,9 @@ class _DropoHomePageState extends State<DropoHomePage>
         return;
       }
       setState(() {
-        updateInfo = result;
-        statusMessage = result.success
-            ? (result.hasUpdate
-                  ? 'Доступна версия ${result.latestVersion}'
-                  : 'Версия актуальна')
-            : 'Ошибка обновления';
-        connectionHint = result.success
-            ? (result.hasUpdate
-                  ? (result.selfUpdate
-                        ? 'Нажмите «Обновить и перезапустить».'
-                        : result.platform.toLowerCase() == 'windows'
-                        ? 'Скачайте portable-архив и замените папку приложения.'
-                        : 'Нажмите «Скачать APK» для установки обновления.')
-                  : 'Вы используете последнюю опубликованную версию.')
-            : result.error;
+        // Update availability is not a connection state. In particular, a
+        // background check must not replace a VPN error or in-flight hint.
+        if (result.success) updateInfo = result;
       });
       _showUpdateSnackBar(result, manual: true);
     });
@@ -5264,10 +5231,11 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       return;
     }
-    final asset = result.assetName.isEmpty ? 'новую сборку' : result.assetName;
     messenger.showSnackBar(
       SnackBar(
-        content: Text('Доступна версия ${result.latestVersion}: $asset'),
+        behavior: SnackBarBehavior.floating,
+        width: math.min(460, MediaQuery.sizeOf(context).width - 24),
+        content: Text('Доступна версия Dropo ${result.latestVersion}'),
         duration: const Duration(seconds: 12),
         action: SnackBarAction(
           label: result.selfUpdate
@@ -6052,7 +6020,6 @@ class _DropoHomePageState extends State<DropoHomePage>
               routeProbeFailed ||
               (legacyTelegramProxy.injected &&
                   legacyTelegramProxy.recommendRemove) ||
-              updateInfo?.hasUpdate == true ||
               (!booting &&
                   status.dependencies.managed &&
                   !status.dependencies.bundled &&
@@ -6099,14 +6066,6 @@ class _DropoHomePageState extends State<DropoHomePage>
                     icon: const Icon(Icons.refresh),
                     label: const Text('Повторить подключение к ядру'),
                   ),
-                if (updateInfo?.hasUpdate == true)
-                  _UpdateStrip(
-                    info: updateInfo!,
-                    progressPercent: updateProgressPercent,
-                    onUpdate: controlsDisabled || uiBusy
-                        ? null
-                        : () => unawaited(_performUpdate(updateInfo!)),
-                  ),
                 if (!booting &&
                     status.dependencies.managed &&
                     !status.dependencies.bundled &&
@@ -6118,6 +6077,7 @@ class _DropoHomePageState extends State<DropoHomePage>
                   ),
               ],
             ),
+      updateNotice: _buildUpdateNotice(),
       servicesExpanded:
           homeRoutesExpanded && appConfig.routingMode == 'blocked_only',
       routes: Column(
@@ -6140,6 +6100,18 @@ class _DropoHomePageState extends State<DropoHomePage>
           ),
         ],
       ),
+    );
+  }
+
+  Widget? _buildUpdateNotice() {
+    final info = updateInfo;
+    if (info == null || !info.success || !info.hasUpdate) return null;
+    return _UpdateStrip(
+      key: ValueKey('available-update-${info.latestVersion}'),
+      info: info,
+      onUpdate: controlsDisabled || uiBusy
+          ? null
+          : () => unawaited(_performUpdate(info)),
     );
   }
 
@@ -6184,12 +6156,11 @@ class _DropoHomePageState extends State<DropoHomePage>
         return AccountPage(
           key: const ValueKey('account-section'),
           endpoint: _accountEndpoint,
-          available:
-              !_isMobileShell ||
-              debugAccountTransport != null ||
-              _mobileAccountAvailable,
+          available: debugAccountTransport != null || _accountConfigured,
           onOpenExternal: widget.bridge.openExternal,
-          persistSession: debugAccountTransport == null,
+          persistSession:
+              debugAccountTransport == null &&
+              !(kDebugMode && _bridgeMode == 'mock'),
           transport: debugAccountTransport,
           initialToken: debugAccountSessionToken,
         );
@@ -6312,6 +6283,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       homeTelemetry: online && status.connected && refreshFailureCount == 0
           ? _VpnResponseTile(snapshot: status.vpnResponse, compact: true)
           : null,
+      updateNotice: activeMenuSection == 'home' ? null : _buildUpdateNotice(),
       notice:
           activeMenuSection == 'home' ||
               strategyBannerMessage.isEmpty ||
@@ -6939,75 +6911,78 @@ class _DependencyStrip extends StatelessWidget {
 }
 
 class _UpdateStrip extends StatelessWidget {
-  const _UpdateStrip({
-    required this.info,
-    required this.progressPercent,
-    required this.onUpdate,
-  });
+  const _UpdateStrip({super.key, required this.info, required this.onUpdate});
 
   final UpdateInfo info;
-  final double? progressPercent;
   final VoidCallback? onUpdate;
 
   @override
   Widget build(BuildContext context) {
-    final progress = progressPercent;
     final actionLabel = info.selfUpdate
-        ? 'Обновить и перезапустить'
+        ? 'Обновить'
         : info.platform.toLowerCase() == 'windows'
-        ? 'Скачать portable'
+        ? 'Скачать'
         : 'Скачать APK';
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+    final version = Semantics(
+      label: 'Доступна новая версия Dropo ${info.latestVersion}',
+      excludeSemantics: true,
+      child: Text(
+        'Dropo ${info.latestVersion}',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: _atlasText,
+          fontFamily: 'Inter',
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.system_update_alt, color: Color(0xFFFBBF24)),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Доступна версия ${info.latestVersion}',
-                  style: const TextStyle(
-                    color: Color(0xFFF8FAFC),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ],
+    );
+    final action = Semantics(
+      label: info.selfUpdate
+          ? 'Обновить и перезапустить Dropo после подтверждения'
+          : info.platform.toLowerCase() == 'windows'
+          ? 'Скачать portable-архив новой версии'
+          : 'Скачать APK новой версии',
+      child: TextButton(
+        key: const ValueKey('update-available-action'),
+        onPressed: onUpdate,
+        style: TextButton.styleFrom(
+          foregroundColor: _atlasMint,
+          minimumSize: const Size(0, 40),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          textStyle: const TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
           ),
-          const SizedBox(height: 7),
-          Text(
-            progress == null
-                ? 'Обновление готово к загрузке и проверке.'
-                : 'Загружено ${progress.round()}%',
-            style: const TextStyle(color: Color(0xFFCBD5E1), fontSize: 10.5),
-          ),
-          if (progress != null) ...[
-            const SizedBox(height: 6),
-            LinearProgressIndicator(
-              value: progress <= 0 ? null : progress / 100,
-              minHeight: 3,
-              color: const Color(0xFFFBBF24),
-              backgroundColor: Colors.white.withValues(alpha: 0.08),
-            ),
-          ],
-          const SizedBox(height: 4),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton(onPressed: onUpdate, child: Text(actionLabel)),
-          ),
-        ],
+        ),
+        child: Text(actionLabel),
+      ),
+    );
+    return Padding(
+      key: const ValueKey('update-available-notice'),
+      padding: const EdgeInsets.only(left: 12, top: 4, bottom: 4),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact =
+              constraints.maxWidth <
+              240 * (MediaQuery.textScalerOf(context).scale(13) / 13);
+          // Very small windows with enlarged text keep the action visible;
+          // the exact version is still announced and shown on confirmation.
+          return compact
+              ? Semantics(
+                  label: 'Доступна новая версия Dropo ${info.latestVersion}',
+                  child: Align(alignment: Alignment.centerLeft, child: action),
+                )
+              : Row(
+                  children: [
+                    Expanded(child: version),
+                    const SizedBox(width: 8),
+                    action,
+                  ],
+                );
+        },
       ),
     );
   }

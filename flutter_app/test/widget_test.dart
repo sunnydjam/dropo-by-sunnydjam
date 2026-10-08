@@ -737,8 +737,31 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
 
-    expect(find.text('Доступна версия 3.0.4'), findsWidgets);
-    expect(find.text('Обновить и перезапустить'), findsOneWidget);
+    final notice = find.byKey(const ValueKey('update-available-notice'));
+    expect(notice, findsOneWidget);
+    expect(
+      find
+          .descendant(of: notice, matching: find.text('Dropo 3.0.4'))
+          .hitTestable(),
+      findsOneWidget,
+      reason: 'the published version must be visible in the compact notice',
+    );
+    final action = find.byKey(const ValueKey('update-available-action'));
+    expect(action.hitTestable(), findsOneWidget);
+    expect(
+      find.descendant(of: action, matching: find.text('Обновить')),
+      findsOneWidget,
+    );
+    expect(
+      find.byType(SnackBar),
+      findsNothing,
+      reason: 'startup has one persistent notice, not a duplicate popup',
+    );
+    expect(
+      find.byType(Dialog),
+      findsNothing,
+      reason: 'startup must not open an installation confirmation',
+    );
     expect(
       bridge.updateCheckCalls,
       1,
@@ -752,6 +775,11 @@ void main() {
 
     await tester.pump(const Duration(seconds: 12));
     expect(bridge.updateInstallCalls, 0);
+    expect(
+      action.hitTestable(),
+      findsOneWidget,
+      reason: 'the update action persists after a toast timeout',
+    );
   });
 
   testWidgets(

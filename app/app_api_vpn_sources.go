@@ -144,13 +144,17 @@ func (a *App) changeVPNSources(change func(*ProfileData) error) map[string]inter
 func publicVPNSources(sources []VPNSource) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(sources))
 	for _, source := range sources {
+		problem := source.LastError
+		if source.PublicCatalogID == managedFreeVPNProviderID && problem != "" {
+			problem = "Не удалось обновить Dropo Free. Используются сохранённые серверы, если они доступны."
+		}
 		result = append(result, map[string]interface{}{
 			"id": source.ID, "name": source.Name, "kind": source.Kind,
 			"public_catalog_id": source.PublicCatalogID, "using_cache": source.UsingCache,
 			"disabled": source.Disabled, "selected_node": source.SelectedNode,
 			"selected_node_id": source.SelectedNodeID, "node_count": source.NodeCount,
 			"node_names":   append([]string(nil), source.NodeNames...),
-			"last_updated": source.LastUpdated, "last_error": source.LastError,
+			"last_updated": source.LastUpdated, "last_error": problem,
 		})
 	}
 	return result

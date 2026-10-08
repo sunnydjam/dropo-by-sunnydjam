@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 60
     env:
       GH_TOKEN: ${{ github.token }}
+      # Public origin only; bot tokens and server secrets never enter builds.
+      DROPO_ACCOUNT_ENDPOINT: https://ms-api.ordaflow.net
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -115,7 +117,9 @@ jobs:
             git restore -- $generatedFlutterFiles
             if ($LASTEXITCODE -ne 0) { throw "Could not restore Flutter-generated source files" }
           }
-          .\scripts\build\build.ps1 -Build -AppOnly -ReuseFlutterWindowsOutput
+          # Recompile Flutter with the same configured account origin. Reusing
+          # an AOT snapshot from another origin is intentionally rejected.
+          .\scripts\build\build.ps1 -Build -AppOnly
           $folder = Get-ChildItem release -Directory | Where-Object Name -Like "dropo-$version-*" | Select-Object -First 1
           $secondSetup = (Get-FileHash (Join-Path $folder.FullName "dropo-Windows-Setup-x64.exe") -Algorithm SHA256).Hash
           $secondPortable = (Get-FileHash (Join-Path $folder.FullName "dropo-Windows-Portable-x64.zip") -Algorithm SHA256).Hash

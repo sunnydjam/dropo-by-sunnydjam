@@ -1,6 +1,7 @@
 package dropocore
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 // Credentials and parsed nodes stay in app-private storage, never in source views.
 type androidVPNSource struct {
 	ID               string        `json:"id"`
+	PublicCatalogID  string        `json:"public_catalog_id,omitempty"`
 	Name             string        `json:"name"`
 	URI              string        `json:"uri"`
 	Disabled         bool          `json:"disabled"`
@@ -99,9 +101,15 @@ func androidSourcesViewLocked() map[string]interface{} {
 			kind = "key"
 		}
 		problem := source.LastRefreshError
-		publicID := ""
+		publicID := source.PublicCatalogID
+		if publicID != androidManagedFreeSourceID || validateAndroidManagedFreeURL(source.URI) != nil {
+			publicID = ""
+		}
 		if isAndroidPublicSource(source.URI) {
 			publicID = androidPublicSourceID
+		}
+		if publicID == androidManagedFreeSourceID && problem != "" {
+			problem = "Не удалось обновить Dropo Free. Используются сохранённые серверы, если они доступны."
 		}
 		if androidSelectedNode(source) < 0 {
 			problem = "Выбранный сервер исчез из подписки. Выберите другой сервер."
@@ -122,6 +130,18 @@ func androidSourcesViewLocked() map[string]interface{} {
 // Mutations are transactional and allowed only while stopped. Network parsing
 // is deliberately outside mu so a slow provider cannot block status or Stop.
 func changeAndroidSources(method string, args []interface{}) string {
+	managedProviderID := ""
+	if method == "AddManagedVPNSource" {
+		if stringArg(args, 0, "") != androidManagedFreeSourceID || !boolArg(args, 3, false) {
+			return androidSourceError("Подтвердите использование бесплатной подписки Dropo.")
+		}
+		uri := strings.TrimSpace(stringArg(args, 2, ""))
+		if err := validateAndroidManagedFreeURL(uri); err != nil {
+			return androidSourceError(err.Error())
+		}
+		managedProviderID = androidManagedFreeSourceID
+		method, args = "AddVPNSource", []interface{}{"Dropo Free", uri}
+	}
 	mu.Lock()
 	migrateAndroidSourcesLocked()
 	if androidSourcesBusyLocked() {
@@ -165,7 +185,7 @@ func changeAndroidSources(method string, args []interface{}) string {
 			uri = androidPublicSourceURL
 		}
 		for _, source := range sources {
-			if source.URI == uri || (isAndroidPublicSource(source.URI) && uri == androidPublicSourceURL) {
+			if source.URI == uri || (managedProviderID != "" && source.PublicCatalogID == managedProviderID) || (isAndroidPublicSource(source.URI) && uri == androidPublicSourceURL) {
 				return androidSourceError("Этот источник уже добавлен.")
 			}
 		}
@@ -177,6 +197,9 @@ func changeAndroidSources(method string, args []interface{}) string {
 			return androidSourceError("Используйте короткое название без ссылок и переносов строк.")
 		}
 		nodes, err := parseAndroidSource(uri)
+		if err == nil && managedProviderID != "" {
+			nodes, err = usableAndroidFreeNodes(nodes)
+		}
 		if err != nil || len(nodes) == 0 {
 			return androidSourceError(androidSubscriptionTestError)
 		}
@@ -186,7 +209,7 @@ func changeAndroidSources(method string, args []interface{}) string {
 				break
 			}
 		}
-		sources = append(sources, androidVPNSource{ID: id, Name: name, URI: uri, Nodes: nodes, UpdatedAt: currentTimeRFC3339()})
+		sources = append(sources, androidVPNSource{ID: id, PublicCatalogID: managedProviderID, Name: name, URI: uri, Nodes: nodes, UpdatedAt: currentTimeRFC3339()})
 	case "RefreshVPNSources":
 		// A failed refresh leaves the complete old pool and chosen nodes intact.
 		var workers sync.WaitGroup
@@ -208,7 +231,7 @@ func changeAndroidSources(method string, args []interface{}) string {
 					failures <- true
 					return
 				}
-				nodes, err := parseAndroidSource(sources[i].URI)
+				nodes, err := parseAndroidSourceEntryContext(context.Background(), sources[i])
 				if err != nil || len(nodes) == 0 {
 					failures <- true
 					return

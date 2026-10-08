@@ -204,12 +204,51 @@ func TestAndroidPublicSourceConsentAndFiltering(t *testing.T) {
 	if sourceCall(t, "AddPublicVPNSource", androidPublicSourceID, false)["success"] == true || calls != 0 {
 		t.Fatal("public source fetched without consent")
 	}
-	sourceSuccess(t, "AddPublicVPNSource", androidPublicSourceID, true)
+	if sourceCall(t, "AddPublicVPNSource", androidPublicSourceID, true)["success"] == true || calls != 0 {
+		t.Fatal("retired public source API recreated an aggregator")
+	}
+	if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", false)["success"] == true || calls != 0 {
+		t.Fatal("managed source fetched without consent")
+	}
+	sourceSuccess(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", true)
 	if len(current.VPNSources[0].Nodes) != 1 {
 		t.Fatal("public private endpoints not filtered")
 	}
-	if sourceCall(t, "AddPublicVPNSource", androidPublicSourceID, true)["success"] == true {
+	if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", true)["success"] == true {
 		t.Fatal("duplicate public source accepted")
+	}
+}
+
+func TestAndroidManagedSourceCatalogAndMetadataDoNotExposeOrReclassifyURI(t *testing.T) {
+	resetSourceTest(t)
+	calls := 0
+	androidSourceParser = func(string) ([]proxyConfig, error) {
+		calls++
+		return []proxyConfig{{Type: "vless", Server: "server.example.com", ServerPort: 443}}, nil
+	}
+	catalog := Call("GetPublicVPNProviders", "[]")
+	if calls != 0 || strings.Contains(catalog, "https://") || strings.Contains(catalog, "vpn-checker") || !strings.Contains(catalog, androidManagedFreeSourceID) {
+		t.Fatal("listing offered a legacy source or exposed/fetched a subscription")
+	}
+	sourceSuccess(t, "AddVPNSource", "Own", "https://personal.example.com/sub/fixture")
+	sourceSuccess(t, "MoveVPNSource", "source-1", 0)
+	sourceSuccess(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Ignored", "https://free.example.com/sub/fixture", true)
+	if current.VPNSourceAutoSelect || current.VPNSources[0].PublicCatalogID != "" || current.VPNSources[1].PublicCatalogID != androidManagedFreeSourceID || current.VPNSources[1].Name != "Dropo Free" {
+		t.Fatal("managed source changed personal metadata/manual priority")
+	}
+	view := Call("GetVPNSources", "[]")
+	if strings.Contains(view, "/sub/fixture") || strings.Contains(view, "https://") {
+		t.Fatal("source view exposed private URL")
+	}
+	current.VPNSources[1].LastRefreshError = "Get " + current.VPNSources[1].URI + ": test-fixture-private-error"
+	view = Call("GetVPNSources", "[]")
+	if strings.Contains(view, "/sub/fixture") || strings.Contains(view, "test-fixture-private-error") {
+		t.Fatal("managed refresh error exposed private details")
+	}
+	for _, uri := range []string{"http://free.example.com/sub", "https://user:pass@free.example.com/sub", "vless://key@server.example.com:443"} {
+		if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", uri, true)["success"] == true {
+			t.Fatal("invalid managed URL accepted")
+		}
 	}
 }
 
@@ -225,5 +264,22 @@ func TestAndroidSourceRefreshFailureIsAtomic(t *testing.T) {
 	after, _ := json.Marshal(current.VPNSources)
 	if string(before) != string(after) {
 		t.Fatal("failed refresh mutated source pool")
+	}
+}
+
+func TestAndroidManagedFreeURLRejectsLocalDestinationsWithoutNetworkIO(t *testing.T) {
+	for _, uri := range []string{
+		"https://localhost/sub", "https://LOCALHOST./sub", "https://vpn.local/sub", "https://vpn.internal/sub", "https://vpn.lan/sub", "https://vpn/sub",
+		"https://127.0.0.1/sub", "https://10.0.0.1/sub", "https://172.16.0.1/sub", "https://192.168.1.1/sub", "https://100.64.0.1/sub", "https://169.254.1.1/sub",
+		"https://[::]/sub", "https://[::1]/sub", "https://[fd00::1]/sub", "https://[fe80::1]/sub", "https://[::ffff:127.0.0.1]/sub", "https://[::ffff:192.168.1.1]/sub",
+	} {
+		if validateAndroidManagedFreeURL(uri) == nil {
+			t.Fatal("local managed subscription accepted")
+		}
+	}
+	for _, uri := range []string{"https://APP.EXAMPLE.COM./sub/test-fixture?token=fixture", "https://8.8.8.8/sub", "https://[2001:4860:4860::8888]/sub"} {
+		if validateAndroidManagedFreeURL(uri) != nil {
+			t.Fatal("valid public managed subscription rejected")
+		}
 	}
 }

@@ -38,6 +38,11 @@ jobs:
       - name: Test release readiness contract
         shell: pwsh
         run: ./tools/test-release-readiness.ps1
+      - name: Test account endpoint and Android build contracts
+        shell: pwsh
+        run: |
+          ./tools/test-account-build-endpoint.ps1
+          ./tools/test-android-build-options.ps1
       - name: Verify bundled blocked lists are current
         shell: pwsh
         run: ./scripts/filters/update-blocked-lists.ps1 -CheckOnly

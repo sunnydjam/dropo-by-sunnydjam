@@ -52,7 +52,7 @@ func RefreshAndroidSourcesForNextSession(ctx context.Context, generation int64) 
 		go func(i int, source androidVPNSource) {
 			defer workers.Done()
 			defer func() { <-limit }()
-			nodes, err := parseAndroidSourceContext(refreshCtx, source.URI)
+			nodes, err := parseAndroidSourceEntryContext(refreshCtx, source)
 			results[i] = refreshed{nodes: nodes, updatedAt: currentTimeRFC3339(), attempted: true, failed: err != nil || len(nodes) == 0}
 		}(i, source)
 	}

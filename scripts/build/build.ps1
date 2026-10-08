@@ -9,6 +9,10 @@ param(
     [switch]$All,
     [switch]$Clean,
     [string]$Version,
+    # Public HTTPS account-service origin. Defaults to the explicit process
+    # environment DROPO_ACCOUNT_ENDPOINT, otherwise accounts remain unconfigured.
+    # Never pass bot tokens or private subscription URLs to Flutter builds.
+    [string]$AccountEndpoint,
     # CI mode: build the complete Windows installer and portable archive.
     [switch]$AppOnly,
     # Backward-compatible alias: Windows is now built with Flutter + Go core.
@@ -50,6 +54,78 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Test-DropoPublicAccountHost {
+    param([string]$HostName)
+    $hostValue = $HostName.ToLowerInvariant().TrimEnd('.')
+    if ($hostValue -eq 'localhost' -or
+        $hostValue -match '(?:^|\.)(?:localhost|local|localdomain|internal|lan)$' -or
+        $hostValue -eq 'home.arpa' -or $hostValue.EndsWith('.home.arpa')) {
+        return $false
+    }
+    $address = $null
+    if ([Net.IPAddress]::TryParse($hostValue, [ref]$address)) {
+        if ($address.IsIPv4MappedToIPv6) { $address = $address.MapToIPv4() }
+        if ([Net.IPAddress]::IsLoopback($address)) { return $false }
+        $bytes = $address.GetAddressBytes()
+        if ($bytes.Length -eq 4) {
+            return $bytes[0] -ne 0 -and $bytes[0] -ne 10 -and $bytes[0] -ne 127 -and $bytes[0] -lt 224 -and
+                -not ($bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127) -and
+                -not ($bytes[0] -eq 169 -and $bytes[1] -eq 254) -and
+                -not ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -and
+                -not ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+        }
+        return $bytes.Length -eq 16 -and $address.ToString() -ne '::' -and
+            -not $address.IsIPv6LinkLocal -and -not $address.IsIPv6SiteLocal -and
+            $bytes[0] -ne 255 -and ($bytes[0] -band 254) -ne 252 -and $address.ScopeId -eq 0
+    }
+    # DNS resolution is not performed during builds. Reject local/single-label
+    # names and malformed labels; TLS still verifies the actual server at runtime.
+    return $hostValue.Length -le 253 -and $hostValue.Contains('.') -and
+        $hostValue -match '^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+}
+
+function Resolve-DropoAccountEndpoint {
+    param([string]$Endpoint, [string]$EnvironmentEndpoint, [switch]$ReuseWindowsOutput)
+    $value = $Endpoint.Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) { $value = $EnvironmentEndpoint.Trim() }
+    if ([string]::IsNullOrWhiteSpace($value)) { return '' }
+    $uri = $null
+    if ($value -notmatch '^https://[^\s\\/?#@]+/?$' -or
+        -not [Uri]::TryCreate($value, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne 'https' -or $uri.UserInfo -ne '' -or
+        $uri.Query -ne '' -or $uri.Fragment -ne '' -or $uri.AbsolutePath -ne '/' -or
+        $uri.Port -lt 1 -or -not (Test-DropoPublicAccountHost -HostName $uri.IdnHost)) {
+        throw 'AccountEndpoint must be a public HTTPS origin without credentials, query, fragment or path.'
+    }
+    if ($ReuseWindowsOutput) {
+        throw 'A configured account endpoint requires a fresh Flutter build. Do not use -ReuseFlutterWindowsOutput.'
+    }
+    # .NET Framework and modern .NET serialize IPv6 Uri authorities differently.
+    # Emit one canonical origin so both build hosts bind stored sessions alike.
+    $publicHost = $uri.IdnHost.ToLowerInvariant().TrimEnd('.')
+    $publicAddress = $null
+    if ([Net.IPAddress]::TryParse($publicHost, [ref]$publicAddress)) {
+        $publicHost = $publicAddress.ToString().ToLowerInvariant()
+        if ($publicAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) {
+            $publicHost = "[$publicHost]"
+        }
+    }
+    $portSuffix = if ($uri.IsDefaultPort) { '' } else { ':' + $uri.Port }
+    return "https://$publicHost$portSuffix"
+}
+
+function Get-DropoAccountBuildArguments {
+    param([string]$Endpoint)
+    if (-not [string]::IsNullOrWhiteSpace($Endpoint)) {
+        return @('--dart-define', "DROPO_ACCOUNT_ENDPOINT=$Endpoint")
+    }
+    return @()
+}
+
+$AccountEndpoint = Resolve-DropoAccountEndpoint -Endpoint $AccountEndpoint `
+    -EnvironmentEndpoint ([Environment]::GetEnvironmentVariable('DROPO_ACCOUNT_ENDPOINT', 'Process')) `
+    -ReuseWindowsOutput:$ReuseFlutterWindowsOutput
 if ($AndroidPreview) { $Android = $true }
 $ScriptRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $DevEnvironmentScript = Join-Path $ScriptRoot "tools\dev-environment.ps1"
@@ -837,6 +913,7 @@ function Build-Application {
                 "--dart-define", "DROPO_APP_VERSION=$AppVersion",
                 "--dart-define", "DROPO_BUILD_HASH=$BuildHash"
             )
+            $flutterBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
             if ($UseCachedFlutterPackages) {
                 Write-Host "Resolving Flutter packages from the local cache..." -ForegroundColor Gray
                 & $FlutterCmd pub get --offline
@@ -1577,7 +1654,20 @@ function Build-AndroidApplication {
     Push-Location $FlutterDir
     try {
         $androidBuildMode = if ($AndroidPreview) { "profile" } else { "release" }
-        & $FlutterCmd build apk "--$androidBuildMode" --target-platform $AndroidFlutterTargetPlatform --build-name $AppVersion --build-number $buildNumber --dart-define "DROPO_APP_VERSION=$AppVersion"
+        $androidBuildArguments = @(
+            'build', 'apk', "--$androidBuildMode",
+            '--target-platform', $AndroidFlutterTargetPlatform,
+            '--build-name', $AppVersion, '--build-number', $buildNumber,
+            '--dart-define', "DROPO_APP_VERSION=$AppVersion"
+        )
+        $androidBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
+        if ($UseCachedFlutterPackages) {
+            Write-Host "Resolving Android Flutter packages from the local cache..." -ForegroundColor Gray
+            & $FlutterCmd pub get --offline
+            if ($LASTEXITCODE -ne 0) { throw "Flutter offline Android dependency resolution failed." }
+            $androidBuildArguments += '--no-pub'
+        }
+        & $FlutterCmd @androidBuildArguments
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[ERROR] Flutter Android build failed. Run 'flutter doctor -v' and check Android SDK/JDK." -ForegroundColor Red
             exit 1
@@ -1598,7 +1688,7 @@ function Build-AndroidApplication {
     $destApk = Join-Path $VersionDir $assetName
     Copy-Item $sourceApk $destApk -Force
 
-    $verifyArgs = @("-NoProfile", "-File", (Join-Path $ScriptRoot "tools\verify-android-apk.ps1"), "-Path", $destApk, "-Architecture", $AndroidReleaseArch)
+    $verifyArgs = @("-NoProfile", "-File", (Join-Path $ScriptRoot "tools\verify-android-apk.ps1"), "-Path", $destApk, "-Architecture", $AndroidReleaseArch, "-ExpectedVersion", $AppVersion)
     if ($AndroidPreview) { $verifyArgs += "-Preview" }
     & pwsh @verifyArgs
     if ($LASTEXITCODE -ne 0) { throw "Android artifact verification failed." }

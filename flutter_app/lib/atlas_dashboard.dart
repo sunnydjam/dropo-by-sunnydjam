@@ -14,11 +14,13 @@ class _AtlasHomeLayout extends StatelessWidget {
     required this.connection,
     required this.routes,
     required this.notices,
+    this.updateNotice,
     this.telemetry,
     this.servicesExpanded = false,
   });
   final Widget connection, routes;
   final Widget? notices;
+  final Widget? updateNotice;
   final Widget? telemetry;
   final bool servicesExpanded;
 
@@ -54,19 +56,24 @@ class _AtlasHomeLayout extends StatelessWidget {
             constraints.maxWidth >= 760 &&
             MediaQuery.textScalerOf(context).scale(12) <= 18)
           Positioned(top: 24, right: 12, width: 160, child: telemetry!),
-        if (notices != null)
+        if (notices != null || updateNotice != null)
           Positioned(
             top: 4,
             left: 12,
             right: 12,
             child: _AtlasNoticeOverlay(
-              identity: notices!.key,
+              identity: ValueKey((notices?.key, updateNotice?.key)),
               maxHeight: MediaQuery.textScalerOf(context).scale(17) > 23
                   ? 48
                   : constraints.maxHeight < 460
                   ? 56
                   : 100,
-              child: notices!,
+              pinnedChild: updateNotice,
+              hasDetails: notices != null,
+              collapsedLabel: updateNotice != null && notices == null
+                  ? 'Новое обновление'
+                  : 'Сообщения',
+              child: notices ?? const SizedBox.shrink(),
             ),
           ),
       ],

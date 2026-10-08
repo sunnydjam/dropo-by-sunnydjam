@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Path,
     [string]$SdkRoot,
     [ValidateSet("arm64", "universal")][string]$Architecture = "arm64",
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ExpectedVersion,
     [switch]$Preview
 )
 $ErrorActionPreference = "Stop"
@@ -32,9 +33,11 @@ if ($minimumLine -notmatch "^(minSdkVersion|sdkVersion):'29'$") { throw "Unexpec
 $targetLine = $badging | Where-Object { $_ -match '^targetSdkVersion:' } | Select-Object -First 1
 if ($targetLine -ne "targetSdkVersion:'36'") { throw "Unexpected target Android version: $targetLine" }
 $repositoryRoot = Split-Path $PSScriptRoot
-$version = (Get-Content -LiteralPath (Join-Path $repositoryRoot "version.json") -Raw | ConvertFrom-Json).version
-$expectedVersion = [string]$version + $(if ($Preview) { "-preview" } else { "" })
-if ($packageLine -notmatch "versionName='$([regex]::Escape($expectedVersion))'") { throw "APK version does not match project metadata: $packageLine" }
+$version = if ($ExpectedVersion) { $ExpectedVersion } else {
+    (Get-Content -LiteralPath (Join-Path $repositoryRoot "version.json") -Raw | ConvertFrom-Json).version
+}
+$expectedVersionName = [string]$version + $(if ($Preview) { "-preview" } else { "" })
+if ($packageLine -notmatch "versionName='$([regex]::Escape($expectedVersionName))'") { throw "APK version does not match expected version: $packageLine" }
 & (Join-Path $buildTools "apksigner.bat") verify --verbose $apkPath
 if ($LASTEXITCODE -ne 0) { throw "APK signature verification failed." }
 $alignmentOutput = & (Join-Path $buildTools "zipalign.exe") -c -P 16 -v 4 $apkPath 2>&1
@@ -88,7 +91,7 @@ $apk = Get-Item -LiteralPath $apkPath
 [pscustomobject]@{
     Path = $apkPath
     Package = $expectedPackage
-    Version = $expectedVersion
+    Version = $expectedVersionName
     Android = "10+ (API 29), target 36"
     Architecture = $Architecture
     Native16KB = "passed"

@@ -52,10 +52,10 @@ class _FirstRunBridge extends MockCoreBridge {
     if (failCatalog) throw StateError('offline');
     return const [
       PublicVpnProviderInfo(
-        id: 'public',
-        name: 'Публичный источник',
+        id: 'dropo-free',
+        name: 'Dropo Free',
         description: '',
-        website: 'https://example.test',
+        website: '',
       ),
     ];
   }
@@ -68,7 +68,7 @@ class _FirstRunBridge extends MockCoreBridge {
     publicAdds++;
     consent = accepted;
     if (failAdd) {
-      return {'success': false, 'error': 'Каталог временно недоступен'};
+      return {'success': false, 'error': 'Dropo Free временно недоступен'};
     }
     sources = [
       VpnSourceInfo.fromJson({
@@ -157,9 +157,12 @@ void main() {
     final bridge = _FirstRunBridge();
     await _pump(tester, bridge);
     await _tap(tester, 'home-connect');
-    expect(find.textContaining('не сеть Dropo'), findsOneWidget);
+    expect(
+      find.textContaining('Доступность Dropo Free проверяется после согласия'),
+      findsOneWidget,
+    );
     expect(bridge.publicAdds, 0);
-    await _tap(tester, 'onboarding-free-public');
+    await _tap(tester, 'onboarding-free-dropo-free');
     expect(bridge.consent, isTrue);
     expect(bridge.publicAdds, 1);
     expect(bridge.starts, 1);
@@ -178,12 +181,12 @@ void main() {
       final bridge = _FirstRunBridge()..failAdd = true;
       await _pump(tester, bridge);
       await _tap(tester, 'home-connect');
-      await _tap(tester, 'onboarding-free-public');
-      expect(find.text('Каталог временно недоступен'), findsOneWidget);
+      await _tap(tester, 'onboarding-free-dropo-free');
+      expect(find.text('Dropo Free временно недоступен'), findsOneWidget);
       expect(bridge.starts, 0);
       expect(bridge.mode, 'all_traffic');
       bridge.failAdd = false;
-      await _tap(tester, 'onboarding-free-public');
+      await _tap(tester, 'onboarding-free-dropo-free');
       expect(bridge.starts, 1);
       expect(bridge.publicAdds, 2);
     },
@@ -214,7 +217,7 @@ void main() {
       ];
     await _pump(tester, bridge);
     await _tap(tester, 'home-connect');
-    expect(_key('onboarding-free-public'), findsNothing);
+    expect(_key('onboarding-free-dropo-free'), findsNothing);
     expect(find.textContaining('не включаем отключённые'), findsOneWidget);
     await _tap(tester, 'onboarding-own-source');
     expect(_key('sources-section'), findsOneWidget);
@@ -228,7 +231,7 @@ void main() {
     final bridge = _FirstRunBridge()..failConnect = true;
     await _pump(tester, bridge);
     await _tap(tester, 'home-connect');
-    await _tap(tester, 'onboarding-free-public');
+    await _tap(tester, 'onboarding-free-dropo-free');
     await tester.pump(const Duration(seconds: 4));
     await tester.pump();
     expect(find.text('Источник не отвечает'), findsOneWidget);
@@ -244,7 +247,7 @@ void main() {
     await _pump(tester, bridge, size: const Size(390, 568), scale: 2);
     await _tap(tester, 'home-connect');
     expect(tester.takeException(), isNull);
-    await _tap(tester, 'onboarding-free-public');
+    await _tap(tester, 'onboarding-free-dropo-free');
     expect(tester.takeException(), isNull);
     expect(bridge.starts, 1);
   });

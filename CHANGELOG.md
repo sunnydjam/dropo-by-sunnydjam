@@ -4,6 +4,27 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.0.43 — 2026-10-09
+
+- replace the clipped, nested update notification with a responsive overlay:
+  readable version, explicit update/download action and accessible dismissal;
+  preserve the dashboard layout and user-confirmed Windows installation;
+- connect both Windows and Android builds to the live HTTPS Telegram account
+  service; register without a phone number and keep all purchases disabled;
+- protect device sessions with Windows DPAPI and Android Keystore, bind saved
+  credentials to their account-service origin and retain sessions on temporary
+  server failures without a plaintext storage fallback;
+- replace the offered public VPN aggregators with the optional managed Dropo Free
+  source, fetched after consent; preserve personal subscriptions and existing
+  saved sources without silently deleting user data;
+- publish a compatible universal ARM Android Preview with the existing Preview
+  package and signing identity; Android installation remains user-confirmed;
+- verify account build origins, Android version overrides and offline builds;
+  configure the public account origin in the clean Windows packaging workflow
+  and require a fresh reproducible Flutter rebuild;
+- reserve 3.0.42 for the local test builds; publish 3.0.43 so those clients also
+  receive the update through the normal version check.
+
 ## 3.0.41 — 2026-10-08
 
 - move service routing to one expandable section on Home, visible only in

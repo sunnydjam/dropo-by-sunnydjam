@@ -330,13 +330,7 @@ func Call(method, argsJSON string) string {
 		return androidPublicProviders()
 	}
 	if method == "AddPublicVPNSource" {
-		if !boolArg(args, 1, false) {
-			return androidSourceError("Подтвердите использование сторонних бесплатных VPN-серверов.")
-		}
-		if stringArg(args, 0, "") != androidPublicSourceID {
-			return androidSourceError("Неизвестный бесплатный источник.")
-		}
-		return changeAndroidSources("AddVPNSource", []interface{}{androidPublicSourceName, androidPublicSourceURL})
+		return androidSourceError("Старый публичный каталог больше не предлагается. Используйте бесплатную подписку Dropo после подтверждения.")
 	}
 	if method == "RunClientQuickCheck" {
 		return runAndroidClientQuickCheck()
@@ -351,7 +345,7 @@ func Call(method, argsJSON string) string {
 		return testAndroidVPNConnection(stringArg(args, 0, ""))
 	}
 	switch method {
-	case "AddVPNSource", "RemoveVPNSource", "SetVPNSourceNode", "SetVPNSourceEnabled", "MoveVPNSource", "RefreshVPNSources", "EnableVPNSourceAutoSelect":
+	case "AddVPNSource", "AddManagedVPNSource", "RemoveVPNSource", "SetVPNSourceNode", "SetVPNSourceEnabled", "MoveVPNSource", "RefreshVPNSources", "EnableVPNSourceAutoSelect":
 		return changeAndroidSources(method, args)
 	}
 

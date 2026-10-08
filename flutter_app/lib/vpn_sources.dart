@@ -181,14 +181,16 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       if (mounted) {
         setState(() {
           providers = catalog;
-          catalogError = '';
+          catalogError = catalog.isEmpty
+              ? 'Dropo Free сейчас недоступен. Вашу подписку можно добавить вручную.'
+              : '';
         });
       }
     } catch (_) {
       if (mounted) {
         setState(
           () => catalogError =
-              'Каталог недоступен. Ваши подписки по-прежнему можно добавить вручную.',
+              'Dropo Free сейчас недоступен. Вашу подписку можно добавить вручную.',
         );
       }
     }
@@ -337,7 +339,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
         title: const Text('Использовать бесплатные серверы?'),
         content: SingleChildScrollView(
           child: Text(
-            '${provider.name} — сторонний публичный список, не серверы Dropo. '
+            '${provider.name} — бесплатная подписка, предоставляемая через сервис Dropo. '
             'Оператор VPN может видеть адреса соединений и незашифрованный трафик. '
             'Скорость, конфиденциальность и доступность не гарантируются.\n\n'
             'Источник будет добавлен в конец списка. Вы сможете изменить его приоритет. '
@@ -360,7 +362,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
     if (consent != true || !mounted) return;
     final added = await _changeSource(
       () => widget.bridge.addPublicVpnSource(provider.id, true),
-      'Загружаем бесплатный список…',
+      'Проверяем доступность Dropo Free…',
       success:
           'Бесплатный источник добавлен. Выбран первый поддерживаемый сервер; доступность проверяется при подключении.',
     );
@@ -698,8 +700,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                 const SizedBox(height: 20),
                 const _VpnSectionTitle('Бесплатный VPN · по желанию'),
                 const Text(
-                  'Нет подписки? Можно использовать публичный список. '
-                  'Это сторонние серверы с переменной доступностью, а не гарантия обхода блокировок.',
+                  'Можно добавить Dropo Free — одну бесплатную подписку. '
+                  'Проверим доступность только после вашего согласия. Собственные подписки всегда можно добавить вручную.',
                   style: TextStyle(color: Color(0xFFB4C9C1), fontSize: 12),
                 ),
                 const SizedBox(height: 10),
@@ -707,12 +709,12 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                   Text(catalogError),
                   TextButton(
                     onPressed: _loadCatalog,
-                    child: const Text('Повторить загрузку каталога'),
+                    child: const Text('Проверить предложение снова'),
                   ),
                 ],
                 if (providers.isEmpty && catalogError.isEmpty)
                   const Text(
-                    'Загружаем каталог…',
+                    'Подготавливаем предложение…',
                     style: TextStyle(color: _atlasMuted),
                   ),
                 for (final provider in providers)
@@ -1024,11 +1026,12 @@ class _PublicVpnProviderCard extends StatelessWidget {
                 added ? 'Уже добавлен' : 'Подключить бесплатный источник',
               ),
             ),
-            TextButton.icon(
-              onPressed: busy ? null : onWebsite,
-              icon: const Icon(Icons.open_in_new, size: 16),
-              label: const Text('Об источнике'),
-            ),
+            if (provider.website.isNotEmpty)
+              TextButton.icon(
+                onPressed: busy ? null : onWebsite,
+                icon: const Icon(Icons.open_in_new, size: 16),
+                label: const Text('Об источнике'),
+              ),
           ],
         ),
       ],
@@ -1202,6 +1205,14 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
             fontSize: 12,
           ),
         ),
+        if (source.publicCatalogId == 'vpn-checker-ru-part9')
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text(
+              'Этот старый публичный список больше не предлагается. Мы сохранили его, чтобы не прерывать ваше соединение. Удалить можно через «Ещё».',
+              style: TextStyle(color: Color(0xFFFCD34D), fontSize: 12),
+            ),
+          ),
         if (!widget.singleSource) ...[
           const SizedBox(height: 4),
           Text(

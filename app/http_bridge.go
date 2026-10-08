@@ -24,6 +24,7 @@ const maxBridgeCallBodyBytes = 2 << 20
 var bridgeCallableMethods = map[string]struct{}{
 	"AddWireGuard":                    {},
 	"AddVPNSource":                    {},
+	"AddManagedVPNSource":             {},
 	"AddPublicVPNSource":              {},
 	"CaptureDPIFingerprint":           {},
 	"CheckExternalVPNConflicts":       {},

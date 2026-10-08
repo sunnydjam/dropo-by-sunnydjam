@@ -20,6 +20,9 @@ class _ManualUpdateBridge extends MockCoreBridge {
   final connectionChanges = <bool>[];
   final externalLinks = <String>[];
   Completer<Map<String, dynamic>>? installResult;
+  Completer<UpdateInfo>? checkResult;
+  bool android = false;
+  bool statusError = false;
 
   void updateEvent(String name, Map<String, dynamic> payload) =>
       _events.add(BridgeEvent(id: _eventId++, name: name, payload: payload));
@@ -51,26 +54,34 @@ class _ManualUpdateBridge extends MockCoreBridge {
     connected: true,
     running: true,
     vpnState: 'connected',
+    hasError: statusError,
+    error: statusError ? 'Тест: сервер временно недоступен' : '',
   );
 
   @override
   Future<UpdateInfo> checkUpdates() async {
     checkCalls++;
-    return UpdateInfo.fromJson(const {
-      'success': true,
-      'hasUpdate': true,
-      'currentVersion': '3.0.33',
-      'latestVersion': '3.0.34',
-      'releaseURL':
-          'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v3.0.34',
-      'downloadURL':
-          'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.34/dropo-Windows-Setup-x64.exe',
-      'assetName': 'dropo-Windows-Setup-x64.exe',
-      'fileSize': 123456,
-      'platform': 'windows',
-      'selfUpdate': true,
-    });
+    if (checkResult != null) return checkResult!.future;
+    return availableUpdate;
   }
+
+  UpdateInfo get availableUpdate => UpdateInfo.fromJson({
+    'success': true,
+    'hasUpdate': true,
+    'currentVersion': '3.0.33',
+    'latestVersion': '3.0.34',
+    'releaseURL':
+        'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v3.0.34',
+    'downloadURL': android
+        ? 'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.34/dropo-Android-Preview-universal.apk'
+        : 'https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.34/dropo-Windows-Setup-x64.exe',
+    'assetName': android
+        ? 'dropo-Android-Preview-universal.apk'
+        : 'dropo-Windows-Setup-x64.exe',
+    'fileSize': 123456,
+    'platform': android ? 'android' : 'windows',
+    'selfUpdate': !android,
+  });
 
   @override
   Future<Map<String, dynamic>> installUpdate() async {
@@ -111,12 +122,23 @@ Future<_ManualUpdateBridge> _pumpUpdater(
   WidgetTester tester, {
   bool checkUpdates = true,
   bool connectionBusy = false,
+  Size size = const Size(1280, 860),
+  double scale = 1,
+  bool mobile = false,
+  _ManualUpdateBridge? providedBridge,
 }) async {
-  tester.view.physicalSize = const Size(1280, 860);
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
-  final bridge = _ManualUpdateBridge();
+  debugMobileShellOverride = mobile;
+  debugAndroidPlatformOverride = mobile;
+  addTearDown(() {
+    debugMobileShellOverride = null;
+    debugAndroidPlatformOverride = null;
+  });
+  final bridge = providedBridge ?? _ManualUpdateBridge();
+  bridge.android = mobile;
   addTearDown(bridge.close);
   await bridge.saveAppConfig(
     AppConfig.defaults.copyWith(checkUpdates: checkUpdates, reduceMotion: true),
@@ -126,6 +148,17 @@ Future<_ManualUpdateBridge> _pumpUpdater(
       key: const ValueKey('update-capture'),
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          brightness: Brightness.dark,
+          fontFamily: 'Inter',
+          useMaterial3: true,
+        ),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(textScaler: TextScaler.linear(scale)),
+          child: child!,
+        ),
         home: DropoHomePage(bridge: bridge),
       ),
     ),
@@ -141,7 +174,7 @@ Future<_ManualUpdateBridge> _pumpUpdater(
 }
 
 Future<void> _openUpdateConfirmation(WidgetTester tester) async {
-  final update = find.text('Обновить и перезапустить');
+  final update = find.byKey(const ValueKey('update-available-action'));
   expect(update, findsOneWidget);
   await tester.ensureVisible(update);
   await tester.tap(update);
@@ -152,6 +185,24 @@ Future<void> _openUpdateConfirmation(WidgetTester tester) async {
 
 Finder _confirmationButton(String label) =>
     find.descendant(of: find.byType(Dialog), matching: find.text(label));
+
+Future<void> _capture(WidgetTester tester, String name) async {
+  const captureDirectory = String.fromEnvironment('DROPO_UI_CAPTURE_DIR');
+  if (captureDirectory.isEmpty) return;
+  await tester.runAsync(() async {
+    final picture = await tester
+        .renderObject<RenderRepaintBoundary>(
+          find.byKey(const ValueKey('update-capture')),
+        )
+        .toImage();
+    final bytes = await picture.toByteData(format: ui.ImageByteFormat.png);
+    await Directory(captureDirectory).create(recursive: true);
+    await File(
+      '$captureDirectory/$name.png',
+    ).writeAsBytes(bytes!.buffer.asUint8List());
+    picture.dispose();
+  });
+}
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -195,24 +246,7 @@ void main() {
       tester.view.physicalSize = size;
       await tester.pump();
       expect(tester.takeException(), isNull);
-      const captureDirectory = String.fromEnvironment('DROPO_UI_CAPTURE_DIR');
-      if (captureDirectory.isNotEmpty) {
-        await tester.runAsync(() async {
-          final picture = await tester
-              .renderObject<RenderRepaintBoundary>(
-                find.byKey(const ValueKey('update-capture')),
-              )
-              .toImage();
-          final bytes = await picture.toByteData(
-            format: ui.ImageByteFormat.png,
-          );
-          await Directory(captureDirectory).create(recursive: true);
-          await File(
-            '$captureDirectory/update-${size.width.round()}.png',
-          ).writeAsBytes(bytes!.buffer.asUint8List());
-          picture.dispose();
-        });
-      }
+      await _capture(tester, 'update-progress-${size.width.round()}');
     }
     tester.view.physicalSize = const Size(1280, 860);
     for (final stage in ['verifying', 'stopping', 'installing']) {
@@ -243,7 +277,11 @@ void main() {
     (tester) async {
       final bridge = await _pumpUpdater(tester);
       expect(bridge.checkCalls, 1);
-      expect(find.text('Доступна версия 3.0.34'), findsWidgets);
+      expect(
+        find.byKey(const ValueKey('update-available-notice')),
+        findsOneWidget,
+      );
+      expect(find.byType(SnackBar), findsNothing);
       expect(find.text('Обновить dropo до 3.0.34?'), findsNothing);
       bridge.expectNoInstallOrInterruption();
 
@@ -319,7 +357,7 @@ void main() {
     tester,
   ) async {
     final bridge = await _pumpUpdater(tester);
-    await tester.tap(find.widgetWithText(SnackBarAction, 'Обновить'));
+    await tester.tap(find.byKey(const ValueKey('update-available-action')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('Обновить dropo до 3.0.34?'), findsOneWidget);
@@ -399,7 +437,7 @@ void main() {
     final bridge = await _pumpUpdater(tester, checkUpdates: false);
     await tester.pump(const Duration(seconds: 30));
     expect(bridge.checkCalls, 0);
-    expect(find.text('Доступна версия 3.0.34'), findsNothing);
+    expect(find.byKey(const ValueKey('update-available-notice')), findsNothing);
     bridge.expectNoInstallOrInterruption();
   });
 
@@ -415,9 +453,180 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
 
       expect(bridge.checkCalls, 1);
-      expect(find.text('Доступна версия 3.0.34'), findsWidgets);
+      expect(
+        find.byKey(const ValueKey('update-available-notice')),
+        findsOneWidget,
+      );
       await tester.pump(const Duration(seconds: 30));
       bridge.expectNoInstallOrInterruption();
     },
   );
+
+  for (final viewport in [
+    (const Size(820, 560), 1.0, false),
+    (const Size(684, 461), 1.0, false),
+    (const Size(320, 480), 2.0, false),
+    (const Size(390, 844), 1.0, true),
+    (const Size(360, 640), 1.5, true),
+    (const Size(320, 568), 2.0, true),
+  ]) {
+    testWidgets('update action is visible without moving controls $viewport', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final bridge = _ManualUpdateBridge()
+        ..checkResult = Completer<UpdateInfo>();
+      await _pumpUpdater(
+        tester,
+        size: viewport.$1,
+        scale: viewport.$2,
+        mobile: viewport.$3,
+        providedBridge: bridge,
+      );
+      final connection = find.byKey(const ValueKey('home-connect'));
+      final before = tester.getRect(connection);
+      bridge.checkResult!.complete(bridge.availableUpdate);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      final action = find.byKey(const ValueKey('update-available-action'));
+      final notice = find.byKey(const ValueKey('notice-overlay'));
+      expect(action.hitTestable(), findsOneWidget);
+      expect(tester.getRect(notice).contains(tester.getCenter(action)), isTrue);
+      expect(
+        tester.getRect(action).bottom,
+        lessThanOrEqualTo(tester.getRect(notice).bottom),
+      );
+      expect(tester.getRect(notice).overlaps(before), isFalse);
+      expect(tester.getRect(connection), before);
+      expect(find.textContaining('Setup-x64.exe'), findsNothing);
+      expect(find.textContaining('Preview-universal.apk'), findsNothing);
+      expect(
+        find.bySemanticsLabel(RegExp('Доступна новая версия Dropo 3.0.34')),
+        findsWidgets,
+      );
+      expect(tester.takeException(), isNull);
+      bridge.expectNoInstallOrInterruption();
+      await _capture(
+        tester,
+        'update-notice-${viewport.$1.width.round()}-${viewport.$2}-${viewport.$3 ? 'android' : 'windows'}',
+      );
+      await tester.tap(find.byKey(const ValueKey('dismiss-notice')));
+      await tester.pump();
+      expect(tester.getRect(connection), before);
+      final reopen = find.byKey(const ValueKey('reopen-notice'));
+      expect(reopen.hitTestable(), findsOneWidget);
+      await tester.tap(reopen);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(action.hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      bridge.expectNoInstallOrInterruption();
+      await tester.pumpWidget(const SizedBox.shrink());
+      semantics.dispose();
+    });
+  }
+
+  for (final viewport in [
+    (const Size(684, 461), 1.0, false),
+    (const Size(390, 568), 2.0, false),
+    (const Size(320, 568), 2.0, true),
+  ]) {
+    testWidgets(
+      'update button remains visible alongside a connection error $viewport',
+      (tester) async {
+        await _pumpUpdater(
+          tester,
+          size: viewport.$1,
+          scale: viewport.$2,
+          mobile: viewport.$3,
+          providedBridge: _ManualUpdateBridge()..statusError = true,
+        );
+        final action = find.byKey(const ValueKey('update-available-action'));
+        expect(action.hitTestable(), findsOneWidget);
+        expect(
+          tester.getRect(action).bottom,
+          lessThanOrEqualTo(
+            tester.getRect(find.byKey(const ValueKey('notice-overlay'))).bottom,
+          ),
+        );
+        expect(
+          tester
+              .getRect(find.byKey(const ValueKey('notice-overlay')))
+              .overlaps(
+                tester.getRect(find.byKey(const ValueKey('home-connect'))),
+              ),
+          isFalse,
+        );
+        await _capture(
+          tester,
+          'update-notice-with-error-${viewport.$1.width.round()}-${viewport.$2}-${viewport.$3 ? 'android' : 'windows'}',
+        );
+        await tester.tap(find.byKey(const ValueKey('expand-notice')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text('Тест: сервер временно недоступен'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await _capture(
+          tester,
+          'update-notice-error-details-${viewport.$1.width.round()}-${viewport.$2}',
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  testWidgets('Android update downloads APK only after explicit action', (
+    tester,
+  ) async {
+    final bridge = await _pumpUpdater(
+      tester,
+      size: const Size(390, 844),
+      mobile: true,
+    );
+    bridge.expectNoInstallOrInterruption();
+    await tester.tap(find.byKey(const ValueKey('update-available-action')));
+    await tester.pump();
+    expect(bridge.externalLinks, [bridge.availableUpdate.downloadUrl]);
+    expect(bridge.installCalls, 0);
+    expect(bridge.prepareQuitCalls, 0);
+    expect(bridge.finalizeQuitCalls, 0);
+    expect(bridge.connectionChanges, isEmpty);
+    expect((await bridge.status()).connected, isTrue);
+    expect(find.byType(Dialog), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('compact Android update exposes the version in app settings', (
+    tester,
+  ) async {
+    final bridge = await _pumpUpdater(
+      tester,
+      size: const Size(320, 568),
+      scale: 2,
+      mobile: true,
+    );
+    await openSection(tester, 'app-settings');
+    final version = find.text('Доступна версия 3.0.34');
+    await tester.ensureVisible(version);
+    await tester.pump();
+    expect(version, findsOneWidget);
+    bridge.expectNoInstallOrInterruption();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('update notification remains available outside the home page', (
+    tester,
+  ) async {
+    final bridge = await _pumpUpdater(tester);
+    for (final section in ['settings', 'sources', 'account', 'home']) {
+      await openSection(tester, section);
+      final action = find.byKey(const ValueKey('update-available-action'));
+      expect(action.hitTestable(), findsOneWidget);
+      expect(find.byType(SnackBar), findsNothing);
+      bridge.expectNoInstallOrInterruption();
+    }
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }

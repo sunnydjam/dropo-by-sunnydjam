@@ -39,6 +39,7 @@ class MainActivity : FlutterActivity() {
     private val subscriptionExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var coreChannel: MethodChannel? = null
+    private var accountSessionChannel: AccountSessionChannel? = null
     private var eventChannel: EventChannel? = null
     private var eventListener: DropoVpnRuntime.Listener? = null
     private var pendingConnectResult: MethodChannel.Result? = null
@@ -78,6 +79,8 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        accountSessionChannel = AccountSessionChannel(this,
+            flutterEngine.dartExecutor.binaryMessenger)
         coreChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL_CORE,
@@ -112,6 +115,8 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         destroyed = true
         pendingConnectResult = null
+        accountSessionChannel?.close()
+        accountSessionChannel = null
         coreChannel?.setMethodCallHandler(null)
         coreChannel = null
         eventChannel?.setStreamHandler(null)
@@ -176,7 +181,7 @@ class MainActivity : FlutterActivity() {
         }
         val executor = if (
             call.method == "call" && stringArg(call, "method") in setOf(
-                "TestVPNConnection", "AddVPNSource", "AddPublicVPNSource", "RefreshVPNSources",
+                "TestVPNConnection", "AddVPNSource", "AddPublicVPNSource", "AddManagedVPNSource", "RefreshVPNSources",
             )
         ) {
             // Subscription validation can spend up to the HTTP timeout on the

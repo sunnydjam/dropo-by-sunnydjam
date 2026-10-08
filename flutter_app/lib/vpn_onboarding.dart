@@ -45,13 +45,15 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
       if (!mounted) return;
       setState(() {
         providers = loaded;
-        if (loaded.isEmpty) error = 'Бесплатный каталог сейчас недоступен.';
+        if (loaded.isEmpty) {
+          error = 'Dropo Free сейчас недоступен. Добавьте свою подписку.';
+        }
       });
     } catch (_) {
       if (mounted) {
         setState(
           () => error =
-              'Не удалось получить бесплатный каталог. Попробуйте ещё раз или добавьте свою подписку.',
+              'Dropo Free сейчас недоступен. Попробуйте позже или добавьте свою подписку.',
         );
       }
     } finally {
@@ -100,12 +102,12 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
               Text(
                 widget.hasDisabledSources
                     ? 'Откройте источники и включите нужный. Мы не включаем отключённые вами источники автоматически.'
-                    : 'Для режима «Всё через VPN» можно использовать бесплатный публичный источник или свою подписку.',
+                    : 'Для режима «Всё через VPN» можно добавить бесплатную подписку Dropo Free или свою подписку.',
               ),
               if (!widget.hasDisabledSources) ...[
                 const SizedBox(height: 16),
                 const Text(
-                  'Это сторонние серверы, не сеть Dropo. Оператор может видеть адреса соединений и незашифрованный трафик. Скорость, конфиденциальность и доступность не гарантируются.',
+                  'Доступность Dropo Free проверяется после согласия. Оператор VPN может видеть адреса соединений и незашифрованный трафик. Скорость, конфиденциальность и наличие серверов не гарантируются.',
                   style: TextStyle(fontSize: 13, height: 1.4),
                 ),
                 if (loading || busy) ...[
@@ -113,7 +115,9 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
                   const LinearProgressIndicator(),
                   const SizedBox(height: 8),
                   Text(
-                    busy ? 'Готовим бесплатный источник…' : 'Получаем каталог…',
+                    busy
+                        ? 'Проверяем Dropo Free…'
+                        : 'Подготавливаем предложение…',
                   ),
                 ],
                 for (final provider in providers) ...[
@@ -132,7 +136,7 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
                 ],
                 if (providers.isNotEmpty)
                   const Text(
-                    'Продолжая, вы соглашаетесь использовать этот публичный источник.',
+                    'Продолжая, вы соглашаетесь добавить бесплатную подписку Dropo Free.',
                     style: TextStyle(fontSize: 12, height: 1.4),
                   ),
               ],

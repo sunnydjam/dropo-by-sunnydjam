@@ -17,6 +17,7 @@ class _AtlasDesktopShell extends StatefulWidget {
     this.motionEnabled = true,
     required this.child,
     this.notice,
+    this.updateNotice,
     this.overlay,
   });
   final String activeSection, version;
@@ -29,7 +30,7 @@ class _AtlasDesktopShell extends StatefulWidget {
   final VoidCallback? onBack;
   final VoidCallback? onWorkNetworks, onExit;
   final Widget child;
-  final Widget? notice, overlay;
+  final Widget? notice, updateNotice, overlay;
 
   @override
   State<_AtlasDesktopShell> createState() => _AtlasDesktopShellState();
@@ -449,15 +450,25 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                       ),
                     ),
                   ),
-                if (widget.notice != null && !_open)
+                if ((widget.notice != null || widget.updateNotice != null) &&
+                    !_open)
                   Positioned(
                     top: 4,
                     left: railWidth + 8,
                     right: 8,
                     child: _AtlasNoticeOverlay(
-                      identity: widget.notice!.key,
+                      identity: ValueKey((
+                        widget.notice?.key,
+                        widget.updateNotice?.key,
+                      )),
                       maxHeight: 96,
-                      child: widget.notice!,
+                      pinnedChild: widget.updateNotice,
+                      hasDetails: widget.notice != null,
+                      collapsedLabel:
+                          widget.updateNotice != null && widget.notice == null
+                          ? 'Новое обновление'
+                          : 'Сообщения',
+                      child: widget.notice ?? const SizedBox.shrink(),
                     ),
                   ),
                 if (_open) ...[
@@ -551,11 +562,18 @@ class _AtlasNoticeOverlay extends StatefulWidget {
     required this.child,
     required this.maxHeight,
     this.identity,
+    this.pinnedChild,
+    this.hasDetails = true,
+    this.collapsedLabel = 'Сообщения',
   });
 
   final Widget child;
   final double maxHeight;
   final Key? identity;
+  // Actions must never sit inside the height-limited message scroll viewport.
+  final Widget? pinnedChild;
+  final bool hasDetails;
+  final String collapsedLabel;
 
   @override
   State<_AtlasNoticeOverlay> createState() => _AtlasNoticeOverlayState();
@@ -584,7 +602,7 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
               children: [
                 Row(
                   children: [
-                    const Expanded(child: Text('Сообщения подключения')),
+                    const Expanded(child: Text('Сообщения Dropo')),
                     _AccessibleIconButton(
                       tooltip: 'Закрыть',
                       mouseCursor: SystemMouseCursors.click,
@@ -593,7 +611,9 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
                     ),
                   ],
                 ),
-                Flexible(child: SingleChildScrollView(child: widget.child)),
+                if (widget.pinnedChild != null) widget.pinnedChild!,
+                if (widget.hasDetails)
+                  Flexible(child: SingleChildScrollView(child: widget.child)),
               ],
             ),
           ),
@@ -618,19 +638,39 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
                 key: const ValueKey('reopen-notice'),
                 onPressed: _showDetails,
                 icon: const Icon(Icons.notifications_none, size: 18),
-                label: const Text('Сообщения'),
+                label: Text(widget.collapsedLabel),
               )
-            : ConstrainedBox(
-                constraints: BoxConstraints(maxHeight: widget.maxHeight),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Semantics(
-                        liveRegion: true,
-                        child: SingleChildScrollView(child: widget.child),
+            : Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Semantics(
+                      liveRegion: true,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (widget.pinnedChild != null) widget.pinnedChild!,
+                          // Reserve the compact action row before allocating
+                          // the shared height budget to passive messages. In
+                          // small/large-text viewports their details stay in
+                          // the expand dialog instead of covering Connect.
+                          if (widget.hasDetails &&
+                              (widget.pinnedChild == null ||
+                                  widget.maxHeight >= 96))
+                            ConstrainedBox(
+                              constraints: BoxConstraints(
+                                maxHeight:
+                                    widget.maxHeight -
+                                    (widget.pinnedChild == null ? 0 : 48),
+                              ),
+                              child: SingleChildScrollView(child: widget.child),
+                            ),
+                        ],
                       ),
                     ),
+                  ),
+                  if (widget.hasDetails)
                     _AccessibleIconButton(
                       key: const ValueKey('expand-notice'),
                       tooltip: 'Открыть сообщение полностью',
@@ -638,15 +678,14 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
                       onPressed: _showDetails,
                       icon: const Icon(Icons.open_in_full, size: 16),
                     ),
-                    _AccessibleIconButton(
-                      key: const ValueKey('dismiss-notice'),
-                      tooltip: 'Свернуть сообщение',
-                      mouseCursor: SystemMouseCursors.click,
-                      onPressed: () => setState(() => _collapsed = true),
-                      icon: const Icon(Icons.close, size: 18),
-                    ),
-                  ],
-                ),
+                  _AccessibleIconButton(
+                    key: const ValueKey('dismiss-notice'),
+                    tooltip: 'Свернуть сообщение',
+                    mouseCursor: SystemMouseCursors.click,
+                    onPressed: () => setState(() => _collapsed = true),
+                    icon: const Icon(Icons.close, size: 18),
+                  ),
+                ],
               ),
       ),
     ),

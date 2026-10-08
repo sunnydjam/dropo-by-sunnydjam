@@ -1706,7 +1706,13 @@ func (b *ConfigBuilderForStorage) fetchVPNSourceNodes(source VPNSource) ([]Proxy
 		}
 		return nodes, nil
 	}
-	return b.fetcher.FetchAndParse(source.URI)
+	nodes, err := b.fetcher.FetchAndParse(source.URI)
+	if err != nil && source.PublicCatalogID == managedFreeVPNProviderID {
+		// net/http errors can contain the private subscription URI. Keep those
+		// out of the shared native API, stored display errors and caller logs.
+		return nil, fmt.Errorf("не удалось загрузить подписку Dropo Free")
+	}
+	return nodes, err
 }
 
 func (b *ConfigBuilderForStorage) parseCachedVPNNodes(rawNodes []string) ([]ProxyConfig, error) {
