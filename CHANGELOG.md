@@ -17,6 +17,8 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
   priorities and session-bound truthful health measurements;
 - strengthen Android session cancellation, native logging and protection-state
   reporting; retain private/work-network precedence and manual subscription nodes;
+- keep Android updates within the installed stable/Preview package family and
+  offer universal ARM builds before architecture-specific compatible packages;
 - add the Dropo account section with Telegram passwordless authentication,
   recovery, session management and Telegram Stars purchase confirmation;
 - keep the account backend in the separate private `DropoVPN-Backend`

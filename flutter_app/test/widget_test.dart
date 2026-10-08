@@ -53,7 +53,7 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
 
-      await tester.pumpWidget(const DropoApp());
+      await tester.pumpWidget(DropoApp(bridge: MockCoreBridge()));
       await tester.pump();
 
       expect(find.text('Dropo'), findsOneWidget);
