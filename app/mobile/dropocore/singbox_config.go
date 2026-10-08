@@ -1,6 +1,8 @@
 package dropocore
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -11,7 +13,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v8"
+	androidConfigSchema     = "android-package-routing-v10-source-pool"
 )
 
 const androidSingBoxVersion = "1.13.14"
@@ -20,6 +22,28 @@ var safeTagChars = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
 func BuildSingBoxConfig() string {
 	mu.Lock()
+	if current.sourceWorkCancelled {
+		mu.Unlock()
+		return androidSourceError("VPN configuration was cancelled")
+	}
+	if androidBuildCancel != nil {
+		androidBuildCancel()
+	}
+	buildCtx, cancel := context.WithCancel(context.Background())
+	androidBuildCancel = cancel
+	defer cancel()
+	migrateAndroidSourcesLocked()
+	for _, source := range current.VPNSources {
+		if !source.Disabled && len(source.Nodes) > 0 {
+			mu.Unlock()
+			return buildPreparedAndroidSourcePool(buildCtx)
+		}
+	}
+	selectedNodeID := ""
+	if source := primaryAndroidSourceLocked(); source != nil {
+		selectedNodeID = source.SelectedNodeID
+	}
+	revision := current.sourcesRevision
 	subscription := strings.TrimSpace(current.Subscription)
 	enableLogging := current.Config.EnableLogging
 	logLevel := effectiveAndroidLogLevel(enableLogging, current.Config.LogLevel)
@@ -33,6 +57,9 @@ func BuildSingBoxConfig() string {
 	cachedSubscription := current.CachedConfigSubscription
 	cachedSignature := current.CachedConfigSignature
 	signature := androidConfigSignature(subscription, enableLogging, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies)
+	if selectedNodeID != "" {
+		signature += "|node=" + selectedNodeID
+	}
 	if !autoUpdateSub && cachedConfig != "" && subscription != "" && subscription == cachedSubscription && signature == cachedSignature {
 		appendLogIfChangedLocked("android sing-box config cache reused (auto-update disabled)")
 		current.SubscriptionProxyCount = cachedProxyCount
@@ -48,14 +75,20 @@ func BuildSingBoxConfig() string {
 	}
 	mu.Unlock()
 
-	config, proxies, err := buildAndroidSingBoxConfig(subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies)
+	config, proxies, err := buildAndroidSingBoxConfigForNodeContext(buildCtx, subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID)
 
 	mu.Lock()
 	defer mu.Unlock()
-	if strings.TrimSpace(current.Subscription) != subscription {
+	liveSignature := androidConfigSignature(current.Subscription, current.Config.EnableLogging,
+		effectiveAndroidLogLevel(current.Config.EnableLogging, current.Config.LogLevel), current.Config.RoutingMode,
+		current.Config.HideRuTraffic, strings.TrimSpace(current.Config.RuProxyAddress), androidRoutePoliciesLocked())
+	if selectedNodeID != "" {
+		liveSignature += "|node=" + selectedNodeID
+	}
+	if strings.TrimSpace(current.Subscription) != subscription || current.sourcesRevision != revision || liveSignature != signature {
 		return encode(map[string]interface{}{
 			"success": false,
-			"error":   "VPN subscription changed while Android configuration was being built",
+			"error":   "VPN settings changed while Android configuration was being built",
 		})
 	}
 	if err != nil {
@@ -92,6 +125,14 @@ func BuildSingBoxConfig() string {
 	current.CachedConfigSubscription = subscription
 	current.CachedConfigSignature = signature
 	current.CachedConfigUpdatedAt = currentTimeRFC3339()
+	if source := primaryAndroidSourceLocked(); source != nil {
+		source.Nodes, source.UpdatedAt = proxies, current.CachedConfigUpdatedAt
+		selected := androidSelectedNode(*source)
+		if selected >= 0 && selected < len(proxies) {
+			current.preparedSources = []androidSourceCandidate{{ID: source.ID,
+				Tag: proxies[selected].Tag, NodeID: androidNodeID(proxies[selected])}}
+		}
+	}
 	_ = saveLocked()
 	return encode(map[string]interface{}{
 		"success":    true,
@@ -107,6 +148,14 @@ func currentTimeRFC3339() string {
 }
 
 func buildAndroidSingBoxConfig(subscription, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string) (string, []proxyConfig, error) {
+	return buildAndroidSingBoxConfigForNode(subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, "")
+}
+
+func buildAndroidSingBoxConfigForNode(subscription, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string, selectedNodeID string) (string, []proxyConfig, error) {
+	return buildAndroidSingBoxConfigForNodeContext(context.Background(), subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID)
+}
+
+func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string, selectedNodeID string) (string, []proxyConfig, error) {
 	if subscription == "" {
 		return "", nil, fmt.Errorf("VPN subscription is empty")
 	}
@@ -114,22 +163,39 @@ func buildAndroidSingBoxConfig(subscription, logLevel, routingMode string, hideR
 		logLevel = "info"
 	}
 
-	filtered, err := parseAndroidProxyCandidates(subscription)
+	filtered, err := parseAndroidSourceContext(ctx, subscription)
 	if err != nil {
 		return "", nil, err
 	}
+	if len(filtered) == 0 {
+		return "", nil, fmt.Errorf("Подписка не содержит поддерживаемых серверов.")
+	}
 
-	outbounds, proxyTags := buildAndroidOutbounds(filtered)
+	selected := 0
+	if selectedNodeID != "" {
+		selected = androidSelectedNode(androidVPNSource{Nodes: filtered, SelectedNodeID: selectedNodeID})
+		if selected < 0 {
+			return "", nil, fmt.Errorf("Выбранный сервер исчез из подписки. Выберите другой сервер.")
+		}
+	}
+	outbounds, proxyTags := buildAndroidOutbounds(filtered[selected : selected+1])
 	effectiveRoutePolicies := androidEffectiveRoutePoliciesForMode(routePolicies, len(proxyTags) > 0, routingMode)
 	ruOutbound := "proxy"
 	ruProxyAddress = strings.TrimSpace(ruProxyAddress)
 	if hideRuTraffic && ruProxyAddress != "" {
-		ruProxies, err := parseAndroidProxyCandidates(ruProxyAddress)
+		fetcher := newSubscriptionFetcher()
+		fetcher.ctx = ctx
+		ruProxies, err := parseAndroidProxyCandidatesWithFetcher(ruProxyAddress, fetcher)
 		if err != nil {
 			return "", nil, fmt.Errorf("RU proxy address is invalid: %w", err)
 		}
-		outbounds, ruOutbound = appendAndroidProxyOutbounds(outbounds, ruProxies, "ru-proxy", "ru-auto-select")
+		outbounds, ruOutbound = appendAndroidProxyOutbounds(outbounds, ruProxies, "ru-proxy")
 	}
+	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags, logLevel, routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies)
+	return config, filtered, err
+}
+
+func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string) (string, error) {
 	dnsServers := buildAndroidDNSServers(proxyTags)
 	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies)
 	finalOutbound := androidFinalOutbound(routingMode)
@@ -166,15 +232,90 @@ func buildAndroidSingBoxConfig(subscription, logLevel, routingMode string, hideR
 			"default_domain_resolver": map[string]interface{}{"server": "dns-direct", "strategy": "ipv4_only"},
 		},
 		"experimental": map[string]interface{}{
-			"cache_file": map[string]interface{}{"enabled": true, "path": "cache.db"},
+			"cache_file": map[string]interface{}{"enabled": false},
 		},
 	}
 
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-	return string(data), filtered, nil
+	return string(data), nil
+}
+
+// Current subscriptions already carry parsed nodes in private storage. Build
+// their bootstrap plan without waiting for subscription servers to respond.
+// Only the legacy (unparsed) migration above needs an initial download.
+func buildPreparedAndroidSourcePool(ctx context.Context) string {
+	mu.Lock()
+	defer mu.Unlock()
+	if ctx.Err() != nil {
+		return androidSourceError("VPN configuration was cancelled")
+	}
+	sources := current.VPNSources
+	outbounds := make([]interface{}, 0, len(sources)+2)
+	proxyTags := make([]string, 0, len(sources))
+	candidates := make([]androidSourceCandidate, 0, len(sources))
+	for _, source := range sources {
+		if source.Disabled {
+			continue
+		}
+		selected := androidSelectedNode(source)
+		if selected < 0 || selected >= len(source.Nodes) {
+			continue
+		}
+		node := source.Nodes[selected]
+		node.Tag = "vpn-" + source.ID
+		outbounds = append(outbounds, proxyToSingBoxOutbound(node))
+		proxyTags = append(proxyTags, node.Tag)
+		candidates = append(candidates, androidSourceCandidate{ID: source.ID, Tag: node.Tag, NodeID: androidNodeID(node)})
+	}
+	if len(candidates) == 0 {
+		return androidSourceError("Включённые источники не содержат выбранных серверов. Обновите подписки или выберите сервер.")
+	}
+	outbounds = append(outbounds, map[string]interface{}{"type": "selector", "tag": "proxy", "outbounds": proxyTags,
+		"default": proxyTags[0], "interrupt_exist_connections": false})
+	outbounds = append(outbounds, map[string]interface{}{"type": "direct", "tag": "direct"})
+	// The optional RU source was validated when it was saved; a network download
+	// for it must not hold the connection gate or this state lock.
+	ruOutbound := "proxy"
+	if current.Config.HideRuTraffic && strings.TrimSpace(current.Config.RuProxyAddress) != "" {
+		ruAddress, revision, settings := current.Config.RuProxyAddress, current.sourcesRevision, current.Config
+		mu.Unlock()
+		fetcher := newSubscriptionFetcher()
+		fetcher.ctx = ctx
+		nodes, err := parseAndroidProxyCandidatesWithFetcher(ruAddress, fetcher)
+		mu.Lock()
+		if revision != current.sourcesRevision || settings != current.Config {
+			return androidSourceError("VPN settings changed while Android configuration was being built")
+		}
+		if err != nil {
+			return androidSourceError("RU proxy address is invalid")
+		}
+		outbounds, ruOutbound = appendAndroidProxyOutbounds(outbounds, nodes, "ru-proxy")
+	}
+	routingMode := normalizeAndroidRoutingMode(current.Config.RoutingMode)
+	policies := androidEffectiveRoutePoliciesForMode(androidRoutePoliciesLocked(), true, routingMode)
+	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags,
+		effectiveAndroidLogLevel(current.Config.EnableLogging, current.Config.LogLevel), routingMode,
+		current.Config.HideRuTraffic, ruOutbound, policies)
+	if err != nil {
+		return androidSourceError("Не удалось подготовить Android VPN.")
+	}
+	current.preparedSources = candidates
+	current.Version.SingboxVersion = androidSingBoxVersion
+	current.LastError = ""
+	current.CachedSingBoxConfig = config
+	current.CachedProxyCount = len(candidates)
+	current.SubscriptionProxyCount = len(primaryAndroidSourceLocked().Nodes)
+	current.CachedConfigSubscription = current.Subscription
+	fingerprint := sha256.Sum256([]byte(config))
+	current.CachedConfigSignature = fmt.Sprintf("%s|%x", androidConfigSchema, fingerprint)
+	current.CachedConfigUpdatedAt = currentTimeRFC3339()
+	_ = saveLocked()
+	return encode(map[string]interface{}{"success": true, "config": config,
+		"proxyCount": current.SubscriptionProxyCount, "version": androidSingBoxVersion,
+		"cached": false, "sourcesCached": true, "candidates": candidates, "bootstrapSourceId": candidates[0].ID})
 }
 
 func effectiveAndroidLogLevel(enableLogging bool, logLevel string) string {
@@ -238,6 +379,10 @@ func parseAndroidDirectProxyCandidate(value string) (proxy proxyConfig, err erro
 }
 
 func buildAndroidOutbounds(proxies []proxyConfig) ([]interface{}, []string) {
+	// A subscription is one source. Never automatically race its sibling nodes.
+	if len(proxies) > 1 {
+		proxies = proxies[:1]
+	}
 	outbounds := make([]interface{}, 0, len(proxies)+3)
 	proxyTags := make([]string, 0, len(proxies))
 	for _, proxy := range proxies {
@@ -251,29 +396,15 @@ func buildAndroidOutbounds(proxies []proxyConfig) ([]interface{}, []string) {
 			"outbounds": proxyTags,
 			"default":   proxyTags[0],
 		})
-	} else {
-		outbounds = append(outbounds, map[string]interface{}{
-			"type":                        "urltest",
-			"tag":                         "auto-select",
-			"outbounds":                   proxyTags,
-			"url":                         "https://www.gstatic.com/generate_204",
-			"interval":                    "5m",
-			"tolerance":                   50,
-			"interrupt_exist_connections": false,
-		})
-		selectorOutbounds := append([]string{"auto-select"}, proxyTags...)
-		outbounds = append(outbounds, map[string]interface{}{
-			"type":      "selector",
-			"tag":       "proxy",
-			"outbounds": selectorOutbounds,
-			"default":   "auto-select",
-		})
 	}
 	outbounds = append(outbounds, map[string]interface{}{"type": "direct", "tag": "direct"})
 	return outbounds, proxyTags
 }
 
-func appendAndroidProxyOutbounds(outbounds []interface{}, proxies []proxyConfig, selectorTag, autoTag string) ([]interface{}, string) {
+func appendAndroidProxyOutbounds(outbounds []interface{}, proxies []proxyConfig, selectorTag string) ([]interface{}, string) {
+	if len(proxies) > 1 {
+		proxies = proxies[:1]
+	}
 	proxyTags := make([]string, 0, len(proxies))
 	for i, proxy := range proxies {
 		proxy.Tag = fmt.Sprintf("%s-%d", selectorTag, i+1)
@@ -283,26 +414,7 @@ func appendAndroidProxyOutbounds(outbounds []interface{}, proxies []proxyConfig,
 	if len(proxyTags) == 0 {
 		return outbounds, "proxy"
 	}
-	if len(proxyTags) == 1 {
-		return outbounds, proxyTags[0]
-	}
-	outbounds = append(outbounds, map[string]interface{}{
-		"type":                        "urltest",
-		"tag":                         autoTag,
-		"outbounds":                   proxyTags,
-		"url":                         "https://www.gstatic.com/generate_204",
-		"interval":                    "5m",
-		"tolerance":                   50,
-		"interrupt_exist_connections": false,
-	})
-	selectorOutbounds := append([]string{autoTag}, proxyTags...)
-	outbounds = append(outbounds, map[string]interface{}{
-		"type":      "selector",
-		"tag":       selectorTag,
-		"outbounds": selectorOutbounds,
-		"default":   autoTag,
-	})
-	return outbounds, selectorTag
+	return outbounds, proxyTags[0]
 }
 
 func proxyToSingBoxOutbound(proxy proxyConfig) map[string]interface{} {

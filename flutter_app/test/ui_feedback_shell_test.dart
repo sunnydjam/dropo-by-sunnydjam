@@ -153,7 +153,7 @@ void main() {
           'home-connect',
           'nav-sources',
           'home-routing-all-vpn',
-          'link-service-settings',
+          'home-routing-selected',
         ]) {
           final rect = tester.getRect(_key(key));
           expect(rect.bottom, lessThanOrEqualTo(size.height));
@@ -211,16 +211,21 @@ void main() {
     },
   );
 
-  testWidgets('five desktop destinations remain present with selected parent', (
+  testWidgets('desktop navigation omits duplicate Services destinations', (
     tester,
   ) async {
     await _pump(tester, _FeedbackBridge());
-    for (final section in ['home', 'services', 'sources', 'settings', 'help']) {
+    for (final section in ['home', 'sources', 'settings', 'help']) {
       expect(_key('nav-$section'), findsOneWidget);
     }
+    expect(_key('nav-services'), findsNothing);
+    expect(_key('link-service-settings'), findsNothing);
     expect(find.text('Источники VPN'), findsOneWidget);
     await _tap(tester, 'nav-settings');
+    expect(_key('link-services'), findsNothing);
+    expect(_key('link-service-settings'), findsNothing);
     await _tap(tester, 'link-advanced');
+    expect(_key('link-service-settings'), findsNothing);
     final selected = find.ancestor(
       of: _key('nav-settings'),
       matching: find.byWidgetPredicate(
@@ -320,7 +325,12 @@ void main() {
     await _pump(tester, _FeedbackBridge());
     final mouse = await tester.createGesture(kind: ui.PointerDeviceKind.mouse);
     await mouse.addPointer(location: Offset.zero);
-    for (final key in ['home-connect', 'nav-sources', 'nav-services']) {
+    await _tap(tester, 'home-routing-selected');
+    for (final key in [
+      'home-connect',
+      'nav-sources',
+      'toggle-home-route-services',
+    ]) {
       await mouse.moveTo(tester.getCenter(_key(key)));
       await tester.pump();
       expect(

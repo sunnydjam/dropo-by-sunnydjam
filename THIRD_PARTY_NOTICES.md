@@ -6,11 +6,15 @@
 
 ## Компоненты Windows release
 
-Интерфейс Atlas использует четыре SVG-знака (YouTube, Discord, Instagram,
-OpenAI) из [Simple Icons 14.0.0](https://github.com/simple-icons/simple-icons/tree/14.0.0),
-CC0-1.0. Текст лицензии поставляется в Flutter assets как
-`Simple-Icons-LICENSE.txt`. Товарные знаки принадлежат своим владельцам;
-их использование обозначает сервисы, а не партнёрство или одобрение Dropo.
+Интерфейс Atlas использует 21 локальный SVG-знак из
+[Simple Icons 14.0.0](https://github.com/simple-icons/simple-icons/tree/14.0.0)
+и отдельные функциональные пиктограммы для восьми сервисов или групп.
+Текст лицензии коллекции CC0-1.0 поставляется в Flutter assets как
+`Simple-Icons-LICENSE.txt`; он не отменяет отдельные условия логотипов и товарных
+знаков. Источники, условия использования и причины замены отдельных логотипов
+описаны в [SERVICE_ICONS_NOTICE.md](flutter_app/assets/SERVICE_ICONS_NOTICE.md).
+Товарные знаки принадлежат своим владельцам; их использование обозначает сервисы,
+а не партнёрство или одобрение Dropo.
 Рендерер [flutter_svg](https://pub.dev/packages/flutter_svg) — MIT;
 лицензии Dart/Flutter-зависимостей входят в стандартный Flutter license bundle.
 

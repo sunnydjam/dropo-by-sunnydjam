@@ -38,7 +38,6 @@ class _AtlasDesktopShell extends StatefulWidget {
 class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   static const _items = <(String, String, IconData)>[
     ('home', 'Подключение', Icons.home_rounded),
-    ('services', 'Сервисы', Icons.grid_view_rounded),
     ('sources', 'Источники VPN', Icons.dns_outlined),
     ('logs', 'Диагностика', Icons.monitor_heart_outlined),
     ('settings', 'Настройки', Icons.settings_outlined),
@@ -48,7 +47,6 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     ('dropo_space', 'Dropo Space', Icons.workspaces_outline),
     ('stats', 'Статистика', Icons.bar_chart_rounded),
     ('about', 'О приложении', Icons.info_outline),
-    ('service-settings', 'Сервисы', Icons.grid_view_rounded),
     ('app-settings', 'Приложение', Icons.settings_outlined),
     ('advanced', 'Дополнительно', Icons.tune),
     ('technical-settings', 'Сеть и диагностика', Icons.tune),
@@ -56,7 +54,6 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   ];
   static const _primarySections = {
     'home',
-    'services',
     'sources',
     'settings',
     'account',
@@ -93,14 +90,14 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   }
 
   String get _parentSection => switch (widget.activeSection) {
-    'service-settings' => 'services',
+    'services' || 'service-settings' => 'home',
     'profiles' || 'work' || 'dropo_space' || 'technical-settings' => 'advanced',
     'logs' || 'stats' || 'about' => 'help',
     _ => 'settings',
   };
 
   String get _selectedPrimary => switch (widget.activeSection) {
-    'service-settings' => 'services',
+    'services' || 'service-settings' => 'home',
     'logs' || 'stats' || 'about' => 'help',
     final section when _primarySections.contains(section) => section,
     _ => 'settings',
@@ -108,12 +105,15 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
 
   bool get _hasParent => !_primarySections.contains(widget.activeSection);
 
+  bool get _canNavigateBack =>
+      _hasParent || (_isMobileShell && widget.activeSection != 'home');
+
   void _back() {
     if (widget.disabled) return;
     if (widget.onBack != null) {
       widget.onBack!();
     } else {
-      widget.onSelect(_parentSection);
+      widget.onSelect(_hasParent ? _parentSection : 'home');
     }
   }
 
@@ -201,6 +201,9 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
         contentWidth < 608 ||
         navigationTextScale > 1.3;
     final compactTelemetry = contentWidth < 760 || navigationTextScale > 1.5;
+    final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
+    final showCompactBrand =
+        !expandedRail && (!_isMobileShell || widget.activeSection == 'home');
     Widget versionLink() => _AccessibleDescription(
       message: 'О приложении',
       child: TextButton(
@@ -252,12 +255,12 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
         popupMenuTheme: const PopupMenuThemeData(color: _atlasSurface),
       ),
       child: PopScope(
-        canPop: !_open && !_hasParent,
+        canPop: !_open && !_canNavigateBack,
         onPopInvokedWithResult: (didPop, _) {
           if (!didPop) {
             if (_open) {
               _close(restoreFocus: true);
-            } else if (_hasParent && !widget.disabled) {
+            } else if (_canNavigateBack && !widget.disabled) {
               _back();
             }
           }
@@ -306,7 +309,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                 child: Row(
                                   children: [
                                     if (!showRail) _toggle(),
-                                    if (_hasParent)
+                                    if (_canNavigateBack)
                                       _AccessibleIconButton(
                                         key: const ValueKey('section-back'),
                                         tooltip: 'Назад',
@@ -315,7 +318,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                             : _back,
                                         icon: const Icon(Icons.arrow_back),
                                       ),
-                                    if (!expandedRail)
+                                    if (showCompactBrand)
                                       const Text(
                                         'Dropo',
                                         style: TextStyle(
@@ -324,7 +327,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                           letterSpacing: -0.8,
                                         ),
                                       ),
-                                    if (!expandedRail &&
+                                    if (showCompactBrand &&
                                         screen.width >= 600 &&
                                         MediaQuery.textScalerOf(
                                               context,
@@ -350,6 +353,8 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                             )
                                           : Text(
                                               title,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
                                               textAlign: TextAlign.end,
                                               style: const TextStyle(
                                                 fontSize: 14,
@@ -372,7 +377,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                         ),
                                       ),
                               ),
-                              if (reserveFooter)
+                              if (reserveFooter && !keyboardVisible)
                                 ColoredBox(
                                   color: Colors.transparent,
                                   child: Align(

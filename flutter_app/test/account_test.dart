@@ -3,6 +3,44 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'unconfigured account makes no requests and preserves credentials',
+    (tester) async {
+      final service = _FakeAccountTransport();
+      final opened = <String>[];
+      await tester.binding.setSurfaceSize(const Size(320, 568));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: Scaffold(
+            body: AccountPage(
+              endpoint: 'http://127.0.0.1:18080',
+              available: false,
+              transport: service,
+              persistSession: false,
+              initialToken: 'existing-test-token',
+              onOpenExternal: (url) async => opened.add(url),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Вход пока недоступен'), findsOneWidget);
+      expect(find.textContaining('аккаунт не нужен'), findsOneWidget);
+      expect(find.byKey(const ValueKey('account-phone')), findsNothing);
+      expect(service.requests, isEmpty);
+      expect(opened, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('Telegram auth and Stars purchase update the account', (
     tester,
   ) async {
@@ -63,6 +101,7 @@ void main() {
 }
 
 class _FakeAccountTransport implements AccountTransport {
+  final List<(String, String)> requests = [];
   bool authApproved = false;
   bool orderPaid = false;
 
@@ -76,6 +115,7 @@ class _FakeAccountTransport implements AccountTransport {
     String? token,
     Map<String, dynamic>? body,
   }) async {
+    requests.add((method, path));
     if (path == '/v1/products') {
       return {
         'products': [

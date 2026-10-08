@@ -63,7 +63,7 @@ class _VpnResponseTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = snapshot.current ? _atlasMint : _atlasMuted;
     final style = TextStyle(
-      fontFamily: 'Consolas',
+      fontFamily: _isMobileShell ? 'monospace' : 'Consolas',
       fontFamilyFallback: const ['Courier New'],
       fontSize: 12,
       color: color,

@@ -15,10 +15,12 @@ class _AtlasHomeLayout extends StatelessWidget {
     required this.routes,
     required this.notices,
     this.telemetry,
+    this.servicesExpanded = false,
   });
   final Widget connection, routes;
   final Widget? notices;
   final Widget? telemetry;
+  final bool servicesExpanded;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -42,6 +44,7 @@ class _AtlasHomeLayout extends StatelessWidget {
                       ),
                   connection: connection,
                   footer: routes,
+                  footerExpanded: servicesExpanded,
                 ),
               ),
             ),
@@ -78,16 +81,22 @@ class _AtlasAdaptiveHomeBody extends MultiChildRenderObjectWidget {
   _AtlasAdaptiveHomeBody({
     required this.viewportHeight,
     required this.minimumConnectionExtent,
+    required this.footerExpanded,
     required Widget connection,
     required Widget footer,
   }) : super(children: [connection, footer]);
 
   final double viewportHeight;
   final double minimumConnectionExtent;
+  final bool footerExpanded;
 
   @override
   RenderObject createRenderObject(BuildContext context) =>
-      _RenderAtlasAdaptiveHomeBody(viewportHeight, minimumConnectionExtent);
+      _RenderAtlasAdaptiveHomeBody(
+        viewportHeight,
+        minimumConnectionExtent,
+        footerExpanded,
+      );
 
   @override
   void updateRenderObject(
@@ -96,6 +105,7 @@ class _AtlasAdaptiveHomeBody extends MultiChildRenderObjectWidget {
   ) {
     renderObject.viewportHeight = viewportHeight;
     renderObject.minimumConnectionExtent = minimumConnectionExtent;
+    renderObject.footerExpanded = footerExpanded;
   }
 }
 
@@ -114,9 +124,18 @@ class _RenderAtlasAdaptiveHomeBody extends RenderBox
   _RenderAtlasAdaptiveHomeBody(
     this._viewportHeight,
     this._minimumConnectionExtent,
+    this._footerExpanded,
   );
   double _viewportHeight;
   double _minimumConnectionExtent;
+  bool _footerExpanded;
+  double? _collapsedFooterHeight;
+
+  set footerExpanded(bool value) {
+    if (value == _footerExpanded) return;
+    _footerExpanded = value;
+    markNeedsLayout();
+  }
 
   set viewportHeight(double value) {
     if (value == _viewportHeight) return;
@@ -143,11 +162,16 @@ class _RenderAtlasAdaptiveHomeBody extends RenderBox
     final footer = lastChild!;
     final width = constraints.maxWidth;
     footer.layout(BoxConstraints.tightFor(width: width), parentUsesSize: true);
+    // Expanding services adds content below the unchanged primary controls.
+    // Keep the measured collapsed extent, instead of shrinking/recentring the
+    // planet to make room for an arbitrarily long catalogue.
+    if (!_footerExpanded) _collapsedFooterHeight = footer.size.height;
+    final summaryHeight = _collapsedFooterHeight ?? footer.size.height;
     final planetExtent = math.min(
       width,
       math.max(
         _minimumConnectionExtent,
-        math.min(280.0, _viewportHeight - footer.size.height - 8),
+        math.min(280.0, _viewportHeight - summaryHeight - 8),
       ),
     );
     connection.layout(
@@ -155,10 +179,11 @@ class _RenderAtlasAdaptiveHomeBody extends RenderBox
       parentUsesSize: true,
     );
     final contentHeight = connection.size.height + 8 + footer.size.height;
+    final summaryContentHeight = connection.size.height + 8 + summaryHeight;
+    final top = math.max(0.0, (_viewportHeight - summaryContentHeight) / 2);
     size = constraints.constrain(
-      Size(width, math.max(contentHeight, _viewportHeight)),
+      Size(width, math.max(top + contentHeight, _viewportHeight)),
     );
-    final top = math.max(0.0, (size.height - contentHeight) / 2);
     (connection.parentData! as ContainerBoxParentData<RenderBox>).offset =
         Offset(0, top);
     (footer.parentData! as ContainerBoxParentData<RenderBox>).offset = Offset(
@@ -358,9 +383,9 @@ class _AtlasRouteControls extends StatelessWidget {
               ),
               _AccessibleDescription(
                 message: c.hasSubscription
-                    ? 'Направить общий трафик через VPN; исключения рабочих сетей сохраняются'
-                    : _isMobileShell
-                    ? 'Подключите свою VPN-подписку для этого режима'
+                    ? _isMobileShell
+                          ? 'Направить интернет-трафик через VPN; локальные адреса идут напрямую'
+                          : 'Направить общий трафик через VPN; исключения рабочих сетей сохраняются'
                     : 'Можно использовать бесплатный публичный источник или свою подписку',
                 child: _mode(
                   'all-vpn',
@@ -390,7 +415,9 @@ class _AtlasRouteControls extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             allTraffic
-                ? 'Общий трафик — через VPN. Локальные и рабочие сети сохраняют исключения.'
+                ? _isMobileShell
+                      ? 'Интернет-трафик — через VPN. Локальные адреса идут напрямую.'
+                      : 'Общий трафик — через VPN. Локальные и рабочие сети сохраняют исключения.'
                 : 'Только выбранные сервисы. Остальное — напрямую.',
             style: const TextStyle(
               color: _atlasMuted,
@@ -472,18 +499,6 @@ class _AtlasRouteControls extends StatelessWidget {
                 ],
               ),
             ),
-        ] else ...[
-          const SizedBox(height: 8),
-          _SettingsLink(
-            section: 'service-settings',
-            title: 'Настроить сервисы',
-            icon: Icons.grid_view_rounded,
-            trailing: Text(
-              '${services.length}',
-              style: const TextStyle(color: _atlasMuted),
-            ),
-            onPressed: c.onAllServices,
-          ),
         ],
       ],
     );
@@ -492,31 +507,29 @@ class _AtlasRouteControls extends StatelessWidget {
   Widget _mode(String key, String label, bool selected, VoidCallback action) =>
       Semantics(
         selected: selected,
-        child: OutlinedButton.icon(
+        child: OutlinedButton(
           key: ValueKey('home-routing-$key'),
           onPressed: controls.enabled ? action : null,
-          icon: Icon(
-            key == 'selected' ? Icons.grid_view_rounded : Icons.public,
-            size: 18,
-          ),
-          label: Text(label),
           style: OutlinedButton.styleFrom(
             enabledMouseCursor: SystemMouseCursors.click,
             disabledMouseCursor: SystemMouseCursors.basic,
             foregroundColor: selected ? _atlasBackground : _atlasText,
             backgroundColor: selected ? _atlasMint : _atlasSurface,
+            disabledForegroundColor: selected ? _atlasBackground : _atlasMuted,
+            disabledBackgroundColor: selected ? _atlasMint : _atlasSurface,
             side: BorderSide(color: selected ? _atlasMint : _atlasBorder),
             minimumSize: const Size(48, 48),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
             textStyle: const TextStyle(
               fontFamily: 'Inter',
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
             ),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(8),
             ),
           ),
+          child: Text(label),
         ),
       );
 }

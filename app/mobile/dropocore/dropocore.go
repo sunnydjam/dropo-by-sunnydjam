@@ -33,11 +33,20 @@ const (
 )
 
 type coreState struct {
-	BasePath                 string            `json:"basePath"`
-	Connected                bool              `json:"connected"`
-	StartedAt                string            `json:"startedAt"`
-	Subscription             string            `json:"subscription"`
-	SubscriptionProxyCount   int               `json:"subscriptionProxyCount,omitempty"`
+	BasePath                 string             `json:"basePath"`
+	Connected                bool               `json:"connected"`
+	StartedAt                string             `json:"startedAt"`
+	Subscription             string             `json:"subscription"`
+	SubscriptionProxyCount   int                `json:"subscriptionProxyCount,omitempty"`
+	VPNSources               []androidVPNSource `json:"vpnSources"`
+	VPNSourceAutoSelect      bool               `json:"vpnSourceAutoSelect"`
+	sourcesRevision          uint64
+	preparedSources          []androidSourceCandidate
+	sourceSession            int64
+	activeSourceID           string
+	sourceResponses          map[string]androidSourceResponse
+	sourceWorkCancelled      bool
+	runtimeInitialized       bool
 	Config                   appConfig         `json:"config"`
 	Version                  versionInfo       `json:"version"`
 	Events                   []bridgeEvent     `json:"events"`
@@ -70,6 +79,7 @@ type appConfig struct {
 	Notifications     bool   `json:"notifications"`
 	AutoUpdateSub     bool   `json:"autoUpdateSub"`
 	Theme             string `json:"theme"`
+	ReduceMotion      bool   `json:"reduceMotion"`
 	Language          string `json:"language"`
 	LogLevel          string `json:"logLevel"`
 	SubUpdateInterval int    `json:"subUpdateInterval"`
@@ -112,6 +122,7 @@ type routeInfo struct {
 
 func defaultState() coreState {
 	return coreState{
+		VPNSourceAutoSelect: true,
 		Config: appConfig{
 			AutoStart:         false,
 			AutoStartPrompted: true,
@@ -124,7 +135,7 @@ func defaultState() coreState {
 			Language:          "ru",
 			LogLevel:          "info",
 			SubUpdateInterval: 24,
-			RoutingMode:       "blocked_only",
+			RoutingMode:       "all_traffic",
 			NetworkMode:       "android_vpn",
 			GithubRepo:        "sunnydjam/dropo-by-sunnydjam",
 			GithubURL:         "https://github.com/sunnydjam/dropo-by-sunnydjam",
@@ -147,13 +158,22 @@ func defaultState() coreState {
 func EnsureStarted(basePath, appVersion string) string {
 	mu.Lock()
 	defer mu.Unlock()
+	alreadyInitialized := current.runtimeInitialized && (strings.TrimSpace(basePath) == "" || basePath == current.BasePath)
 
 	if strings.TrimSpace(basePath) != "" {
 		current.BasePath = basePath
 		_ = os.MkdirAll(basePath, 0o755)
 	}
-	if err := loadLocked(); err != nil {
-		appendLogLocked("state load failed: " + err.Error())
+	if !alreadyInitialized {
+		if err := loadLocked(); err != nil {
+			appendLogLocked("state load failed: " + err.Error())
+		}
+		// A saved connected flag is not evidence of a live Android VpnService
+		// after process death. Repeated calls in the same runtime must not reset it.
+		current.Connected, current.StartedAt = false, ""
+		current.ServiceState, current.ServiceMessage = "stopped", ""
+		applyPendingAndroidSourceRefreshLocked()
+		current.runtimeInitialized = true
 	}
 	if strings.TrimSpace(appVersion) != "" {
 		current.Version.Version = strings.TrimSpace(appVersion)
@@ -218,6 +238,14 @@ func SetConnected(connected bool) string {
 func applyServiceStateLocked(state, message, errText string) map[string]interface{} {
 	state = normalizeServiceState(state)
 	previousState := normalizeServiceState(current.ServiceState)
+	if state != previousState {
+		current.sourcesRevision++
+	}
+	if state != "connected" {
+		current.sourceSession = 0
+		current.activeSourceID = ""
+		current.sourceResponses = nil
+	}
 	wasConnected := current.Connected
 	now := time.Now().Format(time.RFC3339)
 
@@ -259,6 +287,7 @@ func applyServiceStateLocked(state, message, errText string) map[string]interfac
 		if wasConnected {
 			appendLogLocked("android VpnService disconnected")
 		}
+		applyPendingAndroidSourceRefreshLocked()
 	}
 
 	payload := serviceStatePayloadLocked()
@@ -297,6 +326,18 @@ func normalizeServiceState(state string) string {
 
 func Call(method, argsJSON string) string {
 	args := decodeArgs(argsJSON)
+	if method == "GetPublicVPNProviders" {
+		return androidPublicProviders()
+	}
+	if method == "AddPublicVPNSource" {
+		if !boolArg(args, 1, false) {
+			return androidSourceError("Подтвердите использование сторонних бесплатных VPN-серверов.")
+		}
+		if stringArg(args, 0, "") != androidPublicSourceID {
+			return androidSourceError("Неизвестный бесплатный источник.")
+		}
+		return changeAndroidSources("AddVPNSource", []interface{}{androidPublicSourceName, androidPublicSourceURL})
+	}
 	if method == "RunClientQuickCheck" {
 		return runAndroidClientQuickCheck()
 	}
@@ -309,11 +350,32 @@ func Call(method, argsJSON string) string {
 	if method == "TestVPNConnection" {
 		return testAndroidVPNConnection(stringArg(args, 0, ""))
 	}
+	switch method {
+	case "AddVPNSource", "RemoveVPNSource", "SetVPNSourceNode", "SetVPNSourceEnabled", "MoveVPNSource", "RefreshVPNSources", "EnableVPNSourceAutoSelect":
+		return changeAndroidSources(method, args)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
 
 	switch method {
+	case "GetVPNSources":
+		return encode(androidSourcesViewLocked())
+	case "SetReduceMotion":
+		if len(args) < 1 {
+			return androidSourceError("Не указано состояние анимации.")
+		}
+		value, valid := args[0].(bool)
+		if !valid {
+			return androidSourceError("Неверное состояние анимации.")
+		}
+		previous := current.Config.ReduceMotion
+		current.Config.ReduceMotion = value
+		if err := saveLocked(); err != nil {
+			current.Config.ReduceMotion = previous
+			return androidSourceError("Не удалось сохранить настройку анимации.")
+		}
+		return encode(map[string]interface{}{"success": true})
 	case "GetCurrentSubscription":
 		return encode(subscriptionLocked())
 	case "GetAppConfig":
@@ -374,19 +436,31 @@ func Call(method, argsJSON string) string {
 	case "GetRoutingMode":
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.RoutingMode})
 	case "SetRoutingMode":
-		if current.Connected {
+		if androidSourcesBusyLocked() {
 			return encode(map[string]interface{}{"success": false, "error": "VPN must be stopped before changing routing mode"})
 		}
 		mode := normalizeAndroidRoutingMode(stringArg(args, 0, current.Config.RoutingMode))
 		if mode == "" {
 			return encode(map[string]interface{}{"success": false, "error": "Unknown routing mode"})
 		}
-		if mode != current.Config.RoutingMode {
+		previousMode := current.Config.RoutingMode
+		previousCache := captureAndroidSubscriptionStateLocked()
+		previousPrepared := current.preparedSources
+		changed := mode != current.Config.RoutingMode
+		if changed {
 			current.Config.RoutingMode = mode
 			clearCachedConfigLocked()
+		}
+		if err := saveLocked(); err != nil {
+			current.Config.RoutingMode = previousMode
+			restoreAndroidSubscriptionStateLocked(previousCache)
+			current.preparedSources = previousPrepared
+			return androidSourceError("Не удалось сохранить режим подключения. Попробуйте ещё раз.")
+		}
+		if changed {
+			current.sourcesRevision++
 			appendLogLocked("android routing mode changed: " + mode)
 		}
-		_ = saveLocked()
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.RoutingMode})
 	case "GetNetworkMode":
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.NetworkMode})
@@ -485,6 +559,8 @@ func Call(method, argsJSON string) string {
 	case "RemoveVPNSubscription":
 		return encode(updateAndroidSubscriptionLocked("", true))
 	case "AndroidEngineStarting":
+		current.sourceWorkCancelled = false
+		applyPendingAndroidSourceRefreshLocked()
 		applyServiceStateLocked("starting", "Android VpnService is starting sing-box", "")
 		appendLogLocked("android engine starting")
 		emitLocked("vpn-starting", map[string]interface{}{})
@@ -591,6 +667,9 @@ func validateAndroidSubscriptionLocally(value string) error {
 }
 
 func updateAndroidSubscriptionLocked(value string, remove bool) map[string]interface{} {
+	if androidSourcesBusyLocked() {
+		return map[string]interface{}{"success": false, "error": "Отключите VPN перед изменением подписки."}
+	}
 	nextSubscription := strings.TrimSpace(value)
 	if remove {
 		nextSubscription = ""
@@ -599,6 +678,7 @@ func updateAndroidSubscriptionLocked(value string, remove bool) map[string]inter
 	}
 
 	previous := captureAndroidSubscriptionStateLocked()
+	previousSources := current.VPNSources
 	wasRunning := current.Connected
 	nextProxyCount := current.SubscriptionProxyCount
 	if remove {
@@ -620,6 +700,27 @@ func updateAndroidSubscriptionLocked(value string, remove bool) map[string]inter
 	}
 	current.Subscription = nextSubscription
 	current.SubscriptionProxyCount = nextProxyCount
+	// Keep the legacy single-subscription API coherent with the source pool.
+	// It replaces the primary entry; it never silently deletes other sources.
+	migrateAndroidSourcesLocked()
+	current.VPNSources = append([]androidVPNSource(nil), current.VPNSources...)
+	if source := primaryAndroidSourceLocked(); source != nil {
+		if remove {
+			for i := range current.VPNSources {
+				if current.VPNSources[i].ID == source.ID {
+					current.VPNSources = append(current.VPNSources[:i], current.VPNSources[i+1:]...)
+					break
+				}
+			}
+			syncAndroidSubscriptionLocked()
+		} else if source.URI != nextSubscription {
+			source.URI, source.Nodes, source.SelectedNodeID, source.UpdatedAt = nextSubscription, nil, "", ""
+		}
+	} else if !remove {
+		// Empty pools include installations which removed their last source.
+		id := fmt.Sprintf("legacy-%d", time.Now().UnixNano())
+		current.VPNSources = append(current.VPNSources, androidVPNSource{ID: id, Name: "Моя подписка", URI: nextSubscription})
+	}
 	current.LastError = ""
 	if remove {
 		appendLogLocked("android subscription removed")
@@ -627,6 +728,7 @@ func updateAndroidSubscriptionLocked(value string, remove bool) map[string]inter
 		appendLogLocked("android subscription saved: " + subscriptionSummary(current.Subscription))
 	}
 	if err := saveLocked(); err != nil {
+		current.VPNSources = previousSources
 		restoreAndroidSubscriptionStateLocked(previous)
 		recordPersistenceErrorLocked(err)
 		return map[string]interface{}{"success": false, "error": androidSubscriptionSaveError}
@@ -634,6 +736,7 @@ func updateAndroidSubscriptionLocked(value string, remove bool) map[string]inter
 	if remove {
 		clearAndroidSubscriptionTestVerificationLocked()
 	}
+	current.sourcesRevision++
 	return map[string]interface{}{
 		"success":    true,
 		"proxyCount": current.SubscriptionProxyCount,
@@ -732,11 +835,13 @@ func statusLocked() map[string]interface{} {
 			"installed": "sing-box libbox " + current.Version.SingboxVersion,
 			"sizeMB":    0,
 		},
-		"version": current.Version,
+		"version":     current.Version,
+		"vpnResponse": androidSourceResponseLocked(current.activeSourceID),
 	}
 }
 
 func clearCachedConfigLocked() {
+	current.preparedSources = nil
 	current.CachedSingBoxConfig = ""
 	current.CachedProxyCount = 0
 	current.CachedConfigSubscription = ""
@@ -808,6 +913,7 @@ func appConfigLocked() map[string]interface{} {
 		"notifications":     current.Config.Notifications,
 		"autoUpdateSub":     current.Config.AutoUpdateSub,
 		"theme":             current.Config.Theme,
+		"reduceMotion":      current.Config.ReduceMotion,
 		"language":          current.Config.Language,
 		"logLevel":          current.Config.LogLevel,
 		"subUpdateInterval": current.Config.SubUpdateInterval,
@@ -874,15 +980,22 @@ func trafficStatsLocked() map[string]interface{} {
 	if current.Connected {
 		currentMs = currentDuration.Milliseconds()
 	}
-	currentTraffic := trafficBlock(currentMs, currentMs/15, currentMs/9)
+	currentTraffic := trafficBlock(currentMs, 0, 0)
 	lastTraffic := trafficBlock(current.LastDurationMs, 0, 0)
-	totalTraffic := trafficBlock(current.LastDurationMs+currentMs, currentMs/15, currentMs/9)
+	totalTraffic := trafficBlock(current.LastDurationMs+currentMs, 0, 0)
+	// libbox byte counters are not wired to this bridge. Duration and session
+	// counts are measured; byte usage must not be invented from elapsed time.
+	for _, block := range []map[string]interface{}{currentTraffic, lastTraffic, totalTraffic} {
+		block["trafficAvailable"] = false
+		block["uploadedStr"], block["downloadedStr"] = "Нет данных", "Нет данных"
+	}
 	totalTraffic["sessions"] = current.TotalSessions
 	return map[string]interface{}{
-		"success": true,
-		"current": currentTraffic,
-		"last":    lastTraffic,
-		"total":   totalTraffic,
+		"success":          true,
+		"trafficAvailable": false,
+		"current":          currentTraffic,
+		"last":             lastTraffic,
+		"total":            totalTraffic,
 	}
 }
 
@@ -1163,6 +1276,8 @@ func loadLocked() error {
 	}
 	normalizeLoadedAppConfigLocked()
 	normalizeLoadedAndroidSubscriptionCountLocked()
+	migrateAndroidSourcesLocked()
+	current.sourcesRevision++
 	return nil
 }
 

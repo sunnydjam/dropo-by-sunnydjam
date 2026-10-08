@@ -1,9 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Exercise persistent primary navigation and real nested links on each page.
+/// Exercise real navigation; legacy service test names open Home's accordion.
 Future<void> openSection(WidgetTester tester, String section) async {
-  const primary = {'home', 'services', 'sources', 'settings', 'help'};
+  if (section == 'services' || section == 'service-settings') {
+    await openSection(tester, 'home');
+    if (find
+        .byKey(const ValueKey('toggle-home-route-services'))
+        .evaluate()
+        .isEmpty) {
+      final selectedMode = find.byKey(const ValueKey('home-routing-selected'));
+      await tester.ensureVisible(selectedMode);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(selectedMode);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+    }
+    if (find.byKey(const ValueKey('service-search')).evaluate().isEmpty) {
+      final disclosure = find.byKey(
+        const ValueKey('toggle-home-route-services'),
+      );
+      await tester.ensureVisible(disclosure);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(disclosure);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+    }
+    return;
+  }
+  const primary = {'home', 'sources', 'settings', 'account', 'help'};
   Finder locate() {
     final nav = find.byKey(ValueKey('nav-$section'));
     return nav.evaluate().isNotEmpty
@@ -42,4 +67,24 @@ Future<void> openSection(WidgetTester tester, String section) async {
   await tester.tap(target);
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 600));
+}
+
+/// Open a compact service row's inline settings, without leaving Home.
+Future<void> openHomeService(WidgetTester tester, String tag) async {
+  await openSection(tester, 'services');
+  final search = find.byKey(const ValueKey('service-search'));
+  await tester.ensureVisible(search);
+  await tester.pump(const Duration(milliseconds: 300));
+  await tester.enterText(search, tag);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 300));
+  final details = find.byKey(ValueKey('home-service-details-$tag'));
+  if (details.evaluate().isEmpty) {
+    final row = find.byKey(ValueKey('home-service-row-$tag'));
+    await tester.ensureVisible(row);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(row);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+  }
 }

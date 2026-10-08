@@ -13,6 +13,8 @@ import android.net.ConnectivityManager
 import android.net.IpPrefix
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.LinkProperties
+import android.net.NetworkRequest
 import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
@@ -56,8 +58,21 @@ class DropoVpnService :
     VpnService(),
     PlatformInterface,
     CommandServerHandler {
-    private val executor = Executors.newSingleThreadExecutor()
+    @Volatile
+    private var engineThread: Thread? = null
+    private val executor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "DropoVpnEngine").also { engineThread = it }
+    }
+    private val nativeLogs = NativeLogDispatcher { method, arguments ->
+        Dropoandroid.call(method, arguments)
+    }
+    private val sessionFence = VpnSessionFence()
+    private val tunLock = Any()
+    private val stopLock = Any()
     private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
+
+    @Volatile
+    private var engineGeneration = 0L
 
     @Volatile
     private var tunInterface: ParcelFileDescriptor? = null
@@ -89,8 +104,10 @@ class DropoVpnService :
     @Volatile
     private var notificationAlwaysOn: Boolean? = null
 
+    @Volatile
     private var interfaceUpdateListener: InterfaceUpdateListener? = null
     private var networkCallbackRegistered = false
+    private var physicalNetworkSignature = ""
     private val networkCallback =
         object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -105,6 +122,10 @@ class DropoVpnService :
                 network: Network,
                 networkCapabilities: NetworkCapabilities,
             ) {
+                notifyDefaultInterfaceAsync()
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
                 notifyDefaultInterfaceAsync()
             }
         }
@@ -137,6 +158,9 @@ class DropoVpnService :
                     }
                     DropoVpnRuntime.appendLog("VPN stop redirected to Android settings")
                     showForeground(text, protection)
+                    if (protection.alwaysOn && commandServer == null && !starting) {
+                        startVpn()
+                    }
                     START_STICKY
                 } else {
                     DropoVpnRuntime.setDisconnecting("VPN останавливается")
@@ -157,8 +181,10 @@ class DropoVpnService :
     }
 
     override fun onDestroy() {
+        sessionFence.destroy()
         stopVpn(stopSelf = false)
         executor.shutdown()
+        nativeLogs.close()
         foregroundActive = false
         if (activeService === this) {
             activeService = null
@@ -175,55 +201,75 @@ class DropoVpnService :
 
     private fun startVpn() {
         createNotificationChannel()
+        if (stopping) return
         if (starting || commandServer != null) {
             executor.execute { coreLog("start skipped: VPN service is already running") }
-            if (commandServer != null) {
-                DropoVpnRuntime.setConnected("VPN уже работает")
+            sessionFence.commit(engineGeneration) {
+                if (commandServer != null) {
+                    DropoVpnRuntime.setConnected("VPN уже работает")
+                    showForeground("VPN работает")
+                } else {
+                    showForeground("VPN запускается")
+                }
             }
-            showForeground("VPN работает")
             return
         }
-        starting = true
-        stopping = false
-        DropoVpnRuntime.setStarting("VPN запускается")
-        showForeground("VPN запускается")
+        val generation = sessionFence.begin() ?: return
+        engineGeneration = generation
+        if (!sessionFence.commit(generation) {
+            starting = true
+            DropoVpnRuntime.setStarting("VPN запускается")
+            showForeground("VPN запускается")
+        }) return
         executor.execute {
             try {
                 Dropoandroid.ensureStarted(filesDir.absolutePath, packageVersionName())
-                syncCoreServiceState("starting", "VPN запускается")
-                Dropoandroid.call("AndroidEngineStarting", "[]")
+                if (!sessionFence.commit(generation) {
+                    syncCoreServiceState("starting", "VPN запускается")
+                    Dropoandroid.call("AndroidEngineStarting", "[]")
+                }) return@execute
                 coreLog("startForeground requested")
-                startEngine()
+                startEngine(generation)
             } catch (error: Throwable) {
+                if (!sessionFence.isActive(generation)) {
+                    Log.i(TAG, "cancelled VPN start discarded")
+                    return@execute
+                }
                 val message = describeError(error)
                 Log.e(TAG, "startEngine failed: $message", error)
-                coreError(message)
-                stopVpn(stopSelf = true, failureMessage = message)
+                if (sessionFence.commit(generation) { coreError(message) }) {
+                    stopVpn(stopSelf = true, failureMessage = message)
+                }
             } finally {
                 starting = false
             }
         }
     }
 
-    private fun startEngine() {
+    private fun startEngine(generation: Long) {
+        requireActiveSession(generation)
         if (commandServer != null) {
             coreLog("start skipped: command server is already running")
-            Dropoandroid.setConnected(true)
-            DropoVpnRuntime.setConnected("VPN уже работает")
-            syncCoreServiceState("connected", "VPN уже работает")
+            sessionFence.commit(generation) {
+                Dropoandroid.setConnected(true)
+                DropoVpnRuntime.setConnected("VPN уже работает")
+                syncCoreServiceState("connected", "VPN уже работает")
+            }
             return
         }
 
         coreLog("libbox setup")
         ensureLibboxSetup(this)
+        requireActiveSession(generation)
         coreLog("building sing-box config")
         val configResult = JSONObject(Dropoandroid.buildSingBoxConfig())
+        requireActiveSession(generation)
         if (!configResult.optBoolean("success")) {
             error(configResult.optString("error", "Failed to build Android sing-box config"))
         }
         val config = configResult.getString("config")
         if (configResult.optBoolean("cached")) {
-            coreLog("using cached sing-box config: ${configResult.optString("warning", "subscription refresh failed")}")
+            coreLog("using cached sing-box config: ${configResult.optString("warning", "сохранённые серверы подписок")}")
         }
         verboseSingBoxLogs = androidSingBoxVerboseLogging()
         if (verboseSingBoxLogs) {
@@ -231,25 +277,48 @@ class DropoVpnService :
         }
         coreLog("checking sing-box config")
         Dropoandroid.checkConfig(config)
+        requireActiveSession(generation)
 
         coreLog("starting command server")
         val server = CommandServer(this, this)
-        server.start()
-        coreLog("starting sing-box service")
-        server.startOrReloadService(config, OverrideOptions().apply { autoRedirect = false })
-        commandServer = server
-
-        Dropoandroid.setConnected(true)
-        val version = configResult.optString("version", Dropoandroid.version())
-        DropoVpnRuntime.setConnected("VPN работает")
-        syncCoreServiceState("connected", "VPN работает")
-        coreLog("sing-box $version is active")
-        showForeground("VPN работает")
+        var committed = false
+        try {
+            server.start()
+            requireActiveSession(generation)
+            coreLog("starting sing-box service")
+            server.startOrReloadService(config, OverrideOptions().apply { autoRedirect = false })
+            committed = sessionFence.commit(generation) {
+                commandServer = server
+                Dropoandroid.setConnected(true)
+                val version = configResult.optString("version", Dropoandroid.version())
+                DropoVpnRuntime.setConnected("VPN работает")
+                syncCoreServiceState("connected", "VPN работает")
+                coreLog("sing-box $version is active")
+                showForeground("VPN работает")
+                runCatching { server.startSourceSelection() }
+                    .onFailure { coreLog("source selection could not start: ${describeError(it)}") }
+            }
+        } finally {
+            if (!committed) {
+                runCatching { server.stopSourceSelection() }
+                runCatching { server.closeService() }
+                runCatching { server.close() }
+                closeTun()
+            }
+        }
     }
 
     private fun stopVpn(stopSelf: Boolean, failureMessage: String? = null) {
-        if (stopping) return
-        stopping = true
+        // This fence must run on the requesting thread, before queued cleanup.
+        // A subscription download may still be occupying the engine executor.
+        sessionFence.cancel()
+        runCatching { Dropoandroid.cancelPendingSourceWork() }
+        runCatching { commandServer?.stopSourceSelection() }
+        closeTun()
+        synchronized(stopLock) {
+            if (stopping) return
+            stopping = true
+        }
         if (failureMessage == null) {
             DropoVpnRuntime.setDisconnecting("VPN останавливается")
         }
@@ -283,11 +352,19 @@ class DropoVpnService :
     }
 
     private fun closeTun() {
-        runCatching { tunInterface?.close() }
-        tunInterface = null
+        synchronized(tunLock) {
+            runCatching { tunInterface?.close() }
+            tunInterface = null
+        }
+    }
+
+    private fun requireActiveSession(generation: Long = engineGeneration) {
+        check(sessionFence.isActive(generation)) { "android: VPN session was cancelled" }
     }
 
     override fun openTun(options: TunOptions): Int {
+        val generation = engineGeneration
+        requireActiveSession(generation)
         if (prepare(this) != null) error("android: missing VPN permission")
         coreLog("open TUN mtu=${options.mtu}")
 
@@ -336,10 +413,17 @@ class DropoVpnService :
             )
         }
 
-        val pfd = builder.establish() ?: error("android: VPN establish returned null")
-        tunInterface = pfd
-        coreLog("TUN established fd=${pfd.fd}")
-        return pfd.fd
+        var descriptor = -1
+        check(sessionFence.commit(generation) {
+            synchronized(tunLock) {
+                val pfd = builder.establish() ?: error("android: VPN establish returned null")
+                runCatching { tunInterface?.close() }
+                tunInterface = pfd
+                descriptor = pfd.fd
+            }
+        }) { "android: VPN session was cancelled" }
+        coreLog("TUN established fd=$descriptor")
+        return descriptor
     }
 
     private fun addRoutes(
@@ -474,16 +558,25 @@ class DropoVpnService :
     }
 
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
-        interfaceUpdateListener = listener
-        if (!networkCallbackRegistered) {
-            connectivity.registerDefaultNetworkCallback(networkCallback)
-            networkCallbackRegistered = true
-        }
+        check(sessionFence.commit(engineGeneration) {
+            interfaceUpdateListener = listener
+            if (!networkCallbackRegistered) {
+                connectivity.registerNetworkCallback(
+                    NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                        .build(),
+                    networkCallback,
+                )
+                networkCallbackRegistered = true
+            }
+        }) { "android: VPN session was cancelled" }
         notifyDefaultInterfaceAsync()
     }
 
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) {
         interfaceUpdateListener = null
+        physicalNetworkSignature = ""
         if (networkCallbackRegistered) {
             runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
             networkCallbackRegistered = false
@@ -534,39 +627,58 @@ class DropoVpnService :
                 notification.title.ifBlank { "VPN работает" }
             }
         }
-        showForeground(userNotificationText(text))
+        sessionFence.commit(engineGeneration) { showForeground(userNotificationText(text)) }
     }
 
     override fun localDNSTransport(): LocalDNSTransport? = null
 
     override fun serviceStop() {
-        commandServer = null
-        starting = false
-        closeTun()
-        closeDefaultInterfaceMonitor(interfaceUpdateListener)
-        verboseSingBoxLogs = false
+        val protection = publishVpnProtection()
+        if (!protection.observed || protection.alwaysOn) {
+            coreLog("sing-box stop redirected to Android VPN settings")
+            sessionFence.commit(engineGeneration) {
+                showForeground(
+                    if (protection.alwaysOn) "Always-on VPN управляется Android"
+                    else "Сначала проверьте системные настройки VPN",
+                    protection,
+                )
+            }
+            return
+        }
         coreLog("sing-box requested service stop")
-        Dropoandroid.setConnected(false)
-        DropoVpnRuntime.setStopped("VPN остановлен")
-        syncCoreServiceState("stopped", "VPN остановлен")
-        stopForegroundCompat()
-        stopSelf()
+        stopVpn(stopSelf = true)
     }
 
     override fun serviceReload() {
+        val generation = engineGeneration
+        // Command callbacks can arrive on a Go/gRPC thread. Keep reloads on
+        // the same worker as start, cleanup and physical-network changes.
+        if (Thread.currentThread() === engineThread) {
+            reloadEngine(generation)
+        } else {
+            executor.submit { reloadEngine(generation) }.get()
+        }
+    }
+
+    private fun reloadEngine(generation: Long) {
+        requireActiveSession(generation)
         val configResult = JSONObject(Dropoandroid.buildSingBoxConfig())
+        requireActiveSession(generation)
         if (!configResult.optBoolean("success")) {
             error(configResult.optString("error", "Failed to reload Android sing-box config"))
         }
         if (configResult.optBoolean("cached")) {
-            coreLog("reloading cached sing-box config: ${configResult.optString("warning", "subscription refresh failed")}")
+            coreLog("reloading cached sing-box config: ${configResult.optString("warning", "сохранённые серверы подписок")}")
         }
         verboseSingBoxLogs = androidSingBoxVerboseLogging()
         coreLog("reloading sing-box service")
-        commandServer?.startOrReloadService(
+        val server = commandServer ?: return
+        server.stopSourceSelection()
+        server.startOrReloadService(
             configResult.getString("config"),
             OverrideOptions().apply { autoRedirect = false },
         )
+        sessionFence.commit(generation) { server.startSourceSelection() }
     }
 
     override fun getSystemProxyStatus(): SystemProxyStatus =
@@ -586,9 +698,7 @@ class DropoVpnService :
         }
         val important = isImportantSingBoxMessage(text)
         if (verboseSingBoxLogs) {
-            runCatching {
-                Dropoandroid.call("AndroidSingBoxLog", "[${JSONObject.quote(text.take(2000))}]")
-            }
+            nativeLogs.post("AndroidSingBoxLog", "[${JSONObject.quote(text.take(2000))}]")
             val runtimeNow = SystemClock.elapsedRealtime()
             if (runtimeNow - lastRuntimeSingBoxLogAt >= 500) {
                 lastRuntimeSingBoxLogAt = runtimeNow
@@ -600,7 +710,9 @@ class DropoVpnService :
         val now = SystemClock.elapsedRealtime()
         if (now - lastCoreDebugLogAt < 1000) return
         lastCoreDebugLogAt = now
-        coreLog("sing-box: ${text.take(240)}")
+        val line = "sing-box: ${text.take(240)}"
+        DropoVpnRuntime.appendLog("android engine: $line")
+        nativeLogs.post("AndroidEngineLog", "[${JSONObject.quote(line)}]")
     }
 
     private fun isImportantSingBoxMessage(text: String): Boolean {
@@ -661,26 +773,74 @@ class DropoVpnService :
     }
 
     private fun notifyDefaultInterfaceAsync() {
+        val generation = engineGeneration
         runCatching {
-            executor.execute { notifyDefaultInterface() }
+            executor.execute {
+                if (sessionFence.isActive(generation)) notifyDefaultInterface(generation)
+            }
         }.onFailure {
             Log.w(TAG, "default interface update skipped", it)
         }
     }
 
-    private fun notifyDefaultInterface() {
+    private fun notifyDefaultInterface(generation: Long) {
         val listener = interfaceUpdateListener ?: return
-        val network = connectivity.activeNetwork ?: return
-        val linkProperties = connectivity.getLinkProperties(network) ?: return
-        val capabilities = connectivity.getNetworkCapabilities(network) ?: return
-        val name = linkProperties.interfaceName ?: return
-        val javaInterface = JavaNetworkInterface.getByName(name) ?: return
-        listener.updateDefaultInterface(
-            name,
-            javaInterface.index,
-            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
-            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED),
-        )
+        val network = physicalNetwork()
+        val linkProperties = network?.let { connectivity.getLinkProperties(it) }
+        val capabilities = network?.let { connectivity.getNetworkCapabilities(it) }
+        val name = linkProperties?.interfaceName
+        val javaInterface = name?.let { JavaNetworkInterface.getByName(it) }
+        if (network == null || linkProperties == null || capabilities == null || name == null || javaInterface == null) {
+            sessionFence.commit(generation) {
+                if (interfaceUpdateListener === listener && physicalNetworkSignature != "offline") {
+                    physicalNetworkSignature = "offline"
+                    setUnderlyingNetworks(emptyArray())
+                    listener.updateDefaultInterface("", -1, false, false)
+                    commandServer?.stopSourceSelection()
+                }
+            }
+            return
+        }
+        val signature = "$network:$name:${linkProperties.linkAddresses}:${linkProperties.dnsServers}"
+        sessionFence.commit(generation) {
+            if (interfaceUpdateListener !== listener) return@commit
+            val restored = physicalNetworkSignature == "offline"
+            val changed = signature != physicalNetworkSignature
+            physicalNetworkSignature = signature
+            setUnderlyingNetworks(arrayOf(network))
+            listener.updateDefaultInterface(
+                name,
+                javaInterface.index,
+                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
+                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED),
+            )
+            if (changed) {
+                runCatching {
+                    if (restored) {
+                        commandServer?.startSourceSelection()
+                    } else {
+                        commandServer?.recheckSourceSelection()
+                    }
+                }.onFailure { coreLog("network source recheck could not start: ${describeError(it)}") }
+            }
+        }
+    }
+
+    private fun physicalNetwork(): Network? {
+        fun usable(network: Network): Boolean {
+            val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
+            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        }
+        connectivity.activeNetwork?.let { if (usable(it)) return it }
+        return connectivity.allNetworks.filter(::usable).maxByOrNull { network ->
+            val capabilities = connectivity.getNetworkCapabilities(network)
+            var score = 0
+            if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) score += 4
+            if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true) score += 2
+            if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) score += 1
+            score
+        }
     }
 
     private fun startForegroundCompat(notification: Notification) {

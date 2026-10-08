@@ -1,7 +1,9 @@
 package dropoandroid
 
 import (
+	"context"
 	core "dropocore"
+	"sync"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
 )
@@ -45,6 +47,10 @@ func BuildSingBoxConfig() string {
 	return core.BuildSingBoxConfig()
 }
 
+func CancelPendingSourceWork() {
+	core.CancelPendingSourceWork()
+}
+
 func Setup(options *SetupOptions) error {
 	return libbox.Setup(&libbox.SetupOptions{
 		BasePath:                options.BasePath,
@@ -78,7 +84,13 @@ type SetupOptions struct {
 }
 
 type CommandServer struct {
-	inner *libbox.CommandServer
+	inner                *libbox.CommandServer
+	sourceMu             sync.Mutex
+	sourceCancel         context.CancelFunc
+	sourceCycleCancel    context.CancelFunc
+	sourceGeneration     uint64
+	sourceCoreGeneration int64
+	sourceWake           chan struct{}
 }
 
 func NewCommandServer(handler CommandServerHandler, platformInterface PlatformInterface) (*CommandServer, error) {
@@ -97,10 +109,12 @@ func (s *CommandServer) Start() error {
 }
 
 func (s *CommandServer) Close() {
+	s.StopSourceSelection()
 	s.inner.Close()
 }
 
 func (s *CommandServer) StartOrReloadService(configContent string, options *OverrideOptions) error {
+	s.StopSourceSelection()
 	if options == nil {
 		options = &OverrideOptions{}
 	}
@@ -112,6 +126,7 @@ func (s *CommandServer) StartOrReloadService(configContent string, options *Over
 }
 
 func (s *CommandServer) CloseService() error {
+	s.StopSourceSelection()
 	return s.inner.CloseService()
 }
 

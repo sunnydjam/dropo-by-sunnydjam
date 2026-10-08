@@ -18,9 +18,16 @@ class _CatalogBridge extends MockCoreBridge {
   );
   bool failRead = false, failWrite = false, failSources = false;
   int writes = 0;
+  int modeWrites = 0;
   Completer<void>? pendingWrite;
   final policies = <String, String>{};
   final pins = <String, bool>{};
+  @override
+  Future<Map<String, dynamic>> setRoutingMode(String mode) async {
+    modeWrites++;
+    return super.setRoutingMode(mode);
+  }
+
   @override
   Future<Map<String, dynamic>> appConfig() async => {
     ...await super.appConfig(),
@@ -283,13 +290,17 @@ void main() {
   ) async {
     final bridge = _CatalogBridge()..pendingWrite = Completer<void>();
     await _pump(tester, DropoHomePage(bridge: bridge));
-    await _tap(tester, 'nav-services');
-    await _search(tester, 'discord');
+    await openHomeService(tester, 'discord');
     await _tap(tester, 'service-route-discord-vpn');
     // Do not settle the intentional pending operation.
     await tester.tap(find.byKey(const ValueKey('nav-settings')));
     await tester.pump();
-    expect(find.byType(ServiceRoutesPage), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('home-service-details-discord')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
+    expect(find.byType(ServiceRoutesPage), findsNothing);
     expect(find.byType(VpnSourcesDialog), findsNothing);
     bridge.pendingWrite!.complete();
     await tester.pumpAndSettle();
@@ -305,6 +316,84 @@ void main() {
     expect(bridge.policies['discord'], 'vpn');
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('connected Android keeps service routes read-only on Home', (
+    tester,
+  ) async {
+    debugMobileShellOverride = true;
+    addTearDown(() => debugMobileShellOverride = null);
+    final bridge = _CatalogBridge();
+    await bridge.setRoutingMode('blocked_only');
+    await bridge.setConnected(true);
+    bridge.modeWrites = 0;
+    await _pump(
+      tester,
+      DropoHomePage(bridge: bridge),
+      size: const Size(390, 844),
+    );
+    await openHomeService(tester, 'discord');
+    expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
+    expect(find.byType(ServiceRoutesPage), findsNothing);
+    for (final method in ['auto', 'direct', 'vpn']) {
+      final button = tester.widget<OutlinedButton>(
+        find.descendant(
+          of: find.byKey(ValueKey('service-route-discord-$method')),
+          matching: find.byType(OutlinedButton),
+        ),
+      );
+      expect(button.onPressed, isNull);
+    }
+    expect(
+      find.byKey(const ValueKey('service-route-discord-zapret')),
+      findsNothing,
+    );
+    expect(bridge.writes, 0);
+    expect(bridge.modeWrites, 0);
+    await openSection(tester, 'sources');
+    await openSection(tester, 'home');
+    expect((await bridge.status()).connected, isTrue);
+    expect((await bridge.routingMode())['mode'], 'blocked_only');
+    expect(bridge.modeWrites, 0);
+    expect(bridge.writes, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final mobile in [false, true]) {
+    for (final mode in ['all_traffic', 'blocked_only']) {
+      testWidgets(
+        'navigation preserves $mode on ${mobile ? 'Android' : 'Windows'}',
+        (tester) async {
+          debugMobileShellOverride = mobile;
+          addTearDown(() => debugMobileShellOverride = null);
+          final bridge = _CatalogBridge();
+          await bridge.setRoutingMode(mode);
+          bridge.modeWrites = 0;
+          await _pump(
+            tester,
+            DropoHomePage(bridge: bridge),
+            size: mobile ? const Size(390, 844) : const Size(960, 640),
+          );
+          for (final section in ['settings', 'sources', 'home']) {
+            await openSection(tester, section);
+            expect(find.byKey(const ValueKey('nav-services')), findsNothing);
+            expect(find.byKey(const ValueKey('link-services')), findsNothing);
+            expect(
+              find.byKey(const ValueKey('link-service-settings')),
+              findsNothing,
+            );
+          }
+          expect((await bridge.routingMode())['mode'], mode);
+          expect(bridge.modeWrites, 0);
+          expect(bridge.writes, 0);
+          expect(
+            find.byKey(const ValueKey('toggle-home-route-services')),
+            mode == 'blocked_only' ? findsOneWidget : findsNothing,
+          );
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
 
   testWidgets(
     'source page masks stale active state and preserves open form across snapshots',
@@ -377,8 +466,7 @@ void main() {
             size: mobile ? const Size(390, 844) : const Size(960, 640),
             scale: scale,
           );
-          await _tap(tester, 'nav-services');
-          await _search(tester, 'discord');
+          await openHomeService(tester, 'discord');
           await _tap(tester, 'service-route-discord-vpn');
           expect(bridge.policies['discord'], 'vpn');
           await _tap(tester, 'nav-sources');
@@ -403,7 +491,7 @@ void main() {
       size: const Size(1120, 800),
     );
     for (final section in ['services', 'sources']) {
-      await _tap(tester, 'nav-$section');
+      await openSection(tester, section);
       await tester.pumpAndSettle();
       final boundary =
           key.currentContext!.findRenderObject() as RenderRepaintBoundary;

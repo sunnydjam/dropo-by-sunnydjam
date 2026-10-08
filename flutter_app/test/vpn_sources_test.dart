@@ -58,6 +58,7 @@ class _SourceBridge extends MockCoreBridge {
   int autoSelections = 0;
   bool autoSelect = false;
   bool running = true;
+  bool androidSourceCapabilities = false;
   bool failMove = false;
   final List<(String, int)> nodeChanges = [];
   int removals = 0;
@@ -80,6 +81,8 @@ class _SourceBridge extends MockCoreBridge {
     sources: await vpnSources(),
     autoSelect: autoSelect,
     running: running,
+    autoSelectSupported: !androidSourceCapabilities,
+    fallbackSupported: !androidSourceCapabilities,
   );
 
   @override
@@ -177,6 +180,8 @@ Future<void> _pumpEditor(
   bool openPersonal = false,
   bool openFree = false,
   bool embedded = false,
+  bool enabled = true,
+  VpnSourcesSnapshot? sourceSnapshot,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -188,6 +193,8 @@ Future<void> _pumpEditor(
     subscription: subscription,
     onChanged: onChanged,
     onReadyToConnect: onReadyToConnect,
+    enabled: enabled,
+    sourceSnapshot: sourceSnapshot,
   );
   await tester.pumpWidget(
     MaterialApp(
@@ -716,41 +723,113 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Android uses an honest single-subscription editor', (
-    tester,
-  ) async {
-    debugMobileShellOverride = true;
-    addTearDown(() => debugMobileShellOverride = null);
-    final bridge = _SourceBridge()..sources = [_source('personal', count: 4)];
-    await _pumpEditor(
-      tester,
-      bridge,
-      size: const Size(390, 844),
-      subscription: const SubscriptionInfo(
-        hasSubscription: true,
-        url: '',
-        proxyCount: 4,
-      ),
-    );
+  testWidgets(
+    'Android supports source pools without promising unimplemented probes',
+    (tester) async {
+      debugMobileShellOverride = true;
+      addTearDown(() => debugMobileShellOverride = null);
+      final bridge = _SourceBridge()
+        ..androidSourceCapabilities = true
+        ..running = false
+        ..sources = [_source('personal', count: 4), _source('second')];
+      await _pumpEditor(
+        tester,
+        bridge,
+        size: const Size(390, 844),
+        subscription: const SubscriptionInfo(
+          hasSubscription: true,
+          url: '',
+          proxyCount: 4,
+        ),
+      );
 
-    expect(find.text('Источники VPN'), findsOneWidget);
-    expect(find.textContaining('одна активная подписка'), findsOneWidget);
-    expect(find.textContaining('4 сервера'), findsOneWidget);
-    expect(find.byType(Switch), findsNothing);
-    expect(
-      find.byKey(const ValueKey('choose-vpn-node-personal')),
-      findsNothing,
-    );
-    expect(find.text('Обновить списки'), findsNothing);
-    await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
-    await _tapVisible(
-      tester,
-      find.byKey(const ValueKey('choose-personal-source')),
-    );
-    expect(find.text('Проверить и заменить'), findsOneWidget);
-    expect(find.byKey(const ValueKey('personal-vpn-name')), findsNothing);
-    expect(tester.takeException(), isNull);
-  });
+      expect(find.text('Источники VPN'), findsOneWidget);
+      expect(find.textContaining('одна активная подписка'), findsNothing);
+      expect(find.byKey(const ValueKey('source-auto-select')), findsNothing);
+      expect(
+        find.text('Доступен для выбора'),
+        findsNothing,
+      ); // Part of a type/status label.
+      expect(find.textContaining('Доступен для выбора'), findsOneWidget);
+      expect(find.text('Отклик · После подключения'), findsNWidgets(2));
+      expect(find.textContaining('следующем этапе'), findsNothing);
+      expect(find.byType(Switch), findsNothing);
+      expect(
+        find.byKey(const ValueKey('choose-vpn-node-personal')),
+        findsOneWidget,
+      );
+      expect(find.text('Обновить списки'), findsOneWidget);
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('vpn-source-first-second')),
+      );
+      expect(bridge.moves, [('second', 0)]);
+      await _tapVisible(tester, find.byKey(const ValueKey('add-personal-vpn')));
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('choose-personal-source')),
+      );
+      expect(find.text('Проверить и добавить'), findsOneWidget);
+      expect(find.byKey(const ValueKey('personal-vpn-name')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'Android exposes native automatic choice and measured responses',
+    (tester) async {
+      debugMobileShellOverride = true;
+      addTearDown(() => debugMobileShellOverride = null);
+      final bridge = _SourceBridge()
+        ..running = false
+        ..sources = [_source('personal', count: 4), _source('second')];
+      await _pumpEditor(tester, bridge, size: const Size(390, 844));
+      expect(find.byKey(const ValueKey('source-auto-select')), findsOneWidget);
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('source-auto-select')),
+      );
+      expect(bridge.autoSelections, 1);
+      expect(find.text('Отклик · После подключения'), findsNWidgets(2));
+      expect(find.textContaining('следующем этапе'), findsNothing);
+
+      bridge.running = true;
+      bridge.sources = [
+        _source('personal', active: true, responseState: 'ok', latency: 42),
+        _source('second', responseState: 'pending'),
+      ];
+      final snapshot = await bridge.vpnSourcesSnapshot();
+      await _pumpEditor(
+        tester,
+        bridge,
+        size: const Size(390, 844),
+        enabled: false,
+        sourceSnapshot: snapshot,
+      );
+      expect(find.text('Отклик · 42 мс'), findsOneWidget);
+      expect(find.text('Отклик · Проверяем…'), findsOneWidget);
+      expect(find.textContaining('Подключён сейчас'), findsOneWidget);
+      expect(
+        tester
+            .widget<ChoiceChip>(
+              find.byKey(const ValueKey('source-auto-select')),
+            )
+            .onSelected,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byKey(const ValueKey('choose-vpn-node-personal')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(bridge.moves, isEmpty);
+      expect(bridge.nodeChanges, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   for (final viewport in [const Size(390, 844), const Size(320, 568)]) {
     for (final scale in [1.0, 2.0]) {

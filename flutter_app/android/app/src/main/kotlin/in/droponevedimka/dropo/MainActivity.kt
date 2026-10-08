@@ -42,6 +42,7 @@ class MainActivity : FlutterActivity() {
     private var eventChannel: EventChannel? = null
     private var eventListener: DropoVpnRuntime.Listener? = null
     private var pendingConnectResult: MethodChannel.Result? = null
+    private var destroyed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,6 +110,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        destroyed = true
+        pendingConnectResult = null
         coreChannel?.setMethodCallHandler(null)
         coreChannel = null
         eventChannel?.setStreamHandler(null)
@@ -125,6 +128,7 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         when (requestCode) {
             REQUEST_VPN_PREPARE -> {
+                if (destroyed || pendingConnectResult == null) return
                 if (resultCode == Activity.RESULT_OK) {
                     startVpnAndResolve()
                 } else {
@@ -152,6 +156,7 @@ class MainActivity : FlutterActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_POST_NOTIFICATIONS) {
+            if (destroyed || pendingConnectResult == null) return
             continueVpnPrepare()
         }
     }
@@ -170,7 +175,9 @@ class MainActivity : FlutterActivity() {
             return
         }
         val executor = if (
-            call.method == "call" && stringArg(call, "method") == "TestVPNConnection"
+            call.method == "call" && stringArg(call, "method") in setOf(
+                "TestVPNConnection", "AddVPNSource", "AddPublicVPNSource", "RefreshVPNSources",
+            )
         ) {
             // Subscription validation can spend up to the HTTP timeout on the
             // network. Keep status/events/stop-capable core work responsive on
@@ -248,6 +255,15 @@ class MainActivity : FlutterActivity() {
     private fun handleSetConnectedUnsafe(call: MethodCall, result: MethodChannel.Result) {
         val connected = boolArg(call, "connected")
         if (!connected) {
+            if (pendingConnectResult != null) {
+                // Permission dialogs can return after the user cancels a start.
+                // Clear the pending result so their late callbacks cannot start VPN.
+                resolvePendingConnect(errorJson("VPN start was cancelled"))
+                DropoVpnRuntime.setStopped("VPN остановлен")
+                recordCoreCall("AndroidServiceState", "[\"stopped\",\"VPN остановлен\",\"\"]")
+                result.success(successJson("Pending VPN start cancelled"))
+                return
+            }
             val protection = DropoVpnService.refreshVpnProtection()
             if (protection["observed"] != true) {
                 result.success(
@@ -300,6 +316,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun continueVpnPrepare() {
+        if (destroyed || pendingConnectResult == null) return
         val prepareIntent = VpnService.prepare(this)
         if (prepareIntent != null) {
             @Suppress("DEPRECATION")
@@ -310,6 +327,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun startVpnAndResolve() {
+        if (destroyed || pendingConnectResult == null) return
         try {
             DropoVpnRuntime.setStarting("Android VPN start requested")
             recordCoreCall("AndroidServiceState", "[\"starting\",\"Android VPN start requested\",\"\"]")

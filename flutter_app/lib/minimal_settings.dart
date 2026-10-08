@@ -9,13 +9,11 @@ class _SettingsLink extends StatelessWidget {
     required this.icon,
     required this.onPressed,
     this.detail,
-    this.trailing,
   });
   final String section, title;
   final String? detail;
   final IconData icon;
   final VoidCallback? onPressed;
-  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) => Material(
@@ -45,13 +43,7 @@ class _SettingsLink extends StatelessWidget {
                 height: 1.4,
               ),
             ),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (trailing != null) ...[trailing!, const SizedBox(width: 8)],
-          const Icon(Icons.chevron_right, size: 20, color: _atlasMuted),
-        ],
-      ),
+      trailing: const Icon(Icons.chevron_right, size: 20, color: _atlasMuted),
     ),
   );
 }
@@ -73,24 +65,20 @@ class _MinimalSettingsPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final entries = switch (section) {
       'advanced' => <(String, String, String, IconData)>[
-        (
-          'service-settings',
-          'Обход и стратегии',
-          'Маршруты сервисов и экспериментальный Zapret',
-          Icons.alt_route,
-        ),
-        (
-          'profiles',
-          'Профили',
-          'Сохранённые конфигурации подключения',
-          Icons.layers_outlined,
-        ),
-        (
-          'work',
-          'Рабочие сети',
-          'Защищённый доступ к частным сетям',
-          Icons.hub_outlined,
-        ),
+        if (!_isMobileShell)
+          (
+            'profiles',
+            'Профили',
+            'Сохранённые конфигурации подключения',
+            Icons.layers_outlined,
+          ),
+        if (!_isMobileShell)
+          (
+            'work',
+            'Рабочие сети',
+            'Защищённый доступ к частным сетям',
+            Icons.hub_outlined,
+          ),
         (
           'technical-settings',
           'Сеть и диагностика',
@@ -128,21 +116,19 @@ class _MinimalSettingsPage extends StatelessWidget {
       ],
       _ => <(String, String, String, IconData)>[
         (
-          'service-settings',
-          'Сервисы',
-          'Маршруты приложений и сайтов',
-          Icons.grid_view_rounded,
-        ),
-        (
           'app-settings',
           'Приложение',
-          'Автозапуск и обновления',
+          _isMobileShell
+              ? 'Оформление и обновления'
+              : 'Автозапуск и обновления',
           Icons.settings_outlined,
         ),
         (
           'advanced',
           'Дополнительно',
-          'Обход, профили и рабочие сети',
+          _isMobileShell
+              ? 'Маршруты, диагностика и совместимость'
+              : 'Обход, профили и рабочие сети',
           Icons.shield_outlined,
         ),
         ('help', 'Помощь', 'Диагностика и о приложении', Icons.help_outline),

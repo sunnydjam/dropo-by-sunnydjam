@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,10 @@ func checkAndroidUpdates() string {
 }
 
 func checkAndroidUpdatesWithClient(client *http.Client, baseURL, repo, currentVersion string) string {
+	return checkAndroidUpdatesForArchitecture(client, baseURL, repo, currentVersion, runtime.GOARCH)
+}
+
+func checkAndroidUpdatesForArchitecture(client *http.Client, baseURL, repo, currentVersion, architecture string) string {
 	requestURL := strings.TrimRight(baseURL, "/") + "/repos/" + repo + "/releases?per_page=100"
 	request, err := http.NewRequest(http.MethodGet, requestURL, nil)
 	if err != nil {
@@ -74,7 +79,8 @@ func checkAndroidUpdatesWithClient(client *http.Client, baseURL, repo, currentVe
 	if err := json.Unmarshal(body, &releases); err != nil {
 		return encode(map[string]interface{}{"success": false, "error": err.Error()})
 	}
-	release, latestVersion, assetName, downloadURL, fileSize, found := selectLatestAndroidRelease(releases, repo)
+	channel := androidUpdateChannelForVersion(currentVersion)
+	release, latestVersion, assetName, downloadURL, fileSize, found := selectLatestAndroidRelease(releases, repo, channel, architecture)
 	if !found {
 		return encode(map[string]interface{}{
 			"success":        true,
@@ -83,6 +89,7 @@ func checkAndroidUpdatesWithClient(client *http.Client, baseURL, repo, currentVe
 			"latestVersion":  currentVersion,
 			"platform":       "android",
 			"selfUpdate":     false,
+			"updateChannel":  channel,
 		})
 	}
 	hasUpdate := compareAndroidVersions(latestVersion, currentVersion) > 0
@@ -105,10 +112,18 @@ func checkAndroidUpdatesWithClient(client *http.Client, baseURL, repo, currentVe
 		"assetName":      assetName,
 		"platform":       "android",
 		"selfUpdate":     false,
+		"updateChannel":  channel,
 	})
 }
 
-func selectLatestAndroidRelease(releases []androidGitHubRelease, repo string) (androidGitHubRelease, string, string, string, int64, bool) {
+func androidUpdateChannelForVersion(version string) string {
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(version)), "-preview") {
+		return "preview"
+	}
+	return "stable"
+}
+
+func selectLatestAndroidRelease(releases []androidGitHubRelease, repo, channel, architecture string) (androidGitHubRelease, string, string, string, int64, bool) {
 	var selected androidGitHubRelease
 	var selectedVersion, selectedAsset, selectedURL string
 	var selectedSize int64
@@ -120,15 +135,25 @@ func selectLatestAndroidRelease(releases []androidGitHubRelease, repo string) (a
 		if version == "" {
 			version = strings.TrimPrefix(strings.TrimSpace(release.Name), "v")
 		}
-		if !isAndroidReleaseVersion(version) || (selectedVersion != "" && compareAndroidVersions(version, selectedVersion) <= 0) {
+		// Both packages use stable GitHub release records. A Preview APK is an
+		// explicit separate package asset, not a prerelease tag or arbitrary APK.
+		if !isAndroidReleaseVersion(version) || strings.ContainsAny(version, "-+") ||
+			(selectedVersion != "" && compareAndroidVersions(version, selectedVersion) <= 0) {
 			continue
 		}
-		assetName, downloadURL, fileSize := androidUpdateAsset(release)
+		assetName, downloadURL, fileSize := androidUpdateAsset(release, channel, architecture)
 		if assetName == "" || fileSize <= 0 || !trustedAndroidDownloadURL(downloadURL, repo) {
+			continue
+		}
+		parsedURL, _ := url.Parse(downloadURL)
+		if path.Base(parsedURL.Path) != assetName {
 			continue
 		}
 		selected = release
 		selectedVersion = version
+		if channel == "preview" {
+			selectedVersion += "-preview"
+		}
 		selectedAsset = assetName
 		selectedURL = downloadURL
 		selectedSize = fileSize
@@ -147,16 +172,29 @@ func trustedAndroidDownloadURL(rawURL, repo string) bool {
 	return strings.HasPrefix(strings.ToLower(candidate.EscapedPath()), expectedPrefix)
 }
 
-func androidUpdateAsset(release androidGitHubRelease) (string, string, int64) {
-	for _, asset := range release.Assets {
-		if strings.EqualFold(asset.Name, "dropo-Android-arm64.apk") {
-			return asset.Name, asset.BrowserDownloadURL, asset.Size
-		}
+func androidUpdateAsset(release androidGitHubRelease, channel, architecture string) (string, string, int64) {
+	if architecture != "arm" && architecture != "arm64" {
+		return "", "", 0
 	}
-	for _, asset := range release.Assets {
-		name := strings.ToLower(asset.Name)
-		if strings.Contains(name, "android") && strings.HasSuffix(name, ".apk") {
-			return asset.Name, asset.BrowserDownloadURL, asset.Size
+	prefix := "dropo-Android-"
+	switch channel {
+	case "preview":
+		prefix += "Preview-"
+	case "stable":
+	default:
+		return "", "", 0
+	}
+	// Universal includes ARMv7 and ARM64. An ARMv7 process must never be
+	// offered an ARM64-only APK, even when it is the only release asset.
+	names := []string{prefix + "universal.apk"}
+	if architecture == "arm64" {
+		names = append(names, prefix+"arm64.apk")
+	}
+	for _, name := range names {
+		for _, asset := range release.Assets {
+			if strings.EqualFold(asset.Name, name) && asset.Size > 0 {
+				return asset.Name, asset.BrowserDownloadURL, asset.Size
+			}
 		}
 	}
 	return "", "", 0

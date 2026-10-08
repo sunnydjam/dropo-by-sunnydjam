@@ -60,6 +60,10 @@ android {
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
+    buildFeatures {
+        resValues = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -67,7 +71,10 @@ android {
 
     defaultConfig {
         applicationId = "in.droponevedimka.dropo"
-        minSdk = 30
+        resValue("string", "app_name", "dropo")
+        // Android 10 supplies connection-owner lookup and authoritative
+        // Always-on/lockdown state used by service routing and protection UI.
+        minSdk = 29
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -88,6 +95,13 @@ android {
     }
 
     buildTypes {
+        getByName("profile") {
+            // Device-review builds coexist with signed production installs.
+            applicationIdSuffix = ".preview"
+            versionNameSuffix = "-preview"
+            signingConfig = signingConfigs.getByName("debug")
+            resValue("string", "app_name", "dropo Preview")
+        }
         release {
             if (releaseSigningReady) {
                 signingConfig = signingConfigs.getByName("release")
@@ -98,6 +112,7 @@ android {
 
 dependencies {
     implementation(files("libs/dropoandroid.aar"))
+    testImplementation("junit:junit:4.13.2")
 }
 
 kotlin {

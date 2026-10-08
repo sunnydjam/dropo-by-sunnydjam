@@ -5,10 +5,14 @@ class VpnSourcesSnapshot {
     required this.sources,
     this.autoSelect,
     this.running,
+    this.autoSelectSupported = true,
+    this.fallbackSupported = true,
   });
   final List<VpnSourceInfo> sources;
   final bool? autoSelect;
   final bool? running;
+  final bool autoSelectSupported;
+  final bool fallbackSupported;
 
   factory VpnSourcesSnapshot.fromJson(Map<String, dynamic> json) =>
       VpnSourcesSnapshot(
@@ -20,6 +24,8 @@ class VpnSourcesSnapshot {
             ? json['autoSelect'] as bool
             : null,
         running: json['running'] is bool ? json['running'] as bool : null,
+        autoSelectSupported: json['autoSelectSupported'] != false,
+        fallbackSupported: json['fallbackSupported'] != false,
       );
 }
 
@@ -75,6 +81,7 @@ class VpnSourcesDialog extends StatefulWidget {
 class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   final controller = TextEditingController();
   final nameController = TextEditingController();
+  final nameFocus = FocusNode(debugLabel: 'personal-vpn-name');
   final personalFormAnchor = GlobalKey();
   final addFlowAnchor = GlobalKey();
   String statusText = '';
@@ -85,6 +92,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   bool sourcesFresh = false;
   bool? autoSelect;
   bool? running;
+  bool autoSelectSupported = true;
+  bool fallbackSupported = true;
   bool showFreeCatalog = false;
   bool showPersonalForm = false;
   bool showAddOptions = false;
@@ -104,6 +113,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   void dispose() {
     controller.dispose();
     nameController.dispose();
+    nameFocus.dispose();
     super.dispose();
   }
 
@@ -120,6 +130,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       sources = widget.sourceSnapshot!.sources;
       autoSelect = widget.sourceSnapshot!.autoSelect;
       running = widget.sourceSnapshot!.running;
+      autoSelectSupported = widget.sourceSnapshot!.autoSelectSupported;
+      fallbackSupported = widget.sourceSnapshot!.fallbackSupported;
       sourcesFresh = true;
     }
   }
@@ -143,6 +155,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           sources = loaded;
           autoSelect = snapshot.autoSelect;
           running = snapshot.running;
+          autoSelectSupported = snapshot.autoSelectSupported;
+          fallbackSupported = snapshot.fallbackSupported;
           sourcesFresh = true;
         });
       }
@@ -238,6 +252,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       });
       return;
     }
+    FocusManager.instance.primaryFocus?.unfocus();
     final name = nameController.text.trim();
     final previousIds = sources.map((source) => source.id).toSet();
     final wasFirstPersonalSource = !_hasPersonalSource(sources);
@@ -278,6 +293,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   }
 
   void _togglePersonalForm() {
+    FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       showPersonalForm = !showPersonalForm;
       showAddOptions = true;
@@ -427,7 +443,6 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
     final mobile = _isMobileShell;
     final disabled = busy || loading || !widget.enabled;
     final controlsDisabled = disabled || !sourcesFresh;
-    final hasPersonalSource = _hasPersonalSource(sources);
     final firstEnabled = sources
         .where((source) => !source.disabled)
         .firstOrNull;
@@ -449,12 +464,12 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       children: [
         if (!widget.embedded)
           Align(alignment: Alignment.centerRight, child: addButton),
-        if (mobile)
+        if (!autoSelectSupported)
           const Text(
-            'На Android используется одна активная подписка.',
+            'Выберите источник для подключения. Для смены источника или сервера сначала отключите VPN.',
             style: TextStyle(color: _atlasMuted, fontSize: 13),
           ),
-        if (!mobile && sources.isNotEmpty) ...[
+        if (autoSelectSupported && sources.isNotEmpty) ...[
           Wrap(
             key: const ValueKey('source-selection-mode'),
             spacing: 8,
@@ -462,7 +477,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             children: [
               ChoiceChip(
                 key: const ValueKey('source-auto-select'),
-                label: const Text('Автоматически'),
+                label: Text(mobile ? 'Автовыбор' : 'Автоматически'),
                 selected: sourcesFresh && autoSelect == true,
                 onSelected: controlsDisabled
                     ? null
@@ -491,7 +506,9 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                 ? 'Уточняем способ выбора источника…'
                 : autoSelect!
                 ? 'При подключении выбираем источник с минимальным откликом. Работающее соединение не переключаем.'
-                : 'Первый включённый источник — основной. Остальные подстрахуют при сбое.',
+                : fallbackSupported
+                ? 'Первый включённый источник — основной. Остальные подстрахуют при сбое.'
+                : 'Первый включённый источник используется для подключения.',
             style: const TextStyle(
               color: _atlasMuted,
               fontSize: 12,
@@ -506,7 +523,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             padding: const EdgeInsets.symmetric(vertical: 10),
             child: Text(
               mobile
-                  ? 'Отключите VPN и дождитесь связи с ядром, чтобы изменить подписку.'
+                  ? 'Отключите VPN и дождитесь связи с ядром, чтобы изменить источники.'
                   : 'Управление временно недоступно. Дождитесь связи с ядром и завершения подключения.',
               style: const TextStyle(color: Color(0xFFFFD38B), fontSize: 12),
             ),
@@ -532,8 +549,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             icon: const Icon(Icons.arrow_forward),
             label: const Text('Перейти к подключению'),
           ),
-        if (!mobile &&
-            recentlyAddedId.isNotEmpty &&
+        if (recentlyAddedId.isNotEmpty &&
             sources.any(
               (source) => source.id == recentlyAddedId && !source.disabled,
             ) &&
@@ -580,11 +596,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                     onPressed: disabled ? null : _togglePersonalForm,
                     icon: const Icon(Icons.vpn_key_outlined, size: 18),
                     label: Text(
-                      showPersonalForm
-                          ? 'Скрыть форму'
-                          : mobile && hasPersonalSource
-                          ? 'Заменить подписку'
-                          : 'Своя подписка',
+                      showPersonalForm ? 'Скрыть форму' : 'Своя подписка',
                     ),
                   ),
                   OutlinedButton.icon(
@@ -621,6 +633,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                   autocorrect: false,
                   enableSuggestions: false,
                   keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.next,
+                  onSubmitted: (_) => nameFocus.requestFocus(),
                   onChanged: (_) => _clearPersonalInputError(),
                   decoration: _fieldDecoration(
                     hint: 'https://… или vless://…',
@@ -646,7 +660,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                   'Поддерживаются безопасные HTTPS-подписки и ключи VLESS, Trojan, Shadowsocks, VMess, Hysteria2 и TUIC.',
                   style: TextStyle(color: Color(0xFF9CAEA8), fontSize: 11),
                 ),
-                if (!mobile) ...[
+                ...[
                   const SizedBox(height: 10),
                   const Text(
                     'Название (необязательно)',
@@ -656,7 +670,12 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                   TextField(
                     key: const ValueKey('personal-vpn-name'),
                     controller: nameController,
+                    focusNode: nameFocus,
                     enabled: !disabled,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) {
+                      if (!disabled) unawaited(_addPersonal());
+                    },
                     onChanged: (_) => _clearPersonalInputError(),
                     decoration: _fieldDecoration(
                       hint: 'Например, «Моя подписка»',
@@ -671,11 +690,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                     minimumSize: const Size(double.infinity, 48),
                   ),
                   icon: const Icon(Icons.fact_check_outlined),
-                  label: Text(
-                    mobile && hasPersonalSource
-                        ? 'Проверить и заменить'
-                        : 'Проверить и добавить',
-                  ),
+                  label: const Text('Проверить и добавить'),
                 ),
               ],
 
@@ -746,8 +761,12 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           _VpnSourceTile(
             key: ValueKey('vpn-source-${sources[i].id}'),
             source: sources[i],
-            statusKnown: widget.enabled && sourcesFresh && !loading,
-            singleSource: mobile,
+            statusKnown:
+                sourcesFresh &&
+                !loading &&
+                (widget.enabled || (mobile && widget.sourceSnapshot != null)),
+            singleSource: false,
+            fallbackSupported: fallbackSupported,
             running: running,
             autoSelect: autoSelect,
             primary: sources[i].id == firstEnabled?.id,
@@ -766,7 +785,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             ),
             onRemove: () => _remove(sources[i]),
           ),
-        if (!mobile && sources.isNotEmpty) ...[
+        if (sources.isNotEmpty) ...[
           const SizedBox(height: 8),
           const Text(
             'Отклик — HTTP-проверка, не игровой пинг и не скорость скачивания.',
@@ -784,7 +803,11 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                     showOrder ? Icons.expand_less : Icons.reorder,
                     size: 18,
                   ),
-                  label: const Text('Порядок резервных источников'),
+                  label: Text(
+                    fallbackSupported
+                        ? 'Порядок резервных источников'
+                        : 'Порядок источников',
+                  ),
                 ),
               TextButton.icon(
                 key: const ValueKey('refresh-source-lists'),
@@ -1019,6 +1042,7 @@ class _VpnSourceTile extends StatefulWidget {
     required this.source,
     required this.statusKnown,
     required this.singleSource,
+    this.fallbackSupported = true,
     required this.running,
     required this.autoSelect,
     required this.primary,
@@ -1031,6 +1055,7 @@ class _VpnSourceTile extends StatefulWidget {
 
   final VpnSourceInfo source;
   final bool statusKnown, singleSource, primary, busy;
+  final bool fallbackSupported;
   final bool? running, autoSelect;
   final ValueChanged<bool> onEnabled;
   final ValueChanged<int> onNode;
@@ -1086,7 +1111,9 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
         : selected
         ? 'Выбран для подключения'
         : widget.autoSelect == false
-        ? 'Резервный'
+        ? widget.fallbackSupported
+              ? 'Резервный'
+              : 'Доступен для выбора'
         : widget.autoSelect == true
         ? 'Участвует в автовыборе'
         : 'Способ выбора уточняется';
@@ -1100,7 +1127,9 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
           : 'Отклик · ${source.response.label}',
       key: ValueKey('source-response-${source.id}'),
       style: TextStyle(
-        fontFamily: source.response.current ? 'Consolas' : 'Inter',
+        fontFamily: source.response.current
+            ? (_isMobileShell ? 'monospace' : 'Consolas')
+            : 'Inter',
         fontFamilyFallback: const ['Inter'],
         fontSize: 12,
         color:
@@ -1190,7 +1219,7 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
                   : _chooseNode,
               style: TextButton.styleFrom(
                 padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 4),
-                minimumSize: const Size(48, 36),
+                minimumSize: Size(48, _isMobileShell ? 48 : 36),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
               child: const Text(

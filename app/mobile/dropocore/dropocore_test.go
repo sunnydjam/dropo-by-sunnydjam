@@ -499,6 +499,7 @@ func TestBuildSingBoxConfigForDirectVLESS(t *testing.T) {
 func TestAndroidBlockedOnlyRoutesOnlyBlockedServicesThroughVPN(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
+	current.Config.RoutingMode = "blocked_only"
 	current.BasePath = t.TempDir()
 	current.Subscription = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com&sni=example.com&fp=chrome#demo"
 	mu.Unlock()
@@ -567,6 +568,7 @@ func TestAndroidBlockedOnlyRoutesOnlyBlockedServicesThroughVPN(t *testing.T) {
 func TestAndroidRoutePolicyCanForceBlockedServiceDirect(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
+	current.Config.RoutingMode = "blocked_only"
 	current.BasePath = t.TempDir()
 	current.Subscription = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com&sni=example.com&fp=chrome#demo"
 	current.RoutePolicies = map[string]string{"meta": "direct"}
@@ -624,6 +626,7 @@ func TestAndroidLegacyExceptRussiaMigratesToBlockedOnly(t *testing.T) {
 func TestAndroidDiscordRoutePolicyAlsoControlsIPOnlyVoiceTraffic(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
+	current.Config.RoutingMode = "blocked_only"
 	current.BasePath = t.TempDir()
 	current.Subscription = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com&sni=example.com&fp=chrome#demo"
 	current.RoutePolicies = map[string]string{"discord": "direct"}
@@ -641,6 +644,7 @@ func TestAndroidDiscordRoutePolicyAlsoControlsIPOnlyVoiceTraffic(t *testing.T) {
 func TestAndroidHideRuTrafficRoutesRuDomainsThroughVPN(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
+	current.Config.RoutingMode = "blocked_only"
 	current.BasePath = t.TempDir()
 	current.Subscription = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com&sni=example.com&fp=chrome#demo"
 	current.Config.HideRuTraffic = true
@@ -658,6 +662,7 @@ func TestAndroidHideRuTrafficRoutesRuDomainsThroughVPN(t *testing.T) {
 func TestAndroidHideRuTrafficCanUseDedicatedProxy(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
+	current.Config.RoutingMode = "blocked_only"
 	current.BasePath = t.TempDir()
 	current.Subscription = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com&sni=example.com&fp=chrome#main"
 	current.Config.HideRuTraffic = true
@@ -867,7 +872,7 @@ func TestAndroidVersionCompareAndAssetSelection(t *testing.T) {
 		BrowserDownloadURL string `json:"browser_download_url"`
 		Size               int64  `json:"size"`
 	}{Name: "dropo-Android-arm64.apk", BrowserDownloadURL: "android", Size: 20})
-	name, url, size := androidUpdateAsset(release)
+	name, url, size := androidUpdateAsset(release, "stable", "arm64")
 	if name != "dropo-Android-arm64.apk" || url != "android" || size != 20 {
 		t.Fatalf("asset = %q %q %d, want Android APK", name, url, size)
 	}
@@ -1041,6 +1046,7 @@ func TestAndroidDiagnosticsIncludesCacheAndState(t *testing.T) {
 func TestAndroidRoutesExposeAutoDirectAndVPNMethods(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
+	current.Config.RoutingMode = "blocked_only"
 	current.BasePath = t.TempDir()
 	mu.Unlock()
 

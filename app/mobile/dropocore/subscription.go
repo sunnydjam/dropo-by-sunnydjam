@@ -1,6 +1,7 @@
 package dropocore
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -45,6 +46,7 @@ type proxyConfig struct {
 
 type subscriptionFetcher struct {
 	client *http.Client
+	ctx    context.Context
 }
 
 func newSubscriptionFetcher() *subscriptionFetcher {
@@ -68,7 +70,11 @@ func (f *subscriptionFetcher) fetchAndParse(subscriptionURL string) ([]proxyConf
 	if err := validateSubscriptionURL(subscriptionURL); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodGet, subscriptionURL, nil)
+	ctx := f.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, subscriptionURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("invalid subscription request")
 	}

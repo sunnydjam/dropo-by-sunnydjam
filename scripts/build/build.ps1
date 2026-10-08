@@ -16,6 +16,10 @@ param(
     # Opt-in Android artifact build. Alone it builds only the APK; combine with
     # -Build/-Flutter for Windows app + Android, or use -All for all artifacts.
     [switch]$Android,
+    # Optimized, development-signed phone preview; never a publication artifact.
+    [switch]$AndroidPreview,
+    [ValidateSet("arm64", "universal")]
+    [string]$AndroidArchitecture = "arm64",
     # Local/offline rebuild aid: reuse an existing Flutter Windows Release
     # output while still rebuilding and signing the Go core and launcher.
     [switch]$ReuseFlutterWindowsOutput,
@@ -46,6 +50,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($AndroidPreview) { $Android = $true }
 $ScriptRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $DevEnvironmentScript = Join-Path $ScriptRoot "tools\dev-environment.ps1"
 . $DevEnvironmentScript
@@ -317,9 +322,9 @@ $RequiredDepFiles = @("sing-box.exe", "xray.exe", "wireguard.exe", "wg.exe", "wi
 $ForbiddenDepFiles = @("winws.exe", "winws2.exe", "cygwin1.dll", "zapret-lib.lua", "zapret-antidpi.lua", "tg-ws-proxy.exe")
 $WindowsInstallerAsset = "dropo-Windows-Setup-x64.exe"
 $WindowsPortableAsset = "dropo-Windows-Portable-x64.zip"
-$AndroidReleaseArch = "arm64"
-$AndroidFlutterTargetPlatform = "android-arm64"
-$AndroidGoMobileTarget = "android/arm64"
+$AndroidReleaseArch = $AndroidArchitecture
+$AndroidFlutterTargetPlatform = if ($AndroidArchitecture -eq "universal") { "android-arm,android-arm64" } else { "android-arm64" }
+$AndroidGoMobileTarget = if ($AndroidArchitecture -eq "universal") { "android/arm,android/arm64" } else { "android/arm64" }
 $AndroidBridgeTags = "with_gvisor,with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0"
 $AndroidAppAsset = "dropo-Android-$AndroidReleaseArch.apk"
 
@@ -1306,6 +1311,15 @@ function Get-GoMobileCommand {
         return $gomobile.Source
     }
 
+    $androidToolsRoot = [Environment]::GetEnvironmentVariable("DROPO_ANDROID_TOOLCHAIN_ROOT", "User")
+    if ($env:DROPO_ANDROID_TOOLCHAIN_ROOT) { $androidToolsRoot = $env:DROPO_ANDROID_TOOLCHAIN_ROOT }
+    foreach ($candidate in @(
+        (Join-Path $ToolchainRoot "gopath\bin\gomobile.exe"),
+        $(if ($androidToolsRoot) { Join-Path $androidToolsRoot "bin\gomobile.exe" })
+    )) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+    }
+
     $localGoMobile = Join-Path $env:USERPROFILE "go\bin\gomobile.exe"
     if (Test-Path $localGoMobile) {
         return $localGoMobile
@@ -1315,6 +1329,26 @@ function Get-GoMobileCommand {
 }
 
 function Initialize-AndroidBuildEnvironment {
+    $androidToolsRoot = $env:DROPO_ANDROID_TOOLCHAIN_ROOT
+    if (-not $androidToolsRoot) { $androidToolsRoot = [Environment]::GetEnvironmentVariable("DROPO_ANDROID_TOOLCHAIN_ROOT", "User") }
+    if ($androidToolsRoot -and (Test-Path -LiteralPath $androidToolsRoot -PathType Container)) {
+        if (-not $env:ANDROID_HOME -and -not $env:ANDROID_SDK_ROOT) {
+            $env:ANDROID_HOME = Join-Path $androidToolsRoot "sdk"
+            $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
+        }
+        if (-not $env:JAVA_HOME) {
+            $javaRoot = Join-Path $androidToolsRoot "java"
+            $jdk = Get-ChildItem -LiteralPath $javaRoot -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory } |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "bin\java.exe") } |
+                Sort-Object FullName -Descending | Select-Object -First 1
+            if ($jdk) { $env:JAVA_HOME = $jdk.FullName }
+        }
+        if (-not $env:GRADLE_USER_HOME) { $env:GRADLE_USER_HOME = Join-Path $androidToolsRoot "gradle-cache" }
+        if (-not $env:GOCACHE) { $env:GOCACHE = Join-Path $androidToolsRoot "go-build-cache" }
+        $androidBin = Join-Path $androidToolsRoot "bin"
+        if (Test-Path -LiteralPath $androidBin) { $env:Path = "$androidBin;$env:Path" }
+    }
     if (-not $env:ANDROID_HOME -and -not $env:ANDROID_SDK_ROOT) {
         $localAndroidSdk = "E:\android-sdk"
         if (Test-Path $localAndroidSdk) {
@@ -1421,6 +1455,13 @@ function Build-AndroidBridgeAAR {
     }
 
     Initialize-AndroidBuildEnvironment
+    # gomobile invokes gobind by name, even when gomobile itself was resolved
+    # by absolute path. Keep the matching tools together in this build's PATH.
+    $goMobileBin = Split-Path $GoMobileCmd -Parent
+    $env:Path = "$goMobileBin;$env:Path"
+    if (-not (Get-Command gobind -ErrorAction SilentlyContinue)) {
+        throw "gobind is missing beside gomobile. Run tools/install-android-toolchain.ps1."
+    }
 
     $MobileBridgeDir = Join-Path $ScriptRoot "app\mobile\dropoandroid"
     $MobileCoreDir = Join-Path $ScriptRoot "app\mobile\dropocore"
@@ -1535,7 +1576,8 @@ function Build-AndroidApplication {
     $buildNumber = Get-AndroidBuildNumber
     Push-Location $FlutterDir
     try {
-        & $FlutterCmd build apk --release --target-platform $AndroidFlutterTargetPlatform --build-name $AppVersion --build-number $buildNumber --dart-define "DROPO_APP_VERSION=$AppVersion"
+        $androidBuildMode = if ($AndroidPreview) { "profile" } else { "release" }
+        & $FlutterCmd build apk "--$androidBuildMode" --target-platform $AndroidFlutterTargetPlatform --build-name $AppVersion --build-number $buildNumber --dart-define "DROPO_APP_VERSION=$AppVersion"
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[ERROR] Flutter Android build failed. Run 'flutter doctor -v' and check Android SDK/JDK." -ForegroundColor Red
             exit 1
@@ -1544,15 +1586,22 @@ function Build-AndroidApplication {
         Pop-Location
     }
 
-    $sourceApk = Join-Path $FlutterDir "build\app\outputs\flutter-apk\app-release.apk"
+    $androidBuildMode = if ($AndroidPreview) { "profile" } else { "release" }
+    $sourceApk = Join-Path $FlutterDir "build\app\outputs\flutter-apk\app-$androidBuildMode.apk"
     if (-not (Test-Path $sourceApk)) {
         Write-Host "[ERROR] Android APK output not found: $sourceApk" -ForegroundColor Red
         exit 1
     }
 
     $assetName = $AndroidAppAsset
+    if ($AndroidPreview) { $assetName = "dropo-Android-Preview-$AndroidReleaseArch.apk" }
     $destApk = Join-Path $VersionDir $assetName
     Copy-Item $sourceApk $destApk -Force
+
+    $verifyArgs = @("-NoProfile", "-File", (Join-Path $ScriptRoot "tools\verify-android-apk.ps1"), "-Path", $destApk, "-Architecture", $AndroidReleaseArch)
+    if ($AndroidPreview) { $verifyArgs += "-Preview" }
+    & pwsh @verifyArgs
+    if ($LASTEXITCODE -ne 0) { throw "Android artifact verification failed." }
 
     $sha = (Get-FileHash -Algorithm SHA256 $destApk).Hash.ToLower()
     [System.IO.File]::WriteAllText((Join-Path $VersionDir "$assetName.sha256"), "$sha  $assetName`n", (New-Object System.Text.UTF8Encoding($false)))

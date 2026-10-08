@@ -13,12 +13,19 @@ class _SpaceBridge extends MockCoreBridge {
   bool hasError = false;
   bool connecting = false;
   int toggles = 0;
+  bool androidSources = false;
   List<VpnSourceInfo>? sourcesOverride;
+  List<RouteService>? routesOverride;
+  @override
+  Future<List<RouteService>> routes({bool live = false}) async =>
+      routesOverride ?? await super.routes(live: live);
   @override
   Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async => VpnSourcesSnapshot(
     sources: await vpnSources(),
     autoSelect: true,
     running: connected,
+    autoSelectSupported: true,
+    fallbackSupported: true,
   );
   @override
   Future<Map<String, dynamic>> appConfig() async => {
@@ -40,6 +47,11 @@ class _SpaceBridge extends MockCoreBridge {
         : connected
         ? 'connected'
         : 'stopped',
+    vpnResponse: VpnResponseSnapshot.fromJson({
+      'state': connected ? 'ok' : 'unavailable',
+      'latencyMs': connected ? 42 : null,
+      'checkedAt': DateTime.now().toUtc().toIso8601String(),
+    }),
   );
   @override
   Future<List<VpnSourceInfo>> vpnSources() async =>
@@ -137,6 +149,149 @@ Future<void> _capture(
 }
 
 void main() {
+  testWidgets(
+    'phone Home disclosure shows four quick services on one star field',
+    (tester) async {
+      debugMobileShellOverride = true;
+      addTearDown(() => debugMobileShellOverride = null);
+      final bridge = _SpaceBridge();
+      // Match the production catalogue size while keeping all status/latency
+      // values explicitly in this test bridge, never in application code.
+      bridge.routesOverride = [
+        for (final tag in serviceIconCatalogTags)
+          (fallbackRoutes.where((route) => route.tag == tag).firstOrNull ??
+                  RouteService(
+                    tag: tag,
+                    name: tag,
+                    method: 'VPN',
+                    requiresVpn: true,
+                    delayMs: 0,
+                  ))
+              .copyWith(selectedMethod: 'auto', homeVisible: false),
+      ];
+      await bridge.setRoutingMode('blocked_only');
+      await _pumpScene(tester, bridge, const Size(390, 844), 1);
+      expect(find.byKey(const ValueKey('service-search')), findsNothing);
+      expect(find.byKey(const ValueKey('nav-services')), findsNothing);
+      await _capture(tester, 'android-home-services-collapsed-390');
+      await openSection(tester, 'services');
+      final lastQuick = find.byKey(const ValueKey('home-service-row-openai'));
+      await Scrollable.ensureVisible(tester.element(lastQuick), alignment: 1);
+      await tester.pump(const Duration(milliseconds: 400));
+      for (final tag in ['youtube', 'discord', 'meta', 'openai']) {
+        expect(
+          find.byKey(ValueKey('home-service-row-$tag')).hitTestable(),
+          findsOneWidget,
+        );
+      }
+      expect(find.byKey(const ValueKey('home-services')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('home-services')),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Scrollable &&
+                (widget.axisDirection == AxisDirection.down ||
+                    widget.axisDirection == AxisDirection.up),
+          ),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('atlas-space-background')),
+        findsOneWidget,
+      );
+      await _capture(tester, 'android-home-services-expanded-390');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+  for (final (size, scale) in [
+    (const Size(390, 844), 1.0),
+    (const Size(320, 568), 2.0),
+  ]) {
+    testWidgets('Android smartphone source pool fits $size at $scale', (
+      tester,
+    ) async {
+      debugMobileShellOverride = true;
+      addTearDown(() => debugMobileShellOverride = null);
+      final bridge = _SpaceBridge()
+        ..androidSources = true
+        ..connected = false;
+      bridge.sourcesOverride = [
+        ...(await bridge.vpnSources()),
+        VpnSourceInfo.fromJson({
+          'id': 'second-mobile',
+          'name': 'Рабочая подписка',
+          'node_count': 2,
+          'node_names': ['Германия', 'Нидерланды'],
+        }),
+      ];
+      await _pumpScene(tester, bridge, size, scale);
+      await _capture(tester, 'android-home-${size.width.toInt()}-$scale');
+      expect(find.byKey(const ValueKey('link-service-settings')), findsNothing);
+      final selectedMode = find.byKey(const ValueKey('home-routing-selected'));
+      await tester.ensureVisible(selectedMode);
+      await tester.pump();
+      await tester.tap(selectedMode);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final disclosure = find.byKey(
+        const ValueKey('toggle-home-route-services'),
+      );
+      await tester.ensureVisible(disclosure);
+      await tester.pump();
+      expect(disclosure.hitTestable(), findsOneWidget);
+      await openSection(tester, 'sources');
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 300));
+      await _capture(tester, 'android-sources-${size.width.toInt()}-$scale');
+      expect(find.byKey(const ValueKey('source-auto-select')), findsOneWidget);
+      expect(find.textContaining('одна активная подписка'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('add-personal-vpn')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('choose-vpn-node-preview-source')),
+        findsOneWidget,
+      );
+      bridge.connected = true;
+      bridge.sourcesOverride = [
+        VpnSourceInfo.fromJson({
+          'id': 'preview-source',
+          'name': 'Моя подписка',
+          'selected_node': 0,
+          'node_count': 1,
+          'node_names': ['Сервер 1'],
+          'active': true,
+          'response': {
+            'state': 'ok',
+            'latencyMs': 42,
+            'checkedAt': DateTime.now().toUtc().toIso8601String(),
+          },
+        }),
+        bridge.sourcesOverride![1],
+      ];
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Отклик · 42 мс'), findsOneWidget);
+      expect(find.textContaining('Подключён сейчас'), findsOneWidget);
+      await _capture(
+        tester,
+        'android-sources-connected-${size.width.toInt()}-$scale',
+      );
+      await openSection(tester, 'home');
+      expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
+      await _capture(
+        tester,
+        'android-home-connected-${size.width.toInt()}-$scale',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
   for (final (size, scale) in [
     (const Size(1100, 760), 1.0),
     (const Size(390, 568), 2.0),
@@ -147,7 +302,6 @@ void main() {
         await _pumpScene(tester, _SpaceBridge(), size, scale);
         for (final section in [
           'sources',
-          'services',
           'settings',
           'app-settings',
           'technical-settings',
@@ -280,12 +434,16 @@ void main() {
     )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
     expect(await preloadAtlasPlanetForTesting(), isTrue);
     if (const bool.fromEnvironment('DROPO_UI_CAPTURE') && Platform.isWindows) {
-      await (FontLoader('Consolas')..addFont(
-            File(
-              'C:/Windows/Fonts/consola.ttf',
-            ).readAsBytes().then((bytes) => ByteData.sublistView(bytes)),
-          ))
-          .load();
+      // Native Android supplies its monospace family. Host captures use a
+      // Windows monospace font for that family instead of Ahem's test squares.
+      for (final family in ['Consolas', 'monospace']) {
+        await (FontLoader(family)..addFont(
+              File(
+                'C:/Windows/Fonts/consola.ttf',
+              ).readAsBytes().then((bytes) => ByteData.sublistView(bytes)),
+            ))
+            .load();
+      }
     }
   });
   setUp(() {

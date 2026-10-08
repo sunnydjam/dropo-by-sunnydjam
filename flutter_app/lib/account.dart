@@ -207,6 +207,7 @@ class AccountPage extends StatefulWidget {
     super.key,
     required this.endpoint,
     required this.onOpenExternal,
+    this.available = true,
     this.persistSession = true,
     this.transport,
     this.initialToken,
@@ -215,6 +216,7 @@ class AccountPage extends StatefulWidget {
   final String endpoint;
   final Future<void> Function(String url) onOpenExternal;
   final bool persistSession;
+  final bool available;
   final AccountTransport? transport;
   final String? initialToken;
 
@@ -260,6 +262,10 @@ class _AccountPageState extends State<AccountPage> {
   }
 
   Future<void> _restore() async {
+    if (!widget.available) {
+      setState(() => _phase = _AccountPhase.signedOut);
+      return;
+    }
     await _loadProduct();
     final token = await _vault.read();
     if (token == null || token.isEmpty) {
@@ -543,6 +549,41 @@ class _AccountPageState extends State<AccountPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!widget.available) {
+      return _page(
+        const Column(
+          key: ValueKey('account-unavailable'),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.person_outline_rounded, size: 40, color: _atlasMint),
+            SizedBox(height: 20),
+            Text(
+              'Вход пока недоступен',
+              style: TextStyle(
+                color: _atlasText,
+                fontSize: 28,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            SizedBox(height: 12),
+            Text(
+              'Для подключения VPN аккаунт не нужен. Используйте свою подписку или бесплатные источники.',
+              style: TextStyle(color: _atlasMuted, fontSize: 15, height: 1.5),
+            ),
+            SizedBox(height: 28),
+            Text(
+              'Dropo Boost · скоро',
+              style: TextStyle(color: _atlasText, fontSize: 18),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Здесь появятся подписки Dropo и управление покупками.',
+              style: TextStyle(color: _atlasMuted, fontSize: 14, height: 1.5),
+            ),
+          ],
+        ),
+      );
+    }
     return switch (_phase) {
       _AccountPhase.loading => const Center(
         child: CircularProgressIndicator(strokeWidth: 2.5),

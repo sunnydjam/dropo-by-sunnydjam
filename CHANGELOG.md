@@ -4,6 +4,19 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.0.41 — 2026-10-08
+
+- move service routing to one expandable section on Home, visible only in
+  selective mode; keep saved policies and pins when switching to full VPN;
+- add service search, Quick/All lists and bundled local icons for every service;
+  remove duplicate Services navigation without changing the two routing modes;
+- preserve desktop Zapret controls and safe reconnect feedback, and keep Android
+  route editing locked during an active VPN session;
+- bring Android source management to the shared interface: independent saved
+  subscriptions, optional public-source consent, automatic source selection,
+  priorities and session-bound truthful health measurements;
+- strengthen Android session cancellation, native logging and protection-state
+  reporting; retain private/work-network precedence and manual subscription nodes;
 - add the Dropo account section with Telegram passwordless authentication,
   recovery, session management and Telegram Stars purchase confirmation;
 - keep the account backend in the separate private `DropoVPN-Backend`

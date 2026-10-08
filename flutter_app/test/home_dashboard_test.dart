@@ -130,6 +130,29 @@ class _OnboardingBridge extends _HomeBridge {
   }
 }
 
+class _UnavailableTrafficBridge extends _HomeBridge {
+  @override
+  Future<TrafficStatsInfo> trafficStats() async => TrafficStatsInfo.fromJson({
+    'success': true,
+    'trafficAvailable': false,
+    'current': {
+      'uploaded': 0,
+      'downloaded': 0,
+      'uploadedStr': '0 B',
+      'downloadedStr': '0 B',
+      'duration': 321000,
+      'durationStr': '5 мин 21 сек',
+    },
+    'total': {
+      'uploadedStr': '0 B',
+      'downloadedStr': '0 B',
+      'duration': 641000,
+      'durationStr': '10 мин 41 сек',
+      'sessions': 3,
+    },
+  });
+}
+
 class _PolicyContractBridge extends _HomeBridge {
   _PolicyContractBridge(this.mobile);
   final bool mobile;
@@ -394,6 +417,55 @@ void main() {
     expect(await preloadAtlasPlanetForTesting(), isTrue);
   });
 
+  test('traffic capability keeps unavailable counters distinct from zero', () {
+    final unavailable = TrafficDataInfo.fromJson({
+      'trafficAvailable': false,
+      'uploadedStr': '0 B',
+      'downloadedStr': '0 B',
+      'duration': 321000,
+      'durationStr': '5 мин 21 сек',
+    });
+    expect(unavailable.trafficAvailable, isFalse);
+    expect(unavailable.uploadedStr, 'Нет данных');
+    expect(unavailable.downloadedStr, 'Нет данных');
+    expect(unavailable.duration, 321000);
+    expect(unavailable.durationStr, '5 мин 21 сек');
+    final desktop = TrafficStatsInfo.fromJson({
+      'current': {'uploadedStr': '8 MB', 'downloadedStr': '32 MB'},
+    });
+    expect(desktop.trafficAvailable, isTrue);
+    expect(desktop.current.trafficAvailable, isTrue);
+    expect(desktop.current.uploadedStr, '8 MB');
+    expect(TrafficStatsInfo.empty.trafficAvailable, isFalse);
+  });
+
+  testWidgets(
+    'Android statistics preserve duration without fabricated traffic',
+    (tester) async {
+      debugMobileShellOverride = true;
+      addTearDown(() => debugMobileShellOverride = null);
+      await _pumpHome(
+        tester,
+        _UnavailableTrafficBridge(),
+        size: const Size(320, 568),
+        scale: 2,
+      );
+      await _tap(tester, 'nav-stats');
+      expect(find.text('Счётчики трафика недоступны'), findsOneWidget);
+      expect(find.text('0 B'), findsNothing);
+      expect(find.text('Нет данных'), findsNWidgets(4));
+      expect(find.text('Скорость (последние 30 сек)'), findsNothing);
+      expect(find.text('Трафик за сессию'), findsNothing);
+      expect(find.text('5 мин 21 сек'), findsOneWidget);
+      expect(find.text('10 мин 41 сек'), findsOneWidget);
+      expect(find.text('3'), findsOneWidget);
+      await tester.ensureVisible(find.text('10 мин 41 сек'));
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('0 B'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   test('health report normalizes Windows and Android result payloads', () {
     final route = RouteService.fromBypassSummaryJson({
       'tag': 'youtube',
@@ -499,10 +571,7 @@ void main() {
       await tester.pump();
       expect(bridge.toggles, 1);
       expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
-      expect(
-        find.byType(Tooltip),
-        findsNothing,
-      );
+      expect(find.byType(Tooltip), findsNothing);
       await _tap(tester, 'nav-logs');
       expect(find.text('Копировать всё'), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -778,7 +847,7 @@ void main() {
       await _tap(tester, 'home-connect');
       expect(bridge.toggles, 0);
       expect(
-        find.text('Добавьте VPN-подписку для запуска на Android.'),
+        find.text('Добавьте свою подписку или бесплатный VPN-источник.'),
         findsOneWidget,
       );
       await _tap(tester, 'nav-sources');
@@ -964,8 +1033,8 @@ void main() {
           await _tap(tester, 'toggle-home-route-services');
           await _tap(tester, 'toggle-home-route-services');
           expect(tester.takeException(), isNull);
-          await _tap(tester, 'add-home-route-service');
-          expect(find.text('Добавить сервис'), findsWidgets);
+          await _tap(tester, 'request-home-service');
+          expect(find.text('Предложить сервис'), findsWidgets);
           expect(tester.takeException(), isNull);
         },
       );
@@ -1052,8 +1121,12 @@ void main() {
             find.byKey(const ValueKey('navigation-drawer')),
             findsOneWidget,
           );
-          await _tap(tester, 'nav-services');
-          expect(find.byType(ServiceRoutesPage), findsOneWidget);
+          expect(find.byKey(const ValueKey('nav-services')), findsNothing);
+          await _tap(tester, 'nav-settings');
+          expect(
+            find.byKey(const ValueKey('link-service-settings')),
+            findsNothing,
+          );
           expect(find.byKey(const ValueKey('navigation-drawer')), findsNothing);
           await _tap(tester, 'nav-home');
           await _tap(tester, 'home-routing-all-vpn');
@@ -1073,7 +1146,7 @@ void main() {
         'home-connect',
         'home-routing-selected',
         'home-routing-all-vpn',
-        'link-service-settings',
+        'toggle-home-route-services',
       ]) {
         final rect = tester.getRect(find.byKey(ValueKey(key)));
         expect(rect.top, greaterThanOrEqualTo(0));
@@ -1210,31 +1283,31 @@ void main() {
     expect(find.text('Отключить'), findsOneWidget);
   });
 
-  testWidgets('compact dropdown has a touch target and persists a route', (
+  testWidgets('compact service row has a touch target and persists a route', (
     tester,
   ) async {
     final bridge = _HomeBridge();
     await bridge.saveSubscription('https://example.test/subscription');
     await _pumpHome(tester, bridge, size: const Size(700, 500));
-    await _tap(tester, 'nav-service-settings');
-    final dropdown = find.byKey(const ValueKey('home-route-policy-openai-vpn'));
-    expect(tester.getSize(dropdown).height, greaterThanOrEqualTo(48));
-    await tester.tap(dropdown);
-    await tester.pumpAndSettle();
-    await tester.tap(
-      find.byKey(const ValueKey('home-route-openai-direct')).last,
-    );
-    await tester.pumpAndSettle();
+    await openHomeService(tester, 'openai');
+    final row = find.byKey(const ValueKey('home-service-row-openai'));
+    expect(tester.getSize(row).height, greaterThanOrEqualTo(56));
+    await _tap(tester, 'service-route-openai-direct');
     expect(bridge.policyWrites, 1);
     expect(
-      find.byKey(const ValueKey('home-route-policy-openai-direct')),
+      find.byKey(const ValueKey('service-route-openai-direct')),
       findsOneWidget,
     );
     await _tap(tester, 'toggle-home-route-services');
-    expect(find.byType(DropdownButton<String>), findsNothing);
+    expect(find.byKey(const ValueKey('service-search')), findsNothing);
     await _tap(tester, 'toggle-home-route-services');
-    await _tap(tester, 'add-home-route-service');
-    expect(find.byKey(const ValueKey('add-home-route-google')), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('service-search')),
+      'google',
+    );
+    await tester.pump();
+    await _tap(tester, 'home-service-row-google');
+    expect(find.byKey(const ValueKey('pin-service-google')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -1246,38 +1319,39 @@ void main() {
         addTearDown(() => debugMobileShellOverride = null);
         final bridge = _PolicyContractBridge(mobile);
         await _pumpHome(tester, bridge, size: const Size(700, 500));
-        await _tap(tester, 'nav-service-settings');
-        final policy = mobile ? 'auto' : 'direct';
-        final dropdown = tester.widget<DropdownButton<String>>(
-          find.byKey(ValueKey('home-route-policy-youtube-$policy')),
+        await openHomeService(tester, 'youtube');
+        for (final policy
+            in mobile
+                ? ['auto', 'direct', 'vpn']
+                : ['direct', 'vpn', 'zapret']) {
+          expect(
+            find.byKey(ValueKey('service-route-youtube-$policy')),
+            findsOneWidget,
+          );
+        }
+        expect(
+          find.byKey(const ValueKey('service-route-youtube-auto')),
+          mobile ? findsOneWidget : findsNothing,
         );
         expect(
-          dropdown.items!.map((item) => item.value).toList(),
-          mobile ? ['auto', 'direct', 'vpn'] : ['direct', 'vpn', 'zapret'],
+          find.byKey(const ValueKey('service-route-youtube-zapret')),
+          mobile ? findsNothing : findsOneWidget,
         );
-        expect(dropdown.value, policy);
         expect(
           bridge.policyWrites,
           0,
           reason: 'Navigation never rewrites saved routes',
         );
-        await tester.tap(
-          find.byKey(ValueKey('home-route-policy-youtube-$policy')),
-        );
-        await tester.pumpAndSettle();
-        await tester.tap(
-          find.byKey(const ValueKey('home-route-youtube-vpn')).last,
-        );
-        await tester.pumpAndSettle();
+        await _tap(tester, 'service-route-youtube-vpn');
         expect(bridge.policyWrites, 1);
         expect(
-          find.byKey(const ValueKey('home-route-policy-youtube-vpn')),
+          find.byKey(const ValueKey('service-route-youtube-vpn')),
           findsOneWidget,
         );
         await _tap(tester, 'nav-home');
-        await _tap(tester, 'nav-service-settings');
+        await openHomeService(tester, 'youtube');
         expect(
-          find.byKey(const ValueKey('home-route-policy-youtube-vpn')),
+          find.byKey(const ValueKey('service-route-youtube-vpn')),
           findsOneWidget,
         );
         expect(bridge.policyWrites, 1);
@@ -1293,11 +1367,19 @@ void main() {
     final bridge = _HomeBridge()..connected = true;
     await bridge.saveSubscription('https://example.test/subscription');
     await _pumpHome(tester, bridge, size: const Size(390, 844));
-    await _tap(tester, 'nav-service-settings');
-    for (final dropdown in tester.widgetList<DropdownButton<String>>(
-      find.byType(DropdownButton<String>),
-    )) {
-      expect(dropdown.onChanged, isNull);
+    await openHomeService(tester, 'youtube');
+    for (final policy in ['auto', 'direct', 'vpn']) {
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.descendant(
+                of: find.byKey(ValueKey('service-route-youtube-$policy')),
+                matching: find.byType(OutlinedButton),
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
     }
     expect(
       tester
@@ -1307,6 +1389,9 @@ void main() {
           .onPressed,
       isNull,
     );
+    await _tap(tester, 'nav-advanced');
+    expect(find.byKey(const ValueKey('link-work')), findsNothing);
+    expect(find.byKey(const ValueKey('link-profiles')), findsNothing);
     await _tap(tester, 'nav-dropo_space');
     expect(find.byKey(const ValueKey('dropo-space-section')), findsOneWidget);
     await _tap(tester, 'toggle-navigation');
@@ -1324,15 +1409,85 @@ void main() {
   ) async {
     final bridge = _HomeBridge();
     await _pumpHome(tester, bridge, size: const Size(700, 500));
-    await _tap(tester, 'nav-service-settings');
-    await _tap(tester, 'section-back');
+    await _tap(tester, 'toggle-home-route-services');
+    await _tap(tester, 'toggle-home-route-services');
     expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
     await _tap(tester, 'nav-settings');
-    await _tap(tester, 'nav-service-settings');
+    await _tap(tester, 'nav-app-settings');
     await tester.binding.handlePopRoute();
     await tester.pump();
     expect(find.byKey(const ValueKey('settings-section')), findsOneWidget);
     expect(bridge.policyWrites, 0);
+  });
+
+  testWidgets('Android Back navigates primary pages and leaves VPN running', (
+    tester,
+  ) async {
+    debugMobileShellOverride = true;
+    addTearDown(() => debugMobileShellOverride = null);
+    final bridge = _HomeBridge()..connected = true;
+    await bridge.saveSubscription('https://example.test/subscription');
+    await _pumpHome(tester, bridge, size: const Size(390, 844));
+    for (final section in ['sources', 'settings', 'account', 'help']) {
+      await _tap(tester, 'nav-$section');
+      expect(find.byKey(const ValueKey('section-back')), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
+      expect(bridge.connected, isTrue);
+      expect(bridge.toggles, 0);
+    }
+    expect(bridge.policyWrites, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Android can save all-traffic mode before adding a source', (
+    tester,
+  ) async {
+    debugMobileShellOverride = true;
+    addTearDown(() => debugMobileShellOverride = null);
+    final bridge = _OnboardingBridge();
+    await _pumpHome(tester, bridge, size: const Size(390, 844));
+    await _tap(tester, 'home-routing-all-vpn');
+    expect((await bridge.appConfig())['routingMode'], 'all_traffic');
+    expect(find.byType(VpnSourcesDialog), findsNothing);
+    expect(bridge.personalAdds, 0);
+    expect(bridge.toggles, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Android add form remains usable with keyboard and large text', (
+    tester,
+  ) async {
+    debugMobileShellOverride = true;
+    addTearDown(() => debugMobileShellOverride = null);
+    addTearDown(tester.view.resetViewInsets);
+    final bridge = _OnboardingBridge();
+    await _pumpHome(tester, bridge, size: const Size(320, 568), scale: 2);
+    await _tap(tester, 'nav-sources');
+    await _tap(tester, 'choose-personal-source');
+    final uri = find.byKey(const ValueKey('personal-vpn-uri'));
+    await tester.ensureVisible(uri);
+    await tester.enterText(uri, 'https://example.test/subscription');
+    tester.view.viewInsets = const FakeViewPadding(bottom: 280);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.testTextInput.receiveAction(TextInputAction.next);
+    await tester.pump();
+    final name = find.byKey(const ValueKey('personal-vpn-name'));
+    expect(tester.widget<TextField>(name).focusNode?.hasFocus, isTrue);
+    await tester.enterText(name, 'Мой телефон');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(bridge.personalTests, 1);
+    expect(bridge.personalAdds, 1);
+    expect(
+      find.byKey(const ValueKey('onboarding-ready-connect')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('simple settings recover after a transport error', (
@@ -1370,9 +1525,13 @@ void main() {
       motion: true,
       size: const Size(700, 500),
     );
-    double phase() => atlasPlanetPhaseForTesting(tester
-        .widget<CustomPaint>(find.byKey(const ValueKey('atlas-planet-motion')))
-        .foregroundPainter!);
+    double phase() => atlasPlanetPhaseForTesting(
+      tester
+          .widget<CustomPaint>(
+            find.byKey(const ValueKey('atlas-planet-motion')),
+          )
+          .foregroundPainter!,
+    );
     final first = phase();
     await tester.pump(const Duration(seconds: 1));
     final moved = phase();

@@ -34,6 +34,17 @@ class _FeaturePageState extends State<_FeaturePage> {
       final compact =
           pageConstraints.maxWidth < 500 ||
           MediaQuery.textScalerOf(context).scale(1) > 1.4;
+      final pinHeader =
+          widget.headerAction != null &&
+          pageConstraints.maxHeight >= 160 &&
+          MediaQuery.viewInsetsOf(context).bottom == 0;
+      final compactAction = Padding(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+        child: Align(
+          alignment: Alignment.centerRight,
+          child: widget.headerAction,
+        ),
+      );
       final heading = Padding(
         padding: const EdgeInsets.all(20),
         child: LayoutBuilder(
@@ -45,8 +56,12 @@ class _FeaturePageState extends State<_FeaturePage> {
                 Expanded(
                   child: Text(
                     widget.title,
-                    style: const TextStyle(
-                      fontSize: 24,
+                    style: TextStyle(
+                      fontSize: pageConstraints.maxWidth < 330
+                          ? 18
+                          : pageConstraints.maxWidth < 500
+                          ? 20
+                          : 24,
                       fontWeight: FontWeight.w700,
                       color: _homeText,
                     ),
@@ -70,7 +85,9 @@ class _FeaturePageState extends State<_FeaturePage> {
         child: CustomScrollView(
           controller: scroll,
           slivers: [
-            if (widget.headerAction == null || compact)
+            if (widget.headerAction != null && compact && !pinHeader)
+              SliverToBoxAdapter(child: compactAction),
+            if (widget.headerAction == null || compact || !pinHeader)
               SliverToBoxAdapter(child: heading),
             if (widget.child != null)
               SliverPadding(
@@ -84,20 +101,11 @@ class _FeaturePageState extends State<_FeaturePage> {
       return Material(
         key: const ValueKey('flat-feature-page'),
         color: Colors.transparent,
-        child: widget.headerAction == null
+        child: !pinHeader
             ? body
             : Column(
                 children: [
-                  if (compact)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-                      child: Align(
-                        alignment: Alignment.centerRight,
-                        child: widget.headerAction!,
-                      ),
-                    )
-                  else
-                    heading,
+                  if (compact) compactAction else heading,
                   Expanded(child: body),
                 ],
               ),

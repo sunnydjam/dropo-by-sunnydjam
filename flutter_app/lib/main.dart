@@ -23,6 +23,8 @@ part 'update_progress.dart';
 part 'vpn_response.dart';
 part 'app_about.dart';
 part 'service_routes.dart';
+part 'home_services.dart';
+part 'service_icons.dart';
 part 'minimal_settings.dart';
 part 'connection_health.dart';
 part 'android_vpn_protection.dart';
@@ -48,6 +50,14 @@ const String _accountEndpoint = String.fromEnvironment(
   'DROPO_ACCOUNT_ENDPOINT',
   defaultValue: 'http://127.0.0.1:18080',
 );
+
+bool get _mobileAccountAvailable {
+  final uri = Uri.tryParse(_accountEndpoint);
+  return uri != null &&
+      uri.scheme == 'https' &&
+      uri.host.isNotEmpty &&
+      !const {'localhost', '127.0.0.1', '::1'}.contains(uri.host.toLowerCase());
+}
 
 @visibleForTesting
 String? coreCompatibilityError(
@@ -1149,10 +1159,8 @@ class HttpCoreBridge implements CoreBridge {
 
 class ChannelCoreBridge implements CoreBridge {
   @override
-  Future<Map<String, dynamic>> setReduceMotion(bool reduced) async => {
-    'success': false,
-    'error': 'Используйте системную настройку уменьшения движения.',
-  };
+  Future<Map<String, dynamic>> setReduceMotion(bool reduced) =>
+      callMap('SetReduceMotion', args: [reduced]);
   ChannelCoreBridge({MethodChannel? channel, EventChannel? events})
     : _channel = channel ?? const MethodChannel('dropo/core'),
       _events = events ?? const EventChannel('dropo/core/events');
@@ -1500,80 +1508,67 @@ class ChannelCoreBridge implements CoreBridge {
   }
 
   @override
-  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async =>
-      VpnSourcesSnapshot(sources: await vpnSources());
-
-  @override
-  Future<List<VpnSourceInfo>> vpnSources() async {
-    final current = await subscription();
-    if (!current.hasSubscription) return const [];
-    return [
-      VpnSourceInfo(
-        id: 'source-1',
-        name: 'Primary',
-        kind: 'subscription',
-        disabled: false,
-        selectedNode: 0,
-        nodeCount: current.proxyCount,
-        nodeNames: const [],
-        lastUpdated: '',
-        lastError: '',
-      ),
-    ];
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async {
+    final result = await callMap('GetVPNSources');
+    if (result['success'] != true || result['sources'] is! List) {
+      throw StateError('Не удалось получить источники VPN');
+    }
+    return VpnSourcesSnapshot.fromJson(result);
   }
 
   @override
-  Future<Map<String, dynamic>> addVpnSource(String name, String uri) =>
-      saveSubscription(uri);
+  Future<List<VpnSourceInfo>> vpnSources() async {
+    return (await vpnSourcesSnapshot()).sources;
+  }
 
   @override
-  Future<List<PublicVpnProviderInfo>> publicVpnProviders() async => const [];
+  Future<Map<String, dynamic>> addVpnSource(String name, String uri) => callMap(
+    'AddVPNSource',
+    args: [name.trim(), uri.trim()],
+    timeout: const Duration(minutes: 3),
+  );
 
   @override
-  Future<Map<String, dynamic>> addPublicVpnSource(
-    String id,
-    bool consent,
-  ) async => {
-    'success': false,
-    'error': 'Каталог бесплатных источников пока доступен на Windows',
-  };
+  Future<List<PublicVpnProviderInfo>> publicVpnProviders() async {
+    final result = await callMap('GetPublicVPNProviders');
+    if (result['success'] != true) throw StateError('Каталог недоступен');
+    return (result['providers'] as List? ?? const [])
+        .map(_asMap)
+        .map(PublicVpnProviderInfo.fromJson)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<Map<String, dynamic>> addPublicVpnSource(String id, bool consent) =>
+      callMap(
+        'AddPublicVPNSource',
+        args: [id, consent],
+        timeout: const Duration(minutes: 3),
+      );
 
   @override
   Future<Map<String, dynamic>> removeVpnSource(String id) =>
-      saveSubscription('');
+      callMap('RemoveVPNSource', args: [id]);
 
   @override
-  Future<Map<String, dynamic>> setVpnSourceNode(
-    String id,
-    int nodeIndex,
-  ) async => {
-    'success': nodeIndex == 0,
-    'error': 'Выбор узла доступен на Windows',
-  };
+  Future<Map<String, dynamic>> setVpnSourceNode(String id, int nodeIndex) =>
+      callMap('SetVPNSourceNode', args: [id, nodeIndex]);
 
   @override
-  Future<Map<String, dynamic>> setVpnSourceEnabled(
-    String id,
-    bool enabled,
-  ) async => {
-    'success': false,
-    'error': 'Управление источниками доступно на Windows',
-  };
+  Future<Map<String, dynamic>> setVpnSourceEnabled(String id, bool enabled) =>
+      callMap('SetVPNSourceEnabled', args: [id, enabled]);
 
   @override
-  Future<Map<String, dynamic>> moveVpnSource(String id, int newIndex) async => {
-    'success': false,
-    'error': 'Порядок источников доступен на Windows',
-  };
+  Future<Map<String, dynamic>> moveVpnSource(String id, int newIndex) =>
+      callMap('MoveVPNSource', args: [id, newIndex]);
 
   @override
-  Future<Map<String, dynamic>> enableVpnSourceAutoSelect() async => {
-    'success': false,
-    'error': 'Автовыбор источников доступен на Windows',
-  };
+  Future<Map<String, dynamic>> enableVpnSourceAutoSelect() =>
+      callMap('EnableVPNSourceAutoSelect');
 
   @override
-  Future<Map<String, dynamic>> refreshVpnSources() async => {'success': true};
+  Future<Map<String, dynamic>> refreshVpnSources() =>
+      callMap('RefreshVPNSources', timeout: const Duration(minutes: 3));
 
   @override
   Future<Map<String, dynamic>> saveSubscription(String value) {
@@ -3456,6 +3451,7 @@ class TrafficDataInfo {
     required this.uploadedStr,
     required this.downloadedStr,
     required this.durationStr,
+    this.trafficAvailable = true,
   });
 
   final int uploaded;
@@ -3464,15 +3460,22 @@ class TrafficDataInfo {
   final String uploadedStr;
   final String downloadedStr;
   final String durationStr;
+  final bool trafficAvailable;
 
   factory TrafficDataInfo.fromJson(Map<String, dynamic> json) {
+    final trafficAvailable = json['trafficAvailable'] != false;
     return TrafficDataInfo(
       uploaded: _asInt(json['uploaded']),
       downloaded: _asInt(json['downloaded']),
       duration: _asInt(json['duration']),
-      uploadedStr: json['uploadedStr']?.toString() ?? '0 B',
-      downloadedStr: json['downloadedStr']?.toString() ?? '0 B',
+      uploadedStr: trafficAvailable
+          ? json['uploadedStr']?.toString() ?? '0 B'
+          : 'Нет данных',
+      downloadedStr: trafficAvailable
+          ? json['downloadedStr']?.toString() ?? '0 B'
+          : 'Нет данных',
       durationStr: json['durationStr']?.toString() ?? '0 сек',
+      trafficAvailable: trafficAvailable,
     );
   }
 }
@@ -3484,6 +3487,7 @@ class TrafficStatsInfo {
     required this.last,
     required this.total,
     required this.sessions,
+    this.trafficAvailable = true,
   });
 
   final bool success;
@@ -3491,8 +3495,11 @@ class TrafficStatsInfo {
   final TrafficDataInfo last;
   final TrafficDataInfo total;
   final int sessions;
+  final bool trafficAvailable;
 
-  static final empty = TrafficStatsInfo.fromJson(const {});
+  static final empty = TrafficStatsInfo.fromJson(const {
+    'trafficAvailable': false,
+  });
 
   factory TrafficStatsInfo.fromJson(Map<String, dynamic> json) {
     final total = _asMap(json['total']);
@@ -3502,6 +3509,7 @@ class TrafficStatsInfo {
       last: TrafficDataInfo.fromJson(_asMap(json['last'])),
       total: TrafficDataInfo.fromJson(total),
       sessions: _asInt(total['sessions']),
+      trafficAvailable: json['trafficAvailable'] != false,
     );
   }
 }
@@ -3789,7 +3797,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   String updateError = '';
   int updateDownloaded = 0;
   int updateTotal = 0;
-  bool homeRoutesExpanded = true;
+  bool homeRoutesExpanded = false;
   bool preparingFullVpnSource = false;
   final List<String> _sectionHistory = [];
 
@@ -4871,16 +4879,18 @@ class _DropoHomePageState extends State<DropoHomePage>
       return;
     }
     setState(() {
-      statusMessage = 'Нужна VPN-подписка';
+      statusMessage = 'Нужен источник VPN';
       connectionHint =
-          'На Android запуск доступен после добавления VPN-подписки. Бесплатные методы без подписки сейчас не используются.';
+          'Добавьте свою подписку или выберите бесплатный источник в каталоге. После этого можно подключаться в любом из двух режимов.';
       connectionHintDanger = true;
     });
     final messenger = ScaffoldMessenger.maybeOf(context);
     messenger?.hideCurrentSnackBar();
     messenger?.showSnackBar(
       SnackBar(
-        content: const Text('Добавьте VPN-подписку для запуска на Android.'),
+        content: const Text(
+          'Добавьте свою подписку или бесплатный VPN-источник.',
+        ),
         action: SnackBarAction(
           label: 'Добавить',
           onPressed: () => unawaited(_openSubscription()),
@@ -5848,18 +5858,6 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (uiBusy || mode == appConfig.routingMode) {
       return;
     }
-    if (mode == 'all_traffic' &&
-        !subscription.hasSubscription &&
-        _isMobileShell) {
-      setState(() {
-        statusMessage = 'Для режима «Всё через VPN» нужна VPN-подписка';
-        connectionHint = 'Добавьте подписку, затем включите общий VPN-режим.';
-        connectionHintDanger = true;
-      });
-      await _openSubscription();
-      return;
-    }
-
     setState(() {
       uiBusy = true;
       statusMessage = mode == 'all_traffic'
@@ -6120,7 +6118,28 @@ class _DropoHomePageState extends State<DropoHomePage>
                   ),
               ],
             ),
-      routes: _buildRouteControls(summaryOnly: true),
+      servicesExpanded:
+          homeRoutesExpanded && appConfig.routingMode == 'blocked_only',
+      routes: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildRouteControls(summaryOnly: true),
+          const SizedBox(height: 12),
+          _HomeServicesAccordion(
+            key: const ValueKey('home-services'),
+            bridge: widget.bridge,
+            routeSnapshot: online ? routes : null,
+            connected: online && status.connected,
+            enabled: online && !quitting && !uiBusy && !connectionBusy,
+            routingMode: appConfig.routingMode,
+            expanded: homeRoutesExpanded,
+            onExpandedChanged: (expanded) =>
+                setState(() => homeRoutesExpanded = expanded),
+            onBusyChanged: _setSectionBusy,
+            onChanged: () => unawaited(_refresh(all: true)),
+          ),
+        ],
+      ),
     );
   }
 
@@ -6144,44 +6163,11 @@ class _DropoHomePageState extends State<DropoHomePage>
     onZapretStrategyChanged: _setHomeZapretStrategy,
     onAdd: controlsDisabled ? null : _openAddHomeRouteService,
     onRemove: _setHomeRouteVisibility,
-    onAllServices: quitting || sectionBusy
-        ? null
-        : () => unawaited(_selectMenuSection('service-settings')),
+    onAllServices: null,
   );
 
   Widget _buildMenuSection() {
     switch (activeMenuSection) {
-      case 'service-settings':
-        return SingleChildScrollView(
-          key: const ValueKey('service-settings-section'),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 560),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _ConnectionHint(
-                    visible: connectionHint.trim().isNotEmpty,
-                    title: _hintTitle(),
-                    message: connectionHint,
-                    danger: connectionHintDanger,
-                  ),
-                  _buildRouteControls(),
-                  const SizedBox(height: 12),
-                  _SettingsLink(
-                    section: 'services',
-                    title: 'Все сервисы',
-                    detail: 'Полный каталог и поиск по доменам',
-                    icon: Icons.search,
-                    onPressed: quitting || sectionBusy
-                        ? null
-                        : () => unawaited(_selectMenuSection('services')),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
       case 'settings':
       case 'advanced':
       case 'help':
@@ -6189,28 +6175,23 @@ class _DropoHomePageState extends State<DropoHomePage>
           section: activeMenuSection,
           disabled: quitting || sectionBusy,
           onSelect: (section) => unawaited(_selectMenuSection(section)),
-          onWorkNetworks: controlsDisabled ? null : _openWireGuard,
+          onWorkNetworks: controlsDisabled || _isMobileShell
+              ? null
+              : _openWireGuard,
           onExit: quitting ? null : _quitApp,
         );
       case 'account':
         return AccountPage(
           key: const ValueKey('account-section'),
           endpoint: _accountEndpoint,
+          available:
+              !_isMobileShell ||
+              debugAccountTransport != null ||
+              _mobileAccountAvailable,
           onOpenExternal: widget.bridge.openExternal,
           persistSession: debugAccountTransport == null,
           transport: debugAccountTransport,
           initialToken: debugAccountSessionToken,
-        );
-      case 'services':
-        return ServiceRoutesPage(
-          key: const ValueKey('services-section'),
-          bridge: widget.bridge,
-          routeSnapshot: online ? routes : null,
-          connected: status.connected,
-          enabled: online && !quitting && !uiBusy && !connectionBusy,
-          routingMode: appConfig.routingMode,
-          onBusyChanged: _setSectionBusy,
-          onChanged: () => unawaited(_refresh(all: true)),
         );
       case 'sources':
         return VpnSourcesDialog(
@@ -6260,7 +6241,6 @@ class _DropoHomePageState extends State<DropoHomePage>
             }
           },
           onDownloadDependencies: () => unawaited(_downloadDependencies()),
-          onOpenServices: () => unawaited(_selectMenuSection('services')),
         );
       case 'dropo_space':
         return _AndroidCompatibilityPage(
@@ -6321,7 +6301,9 @@ class _DropoHomePageState extends State<DropoHomePage>
               final previous = _sectionHistory.removeLast();
               unawaited(_selectMenuSection(previous, remember: false));
             },
-      onWorkNetworks: controlsDisabled ? null : _openWireGuard,
+      onWorkNetworks: controlsDisabled || _isMobileShell
+          ? null
+          : _openWireGuard,
       onExit: quitting ? null : _quitApp,
       version: status.version.version,
       onAbout: quitting ? null : _openAbout,
@@ -6396,6 +6378,12 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (!mounted || quitting || sectionBusy) {
       return;
     }
+    // Retired routes may remain in history; navigation must never change a
+    // saved traffic mode merely to reveal service settings.
+    if (section == 'services' || section == 'service-settings') {
+      section = 'home';
+      homeRoutesExpanded = true;
+    }
     setState(() {
       if (remember && section != activeMenuSection) {
         if (section == 'home' || section == 'settings') {
@@ -6432,6 +6420,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _openWireGuard() async {
+    if (_isMobileShell) return;
     final changed = await showDialog<bool>(
       context: context,
       builder: (context) => _WireGuardDialog(
@@ -9638,7 +9627,6 @@ class _SettingsDialog extends StatefulWidget {
     required this.onCheckUpdates,
     required this.onInstallUpdate,
     required this.onDownloadDependencies,
-    required this.onOpenServices,
     this.embedded = false,
     this.advanced = false,
     this.onChanged,
@@ -9651,7 +9639,6 @@ class _SettingsDialog extends StatefulWidget {
   final VoidCallback onCheckUpdates;
   final VoidCallback onInstallUpdate;
   final VoidCallback onDownloadDependencies;
-  final VoidCallback onOpenServices;
   final bool embedded;
   final bool advanced;
   final ValueChanged<AppConfig>? onChanged;
@@ -9899,7 +9886,9 @@ class _SettingsDialogState extends State<_SettingsDialog>
               if (widget.advanced)
                 _SwitchSetting(
                   title: 'Логирование sing-box',
-                  description: 'Записывать логи в файл',
+                  description: isMobile
+                      ? 'Записывать журнал соединения'
+                      : 'Записывать логи в файл',
                   value: config.enableLogging,
                   onChanged: canChangeRuntime
                       ? (value) =>
@@ -9930,8 +9919,12 @@ class _SettingsDialogState extends State<_SettingsDialog>
             title: 'Подписка',
             children: [
               _SwitchSetting(
-                title: 'Авто-обновление',
-                description: 'Обновлять подписку автоматически',
+                title: isMobile
+                    ? 'Обновлять списки серверов в фоне'
+                    : 'Авто-обновление',
+                description: isMobile
+                    ? 'Проверяем при подключении с выбранным интервалом. Обновлённый список используется при следующем подключении.'
+                    : 'Обновлять подписку автоматически',
                 value: config.autoUpdateSub,
                 onChanged: canUseLiveSafe
                     ? (value) =>
@@ -10016,19 +10009,19 @@ class _SettingsDialogState extends State<_SettingsDialog>
           _SettingsGroup(
             title: 'Внешний вид',
             children: [
-              if (!isMobile)
-                _SwitchSetting(
-                  title: 'Анимации интерфейса',
-                  description:
-                      'Планета, звёзды и мягкий рассвет. Движение останавливается в трее; системное уменьшение движения имеет приоритет.',
-                  value: !config.reduceMotion,
-                  onChanged: canUseLiveSafe
-                      ? (value) => _applySpecial(
-                          () => widget.bridge.setReduceMotion(!value),
-                          config.copyWith(reduceMotion: !value),
-                        )
-                      : null,
-                ),
+              _SwitchSetting(
+                title: 'Анимации интерфейса',
+                description: isMobile
+                    ? 'Планета, звёзды и мягкий рассвет. Движение останавливается, когда приложение свёрнуто; системное уменьшение движения имеет приоритет.'
+                    : 'Планета, звёзды и мягкий рассвет. Движение останавливается в трее; системное уменьшение движения имеет приоритет.',
+                value: !config.reduceMotion,
+                onChanged: canUseLiveSafe
+                    ? (value) => _applySpecial(
+                        () => widget.bridge.setReduceMotion(!value),
+                        config.copyWith(reduceMotion: !value),
+                      )
+                    : null,
+              ),
               const ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: Text('Atlas'),
@@ -10098,20 +10091,6 @@ class _SettingsDialogState extends State<_SettingsDialog>
                   body:
                       'В режиме «По сервисам» применяются выбранные маршруты; остальное идёт напрямую. В режиме «Всё через VPN» используется TUN. Встроенный движок обхода работает только для выбранных сервисов.',
                 ),
-            ],
-          ),
-        if (widget.advanced)
-          _SettingsGroup(
-            title: 'Сервисы',
-            children: [
-              _ButtonSetting(
-                title: 'Сервисы и маршруты',
-                description:
-                    'Полный каталог, выбор маршрутов и быстрый список сервисов.',
-                label: 'Открыть',
-                icon: Icons.apps_outlined,
-                onPressed: saving ? null : widget.onOpenServices,
-              ),
             ],
           ),
         if (widget.advanced)
@@ -10643,6 +10622,10 @@ class _StatsDialogState extends State<_StatsDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final currentTrafficAvailable =
+        stats.trafficAvailable && stats.current.trafficAvailable;
+    final totalTrafficAvailable =
+        stats.trafficAvailable && stats.total.trafficAvailable;
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -10651,31 +10634,43 @@ class _StatsDialogState extends State<_StatsDialog> {
           style: TextStyle(color: Color(0xFF8892B0), fontSize: 12),
         ),
         const SizedBox(height: 14),
-        _ChartPlaceholder(
-          title: 'Скорость (последние 30 сек)',
-          upload: stats.current.uploaded,
-          download: stats.current.downloaded,
-        ),
-        const SizedBox(height: 10),
-        _ChartPlaceholder(
-          title: 'Трафик за сессию',
-          upload: stats.current.uploaded,
-          download: stats.current.downloaded,
-          compact: true,
-        ),
+        if (currentTrafficAvailable) ...[
+          _ChartPlaceholder(
+            title: 'Скорость (последние 30 сек)',
+            upload: stats.current.uploaded,
+            download: stats.current.downloaded,
+          ),
+          const SizedBox(height: 10),
+          _ChartPlaceholder(
+            title: 'Трафик за сессию',
+            upload: stats.current.uploaded,
+            download: stats.current.downloaded,
+            compact: true,
+          ),
+        ] else
+          const _InfoBand(
+            icon: Icons.info_outline,
+            title: 'Счётчики трафика недоступны',
+            body:
+                'Длительность подключений и количество сессий учитываются отдельно.',
+          ),
         const SizedBox(height: 14),
         const _StatsSectionTitle('Текущая сессия'),
         _StatsGrid(
           children: [
             _StatCard(
               icon: Icons.arrow_upward,
-              value: stats.current.uploadedStr,
+              value: currentTrafficAvailable
+                  ? stats.current.uploadedStr
+                  : 'Нет данных',
               label: 'Отправлено',
               color: const Color(0xFF36D399),
             ),
             _StatCard(
               icon: Icons.arrow_downward,
-              value: stats.current.downloadedStr,
+              value: currentTrafficAvailable
+                  ? stats.current.downloadedStr
+                  : 'Нет данных',
               label: 'Получено',
               color: const Color(0xFF60A5FA),
             ),
@@ -10693,13 +10688,17 @@ class _StatsDialogState extends State<_StatsDialog> {
           children: [
             _StatCard(
               icon: Icons.arrow_upward,
-              value: stats.total.uploadedStr,
+              value: totalTrafficAvailable
+                  ? stats.total.uploadedStr
+                  : 'Нет данных',
               label: 'Отправлено',
               color: const Color(0xFF36D399),
             ),
             _StatCard(
               icon: Icons.arrow_downward,
-              value: stats.total.downloadedStr,
+              value: totalTrafficAvailable
+                  ? stats.total.downloadedStr
+                  : 'Нет данных',
               label: 'Получено',
               color: const Color(0xFF60A5FA),
             ),
@@ -11561,7 +11560,9 @@ String _routingModeDescription(String mode) {
     'all_traffic' =>
       'Весь трафик через VPN. Максимальная приватность, высокая нагрузка.',
     _ =>
-      'VPN и Zapret работают только для выбранных сервисов. Остальной трафик идёт напрямую.',
+      _isMobileShell
+          ? 'VPN работает только для выбранных сервисов. Остальной трафик идёт напрямую.'
+          : 'VPN и Zapret работают только для выбранных сервисов. Остальной трафик идёт напрямую.',
   };
 }
 
