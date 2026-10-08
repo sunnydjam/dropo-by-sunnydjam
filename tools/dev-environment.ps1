@@ -32,7 +32,7 @@ function Add-DropoGoSdkToPath {
         return
     }
 
-    $goBin = Join-Path $ToolchainRoot "go-1.25.13\go\bin"
+    $goBin = Join-Path $ToolchainRoot "go-1.26.9\go\bin"
     $goExe = Join-Path $goBin "go.exe"
     if (Test-Path -LiteralPath $goExe -PathType Leaf) {
         $env:Path = "$goBin;$env:Path"

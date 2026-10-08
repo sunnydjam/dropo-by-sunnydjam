@@ -315,7 +315,7 @@ GitHub SHA-256 точного installer asset, выполняет тихое о�
 
 Требования:
 
-- Go 1.25.13;
+- Go 1.26.9;
 - Flutter 3.47.1 stable;
 - Visual Studio Build Tools 2022 с Desktop development with C++;
 - Windows 10/11 SDK;
