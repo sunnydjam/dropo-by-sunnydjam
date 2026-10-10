@@ -4,6 +4,21 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.0.44 — 2026-10-11
+
+- anchor the optional account control at the bottom-left of the desktop rail
+  and mobile footer; show only a safe public profile name outside Account;
+- make the connected Earth action transparent, enlarge the planet and keep
+  its size stable when switching routing modes or expanding Services;
+- use equal-sized routing segments and a stable service summary without
+  changing saved policies, sources or the two routing modes;
+- replace Android's browser-only APK update link with a user-confirmed native
+  download, byte progress, integrity checks and the system package installer;
+- keep Preview updates within the existing package and signer, handle the
+  per-app installation permission and retain the VPN during download;
+- preserve manual update confirmation on both platforms; Android installation
+  still requires system approval and does not promise an automatic restart.
+
 ## 3.0.43 — 2026-10-09
 
 - replace the clipped, nested update notification with a responsive overlay:

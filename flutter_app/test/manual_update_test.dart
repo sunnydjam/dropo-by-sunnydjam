@@ -15,6 +15,7 @@ class _ManualUpdateBridge extends MockCoreBridge {
   int _eventId = 100;
   int checkCalls = 0;
   int installCalls = 0;
+  int cancelCalls = 0;
   int prepareQuitCalls = 0;
   int finalizeQuitCalls = 0;
   final connectionChanges = <bool>[];
@@ -108,6 +109,20 @@ class _ManualUpdateBridge extends MockCoreBridge {
 
   @override
   Future<void> openExternal(String link) async => externalLinks.add(link);
+
+  @override
+  Future<Map<String, dynamic>> callMap(
+    String method, {
+    List<Object?> args = const [],
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    if (method == 'CancelAndroidUpdate') {
+      cancelCalls++;
+      installResult?.complete({'success': false, 'cancelled': true});
+      return {'success': true};
+    }
+    return super.callMap(method, args: args, timeout: timeout);
+  }
 
   void expectNoInstallOrInterruption() {
     expect(installCalls, 0);
@@ -584,10 +599,22 @@ void main() {
       mobile: true,
     );
     bridge.expectNoInstallOrInterruption();
-    await tester.tap(find.byKey(const ValueKey('update-available-action')));
+    await _openUpdateConfirmation(tester);
+    bridge.expectNoInstallOrInterruption();
+    expect(
+      find.textContaining('скачает APK внутри приложения'),
+      findsOneWidget,
+    );
+    await tester.tap(_confirmationButton('Отмена'));
     await tester.pump();
-    expect(bridge.externalLinks, [bridge.availableUpdate.downloadUrl]);
-    expect(bridge.installCalls, 0);
+    await tester.pump(const Duration(milliseconds: 300));
+    bridge.expectNoInstallOrInterruption();
+    await _openUpdateConfirmation(tester);
+    await tester.tap(_confirmationButton('Обновить'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(bridge.externalLinks, isEmpty);
+    expect(bridge.installCalls, 1);
     expect(bridge.prepareQuitCalls, 0);
     expect(bridge.finalizeQuitCalls, 0);
     expect(bridge.connectionChanges, isEmpty);
@@ -595,6 +622,141 @@ void main() {
     expect(find.byType(Dialog), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets(
+    'Android APK progress and installer handoff never exit or stop VPN',
+    (tester) async {
+      final bridge = await _pumpUpdater(
+        tester,
+        size: const Size(390, 844),
+        mobile: true,
+      );
+      // Preserve old selfUpdate:false metadata as an explicit regression fixture.
+      expect(bridge.availableUpdate.selfUpdate, isFalse);
+      bridge.installResult = Completer<Map<String, dynamic>>();
+      await _openUpdateConfirmation(tester);
+      await tester.tap(_confirmationButton('Обновить'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      bridge.updateEvent('update-stage', {
+        'stage': 'downloading',
+        'version': '3.0.35-preview',
+      });
+      bridge.updateEvent('update-progress', {
+        'percent': 50,
+        'downloaded': 1048576,
+        'total': 2097152,
+      });
+      await tester.pump();
+      expect(find.text('Обновление Dropo 3.0.35-preview'), findsOneWidget);
+      expect(find.text('50% · 1.0 из 2.0 МБ'), findsOneWidget);
+      await _capture(tester, 'android-update-native-progress-390');
+      bridge.updateEvent('update-stage', {'stage': 'permission'});
+      await tester.pump();
+      expect(find.textContaining('Разрешите установку'), findsWidgets);
+      await _capture(tester, 'android-update-install-permission-390');
+      bridge.installResult!.complete({
+        'success': true,
+        'installerOpened': true,
+      });
+      await tester.pump();
+      expect(find.text('Установщик Android открыт'), findsOneWidget);
+      expect(find.textContaining('запустится автоматически'), findsNothing);
+      expect(find.textContaining('Перезапуск'), findsNothing);
+      await _capture(tester, 'android-update-installer-ready-390');
+      bridge.updateEvent('update-stage', {'stage': 'downloading'});
+      bridge.updateEvent('update-progress', {'percent': 3});
+      await tester.pump();
+      expect(find.text('Установщик Android открыт'), findsOneWidget);
+      await tester.tap(find.text('Понятно'));
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('update-progress-overlay')),
+        findsNothing,
+      );
+      expect(bridge.installCalls, 1);
+      expect(bridge.externalLinks, isEmpty);
+      expect(bridge.prepareQuitCalls, 0);
+      expect(bridge.finalizeQuitCalls, 0);
+      expect(bridge.connectionChanges, isEmpty);
+      expect((await bridge.status()).connected, isTrue);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('Android download can be cancelled and retried only manually', (
+    tester,
+  ) async {
+    final bridge = await _pumpUpdater(tester, mobile: true);
+    bridge.installResult = Completer<Map<String, dynamic>>();
+    await _openUpdateConfirmation(tester);
+    await tester.tap(_confirmationButton('Обновить'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Отменить загрузку'));
+    await tester.pump();
+    expect(bridge.cancelCalls, 1);
+    expect(find.text('Загрузка отменена'), findsOneWidget);
+    bridge.updateEvent('update-progress', {'percent': 80});
+    await tester.pump();
+    expect(find.text('80%'), findsNothing);
+    await tester.tap(find.text('Понятно'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 30));
+    expect(bridge.installCalls, 1);
+    expect(bridge.connectionChanges, isEmpty);
+    expect(bridge.externalLinks, isEmpty);
+    bridge.installResult = null;
+    await _openUpdateConfirmation(tester);
+    await tester.tap(_confirmationButton('Обновить'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(bridge.installCalls, 2);
+    expect(find.text('Обновление не установлено'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'Android installer failure stays actionable at 200 percent text',
+    (tester) async {
+      final bridge = await _pumpUpdater(
+        tester,
+        mobile: true,
+        size: const Size(320, 568),
+        scale: 2,
+      );
+      bridge.installResult = Completer<Map<String, dynamic>>();
+      await _openUpdateConfirmation(tester);
+      final confirm = _confirmationButton('Обновить');
+      await tester.ensureVisible(confirm);
+      await tester.tap(confirm);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      // A success transport response without a real installer handoff is not
+      // success, and never enters the Windows exit/restart branch.
+      bridge.installResult!.complete({'success': true});
+      await tester.pump();
+      expect(
+        find.textContaining('Не удалось открыть системный установщик'),
+        findsOneWidget,
+      );
+      final close = find.text('Понятно');
+      await tester.ensureVisible(close);
+      await tester.tap(close);
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('update-progress-overlay')),
+        findsNothing,
+      );
+      expect(bridge.connectionChanges, isEmpty);
+      expect(bridge.prepareQuitCalls, 0);
+      expect(bridge.finalizeQuitCalls, 0);
+      expect(bridge.externalLinks, isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets('compact Android update exposes the version in app settings', (
     tester,

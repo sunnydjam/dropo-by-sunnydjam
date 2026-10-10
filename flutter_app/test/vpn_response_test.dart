@@ -177,7 +177,17 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('app-version')));
       await tester.pumpAndSettle();
       expect(find.text('Джамуха (sunnydjam)'), findsOneWidget);
-      expect(find.text('Telegram'), findsNothing);
+      // The account footer may show Telegram behind the modal. The About
+      // content itself must not invent a developer Telegram contact.
+      final aboutDialog = find.ancestor(
+        of: find.text('О приложении'),
+        matching: find.byType(Dialog),
+      );
+      expect(aboutDialog, findsOneWidget);
+      expect(
+        find.descendant(of: aboutDialog, matching: find.text('Telegram')),
+        findsNothing,
+      );
       expect(tester.takeException(), isNull);
       await _capture(tester, 'about-${size.width.toInt()}-$scale');
       await tester.pumpWidget(const SizedBox.shrink());

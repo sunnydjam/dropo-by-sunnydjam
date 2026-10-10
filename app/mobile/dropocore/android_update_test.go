@@ -11,7 +11,7 @@ import (
 func TestSelectLatestAndroidReleaseSkipsReleaseWithoutTrustedAPK(t *testing.T) {
 	data := `[
 		{"tag_name":"v3.0.4","assets":[{"name":"dropo-Windows-x64.exe","browser_download_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.4/dropo-Windows-x64.exe","size":10}]},
-		{"tag_name":"v3.0.3","assets":[{"name":"dropo-Android-arm64.apk","browser_download_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.3/dropo-Android-arm64.apk","size":20}]}
+		{"tag_name":"v3.0.3","assets":[{"name":"dropo-Android-arm64.apk","browser_download_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.3/dropo-Android-arm64.apk","size":20},{"name":"dropo-Android-arm64.apk.sha256","browser_download_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.3/dropo-Android-arm64.apk.sha256","size":96}]}
 	]`
 	var releases []androidGitHubRelease
 	if err := json.Unmarshal([]byte(data), &releases); err != nil {
@@ -33,7 +33,7 @@ func TestCheckAndroidUpdatesUsesReleaseListAndReportsNewVersion(t *testing.T) {
 			t.Fatalf("unexpected request: %s", r.URL.String())
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"tag_name":"v3.0.4","html_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v3.0.4","assets":[{"name":"dropo-Android-arm64.apk","browser_download_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.4/dropo-Android-arm64.apk","size":123}]}]`))
+		_, _ = w.Write([]byte(`[{"tag_name":"v3.0.4","html_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/tag/v3.0.4","assets":[{"name":"dropo-Android-arm64.apk","browser_download_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.4/dropo-Android-arm64.apk","size":123},{"name":"dropo-Android-arm64.apk.sha256","browser_download_url":"https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.4/dropo-Android-arm64.apk.sha256","size":96}]}]`))
 	}))
 	defer server.Close()
 
@@ -64,6 +64,13 @@ func androidReleaseWithAssetsForTest(tag string, names ...string) androidGitHubR
 			BrowserDownloadURL string `json:"browser_download_url"`
 			Size               int64  `json:"size"`
 		}{Name: name, BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/" + tag + "/" + name, Size: 123})
+		if strings.HasSuffix(name, ".apk") {
+			release.Assets = append(release.Assets, struct {
+				Name               string `json:"name"`
+				BrowserDownloadURL string `json:"browser_download_url"`
+				Size               int64  `json:"size"`
+			}{Name: name + ".sha256", BrowserDownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/" + tag + "/" + name + ".sha256", Size: 96})
+		}
 	}
 	return release
 }
@@ -196,7 +203,7 @@ func TestAndroidUpdateResponseUsesInstalledVersionChannel(t *testing.T) {
 				t.Fatal(err)
 			}
 			if result["success"] != true || result["hasUpdate"] != test.hasUpdate || result["latestVersion"] != test.latest ||
-				result["currentVersion"] != test.current || result["assetName"] != test.asset || result["updateChannel"] != test.channel || result["selfUpdate"] != false {
+				result["currentVersion"] != test.current || result["assetName"] != test.asset || result["updateChannel"] != test.channel || result["selfUpdate"] != true {
 				t.Fatalf("unexpected %s response: %#v", test.name, result)
 			}
 		})
@@ -218,5 +225,71 @@ func TestAndroidPreviewUpdateDoesNotOfferStableOnlyRelease(t *testing.T) {
 	}
 	if result["success"] != true || result["hasUpdate"] != false || result["latestVersion"] != "3.0.40-preview" || result["updateChannel"] != "preview" || result["downloadURL"] != nil {
 		t.Fatalf("Preview offered an incompatible production install: %#v", result)
+	}
+}
+
+func TestAndroidUpdateSkipsMissingOrInvalidChecksumSidecar(t *testing.T) {
+	for _, mutate := range []struct {
+		name string
+		edit func(*androidGitHubRelease)
+	}{
+		{"missing", func(r *androidGitHubRelease) { r.Assets = r.Assets[:1] }},
+		{"empty", func(r *androidGitHubRelease) { r.Assets[1].Size = 0 }},
+		{"unbounded", func(r *androidGitHubRelease) { r.Assets[1].Size = 1025 }},
+		{"foreign", func(r *androidGitHubRelease) { r.Assets[1].BrowserDownloadURL = "https://example.test/file.sha256" }},
+		{"wrong name", func(r *androidGitHubRelease) { r.Assets[1].Name = "another.apk.sha256" }},
+		{"wrong release", func(r *androidGitHubRelease) {
+			r.Assets[1].BrowserDownloadURL = strings.Replace(r.Assets[1].BrowserDownloadURL, "v3.0.44", "v3.0.43", 1)
+		}},
+	} {
+		t.Run(mutate.name, func(t *testing.T) {
+			r := androidReleaseWithAssetsForTest("v3.0.44", "dropo-Android-Preview-universal.apk")
+			mutate.edit(&r)
+			if _, _, _, _, _, ok := selectLatestAndroidRelease([]androidGitHubRelease{r}, "sunnydjam/dropo-by-sunnydjam", "preview", "arm64"); ok {
+				t.Fatal("incomplete/untrusted APK update was advertised")
+			}
+		})
+	}
+}
+
+func TestAndroidUpdateURLRejectsPortsQueriesFragmentsAndCredentials(t *testing.T) {
+	valid := "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v3.0.44/dropo-Android-Preview-universal.apk"
+	for _, value := range []string{
+		valid + "?token=secret", valid + "#APK",
+		strings.Replace(valid, "github.com", "github.com:444", 1),
+		strings.Replace(valid, "github.com", "user:password@github.com", 1),
+	} {
+		if trustedAndroidDownloadURL(value, "sunnydjam/dropo-by-sunnydjam") {
+			t.Fatalf("unsafe update URL was accepted: %q", value)
+		}
+	}
+}
+
+func TestAndroidUpdateRejectsAnAssetFromAnotherReleaseTag(t *testing.T) {
+	release := androidReleaseWithAssetsForTest("v3.0.44", "dropo-Android-Preview-universal.apk")
+	for i := range release.Assets {
+		release.Assets[i].BrowserDownloadURL = strings.Replace(release.Assets[i].BrowserDownloadURL, "v3.0.44", "v3.0.43", 1)
+	}
+	if _, _, _, _, _, ok := selectLatestAndroidRelease([]androidGitHubRelease{release}, "sunnydjam/dropo-by-sunnydjam", "preview", "arm64"); ok {
+		t.Fatal("new release advertised the APK from an older tag")
+	}
+}
+
+func TestAndroidUpdateResponseAdvertisesNativeInstallerWithChecksum(t *testing.T) {
+	release := androidReleaseWithAssetsForTest("v3.0.44", "dropo-Android-Preview-universal.apk")
+	data, err := json.Marshal([]androidGitHubRelease{release})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(checkAndroidUpdatesForArchitecture(server.Client(), server.URL, "sunnydjam/dropo-by-sunnydjam", "3.0.43-preview", "arm64")), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["selfUpdate"] != true || result["hasUpdate"] != true || result["checksumURL"] != result["downloadURL"].(string)+".sha256" {
+		t.Fatalf("native installer metadata missing: %#v", result)
 	}
 }

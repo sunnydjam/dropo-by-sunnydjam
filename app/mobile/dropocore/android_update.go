@@ -88,7 +88,7 @@ func checkAndroidUpdatesForArchitecture(client *http.Client, baseURL, repo, curr
 			"currentVersion": currentVersion,
 			"latestVersion":  currentVersion,
 			"platform":       "android",
-			"selfUpdate":     false,
+			"selfUpdate":     true,
 			"updateChannel":  channel,
 		})
 	}
@@ -105,13 +105,14 @@ func checkAndroidUpdatesForArchitecture(client *http.Client, baseURL, repo, curr
 		"currentVersion": currentVersion,
 		"latestVersion":  latestVersion,
 		"downloadURL":    downloadURL,
+		"checksumURL":    downloadURL + ".sha256",
 		"releaseNotes":   release.Body,
 		"publishedAt":    release.PublishedAt.Format(time.RFC3339),
 		"releaseURL":     release.HTMLURL,
 		"fileSize":       fileSize,
 		"assetName":      assetName,
 		"platform":       "android",
-		"selfUpdate":     false,
+		"selfUpdate":     true,
 		"updateChannel":  channel,
 	})
 }
@@ -142,11 +143,25 @@ func selectLatestAndroidRelease(releases []androidGitHubRelease, repo, channel, 
 			continue
 		}
 		assetName, downloadURL, fileSize := androidUpdateAsset(release, channel, architecture)
-		if assetName == "" || fileSize <= 0 || !trustedAndroidDownloadURL(downloadURL, repo) {
+		if assetName == "" || fileSize <= 0 || fileSize > 384*1024*1024 || !trustedAndroidDownloadURL(downloadURL, repo) {
 			continue
 		}
 		parsedURL, _ := url.Parse(downloadURL)
-		if path.Base(parsedURL.Path) != assetName {
+		expectedPath := "/" + strings.Trim(repo, "/") + "/releases/download/v" + version + "/" + assetName
+		if path.Base(parsedURL.Path) != assetName || parsedURL.EscapedPath() != expectedPath {
+			continue
+		}
+		// An APK without its bounded checksum sidecar cannot be installed by
+		// the native updater. Never advertise an incomplete release as ready.
+		checksumFound := false
+		for _, asset := range release.Assets {
+			if asset.Name == assetName+".sha256" && asset.BrowserDownloadURL == downloadURL+".sha256" &&
+				asset.Size > 0 && asset.Size <= 1024 {
+				checksumFound = true
+				break
+			}
+		}
+		if !checksumFound {
 			continue
 		}
 		selected = release
@@ -165,6 +180,7 @@ func trustedAndroidDownloadURL(rawURL, repo string) bool {
 	candidate, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || candidate.User != nil || candidate.Scheme != "https" ||
 		!strings.EqualFold(candidate.Hostname(), "github.com") ||
+		candidate.Port() != "" || candidate.RawQuery != "" || candidate.Fragment != "" ||
 		!strings.EqualFold(path.Ext(candidate.Path), ".apk") {
 		return false
 	}

@@ -1359,11 +1359,24 @@ class ChannelCoreBridge implements CoreBridge {
 
   @override
   Future<Map<String, dynamic>> installUpdate() async {
-    return {
-      'success': false,
-      'error':
-          'Android устанавливает обновление через системный установщик APK',
-    };
+    try {
+      return await _invokeMap(
+        'androidInstallUpdate',
+        timeout: const Duration(minutes: 16),
+      );
+    } on TimeoutException {
+      // Timing out a MethodChannel future does not cancel native work. A late
+      // return from permission settings must not open a stale installer.
+      try {
+        await callMap(
+          'CancelAndroidUpdate',
+          timeout: const Duration(seconds: 8),
+        );
+      } catch (_) {
+        // Native request expiry is the second guard if this channel is gone.
+      }
+      rethrow;
+    }
   }
 
   @override
@@ -3790,6 +3803,14 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool homeRoutesExpanded = false;
   bool preparingFullVpnSource = false;
   final List<String> _sectionHistory = [];
+  late final _AccountDisplayController _accountDisplay;
+
+  void _accountDisplayChanged() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
 
   bool get connectionBusy {
     return busyTasks.keys.any(isConnectionBlockingBusyTask) ||
@@ -3823,6 +3844,16 @@ class _DropoHomePageState extends State<DropoHomePage>
   @override
   void initState() {
     super.initState();
+    _accountDisplay = _AccountDisplayController(
+      endpoint: _accountEndpoint,
+      available: debugAccountTransport != null || _accountConfigured,
+      persistSession:
+          debugAccountTransport == null &&
+          !(kDebugMode && _bridgeMode == 'mock'),
+      transport: debugAccountTransport,
+      initialToken: debugAccountSessionToken,
+    )..addListener(_accountDisplayChanged);
+    unawaited(_accountDisplay.restore());
     WidgetsBinding.instance.addObserver(this);
     pushEventsSubscription = widget.bridge.watchEvents().listen(
       _handlePushEvent,
@@ -3833,6 +3864,8 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   @override
   void dispose() {
+    _accountDisplay.removeListener(_accountDisplayChanged);
+    _accountDisplay.dispose();
     WidgetsBinding.instance.removeObserver(this);
     refreshTimer?.cancel();
     eventsTimer?.cancel();
@@ -4297,20 +4330,37 @@ class _DropoHomePageState extends State<DropoHomePage>
       case 'update-stage':
         final stage = event.payload['stage']?.toString();
         if (updateStage != null &&
-            updateStage != 'failed' &&
+            !const [
+              'failed',
+              'cancelled',
+              'ready',
+              'cancelling',
+            ].contains(updateStage) &&
             _updateStages.contains(stage)) {
           updateStage = stage;
+          final version = event.payload['version'];
+          if (_isAndroidPlatform && version is String && version.isNotEmpty) {
+            updateVersion = version;
+          }
         }
         break;
       case 'update-progress':
-        if (updateStage == null || updateStage == 'failed') break;
+        if (updateStage == null ||
+            const [
+              'failed',
+              'cancelled',
+              'ready',
+              'cancelling',
+            ].contains(updateStage)) {
+          break;
+        }
         updateDownloaded = (event.payload['downloaded'] as num?)?.toInt() ?? 0;
         updateTotal = (event.payload['total'] as num?)?.toInt() ?? updateTotal;
         final value = event.payload['percent'];
         updateProgressPercent = value is num
             ? value.toDouble().clamp(0, 100).toDouble()
             : null;
-        if (updateProgressPercent != null) {
+        if (updateProgressPercent != null && !_isAndroidPlatform) {
           statusMessage =
               'Загружаем обновление: ${updateProgressPercent!.round()}%';
           connectionHint = 'После проверки целостности dropo перезапустится.';
@@ -5238,7 +5288,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         content: Text('Доступна версия Dropo ${result.latestVersion}'),
         duration: const Duration(seconds: 12),
         action: SnackBarAction(
-          label: result.selfUpdate
+          label: result.selfUpdate || _isAndroidPlatform
               ? 'Обновить'
               : result.platform.toLowerCase() == 'windows'
               ? 'Скачать portable'
@@ -5260,7 +5310,10 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (!result.success || !result.hasUpdate || uiBusy || quitting) {
       return;
     }
-    if (!result.selfUpdate) {
+    final android = _isAndroidPlatform;
+    // Older Android metadata also used selfUpdate:false. Never delegate the
+    // APK to a browser: the native handler rechecks trusted release metadata.
+    if (!result.selfUpdate && !android) {
       final link = _updateDownloadLink(result);
       if (link.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -5340,9 +5393,11 @@ class _DropoHomePageState extends State<DropoHomePage>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text(
-                'После подтверждения приложение скачает установщик из GitHub Releases, проверит размер и SHA-256 и перезапустится. На время установки VPN будет отключён.',
-                style: TextStyle(color: Color(0xFFD8E4E0), height: 1.35),
+              Text(
+                android
+                    ? 'Dropo скачает APK внутри приложения, проверит размер, SHA-256 и совместимость подписи. Затем Android попросит подтвердить установку. При необходимости разрешите установку из Dropo. Во время загрузки VPN продолжает работать; замена приложения прервёт соединение.'
+                    : 'После подтверждения приложение скачает установщик из GitHub Releases, проверит размер и SHA-256 и перезапустится. На время установки VPN будет отключён.',
+                style: const TextStyle(color: Color(0xFFD8E4E0), height: 1.35),
               ),
               const SizedBox(height: 16),
               Row(
@@ -5383,15 +5438,29 @@ class _DropoHomePageState extends State<DropoHomePage>
         updateDownloaded = 0;
         updateTotal = result.fileSize;
         updateProgressPercent = null;
-        statusMessage = 'Загружаем обновление';
-        connectionHint = 'Не закрывайте dropo до завершения проверки.';
+        if (!android) {
+          statusMessage = 'Загружаем обновление';
+          connectionHint = 'Не закрывайте dropo до завершения проверки.';
+        }
       });
+      String? installerVersion;
       try {
         final response = await widget.bridge.installUpdate();
+        if (android && response['cancelled'] == true) {
+          if (mounted) setState(() => updateStage = 'cancelled');
+          return;
+        }
         if (response['success'] != true) {
           throw StateError(
             response['error']?.toString() ?? 'Не удалось установить обновление',
           );
+        }
+        if (android && response['installerOpened'] != true) {
+          throw StateError('Не удалось открыть системный установщик Android');
+        }
+        final version = response['latestVersion'];
+        if (android && version is String && version.isNotEmpty) {
+          installerVersion = version;
         }
       } catch (error) {
         if (mounted) {
@@ -5399,11 +5468,24 @@ class _DropoHomePageState extends State<DropoHomePage>
             updateStage = 'failed';
             updateError = _cleanError(error).replaceFirst('Bad state: ', '');
             updateProgressPercent = null;
-            statusMessage = 'Обновление не установлено';
-            connectionHint = updateError;
-            connectionHintDanger = true;
+            if (!android) {
+              statusMessage = 'Обновление не установлено';
+              connectionHint = updateError;
+              connectionHintDanger = true;
+            }
           });
         }
+        return;
+      }
+      if (android) {
+        if (mounted) {
+          setState(() {
+            updateStage = 'ready';
+            if (installerVersion != null) updateVersion = installerVersion;
+          });
+        }
+        // Opening the installer is not proof of installation. Android owns the
+        // user confirmation and process replacement; never exit or restart it.
         return;
       }
       if (mounted) {
@@ -5419,6 +5501,42 @@ class _DropoHomePageState extends State<DropoHomePage>
       await Future<void>.delayed(const Duration(milliseconds: 250));
       exit(0);
     });
+  }
+
+  Future<void> _cancelAndroidUpdate() async {
+    if (!_isAndroidPlatform ||
+        !const [
+          'checking',
+          'downloading',
+          'verifying',
+          'permission',
+        ].contains(updateStage)) {
+      return;
+    }
+    final previous = updateStage;
+    setState(() => updateStage = 'cancelling');
+    try {
+      final response = await widget.bridge.callMap(
+        'CancelAndroidUpdate',
+        timeout: const Duration(seconds: 8),
+      );
+      if (response['success'] != true) {
+        throw StateError(
+          response['error']?.toString() ?? 'Отмена не выполнена',
+        );
+      }
+    } catch (error) {
+      if (mounted && updateStage == 'cancelling') {
+        setState(() => updateStage = previous);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Не удалось отменить загрузку: ${_cleanError(error)}',
+            ),
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _runBusy(
@@ -6080,6 +6198,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       updateNotice: _buildUpdateNotice(),
       servicesExpanded:
           homeRoutesExpanded && appConfig.routingMode == 'blocked_only',
+      servicesVisible: appConfig.routingMode == 'blocked_only',
       routes: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -6163,6 +6282,7 @@ class _DropoHomePageState extends State<DropoHomePage>
               !(kDebugMode && _bridgeMode == 'mock'),
           transport: debugAccountTransport,
           initialToken: debugAccountSessionToken,
+          onDisplayChanged: _accountDisplay.publish,
         );
       case 'sources':
         return VpnSourcesDialog(
@@ -6277,6 +6397,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           : _openWireGuard,
       onExit: quitting ? null : _quitApp,
       version: status.version.version,
+      accountDisplay: _accountDisplay.value,
       onAbout: quitting ? null : _openAbout,
       visible: windowVisible,
       motionEnabled: !appConfig.reduceMotion,
@@ -6296,6 +6417,7 @@ class _DropoHomePageState extends State<DropoHomePage>
             ),
       overlay: updateStage != null
           ? _UpdateProgressOverlay(
+              android: _isAndroidPlatform,
               stage: updateStage!,
               version: updateVersion,
               percent: updateProgressPercent,
@@ -6303,6 +6425,9 @@ class _DropoHomePageState extends State<DropoHomePage>
               total: updateTotal,
               error: updateError,
               onClose: () => setState(() => updateStage = null),
+              onCancel: _isAndroidPlatform
+                  ? () => unawaited(_cancelAndroidUpdate())
+                  : null,
             )
           : quitting
           ? _QuitProgressOverlay(message: quitProgressMessage)
@@ -6918,7 +7043,7 @@ class _UpdateStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final actionLabel = info.selfUpdate
+    final actionLabel = info.selfUpdate || _isAndroidPlatform
         ? 'Обновить'
         : info.platform.toLowerCase() == 'windows'
         ? 'Скачать'
@@ -6939,7 +7064,9 @@ class _UpdateStrip extends StatelessWidget {
       ),
     );
     final action = Semantics(
-      label: info.selfUpdate
+      label: _isAndroidPlatform
+          ? 'Скачать, проверить APK и открыть установщик после подтверждения'
+          : info.selfUpdate
           ? 'Обновить и перезапустить Dropo после подтверждения'
           : info.platform.toLowerCase() == 'windows'
           ? 'Скачать portable-архив новой версии'
@@ -9938,12 +10065,14 @@ class _SettingsDialogState extends State<_SettingsDialog>
               if (widget.updateInfo?.hasUpdate == true)
                 _ButtonSetting(
                   title: 'Доступна версия ${widget.updateInfo!.latestVersion}',
-                  description: widget.updateInfo!.selfUpdate
+                  description: _isAndroidPlatform
+                      ? 'Загрузить APK внутри Dropo, проверить и открыть установщик Android'
+                      : widget.updateInfo!.selfUpdate
                       ? 'Скачать, проверить и перезапустить dropo'
                       : widget.updateInfo!.platform.toLowerCase() == 'windows'
                       ? 'Скачать portable-архив из GitHub Releases'
                       : 'Скачать APK из GitHub Releases',
-                  label: widget.updateInfo!.selfUpdate
+                  label: widget.updateInfo!.selfUpdate || _isAndroidPlatform
                       ? 'Обновить'
                       : widget.updateInfo!.platform.toLowerCase() == 'windows'
                       ? 'Скачать portable'

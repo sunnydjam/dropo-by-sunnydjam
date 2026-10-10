@@ -11,6 +11,7 @@ class _AtlasDesktopShell extends StatefulWidget {
     required this.onWorkNetworks,
     required this.onExit,
     required this.version,
+    this.accountDisplay,
     this.onAbout,
     this.homeTelemetry,
     this.visible = true,
@@ -21,6 +22,7 @@ class _AtlasDesktopShell extends StatefulWidget {
     this.overlay,
   });
   final String activeSection, version;
+  final AccountDisplaySnapshot? accountDisplay;
   final VoidCallback? onAbout;
   final Widget? homeTelemetry;
   final bool visible;
@@ -184,6 +186,102 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     );
   }
 
+  Widget _account({bool compact = false, bool phone = false}) {
+    final profile = widget.accountDisplay;
+    final selected = widget.activeSection == 'account';
+    final label = profile?.displayName ?? 'Войти через Telegram';
+    final subtitle = profile == null
+        ? phone
+              ? 'Telegram'
+              : 'Аккаунт Dropo'
+        : profile.telegramUsername.isNotEmpty
+        ? '@${profile.telegramUsername}'
+        : 'Telegram';
+    return Semantics(
+      selected: selected,
+      label: label,
+      button: true,
+      child: TextButton(
+        key: const ValueKey('nav-account'),
+        onPressed: widget.disabled ? null : () => _select('account'),
+        style: TextButton.styleFrom(
+          enabledMouseCursor: SystemMouseCursors.click,
+          minimumSize: const Size(48, 48),
+          padding: EdgeInsets.symmetric(
+            horizontal: compact
+                ? 0
+                : phone
+                ? 8
+                : 12,
+            vertical: 8,
+          ),
+          foregroundColor: selected ? _atlasMint : _atlasText,
+          backgroundColor: selected
+              ? _atlasMint.withValues(alpha: 0.12)
+              : Colors.transparent,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          alignment: Alignment.centerLeft,
+        ),
+        child: Row(
+          mainAxisAlignment: compact
+              ? MainAxisAlignment.center
+              : MainAxisAlignment.start,
+          children: [
+            Container(
+              width: phone ? 30 : 36,
+              height: phone ? 30 : 36,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: selected ? _atlasMint : _atlasMuted,
+                  width: 1.5,
+                ),
+              ),
+              child: Icon(
+                Icons.person_outline_rounded,
+                size: phone ? 22 : 26,
+                semanticLabel: compact ? label : null,
+              ),
+            ),
+            if (!compact) ...[
+              SizedBox(width: phone ? 8 : 10),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      phone && profile == null ? 'Войти' : label,
+                      key: const ValueKey('account-display-name'),
+                      maxLines: phone ? 1 : 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: phone ? 13 : 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _atlasMuted,
+                        fontSize: phone ? 11 : 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (!phone) const Icon(Icons.chevron_right, size: 20),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -199,7 +297,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     final contentWidth = screen.width - railWidth;
     final reserveFooter =
         widget.activeSection != 'home' ||
-        contentWidth < 608 ||
+        contentWidth < 960 ||
         navigationTextScale > 1.3;
     final compactTelemetry = contentWidth < 760 || navigationTextScale > 1.5;
     final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
@@ -381,9 +479,18 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                               if (reserveFooter && !keyboardVisible)
                                 ColoredBox(
                                   color: Colors.transparent,
-                                  child: Align(
-                                    alignment: Alignment.centerRight,
-                                    child: versionLink(),
+                                  child: Row(
+                                    children: [
+                                      if (!showRail)
+                                        Expanded(
+                                          child: _open
+                                              ? const SizedBox.shrink()
+                                              : _account(phone: true),
+                                        )
+                                      else
+                                        const Spacer(),
+                                      versionLink(),
+                                    ],
                                   ),
                                 ),
                             ],
@@ -440,10 +547,20 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                 ),
                                 children: [
                                   for (final item in _items)
-                                    if (_primarySections.contains(item.$1))
+                                    if (_primarySections.contains(item.$1) &&
+                                        item.$1 != 'account')
                                       _item(item, compact: !expandedRail),
                                 ],
                               ),
+                            ),
+                            const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 8),
+                              child: Divider(height: 1),
+                            ),
+                            Padding(
+                              key: const ValueKey('account-rail-footer'),
+                              padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+                              child: _account(compact: !expandedRail),
                             ),
                           ],
                         ),
@@ -522,7 +639,8 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                   padding: const EdgeInsets.all(12),
                                   children: [
                                     for (final item in _items)
-                                      if (_primarySections.contains(item.$1))
+                                      if (_primarySections.contains(item.$1) &&
+                                          item.$1 != 'account')
                                         _item(item),
                                     Padding(
                                       padding: const EdgeInsets.only(top: 16),
@@ -536,6 +654,12 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                     ),
                                   ],
                                 ),
+                              ),
+                              const Divider(height: 1),
+                              Padding(
+                                key: const ValueKey('account-drawer-footer'),
+                                padding: const EdgeInsets.all(12),
+                                child: _account(),
                               ),
                             ],
                           ),

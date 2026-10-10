@@ -4,6 +4,8 @@ const _updateStages = [
   'checking',
   'downloading',
   'verifying',
+  'permission',
+  'cancelling',
   'stopping',
   'installing',
 ];
@@ -17,20 +19,29 @@ class _UpdateProgressOverlay extends StatelessWidget {
     required this.total,
     required this.error,
     required this.onClose,
+    this.android = false,
+    this.onCancel,
   });
 
   final String stage, version, error;
   final double? percent;
   final int downloaded, total;
   final VoidCallback onClose;
+  final bool android;
+  final VoidCallback? onCancel;
 
   @override
   Widget build(BuildContext context) {
     final failed = stage == 'failed';
+    final ready = android && stage == 'ready';
+    final cancelled = android && stage == 'cancelled';
+    final terminal = failed || ready || cancelled;
     final labels = <String, String>{
       'checking': 'Проверяем новую версию',
       'downloading': 'Загружаем обновление',
       'verifying': 'Проверяем целостность файлов',
+      'permission': 'Разрешите установку обновления',
+      'cancelling': 'Отменяем загрузку',
       'stopping': 'Отключаем VPN перед установкой',
       'installing': 'Передаём управление установщику',
     };
@@ -44,6 +55,19 @@ class _UpdateProgressOverlay extends StatelessWidget {
       'installing':
           'Откроется окно с прогрессом установки. После успешного обновления Dropo запустится автоматически.',
     };
+    if (android) {
+      labels['verifying'] = 'Проверяем APK и подпись приложения';
+      labels['installing'] = 'Открываем установщик Android';
+      details['checking'] =
+          'Находим APK для вашей версии Dropo. VPN продолжает работать.';
+      details['verifying'] =
+          'Сверяем размер и SHA-256, пакет приложения, подпись и совместимость с телефоном.';
+      details['permission'] =
+          'В настройках Android разрешите установку приложений для Dropo. Вернитесь сюда: откроется системный установщик. Без вашего подтверждения APK не установится.';
+      details['cancelling'] = 'Загрузка будет остановлена. VPN не отключаем.';
+      details['installing'] =
+          'Подтвердите обновление в системном окне Android. При замене приложения VPN может отключиться; после установки откройте Dropo и подключитесь заново.';
+    }
     return Material(
       key: const ValueKey('update-progress-overlay'),
       color: Colors.black.withValues(alpha: 0.78),
@@ -63,13 +87,23 @@ class _UpdateProgressOverlay extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Icon(
-                  failed ? Icons.error_outline : Icons.system_update_alt,
+                  failed
+                      ? Icons.error_outline
+                      : ready
+                      ? Icons.verified_outlined
+                      : cancelled
+                      ? Icons.cancel_outlined
+                      : Icons.system_update_alt,
                   color: failed ? Colors.redAccent : _atlasMint,
                   size: 32,
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  failed
+                  ready
+                      ? 'Установщик Android открыт'
+                      : cancelled
+                      ? 'Загрузка отменена'
+                      : failed
                       ? 'Обновление не установлено'
                       : 'Обновление Dropo $version',
                   style: const TextStyle(
@@ -81,12 +115,18 @@ class _UpdateProgressOverlay extends StatelessWidget {
                 Semantics(
                   liveRegion: true,
                   child: Text(
-                    failed ? error : labels[stage] ?? labels['checking']!,
+                    ready
+                        ? 'APK проверен. Подтвердите обновление в системном окне Android.'
+                        : cancelled
+                        ? 'Обновление не установлено. Можно повторить загрузку, когда будет удобно.'
+                        : failed
+                        ? error
+                        : labels[stage] ?? labels['checking']!,
                     style: const TextStyle(fontSize: 15, height: 1.4),
                   ),
                 ),
                 const SizedBox(height: 16),
-                if (!failed) ...[
+                if (!terminal) ...[
                   LinearProgressIndicator(
                     value: stage == 'downloading' && percent != null
                         ? percent! / 100
@@ -110,14 +150,35 @@ class _UpdateProgressOverlay extends StatelessWidget {
                     style: const TextStyle(color: _atlasMuted, height: 1.5),
                   ),
                   const SizedBox(height: 18),
-                  const Text(
-                    'Загрузка → Проверка → Установка → Перезапуск',
-                    style: TextStyle(color: _atlasMuted, fontSize: 12),
+                  Text(
+                    android
+                        ? 'Загрузка → Проверка → Подтверждение в Android'
+                        : 'Загрузка → Проверка → Установка → Перезапуск',
+                    style: const TextStyle(color: _atlasMuted, fontSize: 12),
                   ),
+                  if (android &&
+                      onCancel != null &&
+                      const [
+                        'checking',
+                        'downloading',
+                        'verifying',
+                        'permission',
+                      ].contains(stage)) ...[
+                    const SizedBox(height: 16),
+                    TextButton(
+                      key: const ValueKey('cancel-update-download'),
+                      onPressed: onCancel,
+                      child: const Text('Отменить загрузку'),
+                    ),
+                  ],
                 ] else ...[
-                  const Text(
-                    'Приложение не будет закрыто. Можно повторить обновление вручную. Если VPN отключился на этапе установки, подключите его заново.',
-                    style: TextStyle(color: _atlasMuted, height: 1.5),
+                  Text(
+                    android
+                        ? ready
+                              ? 'Если установка была отменена, нажмите «Обновить» снова — проверенный APK сохранён. После успешной установки откройте Dropo и при необходимости подключите VPN заново.'
+                              : 'Загрузка сама не отключает VPN. Можно повторить обновление вручную. Настройки, подписки и аккаунт сохраняются.'
+                        : 'Приложение не будет закрыто. Можно повторить обновление вручную. Если VPN отключился на этапе установки, подключите его заново.',
+                    style: const TextStyle(color: _atlasMuted, height: 1.5),
                   ),
                   const SizedBox(height: 16),
                   TextButton(onPressed: onClose, child: const Text('Понятно')),

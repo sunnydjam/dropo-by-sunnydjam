@@ -43,6 +43,7 @@ class MainActivity : FlutterActivity() {
     private var eventChannel: EventChannel? = null
     private var eventListener: DropoVpnRuntime.Listener? = null
     private var pendingConnectResult: MethodChannel.Result? = null
+    private val apkUpdater by lazy { AndroidApkUpdater(this) }
     private var destroyed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -114,6 +115,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         destroyed = true
+        apkUpdater.close()
         pendingConnectResult = null
         accountSessionChannel?.close()
         accountSessionChannel = null
@@ -128,9 +130,20 @@ class MainActivity : FlutterActivity() {
         super.onDestroy()
     }
 
+    override fun onPause() {
+        apkUpdater.onPause()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        apkUpdater.onResume()
+    }
+
     @Deprecated("Deprecated in Android framework API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (apkUpdater.onActivityResult(requestCode)) return
         when (requestCode) {
             REQUEST_VPN_PREPARE -> {
                 if (destroyed || pendingConnectResult == null) return
@@ -167,6 +180,14 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleCoreCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "androidInstallUpdate") {
+            apkUpdater.start(result)
+            return
+        }
+        if (call.method == "call" && stringArg(call, "method") == "CancelAndroidUpdate") {
+            result.success(apkUpdater.cancel())
+            return
+        }
         if (call.method in ANDROID_NATIVE_METHODS) {
             handleAndroidNativeCall(call, result)
             return

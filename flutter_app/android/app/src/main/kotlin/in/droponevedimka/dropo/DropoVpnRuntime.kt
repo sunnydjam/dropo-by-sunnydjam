@@ -35,6 +35,11 @@ object DropoVpnRuntime {
         listeners.remove(listener)
     }
 
+    fun emitUpdateEvent(name: String, payload: Map<String, Any?>) {
+        require(name == "update-stage" || name == "update-progress")
+        emit(name, payload)
+    }
+
     fun setStarting(text: String = "VPN запускается") {
         setState(STATE_STARTING, text, "")
     }

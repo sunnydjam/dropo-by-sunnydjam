@@ -62,6 +62,104 @@ class _AccountRecord {
   final DateTime? speedBoostUntil;
 }
 
+/// Presentation-only public account details. Credentials and private profile
+/// fields never enter the shell, semantics, logs, or avatar image requests.
+class AccountDisplaySnapshot {
+  const AccountDisplaySnapshot({
+    required this.displayName,
+    this.telegramUsername = '',
+  });
+
+  factory AccountDisplaySnapshot.fromJson(Map<String, dynamic> json) {
+    final raw = json['displayName']?.toString() ?? '';
+    final clean = raw
+        .replaceAll(
+          RegExp(r'[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]'),
+          '',
+        )
+        .trim();
+    final name = String.fromCharCodes(clean.runes.take(80));
+    final username = json['telegramUsername']?.toString() ?? '';
+    return AccountDisplaySnapshot(
+      displayName: name.isEmpty ? 'Аккаунт' : name,
+      telegramUsername: RegExp(r'^[A-Za-z0-9_]{1,32}$').hasMatch(username)
+          ? username
+          : '',
+    );
+  }
+
+  final String displayName, telegramUsername;
+}
+
+/// A bounded background read of an already stored session, never an automatic
+/// sign-in. It is independent of the VPN ready gate and cannot clear a token.
+class _AccountDisplayController extends ValueNotifier<AccountDisplaySnapshot?> {
+  _AccountDisplayController({
+    required this.endpoint,
+    required this.available,
+    required bool persistSession,
+    this.transport,
+    String? initialToken,
+  }) : _vault = _AccountTokenVault(
+         endpoint: endpoint,
+         enabled: persistSession,
+         initialToken: initialToken,
+       ),
+       super(null);
+
+  final String endpoint;
+  final bool available;
+  final AccountTransport? transport;
+  final _AccountTokenVault _vault;
+  AccountTransport? _ownedApi;
+  int _generation = 0;
+  bool _disposed = false;
+
+  void publish(AccountDisplaySnapshot? snapshot) {
+    if (_disposed) return;
+    ++_generation;
+    value = snapshot;
+  }
+
+  Future<void> restore() async {
+    if (!available || _disposed) return;
+    final generation = ++_generation;
+    try {
+      final token = await _vault.read().timeout(const Duration(seconds: 3));
+      if (_disposed ||
+          generation != _generation ||
+          token == null ||
+          token.isEmpty) {
+        return;
+      }
+      // A saved account remains identifiable when the server is offline. The
+      // actual public name replaces this neutral label only after validation.
+      value = const AccountDisplaySnapshot(displayName: 'Аккаунт');
+      final api = transport ?? (_ownedApi = _AccountApi(endpoint));
+      final response = await api
+          .request('GET', '/v1/me', token: token)
+          .timeout(const Duration(seconds: 8));
+      if (_disposed || generation != _generation) return;
+      value = AccountDisplaySnapshot.fromJson(_asMap(response['account']));
+    } catch (_) {
+      // AccountPage alone owns authentication, expiry and local sign-out.
+      // An offline backend must not interrupt VPN or remove a stored session.
+    } finally {
+      _ownedApi?.close();
+      _ownedApi = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    ++_generation;
+    _ownedApi?.close();
+    _ownedApi = null;
+    super.dispose();
+  }
+}
+
 class _AccountProduct {
   const _AccountProduct({
     required this.id,
@@ -291,6 +389,7 @@ class AccountPage extends StatefulWidget {
     this.persistSession = true,
     this.transport,
     this.initialToken,
+    this.onDisplayChanged,
   });
 
   final String endpoint;
@@ -299,6 +398,7 @@ class AccountPage extends StatefulWidget {
   final bool available;
   final AccountTransport? transport;
   final String? initialToken;
+  final ValueChanged<AccountDisplaySnapshot?>? onDisplayChanged;
 
   @override
   State<AccountPage> createState() => _AccountPageState();
@@ -349,6 +449,7 @@ class _AccountPageState extends State<AccountPage> {
   Future<void> _restore() async {
     if (!widget.available) {
       setState(() => _phase = _AccountPhase.signedOut);
+      widget.onDisplayChanged?.call(null);
       return;
     }
     await _loadCapabilities();
@@ -356,6 +457,7 @@ class _AccountPageState extends State<AccountPage> {
     final token = await _vault.read();
     if (token == null || token.isEmpty) {
       if (mounted) setState(() => _phase = _AccountPhase.signedOut);
+      if (mounted) widget.onDisplayChanged?.call(null);
       return;
     }
     _token = token;
@@ -368,6 +470,7 @@ class _AccountPageState extends State<AccountPage> {
       if (invalid) {
         await _vault.clear();
         _token = null;
+        if (mounted) widget.onDisplayChanged?.call(null);
       }
       if (mounted) {
         setState(() {
@@ -425,6 +528,9 @@ class _AccountPageState extends State<AccountPage> {
       _phase = _AccountPhase.signedIn;
       _message = '';
     });
+    widget.onDisplayChanged?.call(
+      AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
+    );
   }
 
   Future<void> _startAuth({String purpose = 'login'}) async {
@@ -590,6 +696,9 @@ class _AccountPageState extends State<AccountPage> {
             ? 'Доступ восстановлен. Остальные сессии завершены.'
             : '';
       });
+      widget.onDisplayChanged?.call(
+        AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
+      );
     } catch (error) {
       if (!mounted || generation != _authGeneration) return;
       setState(() {
@@ -639,6 +748,7 @@ class _AccountPageState extends State<AccountPage> {
       _busy = false;
       _message = '';
     });
+    widget.onDisplayChanged?.call(null);
   }
 
   Future<void> _openPurchase() async {

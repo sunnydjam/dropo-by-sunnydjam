@@ -1,5 +1,10 @@
 part of 'main.dart';
 
+// The home anchor reserves this same collapsed header in both routing modes;
+// hiding services therefore never rescales the Earth or the mode selector.
+double _homeServicesHeaderExtent(BuildContext context) =>
+    math.max(56, MediaQuery.textScalerOf(context).scale(17) * 1.2 + 24);
+
 /// Home owns the scroll position; neither the catalog nor a service detail
 /// creates a nested scrollable or an independent tinted surface.
 class _HomeServicesAccordion extends StatefulWidget {
@@ -188,7 +193,9 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                 mouseCursor: SystemMouseCursors.click,
                 onTap: () => widget.onExpandedChanged(!widget.expanded),
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: 56),
+                  constraints: BoxConstraints(
+                    minHeight: _homeServicesHeaderExtent(context),
+                  ),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     child: Row(
@@ -205,20 +212,18 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                             style: TextStyle(
                               color: _atlasText,
                               fontSize: 17,
+                              height: 1.2,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
                         ),
-                        Flexible(
-                          child: Text(
-                            widget.expanded
-                                ? '$pinnedCount'
-                                : '$pinnedCount в быстром списке',
-                            textAlign: TextAlign.right,
-                            style: const TextStyle(
-                              color: _atlasMuted,
-                              fontSize: 12,
-                            ),
+                        Text(
+                          '$pinnedCount',
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(
+                            color: _atlasMuted,
+                            fontSize: 12,
+                            height: 1.2,
                           ),
                         ),
                         const SizedBox(width: 12),
