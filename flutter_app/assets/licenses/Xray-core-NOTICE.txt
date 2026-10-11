@@ -1,0 +1,30 @@
+Xray-core 26.3.27
+
+Upstream: https://github.com/XTLS/Xray-core
+Pinned Go module: github.com/xtls/xray-core v1.260327.0
+Source revision: d2758a023cd7f4174a5a5fa4ff66e487d4342ba0
+Corresponding source: https://github.com/XTLS/Xray-core/tree/d2758a023cd7f4174a5a5fa4ff66e487d4342ba0
+Source archive: https://github.com/XTLS/Xray-core/archive/d2758a023cd7f4174a5a5fa4ff66e487d4342ba0.tar.gz
+License: Mozilla Public License 2.0 (MPL-2.0).
+The complete license is included beside this notice in Xray-core-LICENSE.txt.
+
+Dropo's Android bridge links Xray-core in-process to support VLESS XHTTP
+subscriptions. A scoped MPL-2.0 lifecycle modification isolates HTTP pools
+and cancels XHTTP requests when their VPN session ends. Complete corresponding
+modified source files are included beside this notice under xray-core-source/:
+client.go.txt, dialer.go.txt, managed_session.go.txt and managed_session_test.go.txt.
+The pinned upstream source linked above supplies the remaining component files.
+The source modification is applied by a verified Go build overlay; upstream
+module-cache files are not changed. No separate Xray executable, shell
+runtime, first-run executable download, or upstream database asset is used
+by this bridge. The Dropo integration is maintained separately in the
+app/mobile/dropoandroid and app/mobile/dropocore directories.
+
+The upstream and modified source, including their notices, remain available under
+MPL-2.0 at the corresponding-source links above. Distribution of the compiled
+component does not restrict recipients' rights to that source under MPL-2.0.
+The covered source modifications are distributed under MPL-2.0. Future changes
+must retain their notices and provide corresponding source under MPL-2.0 too.
+
+Xray-core is provided by its upstream contributors without warranty as set
+out in its license. Inclusion does not imply upstream endorsement of Dropo.

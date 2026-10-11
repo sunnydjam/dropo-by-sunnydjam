@@ -1498,10 +1498,15 @@ function Get-AndroidBridgeFingerprint {
     $files = @()
     foreach ($dir in @($BridgeDir, $CoreDir)) {
         if (Test-Path $dir) {
-            $files += Get-ChildItem -Path $dir -Recurse -File -Include "*.go", "go.mod", "go.sum" |
+            $files += Get-ChildItem -Path $dir -Recurse -File -Include "*.go", "go.mod", "go.sum", "*.go.txt", "manifest.json" |
                 Sort-Object FullName
         }
     }
+    $overlayPreparer = Join-Path $ScriptRoot "tools\prepare-android-xhttp-overlay.ps1"
+    if (-not (Test-Path -LiteralPath $overlayPreparer -PathType Leaf)) {
+        throw "Android XHTTP overlay preparer is missing."
+    }
+    $files += Get-Item -LiteralPath $overlayPreparer
 
     $builder = New-Object System.Text.StringBuilder
     [void]$builder.AppendLine("sing-box=$SingBoxVersion")
@@ -1560,6 +1565,10 @@ function Build-AndroidBridgeAAR {
     }
 
     New-Item -ItemType Directory -Force -Path $AARDir | Out-Null
+    # Verify the pinned upstream bytes and bundled corresponding MPL source
+    # before either compiling or reusing an AAR. No module-cache edits or
+    # silently unpatched fallback are permitted.
+    $xhttpOverlay = & (Join-Path $ScriptRoot "tools\prepare-android-xhttp-overlay.ps1")
     $fingerprint = Get-AndroidBridgeFingerprint -BridgeDir $MobileBridgeDir -CoreDir $MobileCoreDir
     if ((Test-Path $AARPath) -and (Test-Path $VersionMarker) -and ((Get-Content $VersionMarker -Raw).Trim() -eq $fingerprint)) {
         $aarMB = [math]::Round((Get-Item $AARPath).Length / 1MB, 2)
@@ -1581,8 +1590,18 @@ function Build-AndroidBridgeAAR {
         }
     }
 
-    Push-Location $MobileBridgeDir
+    $originalAndroidGoFlags = $env:GOFLAGS
+    if ($originalAndroidGoFlags -match '(?:^|\s|\")-(?:overlay|modfile)(?:=|\s)') {
+        throw "Android XHTTP build cannot combine an existing Go overlay or modfile with the pinned lifecycle overlay."
+    }
+    # Bind from an isolated source copy so gomobile can derive its per-ABI
+    # gobind modules with the pinned local Xray replacement without touching
+    # the repository's module files or inheriting a conflicting -modfile.
+    Push-Location $xhttpOverlay.BindingDirectory
     try {
+        # GOFLAGS is inherited by gobind/gomobile's nested Go invocations.
+        # Restore the caller's process environment even if any build fails.
+        $env:GOFLAGS = ("$originalAndroidGoFlags " + $xhttpOverlay.BindingGoFlag).Trim()
         & go mod tidy
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[ERROR] Failed to prepare Android bridge Go module." -ForegroundColor Red
@@ -1609,6 +1628,7 @@ function Build-AndroidBridgeAAR {
             exit 1
         }
     } finally {
+        $env:GOFLAGS = $originalAndroidGoFlags
         Pop-Location
         if ($null -ne $OriginalGoMod) {
             [System.IO.File]::WriteAllBytes($GoModPath, $OriginalGoMod)

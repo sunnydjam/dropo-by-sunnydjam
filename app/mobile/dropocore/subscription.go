@@ -177,6 +177,19 @@ func parseVLESS(link string) (proxyConfig, error) {
 	cfg.Extra = q.Get("extra")
 	cfg.ALPN = q.Get("alpn")
 	cfg.HeaderType = q.Get("headerType")
+	if cfg.Network == "xhttp" {
+		if _, queryErr := url.ParseQuery(u.RawQuery); queryErr != nil {
+			return cfg, fmt.Errorf("invalid Android XHTTP settings")
+		}
+		if encryption := q.Get("encryption"); encryption != "" && encryption != "none" {
+			return cfg, fmt.Errorf("unsupported Android XHTTP encryption")
+		}
+		for _, key := range []string{"type", "security", "mode", "extra", "path", "host", "sni", "fp", "flow", "pbk", "sid", "alpn", "encryption"} {
+			if len(q[key]) > 1 {
+				return cfg, fmt.Errorf("ambiguous Android XHTTP settings")
+			}
+		}
+	}
 	return cfg, validateProxy(cfg)
 }
 

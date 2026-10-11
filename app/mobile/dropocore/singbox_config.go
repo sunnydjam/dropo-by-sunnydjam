@@ -13,7 +13,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v10-source-pool"
+	androidConfigSchema     = "android-package-routing-v11-xhttp-source-pool"
 )
 
 const androidSingBoxVersion = "1.13.14"
@@ -265,6 +265,9 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 			continue
 		}
 		node := source.Nodes[selected]
+		if normalizeTransport(node.Network) == "xhttp" && !isAndroidProxySupported(node) {
+			return androidSourceError("Сохранённый XHTTP-сервер не поддерживается. Обновите источник или выберите другой сервер.")
+		}
 		node.Tag = "vpn-" + source.ID
 		outbounds = append(outbounds, proxyToSingBoxOutbound(node))
 		proxyTags = append(proxyTags, node.Tag)
@@ -354,7 +357,7 @@ func parseAndroidProxyCandidatesWithFetcher(subscription string, fetcher *subscr
 	filtered := make([]proxyConfig, 0, len(proxies))
 	for _, proxy := range proxies {
 		proxy.Network = normalizeTransport(proxy.Network)
-		if !isTransportSupported(proxy.Network) {
+		if !isAndroidProxySupported(proxy) {
 			continue
 		}
 		if proxy.Tag == "" {
@@ -418,6 +421,15 @@ func appendAndroidProxyOutbounds(outbounds []interface{}, proxies []proxyConfig,
 }
 
 func proxyToSingBoxOutbound(proxy proxyConfig) map[string]interface{} {
+	if proxy.Type == "vless" && normalizeTransport(proxy.Network) == "xhttp" {
+		// The bundled Android wrapper validates and replaces this placeholder
+		// with an authenticated in-process Xray bridge before libbox sees it.
+		// The source tag is preserved so probes traverse the actual transport.
+		return map[string]interface{}{
+			"type": androidXHTTPOutboundType, "tag": proxy.Tag,
+			"xray_outbound": proxyToAndroidXrayOutbound(proxy, "xray-"+proxy.Tag),
+		}
+	}
 	out := map[string]interface{}{
 		"type":        proxy.Type,
 		"tag":         proxy.Tag,

@@ -646,7 +646,7 @@ func restoreAndroidSubscriptionStateLocked(snapshot androidSubscriptionStateSnap
 
 // validateAndroidSubscriptionLocally deliberately performs no network I/O.
 // Remote subscriptions are checked for a safe HTTPS URL; direct keys are
-// parsed and filtered against the transports supported by Android sing-box.
+// parsed and filtered against the transports supported by the bundled Android runtime.
 func validateAndroidSubscriptionLocally(value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -657,7 +657,7 @@ func validateAndroidSubscriptionLocally(value string) error {
 	}
 
 	proxy, err := parseAndroidDirectProxyCandidate(value)
-	if err != nil || !isTransportSupported(proxy.Network) {
+	if err != nil || !isAndroidProxySupported(proxy) {
 		return fmt.Errorf(androidInvalidVPNKeyError)
 	}
 	return nil

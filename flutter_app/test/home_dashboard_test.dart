@@ -88,6 +88,52 @@ class _HomeBridge extends MockCoreBridge {
   }
 }
 
+class _SpaceBridge extends _HomeBridge {
+  _SpaceBridge({this.canCreate = true});
+
+  final bool canCreate;
+  int compatibilityReads = 0;
+  int promptWrites = 0;
+  int spaceCreates = 0;
+  int helpSearches = 0;
+
+  @override
+  Future<AndroidCompatibilityInfo> androidCompatibility() async {
+    compatibilityReads++;
+    return AndroidCompatibilityInfo.fromJson({
+      'supported': true,
+      'deviceLabel': 'Poco F5',
+      'sdk': 35,
+      'dropoSpaceSupported': canCreate,
+      'dropoSpaceCanCreate': canCreate,
+      'promptDismissed': false,
+      'riskApps': const [
+        {'packageName': 'ru.oneme.app', 'name': 'MAX', 'installed': true},
+      ],
+    });
+  }
+
+  @override
+  Future<Map<String, dynamic>> setAndroidCompatibilityPromptDismissed(
+    bool dismissed,
+  ) async {
+    promptWrites++;
+    return super.setAndroidCompatibilityPromptDismissed(dismissed);
+  }
+
+  @override
+  Future<Map<String, dynamic>> createDropoSpace() async {
+    spaceCreates++;
+    return super.createDropoSpace();
+  }
+
+  @override
+  Future<Map<String, dynamic>> openCloneHelpSearch() async {
+    helpSearches++;
+    return super.openCloneHelpSearch();
+  }
+}
+
 class _OnboardingBridge extends _HomeBridge {
   String savedSubscription = '';
   int personalTests = 0;
@@ -1359,6 +1405,120 @@ void main() {
       },
     );
   }
+
+  for (final mode in ['all_traffic', 'blocked_only']) {
+    testWidgets('Android $mode connects without promoting cloning', (
+      tester,
+    ) async {
+      debugMobileShellOverride = true;
+      debugAndroidPlatformOverride = true;
+      addTearDown(() {
+        debugMobileShellOverride = null;
+        debugAndroidPlatformOverride = null;
+      });
+      final bridge = _SpaceBridge();
+      await bridge.saveSubscription('https://example.test/subscription');
+      await bridge.saveAppConfig(
+        AppConfig.defaults.copyWith(routingMode: mode),
+      );
+      await _pumpHome(tester, bridge, size: const Size(390, 844));
+      expect(bridge.compatibilityReads, 0);
+      expect(bridge.spaceCreates, 0);
+
+      for (final connected in [true, false, true]) {
+        await _tap(tester, 'home-connect');
+        await tester.pump(const Duration(seconds: 9));
+        await tester.pump();
+        expect(bridge.connected, connected);
+        expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
+        expect(find.text('Совместимость приложений'), findsNothing);
+        expect(find.text('В Dropo Space'), findsNothing);
+        expect(find.text('Используйте клон приложения'), findsNothing);
+        expect(find.byKey(const ValueKey('dropo-space-section')), findsNothing);
+        expect(bridge.compatibilityReads, 0);
+        expect(bridge.promptWrites, 0);
+        expect(bridge.spaceCreates, 0);
+        expect(bridge.helpSearches, 0);
+        expect(bridge.policyWrites, 0);
+        expect((await bridge.appConfig())['routingMode'], mode);
+        expect(tester.takeException(), isNull);
+      }
+      expect(bridge.toggles, 3);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+  }
+
+  testWidgets('Android Space is available only after manual navigation', (
+    tester,
+  ) async {
+    debugMobileShellOverride = true;
+    debugAndroidPlatformOverride = true;
+    addTearDown(() {
+      debugMobileShellOverride = null;
+      debugAndroidPlatformOverride = null;
+    });
+    final bridge = _SpaceBridge()..connected = true;
+    await bridge.saveSubscription('https://example.test/subscription');
+    await _pumpHome(tester, bridge, size: const Size(390, 844));
+    expect(bridge.compatibilityReads, 0);
+    await _tap(tester, 'nav-dropo_space');
+    expect(find.byKey(const ValueKey('dropo-space-section')), findsOneWidget);
+    expect(find.text('Создать Dropo Space'), findsOneWidget);
+    expect(find.text('MAX'), findsOneWidget);
+    expect(bridge.compatibilityReads, 1);
+    expect(bridge.spaceCreates, 0);
+    expect(bridge.promptWrites, 0);
+    expect(bridge.connected, isTrue);
+    expect(bridge.toggles, 0);
+    expect(bridge.policyWrites, 0);
+
+    final create = find.text('Создать Dropo Space');
+    await tester.ensureVisible(create);
+    await tester.tap(create);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(bridge.spaceCreates, 1);
+    expect(find.text('Завершите мастер Android'), findsOneWidget);
+    expect(bridge.promptWrites, 0);
+    expect(bridge.connected, isTrue);
+    expect(bridge.toggles, 0);
+    expect(bridge.policyWrites, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('Android manual clone help remains available without Space', (
+    tester,
+  ) async {
+    debugMobileShellOverride = true;
+    debugAndroidPlatformOverride = true;
+    addTearDown(() {
+      debugMobileShellOverride = null;
+      debugAndroidPlatformOverride = null;
+    });
+    final bridge = _SpaceBridge(canCreate: false);
+    await _pumpHome(tester, bridge, size: const Size(390, 844));
+    expect(bridge.compatibilityReads, 0);
+    await _tap(tester, 'nav-dropo_space');
+    expect(find.text('Dropo Space недоступен'), findsOneWidget);
+    expect(find.text('Создать Dropo Space'), findsNothing);
+    expect(bridge.compatibilityReads, 1);
+    expect(bridge.helpSearches, 0);
+    final help = find.text('Искать инструкцию');
+    await tester.ensureVisible(help);
+    await tester.tap(help);
+    await tester.pump();
+    expect(bridge.helpSearches, 1);
+    expect(bridge.spaceCreates, 0);
+    expect(bridge.promptWrites, 0);
+    expect(bridge.toggles, 0);
+    expect(bridge.policyWrites, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
 
   testWidgets('Android drawer preserves Space and connected route guards', (
     tester,

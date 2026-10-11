@@ -3,6 +3,8 @@ package dropoandroid
 import (
 	"context"
 	core "dropocore"
+	"encoding/json"
+	"errors"
 	"sync"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
@@ -16,10 +18,23 @@ const (
 )
 
 func EnsureStarted(basePath, appVersion string) string {
-	return core.EnsureStarted(basePath, appVersion)
+	androidRuntimeLifecycleMu.Lock()
+	defer androidRuntimeLifecycleMu.Unlock()
+	result := core.EnsureStarted(basePath, appVersion)
+	var status struct {
+		Success bool `json:"success"`
+	}
+	if json.Unmarshal([]byte(result), &status) == nil && status.Success {
+		rearmXHTTPRuntime()
+	}
+	return result
 }
 
 func Shutdown() string {
+	androidRuntimeLifecycleMu.Lock()
+	defer androidRuntimeLifecycleMu.Unlock()
+	core.CancelPendingSourceWork()
+	shutdownXHTTPInstances()
 	return core.Shutdown()
 }
 
@@ -65,7 +80,11 @@ func Setup(options *SetupOptions) error {
 }
 
 func CheckConfig(configContent string) error {
-	return libbox.CheckConfig(configContent)
+	normalized, _, err := normalizeXHTTPConfig(configContent, nil, false)
+	if err != nil {
+		return err
+	}
+	return libbox.CheckConfig(normalized)
 }
 
 func Version() string {
@@ -91,9 +110,17 @@ type CommandServer struct {
 	sourceGeneration     uint64
 	sourceCoreGeneration int64
 	sourceWake           chan struct{}
+	xhttpMu              sync.Mutex
+	xhttpRuntime         *xhttpRuntime
+	platform             PlatformInterface
+	xhttpEpoch           uint64
 }
 
 func NewCommandServer(handler CommandServerHandler, platformInterface PlatformInterface) (*CommandServer, error) {
+	epoch := currentXHTTPEpoch()
+	if epoch == 0 {
+		return nil, errors.New("Android runtime has shut down")
+	}
 	inner, err := libbox.NewCommandServer(
 		&commandServerHandlerAdapter{inner: handler},
 		&platformInterfaceAdapter{inner: platformInterface},
@@ -101,7 +128,7 @@ func NewCommandServer(handler CommandServerHandler, platformInterface PlatformIn
 	if err != nil {
 		return nil, err
 	}
-	return &CommandServer{inner: inner}, nil
+	return &CommandServer{inner: inner, platform: platformInterface, xhttpEpoch: epoch}, nil
 }
 
 func (s *CommandServer) Start() error {
@@ -110,24 +137,71 @@ func (s *CommandServer) Start() error {
 
 func (s *CommandServer) Close() {
 	s.StopSourceSelection()
+	s.StopXHTTPTransport()
 	s.inner.Close()
+	s.closeXHTTPRuntime()
 }
 
 func (s *CommandServer) StartOrReloadService(configContent string, options *OverrideOptions) error {
 	s.StopSourceSelection()
+	s.StopXHTTPTransport()
+	s.xhttpMu.Lock()
+	defer s.xhttpMu.Unlock()
+	if !xHTTPEpochCurrent(s.xhttpEpoch) {
+		return errors.New("Android runtime session was cancelled")
+	}
+	// Fail closed: stop the old bridge before validating/reloading another
+	// configuration. A failed partial start cannot leave a private proxy alive.
+	if s.xhttpRuntime != nil {
+		s.xhttpRuntime.close()
+		s.xhttpRuntime = nil
+	}
+	normalized, runtime, err := normalizeXHTTPConfig(configContent, s.platform, true, s.xhttpEpoch)
+	if err != nil {
+		return err
+	}
 	if options == nil {
 		options = &OverrideOptions{}
 	}
-	return s.inner.StartOrReloadService(configContent, &libbox.OverrideOptions{
+	if !xHTTPEpochCurrent(s.xhttpEpoch) {
+		runtime.close()
+		return errors.New("Android runtime session was cancelled")
+	}
+	err = s.inner.StartOrReloadService(normalized, &libbox.OverrideOptions{
 		AutoRedirect:   options.AutoRedirect,
 		IncludePackage: &libboxStringIterator{inner: options.IncludePackage},
 		ExcludePackage: &libboxStringIterator{inner: options.ExcludePackage},
 	})
+	if err != nil {
+		runtime.close()
+		return err
+	}
+	s.xhttpRuntime = runtime
+	return nil
 }
 
 func (s *CommandServer) CloseService() error {
 	s.StopSourceSelection()
+	s.StopXHTTPTransport()
+	s.closeXHTTPRuntime()
 	return s.inner.CloseService()
+}
+
+// Explicit VPN stop calls this on the caller thread before queued engine
+// cleanup. Probe-only suspension during physical-network loss does not call it.
+func (s *CommandServer) StopXHTTPTransport() {
+	s.xhttpMu.Lock()
+	s.xhttpRuntime.stop()
+	s.xhttpMu.Unlock()
+}
+
+func (s *CommandServer) closeXHTTPRuntime() {
+	s.xhttpMu.Lock()
+	defer s.xhttpMu.Unlock()
+	if s.xhttpRuntime != nil {
+		s.xhttpRuntime.close()
+		s.xhttpRuntime = nil
+	}
 }
 
 func (s *CommandServer) WriteMessage(level int32, message string) {
@@ -155,6 +229,9 @@ func (s *CommandServer) Wake() {
 }
 
 func (s *CommandServer) ResetNetwork() {
+	s.xhttpMu.Lock()
+	s.xhttpRuntime.resetNetwork()
+	s.xhttpMu.Unlock()
 	s.inner.ResetNetwork()
 }
 

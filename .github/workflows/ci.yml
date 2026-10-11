@@ -43,6 +43,7 @@ jobs:
         run: |
           ./tools/test-account-build-endpoint.ps1
           ./tools/test-android-build-options.ps1
+          ./tools/test-android-xhttp-overlay.ps1
       - name: Verify bundled blocked lists are current
         shell: pwsh
         run: ./scripts/filters/update-blocked-lists.ps1 -CheckOnly
@@ -99,12 +100,23 @@ jobs:
           go vet ./...
           if ($LASTEXITCODE -ne 0) { throw "Android core Go vet failed" }
           Pop-Location
+          $xhttpOverlay = & ./tools/prepare-android-xhttp-overlay.ps1
+          $originalAndroidGoFlags = $env:GOFLAGS
+          if ($originalAndroidGoFlags -match '(?:^|\s|\")-(?:overlay|modfile)(?:=|\s)') {
+            throw "Android bridge tests cannot combine another Go overlay or modfile"
+          }
           Push-Location app/mobile/dropoandroid
-          go test ./...
-          if ($LASTEXITCODE -ne 0) { throw "Android bridge Go tests failed" }
-          go vet ./...
-          if ($LASTEXITCODE -ne 0) { throw "Android bridge Go vet failed" }
-          Pop-Location
+          try {
+            $env:GOFLAGS = ("$originalAndroidGoFlags " + $xhttpOverlay.GoFlag).Trim()
+            go test '-ldflags=-checklinkname=0' ./...
+            if ($LASTEXITCODE -ne 0) { throw "Android bridge Go tests failed" }
+            go vet ./...
+            if ($LASTEXITCODE -ne 0) { throw "Android bridge Go vet failed" }
+          } finally {
+            $env:GOFLAGS = $originalAndroidGoFlags
+            Pop-Location
+          }
+          ./tools/test-android-xhttp-overlay.ps1 -RunGoTests
 
   flutter-tests:
     runs-on: windows-latest
@@ -138,6 +150,24 @@ jobs:
       - name: Go race detector
         working-directory: app
         run: go test -race ./...
+      - name: Android XHTTP bridge and managed lifecycle race tests
+        shell: pwsh
+        run: |
+          ./tools/test-android-xhttp-overlay.ps1 -RunGoTests -Race
+          $xhttpOverlay = & ./tools/prepare-android-xhttp-overlay.ps1
+          $originalAndroidGoFlags = $env:GOFLAGS
+          if ($originalAndroidGoFlags -match '(?:^|\s|\")-(?:overlay|modfile)(?:=|\s)') {
+            throw "Android bridge race tests cannot combine another Go overlay or modfile"
+          }
+          Push-Location app/mobile/dropoandroid
+          try {
+            $env:GOFLAGS = ("$originalAndroidGoFlags " + $xhttpOverlay.GoFlag).Trim()
+            go test '-ldflags=-checklinkname=0' -race ./...
+            if ($LASTEXITCODE -ne 0) { throw "Android bridge Go race tests failed" }
+          } finally {
+            $env:GOFLAGS = $originalAndroidGoFlags
+            Pop-Location
+          }
 
   platform-compile:
     runs-on: windows-latest

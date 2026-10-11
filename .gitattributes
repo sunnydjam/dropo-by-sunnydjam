@@ -1,1 +1,3 @@
 /.githooks/* text eol=lf
+/app/mobile/dropoandroid/xray_overlay/files/*.go.txt text eol=lf
+/flutter_app/assets/licenses/xray-core-source/*.go.txt text eol=lf

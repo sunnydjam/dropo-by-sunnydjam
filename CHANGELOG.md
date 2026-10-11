@@ -4,6 +4,17 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.0.47 — 2026-10-12
+
+- support VLESS XHTTP and the `splithttp` alias on Android with bundled
+  in-process Xray, verified TLS and session-scoped transport cleanup;
+- retain provider transport options, manual node selection, independent-source
+  fallback and both routing modes; Windows traffic handling is unchanged;
+- remove the automatic Android cloning suggestion while keeping Dropo Space
+  available through Settings > Advanced;
+- include Xray's full license and corresponding modified transport source in
+  the APK; no first-run executable downloads are introduced.
+
 ## 3.0.46 — 2026-10-12
 
 - open Android account approval in Telegram first, using the same issued login

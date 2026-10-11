@@ -1,0 +1,351 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Dropo modification: explicit per-session XHTTP pools and cancellation.
+package splithttp
+
+import (
+	"context"
+	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/transport/internet"
+	"io"
+	"sync"
+)
+
+type managedSessionKey struct{}
+type managedPool struct {
+	mu         sync.Mutex
+	manager    *XmuxManager
+	generation uint64
+}
+
+// ManagedSession is an opt-in, permanently closeable HTTP pool scope.
+// Ordinary upstream callers continue to use the unmodified global cache.
+type ManagedSession struct {
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	closed      bool
+	clients     map[dialerConf]*managedPool
+	transports  map[*DefaultDialerClient]struct{}
+	requests    map[uint64]context.CancelFunc
+	generation  uint64
+	nextRequest uint64
+}
+
+func NewManagedSession(ctx context.Context) *ManagedSession {
+	ctx, cancel := context.WithCancel(ctx)
+	return &ManagedSession{ctx: ctx, cancel: cancel, clients: make(map[dialerConf]*managedPool), transports: make(map[*DefaultDialerClient]struct{}), requests: make(map[uint64]context.CancelFunc)}
+}
+func ContextWithManagedSession(ctx context.Context, session *ManagedSession) context.Context {
+	return context.WithValue(ctx, managedSessionKey{}, session)
+}
+func managedSessionFromContext(ctx context.Context) *ManagedSession {
+	session, _ := ctx.Value(managedSessionKey{}).(*ManagedSession)
+	return session
+}
+func (s *ManagedSession) Close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	s.cancel()
+	requests, clients := s.requests, s.transports
+	s.clients, s.requests, s.transports = nil, nil, nil
+	s.mu.Unlock()
+	for _, cancel := range requests {
+		cancel()
+	}
+	for client := range clients {
+		client.closeManaged(true)
+	}
+}
+func (s *ManagedSession) requestContext(ctx context.Context) (context.Context, func()) {
+	if s == nil {
+		return context.WithoutCancel(ctx), func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	if s.closed || s.ctx.Err() != nil || len(s.requests) >= 4096 {
+		s.mu.Unlock()
+		cancel()
+		return ctx, func() {}
+	}
+	s.nextRequest++
+	id := s.nextRequest
+	s.requests[id] = cancel
+	s.mu.Unlock()
+	stop := context.AfterFunc(s.ctx, cancel)
+	var once sync.Once
+	return ctx, func() { once.Do(func() { stop(); cancel(); s.mu.Lock(); delete(s.requests, id); s.mu.Unlock() }) }
+}
+func (s *ManagedSession) addClient(client *DefaultDialerClient) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.closed || client.managedGeneration != s.generation {
+		s.mu.Unlock()
+		client.closeManaged(true)
+		return
+	}
+	s.transports[client] = struct{}{}
+	s.mu.Unlock()
+}
+func (s *ManagedSession) removeClient(client *DefaultDialerClient) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.transports, client)
+	s.mu.Unlock()
+}
+func (s *ManagedSession) getHTTPClient(ctx context.Context, dest net.Destination, stream *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
+	s.mu.Lock()
+	if s.closed || s.ctx.Err() != nil || ctx.Err() != nil {
+		s.mu.Unlock()
+		return closedManagedClient{}, nil
+	}
+	key := dialerConf{dest, stream}
+	pool := s.clients[key]
+	if pool == nil {
+		if len(s.clients) >= 16 {
+			s.mu.Unlock()
+			return closedManagedClient{}, nil
+		}
+		transport := stream.ProtocolSettings.(*Config)
+		var xmux XmuxConfig
+		if transport.Xmux != nil {
+			xmux = *transport.Xmux
+		}
+		generation := s.generation
+		pool = &managedPool{generation: generation, manager: NewXmuxManager(xmux, func() XmuxConn { return createHTTPClient(dest, stream, s, generation) })}
+		s.clients[key] = pool
+	}
+	s.mu.Unlock()
+	// XmuxManager requires an external lock. It must not be the scope lock:
+	// creation registers a transport in the scope while this lock is held.
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	s.mu.Lock()
+	current := !s.closed && pool.generation == s.generation
+	s.mu.Unlock()
+	if !current || s.ctx.Err() != nil || ctx.Err() != nil {
+		return closedManagedClient{}, nil
+	}
+	before := append([]*XmuxClient(nil), pool.manager.xmuxClients...)
+	client := pool.manager.GetXmuxClient(ctx)
+	actual := client.XmuxConn.(*DefaultDialerClient)
+	if actual.IsClosed() {
+		return closedManagedClient{}, nil
+	}
+	actual.xmuxClient.Store(client)
+	// Reserve the stream before another getter can retire this client.
+	client.OpenUsage.Add(1)
+	for _, previous := range before {
+		present := false
+		for _, current := range pool.manager.xmuxClients {
+			present = present || current == previous
+		}
+		if !present {
+			retired := previous.XmuxConn.(*DefaultDialerClient)
+			retired.retired.Store(true)
+			retired.closeManaged(false)
+		}
+	}
+	return actual, client
+}
+
+func (s *ManagedSession) ResetNetwork() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.generation++
+	requests, clients := s.requests, s.transports
+	s.clients = make(map[dialerConf]*managedPool)
+	s.requests = make(map[uint64]context.CancelFunc)
+	s.transports = make(map[*DefaultDialerClient]struct{})
+	s.mu.Unlock()
+	for _, cancel := range requests {
+		cancel()
+	}
+	for client := range clients {
+		client.closeManaged(true)
+	}
+}
+
+func (c *DefaultDialerClient) closeRawConnection(connection net.Conn) {
+	if c.managedSession == nil {
+		return
+	}
+	c.rawMu.Lock()
+	delete(c.rawConnections, connection)
+	c.rawMu.Unlock()
+	connection.Close()
+}
+func releaseManagedUsage(client *XmuxClient) {
+	if client == nil {
+		return
+	}
+	client.OpenUsage.Add(-1)
+	if actual, ok := client.XmuxConn.(*DefaultDialerClient); ok {
+		actual.closeManaged(false)
+	}
+}
+
+type managedFlow struct {
+	mu               sync.Mutex
+	upload, download *XmuxClient
+	closed           bool
+}
+
+func newManagedFlow(upload, download *XmuxClient) *managedFlow {
+	return &managedFlow{upload: upload, download: download}
+}
+func (f *managedFlow) replaceUpload(next *XmuxClient) {
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		releaseManagedUsage(next)
+		return
+	}
+	previous := f.upload
+	f.upload = next
+	download := f.download
+	f.mu.Unlock()
+	if previous != download {
+		releaseManagedUsage(previous)
+	}
+	if next == download {
+		releaseManagedUsage(next)
+	}
+}
+func (f *managedFlow) Close() {
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return
+	}
+	f.closed = true
+	upload, download := f.upload, f.download
+	f.upload, f.download = nil, nil
+	f.mu.Unlock()
+	releaseManagedUsage(upload)
+	if download != upload {
+		releaseManagedUsage(download)
+	}
+}
+func (c *DefaultDialerClient) beginRequest(ctx context.Context) (context.Context, func()) {
+	ctx, release := c.managedSession.requestContext(ctx)
+	if c.managedSession == nil {
+		return ctx, release
+	}
+	c.activeRequests.Add(1)
+	if c.closed.Load() {
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		ctx = cancelled
+	}
+	var once sync.Once
+	return ctx, func() { once.Do(func() { release(); c.activeRequests.Add(-1); c.closeManaged(false) }) }
+}
+func (c *DefaultDialerClient) closeManaged(force bool) {
+	if c.managedSession == nil {
+		return
+	}
+	xmux := c.xmuxClient.Load()
+	if !force && (!c.retired.Load() || c.activeRequests.Load() != 0 || xmux != nil && xmux.OpenUsage.Load() != 0) {
+		return
+	}
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		if closer, ok := c.transport.(io.Closer); ok {
+			closer.Close()
+		}
+		if idle, ok := c.transport.(interface{ CloseIdleConnections() }); ok {
+			idle.CloseIdleConnections()
+		}
+		c.rawMu.Lock()
+		connections := c.rawConnections
+		c.rawConnections = nil
+		c.rawMu.Unlock()
+		for connection := range connections {
+			connection.Close()
+		}
+		c.managedSession.removeClient(c)
+	})
+}
+func (c *DefaultDialerClient) trackRawConnection(connection net.Conn) bool {
+	if c.managedSession == nil {
+		return true
+	}
+	c.rawMu.Lock()
+	if c.closed.Load() {
+		c.rawMu.Unlock()
+		connection.Close()
+		return false
+	}
+	c.rawConnections[connection] = struct{}{}
+	c.rawMu.Unlock()
+	return true
+}
+
+type closedManagedClient struct{}
+
+func (closedManagedClient) IsClosed() bool { return true }
+func (closedManagedClient) OpenStream(context.Context, string, string, io.Reader, bool) (io.ReadCloser, net.Addr, net.Addr, error) {
+	return nil, nil, nil, io.ErrClosedPipe
+}
+func (closedManagedClient) PostPacket(_ context.Context, _ string, _ string, _ string, payload buf.MultiBuffer) error {
+	buf.ReleaseMulti(payload)
+	return io.ErrClosedPipe
+}
+
+// Unlike io.NopCloser, a managed packet body owns its remaining pooled buffers
+// on cancellation/error. Read and Close may run concurrently in net/http.
+type managedPacketBody struct {
+	mu        sync.Mutex
+	container *buf.MultiBufferContainer
+	closed    bool
+}
+
+func (b *managedPacketBody) Read(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return 0, io.EOF
+	}
+	return b.container.Read(data)
+}
+func (b *managedPacketBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	return b.container.Close()
+}
+
+type managedResponseBody struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (b *managedResponseBody) Close() (err error) {
+	b.once.Do(func() { err = b.ReadCloser.Close(); b.release() })
+	return
+}
+func (b *managedResponseBody) Read(data []byte) (int, error) {
+	n, err := b.ReadCloser.Read(data)
+	if err != nil {
+		b.Close()
+	}
+	return n, err
+}

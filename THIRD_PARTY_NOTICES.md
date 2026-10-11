@@ -44,6 +44,34 @@ Made with Natural Earth. Данные находятся в public domain сог
 Точные версии и хеши закреплены в `version.json`, file-level
 `runtime-manifest.json` и `dropo-sbom.spdx.json`, создаваемых сборкой.
 
+## Компоненты Android
+
+Android использует встроенный gomobile bridge: sing-box отвечает за TUN и
+маршрутизацию, а Xray-core 26.3.27 обеспечивает VLESS XHTTP через локальный
+bridge внутри процесса приложения. Windows-исполняемые файлы, shell runtime,
+загрузка исполняемых зависимостей при первом запуске и базы geoip/geosite Xray
+для этого пути не используются.
+
+Закреплённый Go module — `github.com/xtls/xray-core v1.260327.0`, исходная
+ревизия — `d2758a023cd7f4174a5a5fa4ff66e487d4342ba0`.
+Полный неизменённый текст MPL-2.0 и notice с точной версией и ссылками на
+соответствующий исходный код входят в APK как Flutter assets:
+`assets/licenses/Xray-core-LICENSE.txt` и `assets/licenses/Xray-core-NOTICE.txt`.
+Исходники доступны в [репозитории Xray-core на закреплённой ревизии](https://github.com/XTLS/Xray-core/tree/d2758a023cd7f4174a5a5fa4ff66e487d4342ba0)
+и в [архиве соответствующих исходников](https://github.com/XTLS/Xray-core/archive/d2758a023cd7f4174a5a5fa4ff66e487d4342ba0.tar.gz).
+Для строгого завершения VPN-сессии Dropo применяет узкий MPL-2.0 lifecycle patch:
+изолированные HTTP-пулы и отмена XHTTP-запросов вместо общего upstream cache.
+Полные соответствующие изменённые исходники `client.go.txt`, `dialer.go.txt`,
+`managed_session.go.txt` и `managed_session_test.go.txt` включены в APK в
+`assets/licenses/xray-core-source/`; остальные исходники доступны на закреплённой
+upstream-ревизии выше. Патч компилируется через проверенный Go overlay, без
+изменения module cache. SHA-256 исходных и заменяющих файлов записаны в
+`app/mobile/dropoandroid/xray_overlay/manifest.json` и проверяются до сборки.
+Изменённые покрытые файлы сохраняют MPL notice и распространяются по MPL-2.0.
+Отдельный integration code хранится в `app/mobile/dropoandroid` и
+`app/mobile/dropocore`. При дальнейших изменениях необходимо сохранить
+уведомления и предоставить соответствующие изменённые исходники по MPL-2.0.
+
 ## Внешние источники конфигураций (по выбору пользователя)
 
 [kort0881/vpn-checker-backend](https://github.com/kort0881/vpn-checker-backend)

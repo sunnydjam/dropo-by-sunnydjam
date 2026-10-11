@@ -82,8 +82,8 @@ func (s *CommandServer) StartSourceSelection() error {
 // request. No cancelled worker can reload an engine or mutate its selector.
 func (s *CommandServer) StopSourceSelection() {
 	s.sourceMu.Lock()
-	defer s.sourceMu.Unlock()
 	s.stopSourceSelectionLocked()
+	s.sourceMu.Unlock()
 }
 
 func (s *CommandServer) stopSourceSelectionLocked() {

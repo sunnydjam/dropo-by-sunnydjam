@@ -1,0 +1,218 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Dropo modification: managed-session ownership and lifecycle regression tests.
+package splithttp
+
+import (
+	"context"
+	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/transport/internet"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func managedTestStream() *internet.MemoryStreamConfig {
+	return &internet.MemoryStreamConfig{ProtocolSettings: &Config{Xmux: &XmuxConfig{CMaxReuseTimes: &RangeConfig{From: 1, To: 1}}}}
+}
+
+type managedCancelledTransport struct{}
+
+func (managedCancelledTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, context.Canceled
+}
+func TestDropoManagedPostPacketCancellationReleasesBodyAndAutoPayload(t *testing.T) {
+	for _, placement := range []string{PlacementBody, PlacementAuto} {
+		t.Run(placement, func(t *testing.T) {
+			scope := NewManagedSession(context.Background())
+			defer scope.Close()
+			client := &DefaultDialerClient{managedSession: scope, transportConfig: &Config{UplinkDataPlacement: placement}, httpVersion: "2", client: &http.Client{Transport: managedCancelledTransport{}}}
+			packet := buf.New()
+			packet.WriteString("cancelled-packet-fixture")
+			if err := client.PostPacket(scope.ctx, "http://fixture.invalid/", "session", "0", buf.MultiBuffer{packet}); err == nil {
+				t.Fatal("cancelled upload succeeded")
+			}
+			if packet.Len() != 0 {
+				t.Fatal("PostPacket cancellation retained unread pooled payload")
+			}
+			scope.mu.Lock()
+			pending := len(scope.requests)
+			scope.mu.Unlock()
+			if pending != 0 {
+				t.Fatal("cancelled upload retained its request context")
+			}
+		})
+	}
+}
+
+func TestDropoManagedPacketCancellationReleasesPooledPayload(t *testing.T) {
+	packet := buf.New()
+	packet.WriteString("secret-free-fixture")
+	payload := buf.MultiBuffer{packet}
+	closedManagedClient{}.PostPacket(context.Background(), "", "", "", payload)
+	if packet.Len() != 0 {
+		t.Fatal("closed client retained packet payload")
+	}
+	packet = buf.New()
+	packet.WriteString("packet-fixture")
+	body := &managedPacketBody{container: &buf.MultiBufferContainer{MultiBuffer: buf.MultiBuffer{packet}}}
+	body.Read(make([]byte, 3))
+	body.Close()
+	body.Close()
+	if packet.Len() != 0 {
+		t.Fatal("partially read packet body retained pooled payload")
+	}
+}
+func TestDropoManagedRetiredPoolReleasedDuringLongSession(t *testing.T) {
+	scope := NewManagedSession(context.Background())
+	defer scope.Close()
+	stream := managedTestStream()
+	dest := net.TCPDestination(net.LocalHostIP, 80)
+	for i := 0; i < 200; i++ {
+		_, client := scope.getHTTPClient(scope.ctx, dest, stream)
+		releaseManagedUsage(client)
+		scope.mu.Lock()
+		count := len(scope.transports)
+		scope.mu.Unlock()
+		if count > 1 {
+			t.Fatalf("retired transports retained: %d", count)
+		}
+	}
+	scope.Close()
+	if len(scope.transports) != 0 || len(scope.clients) != 0 {
+		t.Fatal("Close retained HTTP pools")
+	}
+}
+func TestDropoManagedActiveRetiredClientStaysUntilRequestsFinish(t *testing.T) {
+	scope := NewManagedSession(context.Background())
+	defer scope.Close()
+	stream := managedTestStream()
+	dest := net.TCPDestination(net.LocalHostIP, 80)
+	transport, first := scope.getHTTPClient(scope.ctx, dest, stream)
+	active := transport.(*DefaultDialerClient)
+	_, release := active.beginRequest(scope.ctx)
+	_, second := scope.getHTTPClient(scope.ctx, dest, stream)
+	releaseManagedUsage(first)
+	if active.IsClosed() {
+		t.Fatal("retirement closed an active request")
+	}
+	release()
+	if !active.IsClosed() {
+		t.Fatal("retired client retained after request finished")
+	}
+	scope.mu.Lock()
+	count := len(scope.transports)
+	scope.mu.Unlock()
+	if count != 1 {
+		t.Fatal("retired client was not unregistered")
+	}
+	releaseManagedUsage(second)
+}
+func TestDropoManagedConcurrentGetAndClose(t *testing.T) {
+	for turn := 0; turn < 20; turn++ {
+		scope := NewManagedSession(context.Background())
+		stream := managedTestStream()
+		dest := net.TCPDestination(net.LocalHostIP, 80)
+		var workers sync.WaitGroup
+		for i := 0; i < 32; i++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				_, client := scope.getHTTPClient(scope.ctx, dest, stream)
+				releaseManagedUsage(client)
+			}()
+		}
+		workers.Add(1)
+		go func() { defer workers.Done(); scope.ResetNetwork(); scope.Close() }()
+		workers.Wait()
+		scope.Close()
+	}
+}
+func TestDropoManagedClosedScopeCannotJoinNewPoolWithSameConfig(t *testing.T) {
+	globalDialerAccess.Lock()
+	baseline := len(globalDialerMap)
+	globalDialerAccess.Unlock()
+	stream := managedTestStream()
+	dest := net.TCPDestination(net.LocalHostIP, 80)
+	first := NewManagedSession(context.Background())
+	oldContext := context.WithoutCancel(ContextWithManagedSession(first.ctx, first))
+	oldClient, reservation := getHTTPClient(oldContext, dest, stream)
+	request, release := first.requestContext(oldContext)
+	first.Close()
+	releaseManagedUsage(reservation)
+	select {
+	case <-request.Done():
+	case <-time.After(time.Second):
+		t.Fatal("WithoutCancel request survived managed Close")
+	}
+	release()
+	second := NewManagedSession(context.Background())
+	defer second.Close()
+	newClient, newReservation := getHTTPClient(ContextWithManagedSession(second.ctx, second), dest, stream)
+	defer releaseManagedUsage(newReservation)
+	if oldClient == newClient {
+		t.Fatal("new session reused the old HTTP pool")
+	}
+	forbidden, reservation := getHTTPClient(oldContext, dest, stream)
+	if _, ok := forbidden.(closedManagedClient); !ok || reservation != nil {
+		t.Fatal("stale session joined an HTTP pool after reconnect")
+	}
+	globalDialerAccess.Lock()
+	count := len(globalDialerMap)
+	globalDialerAccess.Unlock()
+	// None of these synthetic managed clients should enter the global map.
+	if count != baseline {
+		t.Fatal("managed session populated global HTTP cache")
+	}
+}
+
+func TestDropoManagedResetCreatesFreshPoolWithoutClosingSession(t *testing.T) {
+	scope := NewManagedSession(context.Background())
+	defer scope.Close()
+	stream := managedTestStream()
+	dest := net.TCPDestination(net.LocalHostIP, 80)
+	first, one := scope.getHTTPClient(scope.ctx, dest, stream)
+	request, release := scope.requestContext(scope.ctx)
+	scope.ResetNetwork()
+	select {
+	case <-request.Done():
+	case <-time.After(time.Second):
+		t.Fatal("network reset did not cancel old requests")
+	}
+	release()
+	releaseManagedUsage(one)
+	second, two := scope.getHTTPClient(scope.ctx, dest, stream)
+	defer releaseManagedUsage(two)
+	if first == second || scope.ctx.Err() != nil {
+		t.Fatal("network reset reused stale pool or closed the VPN session")
+	}
+}
+
+type managedTestBody struct {
+	io.Reader
+	closes atomic.Int32
+}
+
+func (b *managedTestBody) Close() error { b.closes.Add(1); return nil }
+func TestDropoManagedWaitBodyCloseArrivalRace(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		body := &managedTestBody{Reader: strings.NewReader("body")}
+		waiting := &WaitReadCloser{Wait: make(chan struct{})}
+		var workers sync.WaitGroup
+		workers.Add(3)
+		go func() { defer workers.Done(); waiting.Set(body) }()
+		go func() { defer workers.Done(); waiting.Close() }()
+		go func() { defer workers.Done(); waiting.Read(make([]byte, 4)) }()
+		workers.Wait()
+		waiting.Close()
+		if body.closes.Load() != 1 {
+			t.Fatal("late body not closed exactly once")
+		}
+	}
+}

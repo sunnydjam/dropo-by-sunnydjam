@@ -3818,7 +3818,6 @@ class _DropoHomePageState extends State<DropoHomePage>
   Timer? strategyTransitionTimer;
   StreamSubscription<BridgeEvent>? pushEventsSubscription;
   bool startupUpdateCheckScheduled = false;
-  bool compatibilityNoticeShowing = false;
   double? updateProgressPercent;
   String? updateStage;
   String updateVersion = '';
@@ -4869,9 +4868,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         });
       }
       await _refresh(all: true);
-      if (target && ok) {
-        unawaited(_maybeShowAndroidCompatibilityNotice());
-      }
     }, clearConnectionBusy: true);
   }
 
@@ -4926,46 +4922,6 @@ class _DropoHomePageState extends State<DropoHomePage>
       return false;
     } finally {
       if (mounted) setState(() => preparingFullVpnSource = false);
-    }
-  }
-
-  Future<void> _maybeShowAndroidCompatibilityNotice() async {
-    if (!_isMobileShell || !Platform.isAndroid || compatibilityNoticeShowing) {
-      return;
-    }
-    compatibilityNoticeShowing = true;
-    try {
-      final info = await widget.bridge.androidCompatibility();
-      if (!mounted ||
-          !info.supported ||
-          info.promptDismissed ||
-          !info.hasInstalledRiskApps) {
-        return;
-      }
-      // Persist before opening the dialog so an app restart or process kill
-      // cannot make the first-run instruction appear again.
-      await widget.bridge.setAndroidCompatibilityPromptDismissed(true);
-      if (!mounted) {
-        return;
-      }
-      final result = await showDialog<_CompatibilityNoticeAction>(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) => _AndroidCompatibilityNoticeDialog(
-          info: info,
-          onDecision: (action) => Navigator.of(dialogContext).pop(action),
-        ),
-      );
-      if (!mounted || result == null) {
-        return;
-      }
-      if (result.openDropoSpace) {
-        setState(() => activeMenuSection = 'dropo_space');
-      }
-    } catch (_) {
-      // Compatibility help should never block the VPN start flow.
-    } finally {
-      compatibilityNoticeShowing = false;
     }
   }
 
@@ -7626,17 +7582,6 @@ Widget autoStartPromptDialogForTest({
   return _AutoStartPromptDialog(onDecision: onDecision);
 }
 
-@visibleForTesting
-Widget androidCompatibilityNoticeDialogForTest({
-  required AndroidCompatibilityInfo info,
-  required void Function(bool openDropoSpace) onDecision,
-}) {
-  return _AndroidCompatibilityNoticeDialog(
-    info: info,
-    onDecision: (action) => onDecision(action.openDropoSpace),
-  );
-}
-
 // _AutoStartPromptDialog is the one-time first-run notification about launch at
 // system startup. "ОК" (right) enables autostart; the red "Нет, не надо"
 // (bottom-left) declines it and flips the default off.
@@ -8504,156 +8449,6 @@ class _ProfileNameDialogState extends State<_ProfileNameDialog> {
   }
 }
 
-class _CompatibilityNoticeAction {
-  const _CompatibilityNoticeAction({required this.openDropoSpace});
-
-  final bool openDropoSpace;
-}
-
-class _AndroidCompatibilityNoticeDialog extends StatefulWidget {
-  const _AndroidCompatibilityNoticeDialog({
-    required this.info,
-    required this.onDecision,
-  });
-
-  final AndroidCompatibilityInfo info;
-  final ValueChanged<_CompatibilityNoticeAction> onDecision;
-
-  @override
-  State<_AndroidCompatibilityNoticeDialog> createState() =>
-      _AndroidCompatibilityNoticeDialogState();
-}
-
-class _AndroidCompatibilityNoticeDialogState
-    extends State<_AndroidCompatibilityNoticeDialog>
-    with SingleTickerProviderStateMixin {
-  static const _displayDuration = Duration(seconds: 8);
-  late final AnimationController _countdownController;
-  bool _decisionSent = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _countdownController =
-        AnimationController(vsync: this, duration: _displayDuration)
-          ..addStatusListener((status) {
-            if (status == AnimationStatus.completed) {
-              _finish(openDropoSpace: false);
-            }
-          })
-          ..forward();
-  }
-
-  @override
-  void dispose() {
-    _countdownController.dispose();
-    super.dispose();
-  }
-
-  void _finish({required bool openDropoSpace}) {
-    if (_decisionSent || !mounted) {
-      return;
-    }
-    _decisionSent = true;
-    _countdownController.stop();
-    widget.onDecision(
-      _CompatibilityNoticeAction(openDropoSpace: openDropoSpace),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final names = widget.info.installedRiskApps
-        .take(4)
-        .map((app) => app.name)
-        .join(', ');
-    final extra = widget.info.installedRiskApps.length - 4;
-    final appText = extra > 0 ? '$names и ещё $extra' : names;
-    final canUseSpace = widget.info.canOfferDropoSpace;
-    return _AppDialog(
-      title: 'Совместимость приложений',
-      icon: Icons.privacy_tip_outlined,
-      width: 560,
-      centered: true,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            'На устройстве найдены приложения, которые могут видеть включённый системный VPN: $appText.',
-            style: const TextStyle(color: Color(0xFFD8E4E0), height: 1.35),
-          ),
-          const SizedBox(height: 12),
-          _InfoBand(
-            icon: canUseSpace ? Icons.work_outline : Icons.copy_all_outlined,
-            title: canUseSpace
-                ? 'Можно использовать Dropo Space'
-                : 'Используйте клон приложения',
-            body: canUseSpace
-                ? 'Создайте отдельное пространство для прямого запуска выбранных приложений без VPN основного профиля.'
-                : 'На этой версии Android Dropo Space недоступен. Создайте клон приложения штатными средствами телефона и запускайте клон.',
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: _ActionButton(
-                  label: 'Пропустить',
-                  icon: Icons.close,
-                  secondary: true,
-                  onPressed: () => _finish(openDropoSpace: false),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _ActionButton(
-                  label: 'В Dropo Space',
-                  icon: Icons.work_outline,
-                  onPressed: () => _finish(openDropoSpace: true),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          AnimatedBuilder(
-            animation: _countdownController,
-            builder: (context, child) {
-              final secondsLeft = math.max(
-                0,
-                ((_displayDuration.inMilliseconds *
-                            (1 - _countdownController.value)) /
-                        1000)
-                    .ceil(),
-              );
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  LinearProgressIndicator(
-                    value: 1 - _countdownController.value,
-                    minHeight: 3,
-                    backgroundColor: const Color(0xFF24312E),
-                    valueColor: const AlwaysStoppedAnimation<Color>(
-                      Color(0xFF52D6A4),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Окно закроется через $secondsLeft сек.',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: Color(0xFF91A8A1),
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _AndroidCompatibilityPanel extends StatelessWidget {
   const _AndroidCompatibilityPanel({
     required this.info,
@@ -9141,7 +8936,7 @@ class _AndroidCompatibilityPageState extends State<_AndroidCompatibilityPage> {
   @override
   void initState() {
     super.initState();
-    if (Platform.isAndroid) {
+    if (_isAndroidPlatform) {
       unawaited(_loadAndroidCompatibility());
     }
   }
@@ -9718,7 +9513,7 @@ class _AndroidCompatibilityPageState extends State<_AndroidCompatibilityPage> {
 
   @override
   Widget build(BuildContext context) {
-    final isAndroid = Platform.isAndroid;
+    final isAndroid = _isAndroidPlatform;
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

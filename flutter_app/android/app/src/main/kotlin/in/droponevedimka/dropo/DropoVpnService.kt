@@ -314,6 +314,7 @@ class DropoVpnService :
         sessionFence.cancel()
         runCatching { Dropoandroid.cancelPendingSourceWork() }
         runCatching { commandServer?.stopSourceSelection() }
+        runCatching { commandServer?.stopXHTTPTransport() }
         closeTun()
         synchronized(stopLock) {
             if (stopping) return
@@ -586,7 +587,8 @@ class DropoVpnService :
     override fun getInterfaces(): NetworkInterfaceIterator {
         val javaInterfaces = JavaNetworkInterface.getNetworkInterfaces().toList()
         val result = mutableListOf<BoxNetworkInterface>()
-        for (network in connectivity.allNetworks) {
+        val networks = PhysicalNetworkPolicy.preferredFirst(connectivity.allNetworks.toList(), physicalNetwork())
+        for (network in networks) {
             val linkProperties = connectivity.getLinkProperties(network) ?: continue
             val capabilities = connectivity.getNetworkCapabilities(network) ?: continue
             val name = linkProperties.interfaceName ?: continue
@@ -597,11 +599,17 @@ class DropoVpnService :
                 mtu = runCatching { javaInterface.mtu }.getOrDefault(1500)
                 addresses = StringArray(javaInterface.interfaceAddresses.map { it.toPrefix() }.iterator())
                 dnsServer = StringArray(linkProperties.dnsServers.mapNotNull { it.hostAddress }.iterator())
-                type = when {
-                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> Dropoandroid.InterfaceTypeWIFI
-                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> Dropoandroid.InterfaceTypeCellular
-                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> Dropoandroid.InterfaceTypeEthernet
-                    else -> Dropoandroid.InterfaceTypeOther
+                type = when (PhysicalNetworkPolicy.transport(
+                    vpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+                    notVpn = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN),
+                    wifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+                    cellular = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
+                    ethernet = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+                )) {
+                    PhysicalTransport.WIFI -> Dropoandroid.InterfaceTypeWIFI
+                    PhysicalTransport.CELLULAR -> Dropoandroid.InterfaceTypeCellular
+                    PhysicalTransport.ETHERNET -> Dropoandroid.InterfaceTypeEthernet
+                    PhysicalTransport.OTHER -> Dropoandroid.InterfaceTypeOther
                 }
                 metered = !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
                 flags = javaInterface.toFlags(capabilities)
@@ -796,6 +804,7 @@ class DropoVpnService :
                     physicalNetworkSignature = "offline"
                     setUnderlyingNetworks(emptyArray())
                     listener.updateDefaultInterface("", -1, false, false)
+                    runCatching { commandServer?.resetNetwork() }
                     commandServer?.stopSourceSelection()
                 }
             }
@@ -815,6 +824,7 @@ class DropoVpnService :
                 !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED),
             )
             if (changed) {
+                runCatching { commandServer?.resetNetwork() }
                 runCatching {
                     if (restored) {
                         commandServer?.startSourceSelection()
@@ -829,8 +839,11 @@ class DropoVpnService :
     private fun physicalNetwork(): Network? {
         fun usable(network: Network): Boolean {
             val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
-            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            return PhysicalNetworkPolicy.usable(
+                internet = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
+                notVpn = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN),
+                vpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+            )
         }
         connectivity.activeNetwork?.let { if (usable(it)) return it }
         return connectivity.allNetworks.filter(::usable).maxByOrNull { network ->

@@ -365,6 +365,42 @@ pwsh -File .\tools\preflight-release.ps1 `
 дополнительно требует Android SDK и настроенный Flutter Android toolchain.
 Lifecycle smoke требует PowerShell с правами администратора.
 
+### Android: сборка и тесты XHTTP
+
+VLESS XHTTP использует закреплённый Xray-core 26.3.27 с проверяемым MPL-2.0
+lifecycle overlay. Обычный `go test` для `dropoandroid` без overlay недостаточен:
+управление HTTP-пулами предоставляется этим build patch, а не upstream API.
+Подготовка не меняет module cache и исходные `go.mod`/`go.sum`.
+
+Проверка контракта и dedicated lifecycle-тестов:
+
+```powershell
+pwsh -File .\tools\test-android-xhttp-overlay.ps1 -RunGoTests
+```
+
+Полные Go-тесты bridge с временным modfile, с восстановлением окружения:
+
+```powershell
+$overlay = & .\tools\prepare-android-xhttp-overlay.ps1
+$previousGoFlags = $env:GOFLAGS
+Push-Location .\app\mobile\dropoandroid
+try {
+    $env:GOFLAGS = ("$previousGoFlags " + $overlay.GoFlag).Trim()
+    go test -ldflags=-checklinkname=0 ./...
+    if ($LASTEXITCODE -ne 0) { throw 'Android bridge tests failed' }
+    go vet ./...
+    if ($LASTEXITCODE -ne 0) { throw 'Android bridge vet failed' }
+} finally {
+    $env:GOFLAGS = $previousGoFlags
+    Pop-Location
+}
+```
+
+Стандартная команда `scripts/build/build.ps1 -AndroidPreview -AndroidArchitecture
+universal` сама подготавливает изолированную копию bridge для gomobile и наследует
+только overlay, чтобы не подменять генерируемые gomobile модули разных ABI.
+Полные соответствующие MPL-исходники патча и лицензия включены в APK.
+
 ## Диагностика
 
 Логи Windows находятся в `%LOCALAPPDATA%\dropo\logs`.

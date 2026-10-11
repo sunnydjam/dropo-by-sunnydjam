@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "component": "Xray-core",
+  "upstreamVersion": "26.3.27",
+  "module": "github.com/xtls/xray-core",
+  "moduleVersion": "v1.260327.0",
+  "sourceRevision": "d2758a023cd7f4174a5a5fa4ff66e487d4342ba0",
+  "license": "MPL-2.0",
+  "files": [
+    {
+      "upstreamPath": "transport/internet/splithttp/client.go",
+      "operation": "replace",
+      "upstreamSha256": "48ac567d42a4cf99bb55206b2bc4789712cb6fddefbddbfc096f255083e45531",
+      "replacementPath": "files/client.go.txt",
+      "replacementSha256": "b2dbf966d59d8adc7c0555c7f1c0dd827461d4b355c9c4975b2f1655d67d5603",
+      "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/client.go.txt"
+    },
+    {
+      "upstreamPath": "transport/internet/splithttp/dialer.go",
+      "operation": "replace",
+      "upstreamSha256": "c6d063306f85fcfabaa274e51329d188b4da8db11ef73951c1d660741d9fac1c",
+      "replacementPath": "files/dialer.go.txt",
+      "replacementSha256": "1e3b13d2836b33366544049cfb310da11fd1bfb7f21199f1f1c21b5148144f6c",
+      "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/dialer.go.txt"
+    },
+    {
+      "upstreamPath": "transport/internet/splithttp/dropo_managed_session.go",
+      "operation": "add",
+      "upstreamSha256": "",
+      "replacementPath": "files/managed_session.go.txt",
+      "replacementSha256": "724ebdbc62f346d634f5004aee871150e6a0436304b29e0c4c5c135765c118c2",
+      "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/managed_session.go.txt"
+    },
+    {
+      "upstreamPath": "transport/internet/splithttp/dropo_managed_session_test.go",
+      "operation": "add",
+      "upstreamSha256": "",
+      "replacementPath": "files/managed_session_test.go.txt",
+      "replacementSha256": "1858120eaf9e8519f7c075e513c582a36b915fdbfe14742022fdd3289f91c280",
+      "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/managed_session_test.go.txt"
+    }
+  ]
+}
