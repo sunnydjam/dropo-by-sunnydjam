@@ -22,6 +22,36 @@ func managedTestStream() *internet.MemoryStreamConfig {
 	return &internet.MemoryStreamConfig{ProtocolSettings: &Config{Xmux: &XmuxConfig{CMaxReuseTimes: &RangeConfig{From: 1, To: 1}}}}
 }
 
+type managedConsumingUploadWriter struct {
+	writes int
+	failAt int
+}
+
+func (w *managedConsumingUploadWriter) WriteMultiBuffer(payload buf.MultiBuffer) error {
+	w.writes++
+	// A real pipe consumer can release every buffer before the writer returns.
+	// Reproduce that ownership transfer deterministically, without timing sleeps.
+	buf.ReleaseMulti(payload)
+	if w.writes == w.failAt {
+		return io.ErrClosedPipe
+	}
+	return nil
+}
+
+func TestDropoManagedUploadWriterCountsBeforeOwnershipTransfer(t *testing.T) {
+	payload := []byte(strings.Repeat("upload", buf.Size))
+	writer := &managedConsumingUploadWriter{}
+	written, err := writeUploadBuffers(writer, payload)
+	if err != nil || written != len(payload) || writer.writes < 2 {
+		t.Fatalf("consumed upload byte count: got %d, want %d (error %v)", written, len(payload), err)
+	}
+	writer = &managedConsumingUploadWriter{failAt: 2}
+	written, err = writeUploadBuffers(writer, payload)
+	if err != io.ErrClosedPipe || written != buf.Size {
+		t.Fatalf("partial upload byte count: got %d, want %d (error %v)", written, buf.Size, err)
+	}
+}
+
 type managedCancelledTransport struct{}
 
 func (managedCancelledTransport) RoundTrip(*http.Request) (*http.Response, error) {

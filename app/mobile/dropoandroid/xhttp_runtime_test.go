@@ -23,12 +23,7 @@ import (
 
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/protocol/socks"
-	_ "github.com/xtls/xray-core/app/dns"
 	xnet "github.com/xtls/xray-core/common/net"
-	xcore "github.com/xtls/xray-core/core"
-	"github.com/xtls/xray-core/infra/conf"
-	_ "github.com/xtls/xray-core/proxy/freedom"
-	_ "github.com/xtls/xray-core/proxy/vless/inbound"
 )
 
 const fixtureXHTTPUUID = "11111111-2222-3333-4444-555555555555"
@@ -94,31 +89,16 @@ func startXHTTPFixture(t *testing.T, tlsEnabled bool, physicalDNS ...string) (in
 		stream["security"] = "tls"
 		stream["tlsSettings"] = map[string]any{"alpn": []string{"h2", "http/1.1"}, "certificates": []any{map[string]any{"certificate": strings.Split(strings.TrimSpace(root), "\n"), "key": strings.Split(strings.TrimSpace(key), "\n")}}}
 	}
+	dns := map[string]any{"hosts": map[string]any{"dropo-echo.test": "127.0.0.1"}}
+	if len(physicalDNS) > 0 {
+		dns["servers"] = physicalDNS
+	}
 	raw := encodeXHTTPFixture(t, map[string]any{"log": map[string]any{"loglevel": "none", "access": "none", "error": "none"},
-		"dns": map[string]any{"hosts": map[string]any{"dropo-echo.test": "127.0.0.1"}},
+		"dns": dns,
 		"inbounds": []any{map[string]any{"listen": "127.0.0.1", "port": port, "protocol": "vless",
 			"settings": map[string]any{"decryption": "none", "clients": []any{map[string]any{"id": fixtureXHTTPUUID}}}, "streamSettings": stream}},
-		"outbounds": []any{map[string]any{"protocol": "freedom"}}})
-	var config conf.Config
-	if json.Unmarshal(raw, &config) != nil {
-		t.Fatal("fixture decode failed")
-	}
-	built, err := config.Build()
-	if err != nil {
-		t.Fatal("fixture build failed")
-	}
-	session := newXHTTPSocketSession(func(int32) error { return nil }, nil)
-	if len(physicalDNS) > 0 {
-		session.dnsServers = func() []string { return physicalDNS }
-	}
-	server, err := xcore.NewWithContext(session.ctx, built)
-	if err != nil {
-		t.Fatal("fixture start failed")
-	}
-	if err = server.Start(); err != nil {
-		t.Fatal("fixture listen failed")
-	}
-	t.Cleanup(func() { session.close(); server.Close() })
+		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"domainStrategy": "UseIP"}}}})
+	startXHTTPFixtureProcess(t, raw)
 	return port, root
 }
 

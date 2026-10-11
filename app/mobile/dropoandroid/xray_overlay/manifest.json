@@ -20,7 +20,7 @@
       "operation": "replace",
       "upstreamSha256": "c6d063306f85fcfabaa274e51329d188b4da8db11ef73951c1d660741d9fac1c",
       "replacementPath": "files/dialer.go.txt",
-      "replacementSha256": "1e3b13d2836b33366544049cfb310da11fd1bfb7f21199f1f1c21b5148144f6c",
+      "replacementSha256": "a52b9c74fbac3d1581472cf17ed5b910214e2e9e47bb18c5dc3996d5a77c63aa",
       "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/dialer.go.txt"
     },
     {
@@ -36,7 +36,7 @@
       "operation": "add",
       "upstreamSha256": "",
       "replacementPath": "files/managed_session_test.go.txt",
-      "replacementSha256": "1858120eaf9e8519f7c075e513c582a36b915fdbfe14742022fdd3289f91c280",
+      "replacementSha256": "e412af34a3dad1548365a60e4a982403315f60626f08f8c9c4b981fa874c6e22",
       "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/managed_session_test.go.txt"
     }
   ]

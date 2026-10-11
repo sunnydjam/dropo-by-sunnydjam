@@ -14,6 +14,8 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
   available through Settings > Advanced;
 - include Xray's full license and corresponding modified transport source in
   the APK; no first-run executable downloads are introduced.
+- fix XHTTP upload byte accounting before buffer ownership transfer and retain
+  full client/session race coverage with an isolated synthetic test server.
 
 ## 3.0.46 — 2026-10-12
 

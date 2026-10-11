@@ -1,7 +1,8 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
-// Dropo modification: opt-in per-session pools and closeable HTTP transports.
+// Dropo modification: opt-in per-session pools, closeable HTTP transports,
+// and byte counts captured before upload-buffer ownership is transferred.
 package splithttp
 
 import (
@@ -651,6 +652,10 @@ type uploadWriter struct {
 }
 
 func (w uploadWriter) Write(b []byte) (int, error) {
+	return writeUploadBuffers(w.Writer, b)
+}
+
+func writeUploadBuffers(writer buf.Writer, b []byte) (int, error) {
 	/*
 		capacity := int(w.maxLen - w.Len())
 		if capacity > 0 && capacity < len(b) {
@@ -662,12 +667,17 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 	common.Must2(buffer.Write(b))
 
 	var writed int
-	for _, buff := range buffer.MultiBuffer {
-		err := w.WriteMultiBuffer(buf.MultiBuffer{buff})
+	for index, buff := range buffer.MultiBuffer {
+		// WriteMultiBuffer transfers ownership: the consumer may immediately
+		// read, clear, or release buff, including before the call returns.
+		length := int(buff.Len())
+		err := writer.WriteMultiBuffer(buf.MultiBuffer{buff})
 		if err != nil {
+			// Only the buffers not submitted to the writer remain ours.
+			buf.ReleaseMulti(buffer.MultiBuffer[index+1:])
 			return writed, err
 		}
-		writed += int(buff.Len())
+		writed += length
 	}
 	return writed, nil
 }
