@@ -98,7 +98,6 @@ class _HomeConnectionPanel extends StatelessWidget {
     required this.routingMode,
     required this.enabled,
     required this.onPressed,
-    this.onDisabledPressed,
     this.operationError = false,
     this.motionEnabled = true,
     this.atlas = false,
@@ -107,7 +106,6 @@ class _HomeConnectionPanel extends StatelessWidget {
   final bool online, booting, busy, disconnecting, enabled;
   final String routingMode;
   final VoidCallback onPressed;
-  final VoidCallback? onDisabledPressed;
   final bool atlas;
   final bool operationError;
   final bool motionEnabled;
@@ -155,7 +153,6 @@ class _HomeConnectionPanel extends StatelessWidget {
         stopping: stopping,
         enabled: enabled,
         onPressed: onPressed,
-        onDisabledPressed: onDisabledPressed,
         hasError: danger,
         motionEnabled: motionEnabled,
       );
@@ -204,7 +201,7 @@ class _HomeConnectionPanel extends StatelessWidget {
             ),
             action: FilledButton.icon(
               key: const ValueKey('home-connect'),
-              onPressed: enabled ? onPressed : onDisabledPressed,
+              onPressed: enabled ? onPressed : null,
               style: FilledButton.styleFrom(
                 backgroundColor: _homeAccent,
                 foregroundColor: const Color(0xFF08140F),
@@ -674,9 +671,9 @@ class _HomeZapretStrategyControls extends StatelessWidget {
       key: ValueKey('home-zapret-strategy-${service.tag}'),
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-          color: _atlasSurface,
+        color: _atlasSurface,
         borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: _atlasBorder),
+        border: Border.all(color: _atlasBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

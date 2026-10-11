@@ -54,6 +54,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     ('advanced', 'Дополнительно', Icons.tune),
     ('technical-settings', 'Сеть и диагностика', Icons.tune),
     ('help', 'Помощь', Icons.help_outline),
+    ('guided-help', 'Решить проблему', Icons.help_outline),
   ];
   static const _primarySections = {
     'home',
@@ -95,13 +96,13 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   String get _parentSection => switch (widget.activeSection) {
     'services' || 'service-settings' => 'home',
     'profiles' || 'work' || 'dropo_space' || 'technical-settings' => 'advanced',
-    'logs' || 'stats' || 'about' => 'help',
+    'logs' || 'stats' || 'about' || 'guided-help' => 'help',
     _ => 'settings',
   };
 
   String get _selectedPrimary => switch (widget.activeSection) {
     'services' || 'service-settings' => 'home',
-    'logs' || 'stats' || 'about' => 'help',
+    'logs' || 'stats' || 'about' || 'guided-help' => 'help',
     final section when _primarySections.contains(section) => section,
     _ => 'settings',
   };

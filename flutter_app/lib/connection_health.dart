@@ -72,7 +72,7 @@ class ConnectionHealthResult {
       // Windows verifies the selected client transport when the core exposes a
       // scoped probe path. TUN-only Windows checks and Android explicitly send
       // false because an ordinary app HTTP request cannot prove its transport.
-      routeVerified: json['routeVerified'] != false,
+      routeVerified: json['routeVerified'] == true,
     );
   }
 }
@@ -202,7 +202,9 @@ class _ConnectionHealthPanelState extends State<_ConnectionHealthPanel> {
       actionError = '';
     });
     try {
-      final payload = await widget.bridge.runQuickCheck();
+      final payload = await widget.bridge.runConnectionCheck().timeout(
+        const Duration(seconds: 55),
+      );
       if (!mounted ||
           generation != checkGeneration ||
           !widget.connected ||

@@ -1,5 +1,7 @@
 part of 'main.dart';
 
+enum VpnResponseObservation { available, pending, failed, stale, unavailable }
+
 // A scoped HTTP observation, not ICMP, game latency, or individual service RTT.
 class VpnResponseSnapshot {
   const VpnResponseSnapshot({
@@ -29,49 +31,102 @@ class VpnResponseSnapshot {
     );
   }
 
+  // Core already fences the source, node and session. Presentation must also
+  // reject clock reversals, unknown states and retained pending values instead
+  // of making an old or future HTTP sample look like a live measurement.
+  VpnResponseObservation observationAt(DateTime now) {
+    if (state == 'pending') return VpnResponseObservation.pending;
+    if (state == 'stale') return VpnResponseObservation.stale;
+    if (state != 'ok' && state != 'failed') {
+      return VpnResponseObservation.unavailable;
+    }
+    if (checkedAt != null) {
+      final age = now.toUtc().difference(checkedAt!.toUtc());
+      if (age.isNegative) return VpnResponseObservation.unavailable;
+      if (age > const Duration(seconds: 90)) {
+        return VpnResponseObservation.stale;
+      }
+    }
+    // A failed bootstrap can legitimately have no completed timestamp. This
+    // still only describes the source check, never the whole internet.
+    if (state == 'failed') return VpnResponseObservation.failed;
+    if (checkedAt == null || latencyMs == null || latencyMs! <= 0) {
+      return VpnResponseObservation.unavailable;
+    }
+    return VpnResponseObservation.available;
+  }
+
   bool get stale =>
-      state == 'stale' ||
-      (checkedAt != null &&
-          DateTime.now().toUtc().difference(checkedAt!).inSeconds > 90);
+      observationAt(DateTime.now()) == VpnResponseObservation.stale;
   bool get current =>
-      state == 'ok' && latencyMs != null && checkedAt != null && !stale;
-  String get label => stale
-      ? 'Данные устарели'
-      : current
-      ? '$latencyMs мс'
-      : switch (state) {
-          'pending' => 'Проверяем…',
-          'failed' => 'Нет ответа',
-          _ => 'Нет данных',
-        };
-  String get ageLabel {
+      observationAt(DateTime.now()) == VpnResponseObservation.available;
+  String get label => labelAt(DateTime.now());
+  String labelAt(DateTime now) => switch (observationAt(now)) {
+    VpnResponseObservation.available => '$latencyMs мс',
+    VpnResponseObservation.pending => 'Проверяем…',
+    VpnResponseObservation.failed => 'Нет ответа',
+    VpnResponseObservation.stale => 'Данные устарели',
+    VpnResponseObservation.unavailable => 'Нет данных',
+  };
+
+  String get ageLabel => ageLabelAt(DateTime.now());
+  String ageLabelAt(DateTime now) {
     if (checkedAt == null) return 'Замер ещё не получен';
-    final seconds = math.max(
-      0,
-      DateTime.now().toUtc().difference(checkedAt!).inSeconds,
-    );
+    final age = now.toUtc().difference(checkedAt!.toUtc());
+    if (age.isNegative) return 'Время замера неизвестно';
+    final seconds = age.inSeconds;
     return seconds < 60 ? '$seconds с назад' : '${seconds ~/ 60} мин назад';
   }
+
+  String scopeDescription(String routingMode) => switch (routingMode) {
+    'all_traffic' =>
+      'В режиме «Всё через VPN» это всё ещё одна HTTP-проверка, а не проверка всех сайтов, приложений или исключений.',
+    'blocked_only' =>
+      'В режиме «По сервисам» это отклик только VPN-источника. Он не описывает прямой трафик и не подтверждает маршрут отдельного сервиса.',
+    _ =>
+      'Отклик относится только к проверяемому VPN-источнику. По нему нельзя определить маршрут отдельного приложения или сервиса.',
+  };
 }
 
 class _VpnResponseTile extends StatelessWidget {
-  const _VpnResponseTile({required this.snapshot, this.compact = false});
+  const _VpnResponseTile({
+    required this.snapshot,
+    this.compact = false,
+    this.routingMode = 'blocked_only',
+    this.onOpenHelp,
+  });
   final VpnResponseSnapshot snapshot;
   final bool compact;
+  final String routingMode;
+  final VoidCallback? onOpenHelp;
 
   @override
   Widget build(BuildContext context) {
-    final color = snapshot.current ? _atlasMint : _atlasMuted;
+    final now = DateTime.now();
+    final observation = snapshot.observationAt(now);
+    final label = snapshot.labelAt(now);
+    final color = switch (observation) {
+      VpnResponseObservation.available => _atlasMint,
+      VpnResponseObservation.failed => const Color(0xFFF8D38B),
+      _ => _atlasMuted,
+    };
+    final detail = switch (observation) {
+      VpnResponseObservation.available => snapshot.ageLabelAt(now),
+      VpnResponseObservation.pending => 'Проверка в фоне',
+      VpnResponseObservation.failed => 'Только HTTP-проверка',
+      VpnResponseObservation.stale => 'Нужен свежий замер',
+      VpnResponseObservation.unavailable => 'Замер не получен',
+    };
     final style = TextStyle(
       fontFamily: _isMobileShell ? 'monospace' : 'Consolas',
-      fontFamilyFallback: const ['Courier New'],
+      fontFamilyFallback: const ['Courier New', 'Inter'],
       fontSize: 12,
       color: color,
       fontFeatures: const [ui.FontFeature.tabularFigures()],
     );
     return _AccessibleDescription(
       message:
-          'HTTP-проверка через текущий VPN-источник. Не игровой пинг и не скорость скачивания.',
+          'Отклик VPN: $label. HTTP-проверка через текущий VPN-источник. Не игровой пинг и не скорость скачивания. Нажмите для объяснения и помощи.',
       child: TextButton(
         key: ValueKey(compact ? 'vpn-response-compact' : 'vpn-response-panel'),
         onPressed: () => showDialog<void>(
@@ -90,9 +145,25 @@ class _VpnResponseTile extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 const Text(
-                  'Проверка выполняется в фоне примерно раз в 30 секунд. В режиме «По сервисам» показатель относится только к VPN-источнику, а не ко всему трафику.',
+                  '«Подключено» означает, что VPN-движок запущен. HTTP-проверка выполняется отдельно в фоне и не задерживает подключение.',
                 ),
                 const SizedBox(height: 12),
+                Text(snapshot.scopeDescription(routingMode)),
+                const SizedBox(height: 12),
+                const Text(
+                  '«Проверяем…» — замер ещё выполняется. «Нет ответа» — тестовый адрес не ответил; это не доказывает, что интернет не работает. «Данные устарели» и «Нет данных» не подтверждают ни работу, ни поломку подключения. Устаревший или будущий замер не показывается как текущий отклик.',
+                ),
+                const SizedBox(height: 12),
+                if (onOpenHelp != null)
+                  TextButton.icon(
+                    key: const ValueKey('vpn-response-open-help'),
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      onOpenHelp!();
+                    },
+                    icon: const Icon(Icons.help_outline),
+                    label: const Text('Помощь с подключением'),
+                  ),
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
                   child: const Text('Понятно'),
@@ -108,7 +179,7 @@ class _VpnResponseTile extends StatelessWidget {
         ),
         child: compact
             ? Text(
-                'VPN · ${snapshot.label}',
+                'VPN · $label',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: style,
@@ -117,12 +188,24 @@ class _VpnResponseTile extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text('ОТКЛИК VPN', style: style.copyWith(color: _atlasMuted)),
+                  Text(
+                    'ОТКЛИК VPN',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: style.copyWith(color: _atlasMuted),
+                  ),
                   const SizedBox(height: 6),
-                  Text(snapshot.label, style: style.copyWith(fontSize: 16)),
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: style.copyWith(fontSize: 16),
+                  ),
                   const SizedBox(height: 4),
                   Text(
-                    snapshot.ageLabel,
+                    detail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: style.copyWith(color: _atlasMuted),
                   ),
                 ],

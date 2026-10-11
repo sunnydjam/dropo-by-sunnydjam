@@ -61,6 +61,7 @@ var bridgeCallableMethods = map[string]struct{}{
 	"AcknowledgeTelegramProxyRemoved": {},
 	"ResolveAutoStartPrompt":          {},
 	"RunClientQuickCheck":             {},
+	"RunClientQuickCheckReadOnly":     {},
 	"SaveAppConfig":                   {},
 	"SetReduceMotion":                 {},
 	"SelectTrafficStrategy":           {},

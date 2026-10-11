@@ -335,6 +335,9 @@ func Call(method, argsJSON string) string {
 	if method == "RunClientQuickCheck" {
 		return runAndroidClientQuickCheck()
 	}
+	if method == "RunClientQuickCheckReadOnly" {
+		return runAndroidClientQuickCheckMode(true)
+	}
 	if method == "CheckForUpdates" {
 		return checkAndroidUpdates()
 	}

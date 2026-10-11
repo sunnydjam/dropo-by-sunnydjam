@@ -143,6 +143,17 @@ var clientQuickCheckServices = []clientQuickCheckService{
 // intentionally native and event-driven: the UI button should not open
 // PowerShell, block on a long combined output, or write the full result to app logs.
 func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
+	return a.runClientQuickCheck(deep, false, clientQuickCheckServices)
+}
+
+// RunClientQuickCheckReadOnly observes the current routes without restoring the
+// traffic engine, queuing strategy maintenance, changing caches or emitting
+// connection-wide progress events. Guided help must never reconfigure a session.
+func (a *App) RunClientQuickCheckReadOnly() map[string]interface{} {
+	return a.runClientQuickCheck(false, true, clientQuickCheckServices)
+}
+
+func (a *App) runClientQuickCheck(deep, readOnly bool, serviceCatalog []clientQuickCheckService) map[string]interface{} {
 	a.waitForInit()
 
 	startedAt := time.Now()
@@ -150,9 +161,11 @@ func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
 	ctx, cancel := context.WithTimeout(context.Background(), clientQuickCheckTimeout)
 	defer cancel()
 
-	a.ensureTransparentBypassForClientQuickCheck(strategySession)
+	if !readOnly {
+		a.ensureTransparentBypassForClientQuickCheck(strategySession)
+	}
 
-	catalog := denseClientQuickCheckServices(clientQuickCheckServices)
+	catalog := denseClientQuickCheckServices(serviceCatalog)
 	settings := GlobalAppSettings{}
 	if a.storage != nil {
 		settings = a.storage.GetAppSettings()
@@ -203,7 +216,12 @@ func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
 		services, tunZapretDirect = clientQuickCheckEffectiveTUNRoutes(services, proxies)
 	}
 
-	a.emitClientQuickCheck("client-check-start", map[string]interface{}{
+	emit := func(event string, payload interface{}) {
+		if !readOnly {
+			a.emitClientQuickCheck(event, payload)
+		}
+	}
+	emit("client-check-start", map[string]interface{}{
 		"total":    len(services),
 		"proxyUrl": proxyURL,
 	})
@@ -224,7 +242,7 @@ func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
 					return
 				default:
 				}
-				a.emitClientQuickCheck("client-check-progress", map[string]interface{}{
+				emit("client-check-progress", map[string]interface{}{
 					"index": svc.Index,
 					"name":  svc.Name,
 					"url":   svc.URL,
@@ -240,7 +258,7 @@ func (a *App) RunClientQuickCheck(deep bool) map[string]interface{} {
 				}
 				result := runSingleClientQuickCheck(ctx, svc, directClient, proxyClient, zapretClient)
 				results[svc.Index] = result
-				a.emitClientQuickCheck("client-check-service", result)
+				emit("client-check-service", result)
 			}
 		}()
 	}
@@ -306,16 +324,17 @@ enqueue:
 		"blockedFailed": blockedFailed,
 		"proxyUrl":      proxyURL,
 		"sessionValid":  sessionValid,
+		"readOnly":      readOnly,
 	}
 	if ctx.Err() != nil {
 		payload["error"] = ctx.Err().Error()
 	}
 	// A check may outlive Stop followed by a new Start. Its report is still
 	// useful to the caller, but it must never retune the new VPN session.
-	if sessionValid {
+	if sessionValid && !readOnly {
 		a.handleClientQuickCheckFailures(strategySession, results)
 	}
-	a.emitClientQuickCheck("client-check-done", payload)
+	emit("client-check-done", payload)
 	return payload
 }
 

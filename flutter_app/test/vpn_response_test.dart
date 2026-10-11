@@ -9,6 +9,8 @@ import 'navigation_helpers.dart';
 
 class _TelemetryBridge extends MockCoreBridge {
   bool connected = true;
+  String savedRoutingMode = 'blocked_only';
+  int connectionChecks = 0;
   VpnResponseSnapshot snapshot = VpnResponseSnapshot.fromJson({
     'state': 'ok',
     'latencyMs': 83,
@@ -20,6 +22,7 @@ class _TelemetryBridge extends MockCoreBridge {
     ...await super.appConfig(),
     'checkUpdates': false,
     'autoStartPrompted': true,
+    'routingMode': savedRoutingMode,
   };
   @override
   Future<CoreStatus> status() async => (await super.status()).copyWith(
@@ -27,6 +30,12 @@ class _TelemetryBridge extends MockCoreBridge {
     running: connected,
     vpnResponse: snapshot,
   );
+
+  @override
+  Future<Map<String, dynamic>> runConnectionCheck() async {
+    connectionChecks++;
+    return super.runConnectionCheck();
+  }
 }
 
 Future<void> _pump(
@@ -134,6 +143,173 @@ void main() {
     );
   });
 
+  test('response rejects future clock samples and the full stale boundary', () {
+    final now = DateTime.utc(2026, 10, 11, 12);
+    VpnResponseSnapshot measured(Duration age, {String state = 'ok'}) =>
+        VpnResponseSnapshot(
+          state: state,
+          latencyMs: 83,
+          checkedAt: now.subtract(age),
+        );
+    expect(
+      measured(const Duration(seconds: 90)).observationAt(now),
+      VpnResponseObservation.available,
+    );
+    expect(
+      measured(const Duration(seconds: 90, microseconds: 1)).observationAt(now),
+      VpnResponseObservation.stale,
+    );
+    final future = measured(const Duration(microseconds: -1));
+    expect(future.observationAt(now), VpnResponseObservation.unavailable);
+    expect(future.labelAt(now), 'Нет данных');
+    expect(future.ageLabelAt(now), 'Время замера неизвестно');
+    expect(
+      measured(const Duration(seconds: -1), state: 'failed').observationAt(now),
+      VpnResponseObservation.unavailable,
+    );
+    expect(
+      measured(const Duration(minutes: 2), state: 'failed').observationAt(now),
+      VpnResponseObservation.stale,
+    );
+    final timezoneSample = VpnResponseSnapshot.fromJson({
+      'state': 'ok',
+      'latencyMs': 83,
+      'checkedAt': '2026-10-11T15:00:00+03:00',
+    });
+    expect(timezoneSample.observationAt(now), VpnResponseObservation.available);
+  });
+
+  test(
+    'unknown disabled and missing observations cannot inherit a latency',
+    () {
+      final now = DateTime.utc(2026, 10, 11, 12);
+      for (final state in [
+        'unavailable',
+        'disabled',
+        'unknown',
+        '',
+        'offline',
+      ]) {
+        final snapshot = VpnResponseSnapshot(
+          state: state,
+          latencyMs: 999,
+          checkedAt: now.subtract(const Duration(minutes: 3)),
+        );
+        expect(snapshot.observationAt(now), VpnResponseObservation.unavailable);
+        expect(snapshot.labelAt(now), 'Нет данных');
+      }
+      for (final invalidTimestamp in [null, '', 'not-a-time']) {
+        final snapshot = VpnResponseSnapshot.fromJson({
+          'state': 'ok',
+          'latencyMs': 83,
+          'checkedAt': invalidTimestamp,
+        });
+        expect(snapshot.observationAt(now), VpnResponseObservation.unavailable);
+        expect(snapshot.ageLabelAt(now), 'Замер ещё не получен');
+      }
+      for (final latency in [null, 0, -1]) {
+        expect(
+          VpnResponseSnapshot(
+            state: 'ok',
+            latencyMs: latency,
+            checkedAt: now,
+          ).observationAt(now),
+          VpnResponseObservation.unavailable,
+        );
+      }
+      expect(
+        const VpnResponseSnapshot(state: 'failed').observationAt(now),
+        VpnResponseObservation.failed,
+      );
+    },
+  );
+
+  test('pending and a new session never reuse the old measured value', () {
+    final now = DateTime.utc(2026, 10, 11, 12);
+    final retained = VpnResponseSnapshot(
+      state: 'pending',
+      latencyMs: 999,
+      checkedAt: now.subtract(const Duration(minutes: 3)),
+      sessionGeneration: 1,
+      sourceId: 'previous-source',
+    );
+    expect(retained.observationAt(now), VpnResponseObservation.pending);
+    expect(retained.labelAt(now), 'Проверяем…');
+    final newSession = VpnResponseSnapshot.fromJson({
+      'state': 'pending',
+      'sessionGeneration': 2,
+      'sourceId': 'new-source',
+      'nodeId': 'manually-selected-node',
+    });
+    expect(newSession.sessionGeneration, 2);
+    expect(newSession.sourceId, 'new-source');
+    expect(newSession.nodeId, 'manually-selected-node');
+    expect(newSession.latencyMs, isNull);
+    expect(newSession.checkedAt, isNull);
+    expect(newSession.labelAt(now), 'Проверяем…');
+  });
+
+  test('mode explanations never equate a probe with all routed traffic', () {
+    const snapshot = VpnResponseSnapshot();
+    final selective = snapshot.scopeDescription('blocked_only');
+    expect(selective, contains('«По сервисам»'));
+    expect(selective, contains('не описывает прямой трафик'));
+    expect(selective, isNot(contains('«Всё через VPN»')));
+    final full = snapshot.scopeDescription('all_traffic');
+    expect(full, contains('«Всё через VPN»'));
+    expect(full, contains('не проверка всех сайтов'));
+    expect(full, isNot(contains('«По сервисам»')));
+    final unknown = snapshot.scopeDescription('unknown-mode');
+    expect(unknown, contains('только к проверяемому VPN-источнику'));
+    expect(unknown, isNot(contains('«Всё через VPN»')));
+    expect(unknown, isNot(contains('«По сервисам»')));
+  });
+
+  for (final (state, label, detail) in [
+    ('pending', 'Проверяем…', 'Проверка в фоне'),
+    ('failed', 'Нет ответа', 'Только HTTP-проверка'),
+    ('stale', 'Данные устарели', 'Нужен свежий замер'),
+    ('unavailable', 'Нет данных', 'Замер не получен'),
+  ]) {
+    testWidgets('$state response leaves connection controls active', (
+      tester,
+    ) async {
+      final bridge = _TelemetryBridge()
+        ..snapshot = VpnResponseSnapshot(
+          state: state,
+          latencyMs: 999,
+          checkedAt: DateTime.now().toUtc(),
+        );
+      await _pump(tester, bridge, const Size(1100, 760), 1);
+      final metric = find.byKey(const ValueKey('vpn-response-panel'));
+      expect(metric, findsOneWidget);
+      expect(
+        find.descendant(of: metric, matching: find.text(label)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: metric, matching: find.text(detail)),
+        findsOneWidget,
+      );
+      expect(find.text('999 мс'), findsNothing);
+      final power = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('home-connect')),
+      );
+      expect(power.onPressed, isNotNull);
+      expect(find.text('Отключить'), findsOneWidget);
+      expect(find.text('Ошибка VPN'), findsNothing);
+      expect(find.text('Подключаем…'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await _capture(tester, 'response-state-$state');
+      await tester.tap(metric);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('VPN-движок запущен'), findsOneWidget);
+      expect(find.textContaining('это не доказывает'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   for (final (size, scale) in [
     (const Size(1100, 760), 1.0),
     (const Size(820, 560), 1.0),
@@ -193,6 +369,60 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
+
+  testWidgets('full VPN explanation uses the actual current routing mode', (
+    tester,
+  ) async {
+    final bridge = _TelemetryBridge()..savedRoutingMode = 'all_traffic';
+    await _pump(tester, bridge, const Size(820, 560), 1);
+    await tester.tap(find.byKey(const ValueKey('vpn-response-compact')));
+    await tester.pumpAndSettle();
+    final explanation = find.byKey(const ValueKey('vpn-response-explanation'));
+    expect(
+      find.descendant(
+        of: explanation,
+        matching: find.textContaining('В режиме «Всё через VPN»'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: explanation,
+        matching: find.textContaining('В режиме «По сервисам»'),
+      ),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('HTTP response help entry opens help without starting probes', (
+    tester,
+  ) async {
+    final bridge = _TelemetryBridge()
+      ..snapshot = const VpnResponseSnapshot(state: 'failed');
+    await _pump(tester, bridge, const Size(390, 568), 2);
+    final metric = find.byKey(const ValueKey('vpn-response-compact'));
+    expect(
+      find.descendant(of: metric, matching: find.text('VPN · Нет ответа')),
+      findsOneWidget,
+    );
+    await tester.tap(metric);
+    await tester.pumpAndSettle();
+    final help = find.byKey(const ValueKey('vpn-response-open-help'));
+    await tester.ensureVisible(help);
+    await tester.tap(help);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('vpn-response-explanation')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('guided-help-section')), findsOneWidget);
+    expect(bridge.connectionChecks, 0);
+    expect(bridge.connected, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('disconnected hides measurement and preference saves', (
     tester,

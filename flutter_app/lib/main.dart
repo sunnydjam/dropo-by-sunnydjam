@@ -30,6 +30,7 @@ part 'home_services.dart';
 part 'service_icons.dart';
 part 'minimal_settings.dart';
 part 'connection_health.dart';
+part 'guided_help.dart';
 part 'android_vpn_protection.dart';
 part 'account.dart';
 
@@ -162,6 +163,9 @@ ThemeData _dropoTheme(Brightness brightness) {
   );
 }
 
+@visibleForTesting
+ThemeData dropoThemeForTesting() => _dropoTheme(Brightness.dark);
+
 SystemUiOverlayStyle _systemOverlayFor(Brightness brightness) {
   final dark = brightness == Brightness.dark;
   return SystemUiOverlayStyle(
@@ -292,6 +296,7 @@ abstract class CoreBridge {
   Future<Map<String, dynamic>> deleteWireGuard(String tag);
   Future<Map<String, dynamic>> testSubscription(String value);
   Future<Map<String, dynamic>> runQuickCheck();
+  Future<Map<String, dynamic>> runConnectionCheck();
   Future<Map<String, dynamic>> captureFingerprint();
   Future<void> openFingerprintFolder();
   Future<void> openConfigFolder();
@@ -743,6 +748,12 @@ class HttpCoreBridge implements CoreBridge {
       timeout: const Duration(minutes: 2),
     );
   }
+
+  @override
+  Future<Map<String, dynamic>> runConnectionCheck() => callMap(
+    'RunClientQuickCheckReadOnly',
+    timeout: const Duration(seconds: 55),
+  );
 
   @override
   Future<Map<String, dynamic>> captureFingerprint() {
@@ -1466,6 +1477,12 @@ class ChannelCoreBridge implements CoreBridge {
       timeout: const Duration(minutes: 2),
     );
   }
+
+  @override
+  Future<Map<String, dynamic>> runConnectionCheck() => callMap(
+    'RunClientQuickCheckReadOnly',
+    timeout: const Duration(seconds: 55),
+  );
 
   @override
   Future<Map<String, dynamic>> captureFingerprint() {
@@ -2247,6 +2264,14 @@ class MockCoreBridge implements CoreBridge {
   Future<Map<String, dynamic>> runQuickCheck() async {
     return {'success': true, 'mock': true};
   }
+
+  @override
+  Future<Map<String, dynamic>> runConnectionCheck() async => {
+    'success': true,
+    'mock': true,
+    'readOnly': true,
+    'services': const [],
+  };
 
   @override
   Future<Map<String, dynamic>> captureFingerprint() async {
@@ -3829,9 +3854,6 @@ class _DropoHomePageState extends State<DropoHomePage>
       !online ||
       preparingFullVpnSource;
 
-  bool get _mobileNeedsSubscription =>
-      _isMobileShell && !status.connected && !subscription.hasSubscription;
-
   ProfileInfo? get activeProfile {
     for (final profile in profiles) {
       if (profile.isActive) {
@@ -4761,6 +4783,8 @@ class _DropoHomePageState extends State<DropoHomePage>
         : 'Останавливаем сетевые процессы и возвращаем системные настройки.';
     connectionHintDanger = false;
     if (target) {
+      // Do not present a previous session's observation while a new one starts.
+      status = status.copyWith(vpnResponse: const VpnResponseSnapshot());
       routeProbeActive = true;
       routeProbeFailed = false;
       routeProbeExpectedCount = 0;
@@ -4780,17 +4804,14 @@ class _DropoHomePageState extends State<DropoHomePage>
       return;
     }
     final target = !status.connected;
-    if (target && _mobileNeedsSubscription) {
-      _showMobileSubscriptionRequiredNotice();
-      return;
-    }
     if (target &&
-        !_isMobileShell &&
-        appConfig.routingMode == 'all_traffic' &&
-        !await _ensureFullVpnSource()) {
+        (_isMobileShell || appConfig.routingMode == 'all_traffic') &&
+        !await _ensureVpnSource()) {
       return;
     }
-    if (!mounted || quitting) return;
+    // Source preparation yields to other UI/session work. Do not start a
+    // connection while a settings save or another connection became active.
+    if (!mounted || controlsDisabled || connectionBusy) return;
     setState(() => _setConnectionPrimed(target));
     await _runBusy(() async {
       if (target) {
@@ -4854,7 +4875,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     }, clearConnectionBusy: true);
   }
 
-  Future<bool> _ensureFullVpnSource() async {
+  Future<bool> _ensureVpnSource() async {
     setState(() => preparingFullVpnSource = true);
     try {
       // Read the authoritative enabled list, not an old home-card snapshot.
@@ -4869,6 +4890,8 @@ class _DropoHomePageState extends State<DropoHomePage>
         builder: (context) => _VpnOnboardingDialog(
           bridge: widget.bridge,
           hasDisabledSources: sources.isNotEmpty,
+          isMobile: _isMobileShell,
+          isAndroid: _isAndroidPlatform,
         ),
       );
       if (!mounted || quitting) return false;
@@ -4882,7 +4905,10 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       if (action != _VpnOnboardingAction.ready) return false;
       await _refresh(all: true);
-      final enabled = await widget.bridge.vpnSources();
+      final enabled = await widget.bridge.vpnSources().timeout(
+        const Duration(seconds: 10),
+      );
+      if (!mounted || quitting) return false;
       if (!enabled.any((source) => !source.disabled)) {
         throw StateError(
           'Источник не готов. Откройте «Источники VPN» и повторите добавление.',
@@ -4901,31 +4927,6 @@ class _DropoHomePageState extends State<DropoHomePage>
     } finally {
       if (mounted) setState(() => preparingFullVpnSource = false);
     }
-  }
-
-  void _showMobileSubscriptionRequiredNotice() {
-    if (!_mobileNeedsSubscription) {
-      return;
-    }
-    setState(() {
-      statusMessage = 'Нужен источник VPN';
-      connectionHint =
-          'Добавьте свою подписку или выберите бесплатный источник в каталоге. После этого можно подключаться в любом из двух режимов.';
-      connectionHintDanger = true;
-    });
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    messenger?.hideCurrentSnackBar();
-    messenger?.showSnackBar(
-      SnackBar(
-        content: const Text(
-          'Добавьте свою подписку или бесплатный VPN-источник.',
-        ),
-        action: SnackBarAction(
-          label: 'Добавить',
-          onPressed: () => unawaited(_openSubscription()),
-        ),
-      ),
-    );
   }
 
   Future<void> _maybeShowAndroidCompatibilityNotice() async {
@@ -6090,13 +6091,7 @@ class _DropoHomePageState extends State<DropoHomePage>
               ? 'Откройте диагностику подключения для подробностей.'
               : status.error.trim())
         : '';
-    final mobileNeedsSubscription = _mobileNeedsSubscription;
-    final powerEnabled =
-        !controlsDisabled && !connectionBusy && !mobileNeedsSubscription;
-    final disabledPowerAction =
-        mobileNeedsSubscription && !controlsDisabled && !connectionBusy
-        ? _showMobileSubscriptionRequiredNotice
-        : null;
+    final powerEnabled = !controlsDisabled && !connectionBusy;
     final hintDanger =
         connectionHintDanger ||
         status.hasError ||
@@ -6114,8 +6109,16 @@ class _DropoHomePageState extends State<DropoHomePage>
             externalVpnConflictBlocked ||
             depsProgress.trim().isNotEmpty);
     return _AtlasHomeLayout(
-      telemetry: online && status.connected && refreshFailureCount == 0
-          ? _VpnResponseTile(snapshot: status.vpnResponse)
+      telemetry:
+          online &&
+              status.connected &&
+              !connectionBusy &&
+              refreshFailureCount == 0
+          ? _VpnResponseTile(
+              snapshot: status.vpnResponse,
+              routingMode: appConfig.routingMode,
+              onOpenHelp: () => unawaited(_selectMenuSection('guided-help')),
+            )
           : null,
       connection: _HomeConnectionPanel(
         atlas: true,
@@ -6127,7 +6130,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         routingMode: appConfig.routingMode,
         enabled: powerEnabled,
         onPressed: _toggleConnection,
-        onDisabledPressed: disabledPowerAction,
         operationError: connectionHintDanger && !status.connected,
         motionEnabled: !appConfig.reduceMotion,
       ),
@@ -6184,6 +6186,15 @@ class _DropoHomePageState extends State<DropoHomePage>
                     icon: const Icon(Icons.refresh),
                     label: const Text('Повторить подключение к ядру'),
                   ),
+                if (hintDanger && !booting && !quitting)
+                  TextButton.icon(
+                    key: const ValueKey('home-open-help'),
+                    onPressed: sectionBusy
+                        ? null
+                        : () => unawaited(_selectMenuSection('guided-help')),
+                    icon: const Icon(Icons.help_outline),
+                    label: const Text('Разобраться с подключением'),
+                  ),
                 if (!booting &&
                     status.dependencies.managed &&
                     !status.dependencies.bundled &&
@@ -6209,7 +6220,12 @@ class _DropoHomePageState extends State<DropoHomePage>
             bridge: widget.bridge,
             routeSnapshot: online ? routes : null,
             connected: online && status.connected,
-            enabled: online && !quitting && !uiBusy && !connectionBusy,
+            enabled:
+                online &&
+                !quitting &&
+                !uiBusy &&
+                !connectionBusy &&
+                !preparingFullVpnSource,
             routingMode: appConfig.routingMode,
             expanded: homeRoutesExpanded,
             onExpandedChanged: (expanded) =>
@@ -6270,6 +6286,24 @@ class _DropoHomePageState extends State<DropoHomePage>
               ? null
               : _openWireGuard,
           onExit: quitting ? null : _quitApp,
+        );
+      case 'guided-help':
+        return _GuidedHelpPage(
+          key: const ValueKey('guided-help-section'),
+          bridge: widget.bridge,
+          status: status,
+          routingMode: appConfig.routingMode,
+          coreAvailable: online && !booting && refreshFailureCount == 0,
+          routes: routes,
+          routesAreLive: online && liveRoutesConfirmed,
+          onCheckConnection: online && !connectionBusy
+              ? widget.bridge.runConnectionCheck
+              : null,
+          onOpenSources: () => unawaited(_openSubscription()),
+          onOpenServices: () => unawaited(_selectMenuSection('services')),
+          onOpenUpdates: () => unawaited(_selectMenuSection('app-settings')),
+          onOpenDiagnostics: () => unawaited(_selectMenuSection('logs')),
+          onGoHome: () => unawaited(_selectMenuSection('home')),
         );
       case 'account':
         return AccountPage(
@@ -6357,7 +6391,12 @@ class _DropoHomePageState extends State<DropoHomePage>
           routesAreLive: online && liveRoutesConfirmed,
           logs: logs,
           onOpenFolder: () => widget.bridge.openLogsFolder(),
-          onCopyDiagnostics: () => widget.bridge.diagnostics(),
+          onPreviewSupportReport: () => showSafeSupportReportPreview(
+            context,
+            status: status,
+            routingMode: appConfig.routingMode,
+            coreAvailable: online && !booting && refreshFailureCount == 0,
+          ),
           embedded: true,
         );
       case 'about':
@@ -6401,8 +6440,17 @@ class _DropoHomePageState extends State<DropoHomePage>
       onAbout: quitting ? null : _openAbout,
       visible: windowVisible,
       motionEnabled: !appConfig.reduceMotion,
-      homeTelemetry: online && status.connected && refreshFailureCount == 0
-          ? _VpnResponseTile(snapshot: status.vpnResponse, compact: true)
+      homeTelemetry:
+          online &&
+              status.connected &&
+              !connectionBusy &&
+              refreshFailureCount == 0
+          ? _VpnResponseTile(
+              snapshot: status.vpnResponse,
+              compact: true,
+              routingMode: appConfig.routingMode,
+              onOpenHelp: () => unawaited(_selectMenuSection('guided-help')),
+            )
           : null,
       updateNotice: activeMenuSection == 'home' ? null : _buildUpdateNotice(),
       notice:
@@ -7376,7 +7424,7 @@ class _LogsDialog extends StatefulWidget {
     required this.routesAreLive,
     required this.logs,
     required this.onOpenFolder,
-    this.onCopyDiagnostics,
+    this.onPreviewSupportReport,
     this.embedded = false,
   });
 
@@ -7387,7 +7435,7 @@ class _LogsDialog extends StatefulWidget {
   final bool routesAreLive;
   final List<String> logs;
   final Future<void> Function() onOpenFolder;
-  final Future<String> Function()? onCopyDiagnostics;
+  final Future<void> Function()? onPreviewSupportReport;
   final bool embedded;
 
   @override
@@ -7407,7 +7455,7 @@ class _LogsDialogState extends State<_LogsDialog> {
   Widget build(BuildContext context) {
     final logs = widget.logs;
     final onOpenFolder = widget.onOpenFolder;
-    final onCopyDiagnostics = widget.onCopyDiagnostics;
+    final onPreviewSupportReport = widget.onPreviewSupportReport;
     final embedded = widget.embedded;
     final isMobile = _isMobileShell;
     final viewportHeight = MediaQuery.sizeOf(context).height;
@@ -7464,23 +7512,21 @@ class _LogsDialogState extends State<_LogsDialog> {
             },
           ),
         ),
-        if (onCopyDiagnostics != null) ...[
+        const SizedBox(height: 8),
+        const Text(
+          'Технический журнал может содержать адреса и другие личные данные. '
+          'Просмотрите его перед копированием; для поддержки лучше использовать отчёт ниже.',
+          style: TextStyle(color: _atlasMuted, fontSize: 12, height: 1.4),
+        ),
+        if (onPreviewSupportReport != null) ...[
           const SizedBox(height: 8),
           Align(
             alignment: Alignment.centerRight,
             child: _ActionButton(
-              label: 'Копировать диагностику',
+              label: 'Отчёт для поддержки',
               icon: Icons.bug_report,
               compact: true,
-              onPressed: () async {
-                final diagnostics = await onCopyDiagnostics();
-                await Clipboard.setData(ClipboardData(text: diagnostics));
-                if (context.mounted) {
-                  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                    const SnackBar(content: Text('Диагностика скопирована')),
-                  );
-                }
-              },
+              onPressed: () => unawaited(onPreviewSupportReport()),
             ),
           ),
         ],

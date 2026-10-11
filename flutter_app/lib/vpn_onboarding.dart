@@ -8,10 +8,14 @@ class _VpnOnboardingDialog extends StatefulWidget {
   const _VpnOnboardingDialog({
     required this.bridge,
     required this.hasDisabledSources,
+    this.isMobile = false,
+    this.isAndroid = false,
   });
 
   final CoreBridge bridge;
   final bool hasDisabledSources;
+  final bool isMobile;
+  final bool isAndroid;
 
   @override
   State<_VpnOnboardingDialog> createState() => _VpnOnboardingDialogState();
@@ -87,9 +91,15 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
     canPop: !busy,
     child: AlertDialog(
       key: const ValueKey('full-vpn-onboarding'),
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: widget.isMobile ? 16 : 40,
+        vertical: 24,
+      ),
       title: Text(
         widget.hasDisabledSources
             ? 'Источники VPN выключены'
+            : widget.isMobile
+            ? 'Выбор источника'
             : 'Как подключиться?',
       ),
       content: SizedBox(
@@ -102,8 +112,26 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
               Text(
                 widget.hasDisabledSources
                     ? 'Откройте источники и включите нужный. Мы не включаем отключённые вами источники автоматически.'
+                    : widget.isMobile
+                    ? 'Выберите Dropo Free или добавьте свою подписку. Источник нужен в обоих режимах. Ваш выбор режима останется прежним.'
                     : 'Для режима «Всё через VPN» можно добавить бесплатную подписку Dropo Free или свою подписку.',
               ),
+              if (!widget.hasDisabledSources) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Бесплатный старт и своя подписка доступны без регистрации.',
+                  key: ValueKey('onboarding-no-registration'),
+                  style: TextStyle(fontSize: 13, height: 1.4),
+                ),
+              ],
+              if (widget.isAndroid) ...[
+                const SizedBox(height: 12),
+                const Text(
+                  'При первом подключении Android попросит разрешить VPN-соединение. Подтвердите системный запрос: VPN запускается только после разрешения.',
+                  key: ValueKey('onboarding-android-permission'),
+                  style: TextStyle(fontSize: 13, height: 1.4),
+                ),
+              ],
               if (!widget.hasDisabledSources) ...[
                 const SizedBox(height: 16),
                 const Text(
@@ -172,14 +200,20 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
                       : 'Добавить свою подписку',
                 ),
               ),
-              TextButton(
-                key: const ValueKey('onboarding-services-mode'),
-                onPressed: busy
-                    ? null
-                    : () =>
-                          Navigator.pop(context, _VpnOnboardingAction.services),
-                child: const Text('Выбрать режим «По сервисам»'),
-              ),
+              // Windows can run selective direct strategies without a source.
+              // Android still needs a source in either mode, so offering this
+              // alternative there would send a newcomer into a dead end.
+              if (!widget.isMobile)
+                TextButton(
+                  key: const ValueKey('onboarding-services-mode'),
+                  onPressed: busy
+                      ? null
+                      : () => Navigator.pop(
+                          context,
+                          _VpnOnboardingAction.services,
+                        ),
+                  child: const Text('Выбрать режим «По сервисам»'),
+                ),
             ],
           ),
         ),
@@ -194,3 +228,16 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
     ),
   );
 }
+
+@visibleForTesting
+Widget vpnOnboardingDialogForTest({
+  required CoreBridge bridge,
+  bool hasDisabledSources = false,
+  bool isMobile = false,
+  bool isAndroid = false,
+}) => _VpnOnboardingDialog(
+  bridge: bridge,
+  hasDisabledSources: hasDisabledSources,
+  isMobile: isMobile,
+  isAndroid: isAndroid,
+);

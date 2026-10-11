@@ -200,14 +200,14 @@ class MainActivity : FlutterActivity() {
             result.notImplemented()
             return
         }
-        val executor = if (
-            call.method == "call" && stringArg(call, "method") in setOf(
-                "TestVPNConnection", "AddVPNSource", "AddPublicVPNSource", "AddManagedVPNSource", "RefreshVPNSources",
-            )
-        ) {
-            // Subscription validation can spend up to the HTTP timeout on the
-            // network. Keep status/events/stop-capable core work responsive on
-            // their ordered executor while Go protects shared state itself.
+        val executor = if (CoreCallExecutionPolicy.usesNetworkExecutor(
+            call.method,
+            if (call.method == "call") stringArg(call, "method") else null,
+        )) {
+            // Source downloads and endpoint checks can spend their bounded
+            // HTTP timeouts on the network. Keep status/events/stop-capable
+            // core work responsive on the ordered core executor while Go
+            // protects shared state and rejects stale-session probe results.
             subscriptionExecutor
         } else {
             coreExecutor

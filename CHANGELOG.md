@@ -4,6 +4,21 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.0.45 — 2026-10-11
+
+- offer Android the shared first-connection source wizard in both routing modes,
+  with explicit Free consent, optional registration and no silent mode changes;
+- add guided help for internet, service and update issues; use bounded read-only
+  checks that never restore engines, retune strategies or change saved routes;
+- preview an allowlisted local support summary before copying, without raw logs,
+  subscription addresses, keys, account identifiers or automatic uploads;
+- clarify pending, failed and stale HTTP source observations without turning a
+  background measurement into a connection-wide error or gaming-ping claim;
+- keep Android status and shutdown responsive during manual network checks;
+- prevent service edits and duplicate starts while preparing a VPN source;
+- refresh bundled blocked catalogs to 11102026 with existing scoped IP guards;
+- document a voluntary, manually reported beta without analytics or telemetry.
+
 ## 3.0.44 — 2026-10-11
 
 - anchor the optional account control at the bottom-left of the desktop rail

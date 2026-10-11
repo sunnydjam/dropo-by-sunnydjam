@@ -206,7 +206,7 @@ class _HealthBridge extends _HomeBridge {
   ];
 
   @override
-  Future<Map<String, dynamic>> runQuickCheck() async {
+  Future<Map<String, dynamic>> runConnectionCheck() async {
     quickChecks++;
     return {
       'success': false,
@@ -222,6 +222,7 @@ class _HealthBridge extends _HomeBridge {
           'url': 'https://www.youtube.com',
           'success': true,
           'statusText': 'VPN_OK',
+          'routeVerified': true,
           'expectedRoute': 'vpn',
           'proxyTimeMs': 74,
         },
@@ -231,6 +232,7 @@ class _HealthBridge extends _HomeBridge {
           'url': 'https://youtubei.googleapis.com',
           'success': true,
           'statusText': 'VPN_OK',
+          'routeVerified': true,
           'expectedRoute': 'vpn',
           'proxyTimeMs': 88,
         },
@@ -240,6 +242,7 @@ class _HealthBridge extends _HomeBridge {
           'url': 'https://discord.com',
           'success': false,
           'statusText': 'FAIL',
+          'routeVerified': true,
           'expectedRoute': 'zapret',
           'normalTimeMs': 240,
           'normalError': 'connection reset',
@@ -272,7 +275,7 @@ class _PendingHealthBridge extends _HealthBridge {
   final Completer<Map<String, dynamic>> pendingCheck = Completer();
 
   @override
-  Future<Map<String, dynamic>> runQuickCheck() {
+  Future<Map<String, dynamic>> runConnectionCheck() {
     quickChecks++;
     return pendingCheck.future;
   }
@@ -298,7 +301,7 @@ class _ChangingRouteHealthBridge extends _PendingHealthBridge {
 
 class _AndroidHealthBridge extends _HealthBridge {
   @override
-  Future<Map<String, dynamic>> runQuickCheck() async {
+  Future<Map<String, dynamic>> runConnectionCheck() async {
     quickChecks++;
     return {
       'success': true,
@@ -326,7 +329,7 @@ class _AndroidHealthBridge extends _HealthBridge {
 
 class _StaleSessionHealthBridge extends _HealthBridge {
   @override
-  Future<Map<String, dynamic>> runQuickCheck() async {
+  Future<Map<String, dynamic>> runConnectionCheck() async {
     quickChecks++;
     return {
       'success': true,
@@ -486,6 +489,7 @@ void main() {
           'success': true,
           'expectedRoute': 'vpn',
           'proxyTimeMs': 91,
+          'routeVerified': true,
         },
         {
           'tag': 'discord',
@@ -846,11 +850,8 @@ void main() {
       expect(initialConnect.onPressed, isNotNull);
       await _tap(tester, 'home-connect');
       expect(bridge.toggles, 0);
-      expect(
-        find.text('Добавьте свою подписку или бесплатный VPN-источник.'),
-        findsOneWidget,
-      );
-      await _tap(tester, 'nav-sources');
+      expect(find.byKey(const ValueKey('full-vpn-onboarding')), findsOneWidget);
+      await _tap(tester, 'onboarding-own-source');
       await _tap(tester, 'choose-personal-source');
       expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
       await tester.enterText(

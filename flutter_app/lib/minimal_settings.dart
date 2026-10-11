@@ -95,6 +95,12 @@ class _MinimalSettingsPage extends StatelessWidget {
       ],
       'help' => <(String, String, String, IconData)>[
         (
+          'guided-help',
+          'Решить проблему',
+          'Нет интернета, не открывается сервис или не получается обновиться',
+          Icons.help_outline,
+        ),
+        (
           'logs',
           'Диагностика',
           'Журнал и данные для решения проблем',
@@ -131,7 +137,7 @@ class _MinimalSettingsPage extends StatelessWidget {
               : 'Обход, профили и рабочие сети',
           Icons.shield_outlined,
         ),
-        ('help', 'Помощь', 'Диагностика и о приложении', Icons.help_outline),
+        ('help', 'Помощь', 'Решение проблем и диагностика', Icons.help_outline),
       ],
     };
     return Align(

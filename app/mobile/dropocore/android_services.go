@@ -626,6 +626,16 @@ func androidClientQuickCheckResult(service routeInfo, target string, statusCode 
 }
 
 func runAndroidClientQuickCheck() string {
+	return runAndroidClientQuickCheckMode(false)
+}
+
+// Help checks observe endpoints only. They must not persist logs, mutate route
+// policy or publish events that can be interpreted as a connection operation.
+func runAndroidClientQuickCheckMode(readOnly bool) string {
+	return runAndroidClientQuickCheckWithProbe(readOnly, probeAndroidService)
+}
+
+func runAndroidClientQuickCheckWithProbe(readOnly bool, probe func(context.Context, *http.Client, string) (int, string)) string {
 	startedAt := time.Now()
 	mu.Lock()
 	services := androidServiceRoutesLocked(true)
@@ -636,13 +646,15 @@ func runAndroidClientQuickCheck() string {
 	for _, service := range services {
 		startServices = append(startServices, map[string]interface{}{"tag": service.Tag, "name": service.Name})
 	}
-	appendLogLocked(fmt.Sprintf("android service quick check started (%d services)", len(services)))
-	emitLocked("client-check-start", map[string]interface{}{
-		"total":        len(services),
-		"serviceCount": len(services),
-		"services":     startServices,
-	})
-	_ = saveLocked()
+	if !readOnly {
+		appendLogLocked(fmt.Sprintf("android service quick check started (%d services)", len(services)))
+		emitLocked("client-check-start", map[string]interface{}{
+			"total":        len(services),
+			"serviceCount": len(services),
+			"services":     startServices,
+		})
+		_ = saveLocked()
+	}
 	mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -663,20 +675,22 @@ func runAndroidClientQuickCheck() string {
 				service := services[index]
 				target := androidServiceHealthTarget(service.Tag)
 				probeStarted := time.Now()
-				statusCode, errText := probeAndroidService(ctx, client, target)
+				statusCode, errText := probe(ctx, client, target)
 				delayMS := int(time.Since(probeStarted).Milliseconds())
 				result := androidClientQuickCheckResult(service, target, statusCode, errText, delayMS)
 				results[index] = result
 
-				mu.Lock()
-				emitLocked("client-check-service", result)
-				if result["success"] == true {
-					appendLogLocked(fmt.Sprintf("android service quick check ok: %s %s (%d ms)", service.Tag, target, delayMS))
-				} else {
-					appendLogLocked(fmt.Sprintf("android service quick check failed: %s %s: %s", service.Tag, target, errText))
+				if !readOnly {
+					mu.Lock()
+					emitLocked("client-check-service", result)
+					if result["success"] == true {
+						appendLogLocked(fmt.Sprintf("android service quick check ok: %s %s (%d ms)", service.Tag, target, delayMS))
+					} else {
+						appendLogLocked(fmt.Sprintf("android service quick check failed: %s %s: %s", service.Tag, target, errText))
+					}
+					_ = saveLocked()
+					mu.Unlock()
 				}
-				_ = saveLocked()
-				mu.Unlock()
 			}
 		}()
 	}
@@ -725,6 +739,7 @@ enqueue:
 		"checkedAt":     currentTimeRFC3339(),
 		"routeVerified": false,
 		"checkScope":    "endpoint_reachability",
+		"readOnly":      readOnly,
 	}
 	if ctx.Err() != nil {
 		payload["error"] = ctx.Err().Error()
@@ -735,9 +750,11 @@ enqueue:
 		sessionNumber,
 		sessionWasConnected,
 	)
-	emitLocked("client-check-done", payload)
-	appendLogLocked(fmt.Sprintf("android service quick check complete: %d/%d failed", failedCount, len(results)))
-	_ = saveLocked()
+	if !readOnly {
+		emitLocked("client-check-done", payload)
+		appendLogLocked(fmt.Sprintf("android service quick check complete: %d/%d failed", failedCount, len(results)))
+		_ = saveLocked()
+	}
 	mu.Unlock()
 	return encode(payload)
 }

@@ -244,7 +244,6 @@ class _AtlasConnectionPanel extends StatelessWidget {
     required this.stopping,
     required this.enabled,
     required this.onPressed,
-    this.onDisabledPressed,
     this.hasError = false,
     this.motionEnabled = true,
   });
@@ -254,7 +253,6 @@ class _AtlasConnectionPanel extends StatelessWidget {
   final bool motionEnabled;
   final bool hasError;
   final VoidCallback onPressed;
-  final VoidCallback? onDisabledPressed;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -332,7 +330,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
                           ),
                     child: FilledButton(
                       key: const ValueKey('home-connect'),
-                      onPressed: enabled ? onPressed : onDisabledPressed,
+                      onPressed: enabled ? onPressed : null,
                       style: FilledButton.styleFrom(
                         enabledMouseCursor: SystemMouseCursors.click,
                         disabledMouseCursor: SystemMouseCursors.basic,

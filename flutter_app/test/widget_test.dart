@@ -623,7 +623,7 @@ void main() {
   );
 
   testWidgets(
-    'Android uses the touch drawer and still requires a subscription before VPN start',
+    'Android uses the touch drawer and offers a source before VPN start',
     (tester) async {
       debugMobileShellOverride = true;
       tester.view.physicalSize = const Size(390, 844);
@@ -692,11 +692,11 @@ void main() {
       await tester.tap(connect);
       await tester.pump();
 
+      expect(find.byKey(const ValueKey('full-vpn-onboarding')), findsOneWidget);
       expect(
-        find.text('Добавьте свою подписку или бесплатный VPN-источник.'),
+        find.byKey(const ValueKey('onboarding-own-source')),
         findsOneWidget,
       );
-      expect(find.text('Добавить'), findsWidgets);
       expect((await bridge.status()).connected, isFalse);
 
       await tester.pump(const Duration(seconds: 5));

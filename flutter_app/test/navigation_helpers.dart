@@ -48,7 +48,7 @@ Future<void> openSection(WidgetTester tester, String section) async {
         'work' ||
         'dropo_space' ||
         'technical-settings' => 'advanced',
-        'logs' || 'stats' || 'about' || 'exit' => 'help',
+        'logs' || 'stats' || 'about' || 'exit' || 'guided-help' => 'help',
         _ => 'settings',
       };
       await openSection(tester, parent);
