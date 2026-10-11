@@ -260,6 +260,391 @@ void main() {
     expect(service.requests.where((r) => r.$2.endsWith('/exchange')), isEmpty);
   });
 
+  test('auth wait honors server expiry and has bounded fallback', () {
+    final now = DateTime.utc(2026, 10, 12);
+    for (final invalid in [null, 42, '', 'not-a-date']) {
+      expect(
+        accountAuthWaitDuration(invalid, now: now),
+        const Duration(minutes: 5),
+      );
+    }
+    expect(
+      accountAuthWaitDuration(now.toIso8601String(), now: now),
+      Duration.zero,
+    );
+    expect(
+      accountAuthWaitDuration(
+        now.subtract(const Duration(seconds: 1)).toIso8601String(),
+        now: now,
+      ),
+      Duration.zero,
+    );
+    expect(
+      accountAuthWaitDuration(
+        now
+            .add(const Duration(seconds: 12, microseconds: 123))
+            .toIso8601String(),
+        now: now,
+      ),
+      const Duration(seconds: 12, microseconds: 123),
+    );
+    expect(
+      accountAuthWaitDuration(
+        now.add(const Duration(hours: 1)).toIso8601String(),
+        now: now,
+      ),
+      const Duration(minutes: 10),
+    );
+  });
+
+  testWidgets(
+    'first and repeat launch errors are handled without leaking URL',
+    (tester) async {
+      final service = _FakeAccountTransport();
+      final opened = <String>[];
+      await _pumpAccount(
+        tester,
+        service,
+        opened: opened,
+        openExternal: (_) async {
+          throw Exception('https://t.me/dropo_test?start=private-login-token');
+        },
+      );
+      await tester.tap(find.byKey(const ValueKey('account-submit')));
+      await tester.pump();
+      expect(find.text('Не удалось открыть Telegram'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.textContaining('private-login-token'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('account-reopen-telegram')));
+      await tester.pump();
+      expect(opened.length, 2);
+      expect(opened[0], opened[1]);
+      expect(service.authBodies.length, 1);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Отменить'));
+      await tester.pump();
+    },
+  );
+
+  testWidgets('successful reopen retains the original login challenge', (
+    tester,
+  ) async {
+    final service = _FakeAccountTransport();
+    var launches = 0;
+    final opened = <String>[];
+    await _pumpAccount(
+      tester,
+      service,
+      opened: opened,
+      openExternal: (_) async {
+        if (++launches == 1) throw Exception('launch failed');
+      },
+    );
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('account-reopen-telegram')));
+    await tester.pump();
+    expect(find.text('Не удалось открыть Telegram'), findsNothing);
+    expect(find.text('Ожидаем подтверждение в Telegram'), findsOneWidget);
+    expect(opened.length, 2);
+    expect(opened[0], opened[1]);
+    expect(service.authBodies.length, 1);
+    await tester.tap(find.text('Отменить'));
+    await tester.pump();
+  });
+
+  testWidgets('launch timeout is visible and does not wait forever', (
+    tester,
+  ) async {
+    final service = _FakeAccountTransport();
+    final launch = Completer<void>();
+    await _pumpAccount(tester, service, openExternal: (_) => launch.future);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 7));
+    expect(find.text('Не удалось открыть Telegram'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    await tester.tap(find.text('Отменить'));
+    await tester.pump();
+    launch.complete();
+    await tester.pump();
+    expect(find.text('Войти в Dropo'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('late launch failure cannot overwrite successful login', (
+    tester,
+  ) async {
+    final service = _FakeAccountTransport()..authApproved = true;
+    final launch = Completer<void>();
+    await _pumpAccount(tester, service, openExternal: (_) => launch.future);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    expect(find.text('Локальный пользователь'), findsOneWidget);
+    launch.completeError(Exception('late launch error'));
+    await tester.pump();
+    expect(find.text('Локальный пользователь'), findsOneWidget);
+    expect(find.textContaining('Не удалось открыть'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('server deadline stops polling and fences late approval', (
+    tester,
+  ) async {
+    final approval = Completer<Map<String, dynamic>>();
+    final service = _FakeAccountTransport()
+      ..challengeExpiresAt = DateTime.now()
+          .add(const Duration(seconds: 2))
+          .toUtc()
+          .toIso8601String()
+      ..pendingPoll = approval;
+    await _pumpAccount(tester, service);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.textContaining('Время подтверждения истекло'), findsOneWidget);
+    expect(find.text('Повторить вход через Telegram'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    final requestCount = service.requests.length;
+    approval.complete({'status': 'approved'});
+    await tester.pump(const Duration(seconds: 8));
+    expect(service.requests.length, requestCount);
+    expect(service.requests.where((r) => r.$2.endsWith('/exchange')), isEmpty);
+  });
+
+  testWidgets('expired new challenge is not opened or polled', (tester) async {
+    final service = _FakeAccountTransport()
+      ..challengeExpiresAt = DateTime.now()
+          .subtract(const Duration(minutes: 1))
+          .toUtc()
+          .toIso8601String();
+    final opened = <String>[];
+    await _pumpAccount(tester, service, opened: opened);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pumpAndSettle();
+    expect(opened, isEmpty);
+    expect(find.textContaining('Время подтверждения истекло'), findsOneWidget);
+    expect(
+      service.requests.where(
+        (r) => r.$1 == 'GET' && r.$2.startsWith('/v1/auth/challenges/'),
+      ),
+      isEmpty,
+    );
+  });
+
+  testWidgets('offline polling shows failure and expires with a retry', (
+    tester,
+  ) async {
+    final service = _FakeAccountTransport()
+      ..pollFailure = const AccountApiException('network unavailable');
+    await _pumpAccount(tester, service);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    expect(find.text('Не удалось проверить подтверждение'), findsOneWidget);
+    expect(
+      find.textContaining('Нет связи с сервером аккаунтов'),
+      findsOneWidget,
+    );
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    await tester.pump(const Duration(minutes: 5, seconds: 1));
+    expect(find.text('Повторить вход через Telegram'), findsOneWidget);
+    final requestCount = service.requests.length;
+    await tester.pump(const Duration(seconds: 10));
+    expect(service.requests.length, requestCount);
+  });
+
+  testWidgets('GET expiry may shorten but never extend the deadline', (
+    tester,
+  ) async {
+    for (final shorter in [true, false]) {
+      final service = _FakeAccountTransport()
+        ..challengeExpiresAt = DateTime.now()
+            .add(const Duration(seconds: 3))
+            .toUtc()
+            .toIso8601String()
+        ..statusExpiresAt = DateTime.now()
+            .add(Duration(seconds: shorter ? 1 : 60))
+            .toUtc()
+            .toIso8601String();
+      await _pumpAccount(tester, service);
+      await tester.tap(find.byKey(const ValueKey('account-submit')));
+      await tester.pump();
+      await tester.pump(Duration(seconds: shorter ? 2 : 4));
+      expect(find.text('Повторить вход через Telegram'), findsOneWidget);
+    }
+  });
+
+  testWidgets('returning from Telegram checks approval without reopening it', (
+    tester,
+  ) async {
+    final service = _FakeAccountTransport();
+    final opened = <String>[];
+    await _pumpAccount(tester, service, opened: opened);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    service.authApproved = true;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(find.text('Локальный пользователь'), findsOneWidget);
+    expect(opened.length, 1);
+  });
+
+  testWidgets('new attempt polls while old cancelled request is pending', (
+    tester,
+  ) async {
+    final oldPoll = Completer<Map<String, dynamic>>();
+    final newPoll = Completer<Map<String, dynamic>>();
+    final service = _FakeAccountTransport()..pendingPoll = oldPoll;
+    await _pumpAccount(tester, service);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    await tester.tap(find.text('Отменить'));
+    await tester.pump();
+    service.pendingPoll = newPoll;
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    final reads = service.requests
+        .where((r) => r.$1 == 'GET' && r.$2.startsWith('/v1/auth/challenges/'))
+        .length;
+    expect(reads, 2);
+    oldPoll.complete({'status': 'approved'});
+    await tester.pump(const Duration(seconds: 3));
+    expect(
+      service.requests
+          .where(
+            (r) => r.$1 == 'GET' && r.$2.startsWith('/v1/auth/challenges/'),
+          )
+          .length,
+      reads,
+    );
+    expect(service.requests.where((r) => r.$2.endsWith('/exchange')), isEmpty);
+    newPoll.complete({'status': 'approved'});
+    await tester.pump();
+    expect(find.text('Локальный пользователь'), findsOneWidget);
+  });
+
+  testWidgets('late exchange cannot persist after deadline', (tester) async {
+    final exchange = Completer<Map<String, dynamic>>();
+    final service = _FakeAccountTransport()
+      ..authApproved = true
+      ..pendingExchange = exchange
+      ..challengeExpiresAt = DateTime.now()
+          .add(const Duration(seconds: 2))
+          .toUtc()
+          .toIso8601String();
+    final vaultCalls = <String>[];
+    const channel = MethodChannel('dropo/account_session');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      vaultCalls.add(call.method);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    await _pumpAccount(tester, service, persistSession: true);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    exchange.complete({
+      'accessToken': 'late-access-token',
+      'account': service._account(),
+    });
+    await tester.pump();
+    expect(find.text('Повторить вход через Telegram'), findsOneWidget);
+    expect(vaultCalls, ['read']);
+  });
+
+  testWidgets(
+    'auth rejects duplicate start query and overlong Telegram payload',
+    (tester) async {
+      for (final url in [
+        'https://t.me/dropo_test?start=login_test-challenge&start=login_test-challenge',
+        'https://t.me/dropo_test?start=login_${'a' * 59}',
+      ]) {
+        final service = _FakeAccountTransport()..authURL = url;
+        if (!url.contains('&')) service.challengeToken = 'a' * 59;
+        final opened = <String>[];
+        await _pumpAccount(tester, service, opened: opened);
+        await tester.tap(find.byKey(const ValueKey('account-submit')));
+        await tester.pumpAndSettle();
+        expect(opened, isEmpty);
+        expect(find.textContaining('неполную заявку'), findsOneWidget);
+      }
+    },
+  );
+
+  testWidgets('unavailable challenge ends waiting without repeated requests', (
+    tester,
+  ) async {
+    for (final status in [404, 410]) {
+      final service = _FakeAccountTransport()
+        ..pollFailure = AccountApiException('expired', status: status);
+      await _pumpAccount(tester, service);
+      await tester.tap(find.byKey(const ValueKey('account-submit')));
+      await tester.pump();
+      expect(
+        find.textContaining('Заявка входа больше недоступна'),
+        findsOneWidget,
+      );
+      expect(find.text('Повторить вход через Telegram'), findsOneWidget);
+      final count = service.requests.length;
+      await tester.pump(const Duration(seconds: 5));
+      expect(service.requests.length, count);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    }
+  });
+
+  testWidgets('restored server connection clears the failure state', (
+    tester,
+  ) async {
+    final service = _FakeAccountTransport()
+      ..pollFailure = const AccountApiException('offline');
+    await _pumpAccount(tester, service);
+    await tester.tap(find.byKey(const ValueKey('account-submit')));
+    await tester.pump();
+    expect(find.text('Не удалось проверить подтверждение'), findsOneWidget);
+    service.pollFailure = null;
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.text('Ожидаем подтверждение в Telegram'), findsOneWidget);
+    expect(find.textContaining('Нет связи с сервером аккаунтов'), findsNothing);
+    await tester.tap(find.text('Отменить'));
+    await tester.pump();
+  });
+
+  testWidgets('pending and launch failure fit phone with large text', (
+    tester,
+  ) async {
+    for (final fails in [false, true]) {
+      await _pumpAccount(
+        tester,
+        _FakeAccountTransport(),
+        size: const Size(320, 568),
+        textScale: 2,
+        openExternal: (_) async {
+          if (fails) throw Exception('launch failed');
+        },
+      );
+      await tester.ensureVisible(find.byKey(const ValueKey('account-submit')));
+      await tester.tap(find.byKey(const ValueKey('account-submit')));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('account-reopen-telegram')),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.ensureVisible(find.text('Отменить'));
+      await tester.tap(find.text('Отменить'));
+      await tester.pump();
+    }
+  });
+
   testWidgets('protected credential cannot cross backend origins', (
     tester,
   ) async {
@@ -453,6 +838,7 @@ Future<void> _pumpAccount(
   double textScale = 1,
   GlobalKey? captureKey,
   String endpoint = 'https://accounts.example.com',
+  Future<void> Function(String)? openExternal,
 }) async {
   await tester.binding.setSurfaceSize(size);
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -464,6 +850,7 @@ Future<void> _pumpAccount(
     initialToken: initialToken,
     onOpenExternal: (url) async {
       opened?.add(url);
+      await openExternal?.call(url);
     },
   );
   await tester.pumpWidget(
@@ -497,6 +884,10 @@ class _FakeAccountTransport implements AccountTransport {
   bool development = false;
   AccountApiException? meFailure;
   Completer<Map<String, dynamic>>? pendingPoll;
+  Completer<Map<String, dynamic>>? pendingExchange;
+  AccountApiException? pollFailure;
+  String? challengeExpiresAt, statusExpiresAt;
+  String challengeToken = 'test-challenge';
   String authURL = 'https://t.me/dropo_test?start=login_test-challenge';
 
   @override
@@ -535,16 +926,22 @@ class _FakeAccountTransport implements AccountTransport {
     if (path == '/v1/auth/challenges' && method == 'POST') {
       authBodies.add(Map<String, dynamic>.from(body!));
       return {
-        'challengeToken': 'test-challenge',
+        'challengeToken': challengeToken,
         'status': 'pending',
         'telegramUrl': authURL,
+        if (challengeExpiresAt != null) 'expiresAt': challengeExpiresAt,
       };
     }
-    if (path == '/v1/auth/challenges/test-challenge' && method == 'GET') {
+    if (path == '/v1/auth/challenges/$challengeToken' && method == 'GET') {
+      if (pollFailure != null) throw pollFailure!;
       if (pendingPoll != null) return pendingPoll!.future;
-      return {'status': authApproved ? 'approved' : 'pending'};
+      return {
+        'status': authApproved ? 'approved' : 'pending',
+        if (statusExpiresAt != null) 'expiresAt': statusExpiresAt,
+      };
     }
-    if (path == '/v1/auth/challenges/test-challenge/exchange') {
+    if (path == '/v1/auth/challenges/$challengeToken/exchange') {
+      if (pendingExchange != null) return pendingExchange!.future;
       return {'accessToken': 'test-access-token', 'account': _account()};
     }
     if (path == '/v1/me') {

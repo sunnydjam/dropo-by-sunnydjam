@@ -2,6 +2,19 @@ part of 'main.dart';
 
 enum _AccountPhase { loading, signedOut, pendingAuth, signedIn, offline }
 
+/// Server expiry is authoritative, but a broken/missing response cannot keep
+/// the client waiting forever. These are UI bounds, not a server TTL change.
+@visibleForTesting
+Duration accountAuthWaitDuration(Object? expiresAt, {required DateTime now}) {
+  final expiry = expiresAt is String ? DateTime.tryParse(expiresAt) : null;
+  if (expiry == null) return const Duration(minutes: 5);
+  final remaining = expiry.difference(now);
+  if (remaining <= Duration.zero) return Duration.zero;
+  return remaining > const Duration(minutes: 10)
+      ? const Duration(minutes: 10)
+      : remaining;
+}
+
 /// Release builds never use a local mock or send credentials over plain HTTP.
 bool accountEndpointAvailable(
   String endpoint, {
@@ -404,7 +417,7 @@ class AccountPage extends StatefulWidget {
   State<AccountPage> createState() => _AccountPageState();
 }
 
-class _AccountPageState extends State<AccountPage> {
+class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   late final AccountTransport _api =
       widget.transport ?? _AccountApi(widget.endpoint);
   late final _vault = _AccountTokenVault(
@@ -413,6 +426,8 @@ class _AccountPageState extends State<AccountPage> {
     initialToken: widget.initialToken,
   );
   Timer? _authPoll;
+  Timer? _authDeadlineTimer;
+  DateTime? _authDeadline;
   _AccountPhase _phase = _AccountPhase.loading;
   _AccountRecord? _account;
   _AccountProduct _product = const _AccountProduct(
@@ -429,21 +444,36 @@ class _AccountPageState extends State<AccountPage> {
   bool _registrationAvailable = false;
   bool _purchasingAvailable = false;
   bool _development = false;
-  bool _polling = false;
+  int? _pollingGeneration;
+  bool _openingTelegram = false;
+  bool _authOpenFailed = false;
+  bool _authCheckFailed = false;
+  bool _authRetryAvailable = false;
   int _authGeneration = 0;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_restore());
   }
 
   @override
   void dispose() {
-    _authPoll?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _stopAuthTimers();
     _authGeneration++;
     if (widget.transport == null) _api.close();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _phase == _AccountPhase.pendingAuth &&
+        !_expireAuthIfNeeded()) {
+      unawaited(_pollAuth());
+    }
   }
 
   Future<void> _restore() async {
@@ -535,11 +565,16 @@ class _AccountPageState extends State<AccountPage> {
 
   Future<void> _startAuth({String purpose = 'login'}) async {
     if (_busy || !_registrationAvailable) return;
+    _stopAuthTimers();
     final generation = ++_authGeneration;
     setState(() {
       _busy = true;
       _message = '';
       _authPurpose = purpose;
+      _authRetryAvailable = false;
+      _authOpenFailed = false;
+      _authCheckFailed = false;
+      _openingTelegram = false;
     });
     try {
       final response = await _api.request(
@@ -555,19 +590,23 @@ class _AccountPageState extends State<AccountPage> {
           !_validAuthLink(_telegramUrl, _challengeToken!, purpose)) {
         throw const AccountApiException('Сервис вернул неполную заявку входа.');
       }
+      final now = DateTime.now();
+      final wait = accountAuthWaitDuration(response['expiresAt'], now: now);
+      if (wait == Duration.zero) {
+        _finishAuthAttempt('Время подтверждения истекло. Повторите вход.');
+        return;
+      }
       if (!mounted) return;
       setState(() {
         _phase = _AccountPhase.pendingAuth;
         _busy = false;
       });
+      _setAuthDeadline(now.add(wait), generation);
       _scheduleAuthPoll();
-      await widget.onOpenExternal(_telegramUrl!);
+      await _openAuthLink();
     } catch (error) {
       if (!mounted || generation != _authGeneration) return;
-      setState(() {
-        _busy = false;
-        _message = _accountError(error);
-      });
+      _finishAuthAttempt(_accountError(error));
     }
   }
 
@@ -582,7 +621,9 @@ class _AccountPageState extends State<AccountPage> {
           r'^[A-Za-z][A-Za-z0-9_]{4,31}$',
         ).hasMatch(uri.pathSegments.first)) {
       final prefix = purpose == 'recovery' ? 'recover_' : 'login_';
-      return uri.queryParameters.length == 1 &&
+      return '$prefix$challenge'.length <= 64 &&
+          uri.queryParametersAll.length == 1 &&
+          uri.queryParametersAll['start']?.length == 1 &&
           uri.queryParameters['start'] == '$prefix$challenge';
     }
     final endpoint = Uri.tryParse(widget.endpoint);
@@ -598,17 +639,95 @@ class _AccountPageState extends State<AccountPage> {
   }
 
   void _cancelAuth() {
-    _authGeneration++;
+    _finishAuthAttempt('', retry: false);
+  }
+
+  void _stopAuthTimers() {
     _authPoll?.cancel();
+    _authPoll = null;
+    _authDeadlineTimer?.cancel();
+    _authDeadlineTimer = null;
+    _authDeadline = null;
+  }
+
+  void _setAuthDeadline(DateTime deadline, int generation) {
+    _authDeadline = deadline;
+    _authDeadlineTimer?.cancel();
+    _authDeadlineTimer = Timer(deadline.difference(DateTime.now()), () {
+      if (mounted &&
+          generation == _authGeneration &&
+          _phase == _AccountPhase.pendingAuth) {
+        _finishAuthAttempt('Время подтверждения истекло. Повторите вход.');
+      }
+    });
+  }
+
+  bool _expireAuthIfNeeded() {
+    final deadline = _authDeadline;
+    if (deadline == null || DateTime.now().isBefore(deadline)) return false;
+    _finishAuthAttempt('Время подтверждения истекло. Повторите вход.');
+    return true;
+  }
+
+  void _finishAuthAttempt(String message, {bool retry = true}) {
+    _authGeneration++;
+    _stopAuthTimers();
     _challengeToken = null;
     _telegramUrl = null;
+    if (!mounted) return;
     setState(() {
       _phase = _account == null
           ? _AccountPhase.signedOut
           : _AccountPhase.signedIn;
       _busy = false;
-      _message = '';
+      _openingTelegram = false;
+      _authOpenFailed = false;
+      _authCheckFailed = false;
+      _authRetryAvailable = retry;
+      _message = message;
     });
+  }
+
+  Future<void> _openAuthLink() async {
+    final url = _telegramUrl;
+    final generation = _authGeneration;
+    if (_openingTelegram ||
+        _busy ||
+        url == null ||
+        _phase != _AccountPhase.pendingAuth ||
+        _expireAuthIfNeeded()) {
+      return;
+    }
+    setState(() => _openingTelegram = true);
+    try {
+      await widget.onOpenExternal(url).timeout(const Duration(seconds: 6));
+      if (!mounted ||
+          generation != _authGeneration ||
+          _phase != _AccountPhase.pendingAuth) {
+        return;
+      }
+      setState(() {
+        _authOpenFailed = false;
+        if (!_authCheckFailed) _message = '';
+      });
+    } catch (_) {
+      if (mounted &&
+          generation == _authGeneration &&
+          _phase == _AccountPhase.pendingAuth) {
+        setState(() {
+          _authOpenFailed = true;
+          _message = _development
+              ? 'Не удалось открыть тестовую страницу. Повторите открытие или отмените вход.'
+              : 'Не удалось открыть Telegram. Повторите открытие или отмените вход. Проверьте, что Telegram установлен.';
+        });
+      }
+    } finally {
+      if (mounted &&
+          generation == _authGeneration &&
+          _phase == _AccountPhase.pendingAuth) {
+        setState(() => _openingTelegram = false);
+      }
+    }
   }
 
   void _scheduleAuthPoll() {
@@ -625,12 +744,13 @@ class _AccountPageState extends State<AccountPage> {
     final generation = _authGeneration;
     if (challenge == null ||
         _busy ||
-        _polling ||
+        _pollingGeneration == generation ||
         !mounted ||
         _phase != _AccountPhase.pendingAuth) {
       return;
     }
-    _polling = true;
+    if (_expireAuthIfNeeded()) return;
+    _pollingGeneration = generation;
     try {
       final response = await _api.request(
         'GET',
@@ -641,30 +761,52 @@ class _AccountPageState extends State<AccountPage> {
           _phase != _AccountPhase.pendingAuth) {
         return;
       }
+      final serverExpiry = response['expiresAt'];
+      final parsedExpiry = serverExpiry is String
+          ? DateTime.tryParse(serverExpiry)
+          : null;
+      if (parsedExpiry != null &&
+          _authDeadline != null &&
+          parsedExpiry.isBefore(_authDeadline!)) {
+        _setAuthDeadline(parsedExpiry, generation);
+      }
+      if (_expireAuthIfNeeded()) return;
+      if (_authCheckFailed) {
+        setState(() {
+          _authCheckFailed = false;
+          if (!_authOpenFailed) _message = '';
+        });
+      }
       final status = response['status']?.toString();
       if (status == 'approved') {
         _authPoll?.cancel();
         await _exchangeAuth(challenge, generation);
       } else if (status == 'denied' || status == 'expired') {
-        _authPoll?.cancel();
-        if (!mounted) return;
-        setState(() {
-          _phase = _account == null
-              ? _AccountPhase.signedOut
-              : _AccountPhase.signedIn;
-          _message = status == 'expired'
-              ? 'Время подтверждения истекло. Создайте новую заявку.'
-              : 'Вход отклонён в Telegram.';
-        });
+        _finishAuthAttempt(
+          status == 'expired'
+              ? 'Время подтверждения истекло. Повторите вход.'
+              : 'Вход отклонён в Telegram. Можно повторить вход.',
+        );
       }
     } catch (error) {
       if (mounted &&
           generation == _authGeneration &&
           _phase == _AccountPhase.pendingAuth) {
-        setState(() => _message = _accountError(error));
+        if (error is AccountApiException &&
+            (error.status == 404 || error.status == 410)) {
+          _finishAuthAttempt('Заявка входа больше недоступна. Повторите вход.');
+        } else {
+          setState(() {
+            _authCheckFailed = true;
+            if (!_authOpenFailed) {
+              _message =
+                  'Нет связи с сервером аккаунтов. Проверьте интернет. Проверка повторится автоматически; вход можно отменить.';
+            }
+          });
+        }
       }
     } finally {
-      _polling = false;
+      if (_pollingGeneration == generation) _pollingGeneration = null;
     }
   }
 
@@ -676,18 +818,27 @@ class _AccountPageState extends State<AccountPage> {
         '/v1/auth/challenges/$challenge/exchange',
         body: {'deviceName': _deviceName()},
       );
-      if (!mounted || generation != _authGeneration) return;
+      if (!mounted ||
+          generation != _authGeneration ||
+          _phase != _AccountPhase.pendingAuth ||
+          _expireAuthIfNeeded()) {
+        return;
+      }
       final token = response['accessToken']?.toString() ?? '';
       if (token.isEmpty) {
         throw const AccountApiException('Не удалось получить сессию Dropo.');
       }
+      // A started native secure write cannot be cancelled. The approved
+      // exchange is fenced before it starts; the UI remains busy until done.
+      _stopAuthTimers();
       final persisted = await _vault.write(token);
       _token = token;
-      if (!mounted) return;
+      if (!mounted || generation != _authGeneration) return;
       setState(() {
         _account = _AccountRecord.fromJson(_asMap(response['account']));
         _phase = _AccountPhase.signedIn;
         _busy = false;
+        _authRetryAvailable = false;
         _message = !persisted
             ? _vault.previousCredentialMayRemain
                   ? 'Новый вход сохранён только до закрытия приложения. Не удалось очистить прежнюю защищённую сессию: после перезапуска может восстановиться предыдущий аккаунт. Повторите выход из аккаунта.'
@@ -701,13 +852,7 @@ class _AccountPageState extends State<AccountPage> {
       );
     } catch (error) {
       if (!mounted || generation != _authGeneration) return;
-      setState(() {
-        _busy = false;
-        _phase = _account == null
-            ? _AccountPhase.signedOut
-            : _AccountPhase.signedIn;
-        _message = _accountError(error);
-      });
+      _finishAuthAttempt(_accountError(error));
     }
   }
 
@@ -719,6 +864,7 @@ class _AccountPageState extends State<AccountPage> {
   }
 
   Future<void> _logout() async {
+    _stopAuthTimers();
     _authGeneration++;
     final token = _token;
     setState(() => _busy = true);
@@ -938,11 +1084,13 @@ class _AccountPageState extends State<AccountPage> {
           available: _registrationAvailable,
           development: _development,
           recovery: _authPurpose == 'recovery',
+          retry: _authRetryAvailable,
           message: _message,
           onSubmit: () => _startAuth(purpose: _authPurpose),
           onToggleRecovery: () => setState(() {
             _authPurpose = _authPurpose == 'login' ? 'recovery' : 'login';
             _message = '';
+            _authRetryAvailable = false;
           }),
         );
         const steps = _TelegramAuthSteps();
@@ -1025,15 +1173,24 @@ class _AccountPageState extends State<AccountPage> {
             children: [
               Row(
                 children: [
-                  const SizedBox(
+                  SizedBox(
                     width: 28,
                     height: 28,
-                    child: CircularProgressIndicator(strokeWidth: 2.7),
+                    child: _authOpenFailed || _authCheckFailed
+                        ? const Icon(
+                            Icons.warning_amber_rounded,
+                            color: Colors.orangeAccent,
+                          )
+                        : const CircularProgressIndicator(strokeWidth: 2.7),
                   ),
                   const SizedBox(width: 16),
                   Expanded(
                     child: Text(
-                      _development
+                      _authOpenFailed
+                          ? 'Не удалось открыть ${_development ? 'страницу' : 'Telegram'}'
+                          : _authCheckFailed
+                          ? 'Не удалось проверить подтверждение'
+                          : _development
                           ? 'Ожидаем локальное подтверждение'
                           : 'Ожидаем подтверждение в Telegram',
                       style: const TextStyle(
@@ -1046,6 +1203,11 @@ class _AccountPageState extends State<AccountPage> {
                 ],
               ),
               const SizedBox(height: 16),
+              const Text(
+                'После подтверждения вернитесь в Dropo. Если время заявки истечёт, можно повторить вход.',
+                style: TextStyle(color: _atlasMuted, height: 1.5),
+              ),
+              const SizedBox(height: 12),
               Text(
                 _development
                     ? 'Подтвердите тестовый вход на локальной странице в браузере. Это имитация: настоящий Telegram-бот не используется.'
@@ -1066,9 +1228,9 @@ class _AccountPageState extends State<AccountPage> {
                 children: [
                   FilledButton.icon(
                     key: const ValueKey('account-reopen-telegram'),
-                    onPressed: _telegramUrl == null
+                    onPressed: _telegramUrl == null || _busy || _openingTelegram
                         ? null
-                        : () => widget.onOpenExternal(_telegramUrl!),
+                        : () => unawaited(_openAuthLink()),
                     icon: const Icon(Icons.send_outlined),
                     label: Text(
                       _development
@@ -1241,11 +1403,12 @@ class _AuthForm extends StatelessWidget {
     required this.available,
     required this.development,
     required this.recovery,
+    required this.retry,
     required this.message,
     required this.onSubmit,
     required this.onToggleRecovery,
   });
-  final bool busy, recovery, available, development;
+  final bool busy, recovery, available, development, retry;
   final String message;
   final VoidCallback onSubmit, onToggleRecovery;
 
@@ -1275,6 +1438,8 @@ class _AuthForm extends StatelessWidget {
         label: Text(
           development
               ? 'Проверить локальный вход'
+              : retry
+              ? 'Повторить ${recovery ? 'восстановление' : 'вход'} через Telegram'
               : recovery
               ? 'Восстановить через Telegram'
               : 'Войти через Telegram',
@@ -1900,7 +2065,7 @@ Future<void> _showTextDialog(BuildContext context, String title, String body) =>
 String _accountError(Object error) {
   if (error is AccountApiException) return error.message;
   if (error is SocketException || error is TimeoutException) {
-    return 'Сервис аккаунтов недоступен. Запустите локальный DropoVPN-Backend или проверьте адрес сервиса.';
+    return 'Нет связи с сервером аккаунтов. Проверьте интернет и повторите попытку.';
   }
   return 'Не удалось выполнить действие. Повторите позже.';
 }

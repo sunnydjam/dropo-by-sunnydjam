@@ -977,12 +977,40 @@ class MainActivity : FlutterActivity() {
         if (scheme !in setOf("https", "http", "tg", "market")) {
             return errorJson("Unsupported URL scheme: $scheme")
         }
+        TelegramAuthLink.fromHttps(trimmed)?.let { authLink ->
+            return openTelegramAuthLink(authLink)
+        }
         val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return runCatching {
             startActivity(intent)
             JSONObject(mapOf("success" to true, "url" to trimmed)).toString()
         }.getOrElse { error ->
             errorJson(error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    private fun openTelegramAuthLink(link: TelegramAuthLink): String {
+        // Let Android resolve Telegram clients (including the user's preferred client).
+        // Do not pin a package, query installed apps, or expose a challenge in responses.
+        val outcome = runCatching {
+            TelegramAuthLaunchPolicy.launch(
+                link,
+                launchUrl = { value ->
+                    startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(value))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                },
+                isMissingHandler = { it is ActivityNotFoundException },
+            )
+        }.getOrDefault(TelegramAuthLaunchResult.FAILED)
+        return when (outcome) {
+            TelegramAuthLaunchResult.TELEGRAM ->
+                successJson("Открыт Telegram для подтверждения входа.")
+            TelegramAuthLaunchResult.HTTPS_FALLBACK ->
+                successJson("Открыта веб-ссылка входа: обработчик Telegram не найден.")
+            TelegramAuthLaunchResult.FAILED ->
+                errorJson("Не удалось открыть вход через Telegram. Попробуйте ещё раз.")
         }
     }
 

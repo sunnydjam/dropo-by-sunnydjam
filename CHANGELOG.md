@@ -4,6 +4,17 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.0.46 — 2026-10-12
+
+- open Android account approval in Telegram first, using the same issued login
+  challenge; fall back to its validated HTTPS link only when no Telegram handler exists;
+- bound approval waiting, show actionable timeout and launch errors, and offer
+  explicit retry without silently creating a second login request;
+- retain the existing Android Preview package, profile build and signing identity
+  so the compatible universal ARM APK updates the installed Preview in place;
+- preserve both routing modes, saved sources, Direct/private-network precedence,
+  the traffic engine and user-confirmed updates; purchases remain disabled.
+
 ## 3.0.45 — 2026-10-11
 
 - offer Android the shared first-connection source wizard in both routing modes,
