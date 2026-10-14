@@ -36,8 +36,8 @@ function Assert-DropoAabManifest {
     param([xml]$Manifest, [string]$Version)
     $namespace = 'http://schemas.android.com/apk/res/android'
     $root = $Manifest.DocumentElement
-    if ($root.LocalName -cne 'manifest' -or $root.GetAttribute('package') -cne 'in.droponevedimka.dropo') {
-        throw 'Unexpected AAB package. Google Play requires the stable application identity.'
+    if ($root.LocalName -cne 'manifest' -or $root.GetAttribute('package') -cne 'com.dropo_dzhamuha.app') {
+        throw 'Unexpected AAB package. Google Play requires com.dropo_dzhamuha.app.'
     }
     if ($root.GetAttribute('versionName', $namespace) -cne $Version) { throw 'AAB versionName does not match the expected release.' }
     $parts = $Version.Split('.')
@@ -69,8 +69,10 @@ function Assert-DropoAabManifest {
         if ($required -cnotin $permissions) { throw 'AAB is missing a required VPN/foreground service permission.' }
     }
     foreach ($provider in $applications[0].SelectNodes('provider')) {
-        if ($provider.GetAttribute('authorities', $namespace).Split(';') -ccontains 'in.droponevedimka.dropo.updates') {
-            throw 'Play AAB must not declare the APK update FileProvider.'
+        foreach ($authority in $provider.GetAttribute('authorities', $namespace).Split(';')) {
+            if ($authority.Trim() -imatch '(^|\.)updates$') {
+                throw 'Play AAB must not declare the APK update FileProvider.'
+            }
         }
     }
     foreach ($data in $root.SelectNodes('queries/intent/data')) {
@@ -78,8 +80,21 @@ function Assert-DropoAabManifest {
             throw 'Play AAB must not declare APK installer queries.'
         }
     }
+    foreach ($component in @(
+        @{ Element = 'activity'; Class = 'in.droponevedimka.dropo.MainActivity' },
+        @{ Element = 'receiver'; Class = 'in.droponevedimka.dropo.DropoDeviceAdminReceiver' }
+    )) {
+        $matches = @($applications[0].SelectNodes($component.Element) | Where-Object {
+            $_.GetAttribute('name', $namespace) -ceq $component.Class
+        })
+        if ($matches.Count -ne 1) {
+            throw "AAB must retain exactly one Kotlin-namespace $($component.Class) entry point."
+        }
+    }
     $vpnServices = @($applications[0].SelectNodes('service') | Where-Object {
-        $_.GetAttribute('name', $namespace) -cin @('.DropoVpnService', 'in.droponevedimka.dropo.DropoVpnService')
+        # The Play applicationId is distinct from the existing Kotlin namespace.
+        # A relative class would resolve under the new package and not exist.
+        $_.GetAttribute('name', $namespace) -ceq 'in.droponevedimka.dropo.DropoVpnService'
     })
     if ($vpnServices.Count -ne 1 -or
         $vpnServices[0].GetAttribute('permission', $namespace) -cne 'android.permission.BIND_VPN_SERVICE' -or
@@ -224,7 +239,7 @@ $archive = [IO.Compression.ZipFile]::OpenRead($bundlePath)
 try { Assert-DropoAabContents -Archive $archive -RepositoryRoot $repositoryRoot } finally { $archive.Dispose() }
 [pscustomobject]@{
     Path = $bundlePath
-    Package = 'in.droponevedimka.dropo'
+    Package = 'com.dropo_dzhamuha.app'
     Version = $version
     VersionCode = $versionCode
     Distribution = 'Google Play (APK self-update disabled)'

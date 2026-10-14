@@ -23,7 +23,7 @@ function Write-ArchiveFixture {
     $record = [ordered]@{
         artifactName = 'dropo-Android-Play-universal.aab'; sha256 = $hash
         sourceRevision = ('a' * 40); sourceDirty = $false; channel = 'play'
-        packageName = 'in.droponevedimka.dropo'; version = '3.0.47'; versionCode = 30047; architecture = 'universal'
+        packageName = 'com.dropo_dzhamuha.app'; version = '3.0.47'; versionCode = 30047; architecture = 'universal'
     }
     foreach ($key in $Overrides.Keys) { $record[$key] = $Overrides[$key] }
     [IO.File]::WriteAllText("$aab.build.json", ($record | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
@@ -39,12 +39,25 @@ try {
     $inputData = Get-DropoAabArchiveInput -Folder $releaseFolder
     Assert-Fixture ($inputData.record.sourceRevision -ceq ('a' * 40)) 'accepts historical clean source revision without current HEAD dependency'
     $archiveRoot = Join-Path $fixtureRoot 'archive'
+    # This entry represents an immutable archive made before the Play package
+    # correction. New archive writes must not migrate its metadata or bytes.
+    $historicalFolder = Join-Path (Join-Path $archiveRoot '3.0.47') 'historical-old-package'
+    Write-ArchiveFixture -Folder $historicalFolder -Content 'older package bundle bytes' -Overrides @{
+        packageName = 'in.droponevedimka.dropo'; sourceRevision = ('b' * 40)
+    } | Out-Null
+    $historicalHashes = @{}
+    foreach ($name in $script:DropoAabArchiveFileNames) {
+        $historicalHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $historicalFolder $name) -Algorithm SHA256).Hash
+    }
     $first = Copy-DropoVerifiedAabToArchive -InputData $inputData -Root $archiveRoot
     Assert-Fixture (-not $first.alreadyArchived) 'first immutable archive copy'
     Assert-Fixture ($first.archivePath -ceq (Join-Path (Join-Path $archiveRoot '3.0.47') (('a' * 40) + '-' + $inputData.record.sha256.Substring(0, 12)))) 'full commit and digest identity'
     Assert-Fixture (@(Get-ChildItem -LiteralPath $first.archivePath -Force).Count -eq 3) 'archives exactly AAB checksum and public build record'
     $again = Copy-DropoVerifiedAabToArchive -InputData $inputData -Root $archiveRoot
     Assert-Fixture ($again.alreadyArchived -and $again.archivePath -ceq $first.archivePath) 'identical archive is idempotent'
+    foreach ($name in $script:DropoAabArchiveFileNames) {
+        Assert-Fixture ((Get-FileHash -LiteralPath (Join-Path $historicalFolder $name) -Algorithm SHA256).Hash -ceq $historicalHashes[$name]) "historical old-package archive preserves $name"
+    }
 
     $secondFolder = Join-Path $fixtureRoot 'second'
     Write-ArchiveFixture -Folder $secondFolder -Content 'different synthetic bundle bytes' | Out-Null
@@ -67,7 +80,9 @@ try {
         @{ label = 'short source revisions'; data = @{ sourceRevision = 'abcdef0' } },
         @{ label = 'unsafe source revisions'; data = @{ sourceRevision = '../unsafe' } },
         @{ label = 'preview channel'; data = @{ channel = 'preview' } },
+        @{ label = 'old Play package'; data = @{ packageName = 'in.droponevedimka.dropo' } },
         @{ label = 'preview package'; data = @{ packageName = 'in.droponevedimka.dropo.preview' } },
+        @{ label = 'new package preview suffix'; data = @{ packageName = 'com.dropo_dzhamuha.app.preview' } },
         @{ label = 'arm64-only architecture'; data = @{ architecture = 'arm64' } },
         @{ label = 'wrong record filename'; data = @{ artifactName = 'other.aab' } },
         @{ label = 'wrong record hash'; data = @{ sha256 = ('0' * 64) } },

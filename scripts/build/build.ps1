@@ -1833,7 +1833,7 @@ function Build-AndroidAppBundle {
     $sha = (Get-FileHash -LiteralPath $destBundle -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText("$destBundle.sha256", "$sha  $AndroidBundleAsset`n", [Text.UTF8Encoding]::new($false))
     Write-DropoAndroidBuildMetadata -ArtifactPath $destBundle -ArtifactSHA256 $sha `
-        -Channel 'play' -PackageName 'in.droponevedimka.dropo' -Architecture 'universal'
+        -Channel 'play' -PackageName 'com.dropo_dzhamuha.app' -Architecture 'universal'
     # Play bundles stay in a local immutable archive, never in GitHub assets.
     # Keep it outside release/: normal Windows cleanup may remove old builds.
     if (-not $SourceDirty) {

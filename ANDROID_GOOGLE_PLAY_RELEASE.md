@@ -13,12 +13,16 @@ Play Console, а не файл для установки на телефон. Go
 | Канал | Файл | Package | Подпись и обновления |
 | --- | --- | --- | --- |
 | Прямая установка Preview | `dropo-Android-Preview-universal.apk` | `in.droponevedimka.dropo.preview` | Прежняя Preview-подпись; подтверждённая загрузка и установка APK из GitHub. |
-| Google Play | `dropo-Android-Play-universal.aab` | `in.droponevedimka.dropo` | Сохранённый upload-ключ; установленные APK подписывает Play App Signing, обновления через Google Play. |
+| Google Play | `dropo-Android-Play-universal.aab` | `com.dropo_dzhamuha.app` | Сохранённый upload-ключ; установленные APK подписывает Play App Signing, обновления через Google Play. |
 
 Оба пакета включают ARM32 и ARM64, Android 10+ и target SDK 36. Preview остаётся
 отдельным приложением: AAB не заменяет установленный Preview поверх него и не
 переносит его данные автоматически. Release-ключ для стабильного sideload APK
 настраивается отдельно; `-Android` без `-AndroidPreview` требует именно его.
+Идентификатор Play закреплён по требованию созданного приложения в Console.
+Preview сохраняет `in.droponevedimka.dropo.preview`; namespace Kotlin остаётся
+`in.droponevedimka.dropo` и не меняет идентификатор Play. Ранние AAB с прежним
+package сохраняются как история сборок, но для этой записи Play Console не подходят.
 
 Play-вариант не запрашивает `REQUEST_INSTALL_PACKAGES`, не включает APK
 FileProvider и не использует встроенную загрузку и установку собственных APK.
@@ -162,7 +166,7 @@ pwsh -File .\tools\publish-android-release-assets.ps1 `
 1. Подготовьте подтверждённый **аккаунт организации**: Google требует такой тип
    аккаунта для приложений, одобренных к использованию `VpnService`. Для организации
    требуется D-U-N-S. Проверьте доступность и владение package
-   `in.droponevedimka.dropo` до первого выпуска; не меняйте его после публикации.
+   `com.dropo_dzhamuha.app` до первого выпуска; не меняйте его после публикации.
    [Требования Play Console](https://support.google.com/googleplay/android-developer/answer/10788890?hl=en),
    [выбор аккаунта](https://support.google.com/googleplay/android-developer/answer/13634885?hl=en).
 2. Создайте приложение и настройте Play App Signing. Загрузите проверенный AAB

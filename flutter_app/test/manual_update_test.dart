@@ -258,7 +258,7 @@ void main() {
       await tester.tap(play);
       await tester.pump(const Duration(milliseconds: 300));
       expect(bridge.externalLinks, [
-        'https://play.google.com/store/apps/details?id=in.droponevedimka.dropo',
+        'https://play.google.com/store/apps/details?id=com.dropo_dzhamuha.app',
       ]);
       expect(bridge.checkCalls, 0);
       expect(bridge.installCalls, 0);

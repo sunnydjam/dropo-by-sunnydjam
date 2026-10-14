@@ -119,7 +119,8 @@ android {
     }
 
     defaultConfig {
-        applicationId = "in.droponevedimka.dropo"
+        // Play Console owns this identity; sideload/Preview keep update continuity.
+        applicationId = if (playDistribution) "com.dropo_dzhamuha.app" else "in.droponevedimka.dropo"
         resValue("string", "app_name", "dropo")
         // Android 10 supplies connection-owner lookup and authoritative
         // Always-on/lockdown state used by service routing and protection UI.

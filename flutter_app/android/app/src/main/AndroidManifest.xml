@@ -14,7 +14,7 @@
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true">
         <activity
-            android:name=".MainActivity"
+            android:name="in.droponevedimka.dropo.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
@@ -41,7 +41,7 @@
             android:name="flutterEmbedding"
             android:value="2" />
         <service
-            android:name=".DropoVpnService"
+            android:name="in.droponevedimka.dropo.DropoVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false"
             android:foregroundServiceType="specialUse">
@@ -53,7 +53,7 @@
             </intent-filter>
         </service>
         <receiver
-            android:name=".DropoDeviceAdminReceiver"
+            android:name="in.droponevedimka.dropo.DropoDeviceAdminReceiver"
             android:permission="android.permission.BIND_DEVICE_ADMIN"
             android:exported="true">
             <meta-data
