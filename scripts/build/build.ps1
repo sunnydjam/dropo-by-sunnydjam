@@ -5,7 +5,7 @@ param(
     [switch]$Build,
     [switch]$Portable,
     # Build every implemented release artifact in one pass:
-    # Windows installer + portable ZIP + Android arm64 APK.
+    # Windows installer + portable ZIP + Android APK + Google Play AAB.
     [switch]$All,
     [switch]$Clean,
     [string]$Version,
@@ -20,6 +20,9 @@ param(
     # Opt-in Android artifact build. Alone it builds only the APK; combine with
     # -Build/-Flutter for Windows app + Android, or use -All for all artifacts.
     [switch]$Android,
+    # Google Play upload bundle. Always release-signed and ARM32/ARM64;
+    # combine with -Android/-AndroidPreview to keep the APK download channel.
+    [switch]$AndroidBundle,
     # Optimized, development-signed phone preview; never a publication artifact.
     [switch]$AndroidPreview,
     [ValidateSet("arm64", "universal")]
@@ -123,10 +126,31 @@ function Get-DropoAccountBuildArguments {
     return @()
 }
 
+function Get-DropoAndroidBundleBuildArguments {
+    param(
+        [string]$AppVersion,
+        [int]$BuildNumber,
+        [string]$Endpoint
+    )
+    $arguments = @(
+        'build', 'appbundle', '--release',
+        '--target-platform', 'android-arm,android-arm64',
+        '--build-name', $AppVersion, '--build-number', $BuildNumber,
+        '--dart-define', "DROPO_APP_VERSION=$AppVersion",
+        '--dart-define', 'DROPO_PLAY_DISTRIBUTION=true'
+    )
+    $arguments += @(Get-DropoAccountBuildArguments -Endpoint $Endpoint)
+    return $arguments
+}
+
 $AccountEndpoint = Resolve-DropoAccountEndpoint -Endpoint $AccountEndpoint `
     -EnvironmentEndpoint ([Environment]::GetEnvironmentVariable('DROPO_ACCOUNT_ENDPOINT', 'Process')) `
     -ReuseWindowsOutput:$ReuseFlutterWindowsOutput
 if ($AndroidPreview) { $Android = $true }
+if ($All) {
+    $Android = $true
+    $AndroidBundle = $true
+}
 $ScriptRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $DevEnvironmentScript = Join-Path $ScriptRoot "tools\dev-environment.ps1"
 . $DevEnvironmentScript
@@ -322,7 +346,8 @@ if ($SourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
 }
 $SourceDirty = @(& git -C $ScriptRoot status --porcelain 2>$null).Count -gt 0
 $dirtyBuildAllowed = $AllowDirtySource -or $env:DROPO_ALLOW_DIRTY_BUILD -eq "1"
-$willBuildWindows = $Build -or $Flutter -or $AppOnly -or $All -or (-not $Portable -and -not $Android -and -not $Clean)
+$willBuildAndroidBundle = $AndroidBundle -or $All
+$willBuildWindows = $Build -or $Flutter -or $AppOnly -or $All -or (-not $Portable -and -not $Android -and -not $AndroidBundle -and -not $Clean)
 if ([string]::IsNullOrWhiteSpace($WfpGuardBinaryPath) -ne [string]::IsNullOrWhiteSpace($WfpGuardSHA256)) {
     throw 'Specify both -WfpGuardBinaryPath and -WfpGuardSHA256, or neither.'
 }
@@ -339,8 +364,8 @@ if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
     # Do not let the normal unsigned development-build fallback weaken it.
     $RequireWindowsSigning = $true
 }
-if ($willBuildWindows -and $SourceDirty -and -not $dirtyBuildAllowed) {
-    throw "Reproducible Windows packages require a clean Git worktree. Commit the intended source first, or use -AllowDirtySource for a development-only build."
+if (($willBuildWindows -or $willBuildAndroidBundle) -and $SourceDirty -and -not $dirtyBuildAllowed) {
+    throw "Reproducible Windows/Google Play packages require a clean Git worktree. Commit the intended source first, or use -AllowDirtySource for a development-only build."
 }
 $BuildHash = if ($SourceDirty) {
     Get-DirtyBuildHash -Revision $SourceRevision -RepositoryRoot $ScriptRoot
@@ -400,9 +425,10 @@ $WindowsInstallerAsset = "dropo-Windows-Setup-x64.exe"
 $WindowsPortableAsset = "dropo-Windows-Portable-x64.zip"
 $AndroidReleaseArch = $AndroidArchitecture
 $AndroidFlutterTargetPlatform = if ($AndroidArchitecture -eq "universal") { "android-arm,android-arm64" } else { "android-arm64" }
-$AndroidGoMobileTarget = if ($AndroidArchitecture -eq "universal") { "android/arm,android/arm64" } else { "android/arm64" }
+$AndroidGoMobileTarget = if ($willBuildAndroidBundle -or $AndroidArchitecture -eq "universal") { "android/arm,android/arm64" } else { "android/arm64" }
 $AndroidBridgeTags = "with_gvisor,with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0"
 $AndroidAppAsset = "dropo-Android-$AndroidReleaseArch.apk"
+$AndroidBundleAsset = 'dropo-Android-Play-universal.aab'
 
 function Ensure-SingBoxWindowsDependency {
     if (Test-Path $SingBoxExe) {
@@ -594,7 +620,7 @@ if ($Clean) {
         Remove-Item -Recurse -Force $VersionDir
     }
     Write-Host "[OK] Cleaned release/$BuildFolderName" -ForegroundColor Green
-    if (-not $Build -and -not $All) {
+    if (-not $Build -and -not $Flutter -and -not $AppOnly -and -not $All -and -not $Android -and -not $AndroidBundle -and -not $Portable) {
         exit 0
     }
 }
@@ -1648,6 +1674,28 @@ function Get-AndroidBuildNumber {
     return ($v.Major * 10000) + ($v.Minor * 100) + $v.Build
 }
 
+function Write-DropoAndroidBuildMetadata {
+    param(
+        [string]$ArtifactPath,
+        [string]$ArtifactSHA256,
+        [ValidateSet('preview', 'sideload', 'play')][string]$Channel,
+        [string]$PackageName,
+        [string]$Architecture
+    )
+    $metadata = [ordered]@{
+        artifactName = [IO.Path]::GetFileName($ArtifactPath)
+        sha256 = $ArtifactSHA256
+        sourceRevision = $SourceRevision
+        sourceDirty = [bool]$SourceDirty
+        channel = $Channel
+        packageName = $PackageName
+        version = $AppVersion
+        versionCode = Get-AndroidBuildNumber
+        architecture = $Architecture
+    }
+    [IO.File]::WriteAllText("$ArtifactPath.build.json", ($metadata | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+}
+
 function Build-AndroidApplication {
     Write-Host ""
     Write-Host "Building Android Flutter APK..." -ForegroundColor Yellow
@@ -1673,12 +1721,14 @@ function Build-AndroidApplication {
     $buildNumber = Get-AndroidBuildNumber
     Push-Location $FlutterDir
     try {
+        # The same explicit Dart define drives native Gradle distribution.
         $androidBuildMode = if ($AndroidPreview) { "profile" } else { "release" }
         $androidBuildArguments = @(
             'build', 'apk', "--$androidBuildMode",
             '--target-platform', $AndroidFlutterTargetPlatform,
             '--build-name', $AppVersion, '--build-number', $buildNumber,
-            '--dart-define', "DROPO_APP_VERSION=$AppVersion"
+            '--dart-define', "DROPO_APP_VERSION=$AppVersion",
+            '--dart-define', 'DROPO_PLAY_DISTRIBUTION=false'
         )
         $androidBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
         if ($UseCachedFlutterPackages) {
@@ -1715,9 +1765,77 @@ function Build-AndroidApplication {
 
     $sha = (Get-FileHash -Algorithm SHA256 $destApk).Hash.ToLower()
     [System.IO.File]::WriteAllText((Join-Path $VersionDir "$assetName.sha256"), "$sha  $assetName`n", (New-Object System.Text.UTF8Encoding($false)))
+    $androidChannel = if ($AndroidPreview) { 'preview' } else { 'sideload' }
+    $androidPackage = if ($AndroidPreview) { 'in.droponevedimka.dropo.preview' } else { 'in.droponevedimka.dropo' }
+    Write-DropoAndroidBuildMetadata -ArtifactPath $destApk -ArtifactSHA256 $sha `
+        -Channel $androidChannel -PackageName $androidPackage -Architecture $AndroidReleaseArch
     $apkMB = [math]::Round((Get-Item $destApk).Length / 1MB, 2)
 
     Write-Host "[OK] Created Android APK: $assetName ($apkMB MB)" -ForegroundColor Green
+    Write-Host "[OK] SHA256: $sha" -ForegroundColor Green
+}
+
+function Build-AndroidAppBundle {
+    Write-Host ""
+    Write-Host 'Building Google Play Android App Bundle (ARM32/ARM64)...' -ForegroundColor Yellow
+    if ($SourceDirty) {
+        Write-Host '[WARNING] Dirty-source AAB is development-only. Do not upload it to a public release or Google Play.' -ForegroundColor Yellow
+    }
+
+    # This tool is build-only, SHA-256-pinned, and never enters application
+    # assets or performs a first-run dependency download on an end-user device.
+    $bundletool = & (Join-Path $ScriptRoot 'tools\prepare-android-bundletool.ps1') -Download
+    Build-AndroidBridgeAAR
+
+    $FlutterCmd = Get-FlutterCommand
+    if (-not $FlutterCmd) { throw 'Flutter SDK not found for the Google Play bundle build.' }
+    $FlutterDir = Join-Path $ScriptRoot 'flutter_app'
+    if (-not (Test-Path -LiteralPath $FlutterDir -PathType Container)) {
+        throw 'flutter_app/ not found for the Google Play bundle build.'
+    }
+    if (-not (Test-Path -LiteralPath $VersionDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $VersionDir | Out-Null
+    }
+
+    $buildNumber = Get-AndroidBuildNumber
+    Push-Location $FlutterDir
+    try {
+        # Native permissions/installer code and Flutter updater UI must agree
+        # on this channel. Never use the Preview/profile signing fallback.
+        $androidBundleArguments = @(Get-DropoAndroidBundleBuildArguments `
+            -AppVersion $AppVersion -BuildNumber $buildNumber -Endpoint $AccountEndpoint)
+        if ($UseCachedFlutterPackages) {
+            Write-Host 'Resolving Google Play Flutter packages from the local cache...' -ForegroundColor Gray
+            & $FlutterCmd pub get --offline
+            if ($LASTEXITCODE -ne 0) { throw 'Flutter offline Google Play dependency resolution failed.' }
+            $androidBundleArguments += '--no-pub'
+        }
+        & $FlutterCmd @androidBundleArguments
+        if ($LASTEXITCODE -ne 0) { throw 'Flutter Google Play bundle build failed. A production upload key is required.' }
+    } finally {
+        Pop-Location
+    }
+
+    $sourceBundle = Join-Path $FlutterDir 'build\app\outputs\bundle\release\app-release.aab'
+    if (-not (Test-Path -LiteralPath $sourceBundle -PathType Leaf)) {
+        throw "Android App Bundle output not found: $sourceBundle"
+    }
+    $destBundle = Join-Path $VersionDir $AndroidBundleAsset
+    Copy-Item -LiteralPath $sourceBundle -Destination $destBundle -Force
+    $verifyArgs = @(
+        '-NoProfile', '-File', (Join-Path $ScriptRoot 'tools\verify-android-aab.ps1'),
+        '-Path', $destBundle, '-ExpectedVersion', $AppVersion,
+        '-BundletoolPath', $bundletool.Path
+    )
+    & pwsh @verifyArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Google Play bundle verification failed.' }
+
+    $sha = (Get-FileHash -LiteralPath $destBundle -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText("$destBundle.sha256", "$sha  $AndroidBundleAsset`n", [Text.UTF8Encoding]::new($false))
+    Write-DropoAndroidBuildMetadata -ArtifactPath $destBundle -ArtifactSHA256 $sha `
+        -Channel 'play' -PackageName 'in.droponevedimka.dropo' -Architecture 'universal'
+    $bundleMB = [math]::Round((Get-Item -LiteralPath $destBundle).Length / 1MB, 2)
+    Write-Host "[OK] Created Google Play AAB: $AndroidBundleAsset ($bundleMB MB)" -ForegroundColor Green
     Write-Host "[OK] SHA256: $sha" -ForegroundColor Green
 }
 
@@ -1760,9 +1878,13 @@ if ($AppOnly) {
     if ($Android) {
         Build-AndroidApplication
     }
+    if ($AndroidBundle) {
+        Build-AndroidAppBundle
+    }
 } elseif ($All) {
     Build-Application
     Build-AndroidApplication
+    Build-AndroidAppBundle
 } else {
     $didWork = $false
     if ($Flutter -or $Build) {
@@ -1775,6 +1897,10 @@ if ($AppOnly) {
     }
     if ($Android) {
         Build-AndroidApplication
+        $didWork = $true
+    }
+    if ($AndroidBundle) {
+        Build-AndroidAppBundle
         $didWork = $true
     }
     if (-not $didWork) {

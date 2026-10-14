@@ -180,6 +180,11 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleCoreCall(call: MethodCall, result: MethodChannel.Result) {
+        val requestedMethod = if (call.method == "call") stringArg(call, "method") else call.method
+        if (AndroidDistributionPolicy.blocksMethod(BuildConfig.PLAY_DISTRIBUTION, requestedMethod)) {
+            result.success(errorJson("Эта версия обновляется только через Google Play."))
+            return
+        }
         if (call.method == "androidInstallUpdate") {
             apkUpdater.start(result)
             return

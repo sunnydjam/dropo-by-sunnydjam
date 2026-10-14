@@ -401,6 +401,20 @@ universal` сама подготавливает изолированную ко
 только overlay, чтобы не подменять генерируемые gomobile модули разных ABI.
 Полные соответствующие MPL-исходники патча и лицензия включены в APK.
 
+### Android App Bundle для Google Play
+
+Для следующего выпуска доступны три вида пакетов: Windows installer/portable,
+Android Preview APK и подписанный Play AAB. `scripts/build/build.ps1 -All
+-AndroidPreview -AndroidArchitecture universal` собирает их вместе; для только
+мобильных пакетов используйте `-AndroidPreview -AndroidBundle`. Preview сохраняет
+прежний package и подпись. Play AAB использует отдельный upload-ключ и обновления
+только через Google Play, без встроенного APK-установщика.
+
+Ключи хранятся вне Git, публичный сертификат и содержимое AAB проверяются перед
+публикацией. Подготовка AAB не означает одобрение магазина. Команды сборки,
+добавления Android-файлов к проверенному Windows release и первый Play rollout:
+[ANDROID_GOOGLE_PLAY_RELEASE.md](ANDROID_GOOGLE_PLAY_RELEASE.md).
+
 ## Диагностика
 
 Логи Windows находятся в `%LOCALAPPDATA%\dropo\logs`.

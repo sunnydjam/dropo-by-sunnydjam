@@ -43,6 +43,9 @@ jobs:
         run: |
           ./tools/test-account-build-endpoint.ps1
           ./tools/test-android-build-options.ps1
+          ./tools/test-android-aab-verifier.ps1 -RunJavaTests
+          ./tools/test-android-release-publication.ps1
+          ./tools/test-android-upload-signing.ps1
           ./tools/test-android-xhttp-overlay.ps1
       - name: Verify bundled blocked lists are current
         shell: pwsh
@@ -52,6 +55,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check Windows upload key safety guards
+        shell: pwsh
+        run: ./tools/test-android-upload-signing.ps1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.9"

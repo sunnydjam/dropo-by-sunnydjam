@@ -44,6 +44,10 @@ internal class AndroidApkUpdater(private val activity: Activity) {
     }
 
     fun start(result: MethodChannel.Result) {
+        if (BuildConfig.PLAY_DISTRIBUTION) {
+            result.success(json(false, "Эта версия обновляется только через Google Play."))
+            return
+        }
         if (closed || pending != null) {
             result.success(json(false, "Обновление уже выполняется. Дождитесь завершения или отмените загрузку."))
             return

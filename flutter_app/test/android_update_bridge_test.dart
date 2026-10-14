@@ -10,9 +10,29 @@ void main() {
   const channel = MethodChannel('dropo/test-native-update');
 
   tearDown(() {
+    debugAndroidPlatformOverride = null;
+    debugPlayDistributionOverride = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
   });
+
+  test(
+    'Play bridge refuses APK download without calling native installer',
+    () async {
+      debugAndroidPlatformOverride = true;
+      debugPlayDistributionOverride = true;
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            return jsonEncode({'success': true});
+          });
+      final result = await ChannelCoreBridge(channel: channel).installUpdate();
+      expect(result['success'], isFalse);
+      expect(result['error'], contains('Google Play'));
+      expect(calls, isEmpty);
+    },
+  );
 
   test(
     'Android installation calls native downloader without caller-supplied URL',

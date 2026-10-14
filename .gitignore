@@ -107,6 +107,7 @@ app/dropo.exe
 flutter_app/android/app/libs/*.aar
 flutter_app/android/app/libs/*.jar
 flutter_app/android/app/libs/*.version
+flutter_app/android/build/
 
 # Production release publisher — owner-only, must NOT be public
 release.ps1

@@ -54,6 +54,9 @@ const String _accountEndpoint = String.fromEnvironment(
   'DROPO_ACCOUNT_ENDPOINT',
   defaultValue: '',
 );
+const bool _playDistribution = bool.fromEnvironment('DROPO_PLAY_DISTRIBUTION');
+const String _playStoreUrl =
+    'https://play.google.com/store/apps/details?id=in.droponevedimka.dropo';
 
 bool get _accountConfigured => accountEndpointAvailable(_accountEndpoint);
 
@@ -102,6 +105,12 @@ bool? debugAndroidPlatformOverride;
 
 bool get _isAndroidPlatform =>
     debugAndroidPlatformOverride ?? Platform.isAndroid;
+
+@visibleForTesting
+bool? debugPlayDistributionOverride;
+
+bool get _isPlayDistribution =>
+    _isAndroidPlatform && (debugPlayDistributionOverride ?? _playDistribution);
 
 ButtonStyle _withClickCursor(ButtonStyle style) {
   return style.copyWith(
@@ -1371,6 +1380,12 @@ class ChannelCoreBridge implements CoreBridge {
   @override
   Future<Map<String, dynamic>> installUpdate() async {
     try {
+      if (_isPlayDistribution) {
+        return const {
+          'success': false,
+          'error': 'Эта версия обновляется только через Google Play.',
+        };
+      }
       return await _invokeMap(
         'androidInstallUpdate',
         timeout: const Duration(minutes: 16),
@@ -4314,7 +4329,9 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   void _scheduleStartupUpdateCheck() {
-    if (startupUpdateCheckScheduled || !appConfig.checkUpdates) {
+    if (_isPlayDistribution ||
+        startupUpdateCheckScheduled ||
+        !appConfig.checkUpdates) {
       return;
     }
     startupUpdateCheckScheduled = true;
@@ -5187,6 +5204,10 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _checkUpdates() async {
+    if (_isPlayDistribution) {
+      await widget.bridge.openExternal(_playStoreUrl);
+      return;
+    }
     await _runBusy(() async {
       final result = await widget.bridge.checkUpdates();
       if (!mounted) {
@@ -5264,6 +5285,10 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _performUpdate(UpdateInfo result) async {
+    if (_isPlayDistribution) {
+      await widget.bridge.openExternal(_playStoreUrl);
+      return;
+    }
     if (!result.success || !result.hasUpdate || uiBusy || quitting) {
       return;
     }
@@ -9893,41 +9918,53 @@ class _SettingsDialogState extends State<_SettingsDialog>
           _SettingsGroup(
             title: 'Обновления',
             children: [
-              _SwitchSetting(
-                title: 'Проверять обновления автоматически',
-                description:
-                    'Сообщать о новых версиях. Скачивание и установка — только по вашему нажатию',
-                value: config.checkUpdates,
-                onChanged: canUseLiveSafe
-                    ? (value) =>
-                          _saveGeneral(config.copyWith(checkUpdates: value))
-                    : null,
-              ),
-              if (widget.updateInfo?.hasUpdate == true)
+              if (_isPlayDistribution)
                 _ButtonSetting(
-                  title: 'Доступна версия ${widget.updateInfo!.latestVersion}',
-                  description: _isAndroidPlatform
-                      ? 'Загрузить APK внутри Dropo, проверить и открыть установщик Android'
-                      : widget.updateInfo!.selfUpdate
-                      ? 'Скачать, проверить и перезапустить dropo'
-                      : widget.updateInfo!.platform.toLowerCase() == 'windows'
-                      ? 'Скачать portable-архив из GitHub Releases'
-                      : 'Скачать APK из GitHub Releases',
-                  label: widget.updateInfo!.selfUpdate || _isAndroidPlatform
-                      ? 'Обновить'
-                      : widget.updateInfo!.platform.toLowerCase() == 'windows'
-                      ? 'Скачать portable'
-                      : 'Скачать APK',
-                  icon: Icons.restart_alt,
-                  onPressed: canUseLiveSafe ? widget.onInstallUpdate : null,
+                  title: 'Обновления через Google Play',
+                  description:
+                      'Новые версии устанавливаются через магазин. Настройки обновлений доступны в Google Play.',
+                  label: 'Открыть Google Play',
+                  icon: Icons.shop_outlined,
+                  onPressed: canUseLiveSafe ? widget.onCheckUpdates : null,
                 ),
-              _ButtonSetting(
-                title: 'Проверить сейчас',
-                description: 'Проверить стабильные релизы GitHub',
-                label: 'Проверить',
-                icon: Icons.system_update_alt,
-                onPressed: canUseLiveSafe ? widget.onCheckUpdates : null,
-              ),
+              if (!_isPlayDistribution) ...[
+                _SwitchSetting(
+                  title: 'Проверять обновления автоматически',
+                  description:
+                      'Сообщать о новых версиях. Скачивание и установка — только по вашему нажатию',
+                  value: config.checkUpdates,
+                  onChanged: canUseLiveSafe
+                      ? (value) =>
+                            _saveGeneral(config.copyWith(checkUpdates: value))
+                      : null,
+                ),
+                if (widget.updateInfo?.hasUpdate == true)
+                  _ButtonSetting(
+                    title:
+                        'Доступна версия ${widget.updateInfo!.latestVersion}',
+                    description: _isAndroidPlatform
+                        ? 'Загрузить APK внутри Dropo, проверить и открыть установщик Android'
+                        : widget.updateInfo!.selfUpdate
+                        ? 'Скачать, проверить и перезапустить dropo'
+                        : widget.updateInfo!.platform.toLowerCase() == 'windows'
+                        ? 'Скачать portable-архив из GitHub Releases'
+                        : 'Скачать APK из GitHub Releases',
+                    label: widget.updateInfo!.selfUpdate || _isAndroidPlatform
+                        ? 'Обновить'
+                        : widget.updateInfo!.platform.toLowerCase() == 'windows'
+                        ? 'Скачать portable'
+                        : 'Скачать APK',
+                    icon: Icons.restart_alt,
+                    onPressed: canUseLiveSafe ? widget.onInstallUpdate : null,
+                  ),
+                _ButtonSetting(
+                  title: 'Проверить сейчас',
+                  description: 'Проверить стабильные релизы GitHub',
+                  label: 'Проверить',
+                  icon: Icons.system_update_alt,
+                  onPressed: canUseLiveSafe ? widget.onCheckUpdates : null,
+                ),
+              ],
             ],
           ),
         if (widget.advanced && !isMobile)

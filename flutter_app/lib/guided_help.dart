@@ -439,6 +439,15 @@ class _GuidedHelpPageState extends State<_GuidedHelpPage> {
 
   List<Widget> _scenarioBody() {
     if (scenario == GuidedHelpScenario.updateUnavailable) {
+      if (_isPlayDistribution) {
+        return [
+          _helpText('Обновление через Google Play', heading: true),
+          _helpText(
+            'Откройте страницу Dropo в Google Play и проверьте наличие обновления. Эта версия не скачивает APK из GitHub. Не удаляйте приложение: так сохранятся настройки.',
+          ),
+          _helpAction('Открыть Google Play', widget.onOpenUpdates, 'updates'),
+        ];
+      }
       return [
         _helpText('Обновление — отдельный шаг', heading: true),
         _helpText(

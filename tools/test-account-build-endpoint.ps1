@@ -8,7 +8,7 @@ if ($parseErrors.Count -gt 0) { throw 'Build script PowerShell parsing failed.' 
 
 # Import only the pure helpers, never the build script's SDK/download/package
 # entry point. Fixtures do not read process environment, credentials or DNS.
-$helperNames = @('Test-DropoPublicAccountHost', 'Resolve-DropoAccountEndpoint', 'Get-DropoAccountBuildArguments')
+$helperNames = @('Test-DropoPublicAccountHost', 'Resolve-DropoAccountEndpoint', 'Get-DropoAccountBuildArguments', 'Get-DropoAndroidBundleBuildArguments')
 $definitions = @($ast.FindAll({ param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $helperNames
 }, $true))
@@ -62,5 +62,76 @@ if (@($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath 
 $argumentCalls = @($ast.FindAll({ param($node)
     $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-DropoAccountBuildArguments'
 }, $true))
-if ($argumentCalls.Count -ne 2) { throw 'Windows and Android must both receive the endpoint Dart define.' }
-Write-Host 'Account build endpoint fixtures passed (HTTPS origin, environment precedence, both platforms and fail-closed reuse).'
+function Get-ContainingFunctionName($Node) {
+    $current = $Node.Parent
+    while ($null -ne $current) {
+        if ($current -is [Management.Automation.Language.FunctionDefinitionAst]) { return $current.Name }
+        $current = $current.Parent
+    }
+    return ''
+}
+$expectedEndpointConsumers = @{
+    'Build-Application' = '$AccountEndpoint'
+    'Build-AndroidApplication' = '$AccountEndpoint'
+    'Get-DropoAndroidBundleBuildArguments' = '$Endpoint'
+}
+if ($argumentCalls.Count -ne $expectedEndpointConsumers.Count) {
+    throw 'Unexpected build endpoint consumer; Windows, Android APK and Play AAB must each receive it once.'
+}
+foreach ($entry in $expectedEndpointConsumers.GetEnumerator()) {
+    $calls = @($argumentCalls | Where-Object { (Get-ContainingFunctionName $_) -ceq $entry.Key })
+    if ($calls.Count -ne 1 -or $calls[0].Extent.Text -cne "Get-DropoAccountBuildArguments -Endpoint $($entry.Value)") {
+        throw "Endpoint wiring missing or changed for $($entry.Key)."
+    }
+}
+
+# Evaluate only real argument assignments, never native builds or the full
+# script. This catches dropped/misbound defines beyond checking call counts.
+$platformFixtures = @(
+    @{ Function = 'Build-Application'; Arguments = '$flutterBuildArguments'; Mode = 'release' },
+    @{ Function = 'Build-AndroidApplication'; Arguments = '$androidBuildArguments'; Mode = 'release' },
+    @{ Function = 'Build-AndroidApplication'; Arguments = '$androidBuildArguments'; Mode = 'profile' },
+    @{ Function = 'Build-AndroidAppBundle'; Arguments = '$androidBundleArguments'; Mode = 'release' }
+)
+$AppVersion = '3.0.47'
+$BuildHash = 'abcdef0'
+$buildNumber = 30047
+$AndroidFlutterTargetPlatform = 'android-arm,android-arm64'
+foreach ($case in $platformFixtures) {
+    $function = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $case.Function
+    }, $true))
+    if ($function.Count -ne 1) { throw "Build endpoint fixture function missing: $($case.Function)" }
+    $assignments = @($function[0].Body.FindAll({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq $case.Arguments -and
+            ($node.Operator -eq [Management.Automation.Language.TokenKind]::Equals -or
+                $node.Right.Extent.Text.Contains('Get-DropoAccountBuildArguments'))
+    }, $true) | Sort-Object { $_.Extent.StartOffset })
+    $expectedAssignments = if ($case.Function -ceq 'Build-AndroidAppBundle') { 1 } else { 2 }
+    if ($assignments.Count -ne $expectedAssignments) { throw "Build endpoint argument construction changed: $($case.Function)" }
+    if ($case.Function -ceq 'Build-AndroidAppBundle' -and
+        -not $assignments[0].Extent.Text.Contains('-Endpoint $AccountEndpoint')) {
+        throw 'Play bundle must forward the same normalized public endpoint into its argument helper.'
+    }
+    foreach ($AccountEndpoint in @('', 'https://accounts.example.com')) {
+        $androidBuildMode = $case.Mode
+        foreach ($assignment in $assignments) { . ([ScriptBlock]::Create($assignment.Extent.Text)) }
+        $arguments = Get-Variable -Name $case.Arguments.TrimStart('$') -ValueOnly
+        $endpointIndexes = @(for ($index = 0; $index -lt $arguments.Count; $index++) {
+            if ([string]$arguments[$index] -like 'DROPO_ACCOUNT_ENDPOINT=*') { $index }
+        })
+        $expectedCount = if ($AccountEndpoint) { 1 } else { 0 }
+        if ($endpointIndexes.Count -ne $expectedCount) {
+            throw "Endpoint define count incorrect for $($case.Function)/$($case.Mode)."
+        }
+        if ($AccountEndpoint) {
+            $index = $endpointIndexes[0]
+            if ($index -lt 1 -or $arguments[$index - 1] -cne '--dart-define' -or
+                $arguments[$index] -cne "DROPO_ACCOUNT_ENDPOINT=$AccountEndpoint") {
+                throw "Endpoint not passed as one normalized Dart value for $($case.Function)/$($case.Mode)."
+            }
+        }
+    }
+}
+Write-Host 'Account build endpoint fixtures passed (HTTPS origin, environment precedence, Windows/APK/AAB argument execution and fail-closed reuse).'

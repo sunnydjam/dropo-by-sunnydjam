@@ -235,6 +235,39 @@ void main() {
   });
   tearDown(binding.platformDispatcher.clearAccessibilityFeaturesTestValue);
 
+  testWidgets(
+    'Play uses store updates and never checks or installs GitHub APKs',
+    (tester) async {
+      debugPlayDistributionOverride = true;
+      addTearDown(() => debugPlayDistributionOverride = null);
+      final bridge = await _pumpUpdater(
+        tester,
+        mobile: true,
+        size: const Size(390, 844),
+      );
+      expect(bridge.checkCalls, 0);
+      expect(
+        find.byKey(const ValueKey('update-available-action')),
+        findsNothing,
+      );
+      await openSection(tester, 'app-settings');
+      expect(find.text('Проверять обновления автоматически'), findsNothing);
+      expect(find.text('Проверить сейчас'), findsNothing);
+      final play = find.text('Открыть Google Play');
+      await tester.ensureVisible(play);
+      await tester.tap(play);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(bridge.externalLinks, [
+        'https://play.google.com/store/apps/details?id=in.droponevedimka.dropo',
+      ]);
+      expect(bridge.checkCalls, 0);
+      expect(bridge.installCalls, 0);
+      expect(bridge.connectionChanges, isEmpty);
+      expect(bridge.prepareQuitCalls, 0);
+      expect(bridge.finalizeQuitCalls, 0);
+    },
+  );
+
   testWidgets('update overlay shows stages, bytes and actionable failure', (
     tester,
   ) async {

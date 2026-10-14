@@ -1,4 +1,6 @@
-import java.io.FileInputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.util.Base64
 import java.util.Properties
 
 plugins {
@@ -7,23 +9,69 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Flutter forwards its Dart defines as an explicit -Pdart-defines argument.
+// Decode that same flag for native permissions and signing so Gradle daemons
+// cannot select a different distribution through a stale environment property.
+fun dropoDistributionFlag(value: String): Boolean = when (value) {
+    "false" -> false
+    "true" -> true
+    else -> throw GradleException("DROPO_PLAY_DISTRIBUTION must be true or false.")
+}
+fun dropoDistributionDefine(encoded: String?): Boolean? {
+    if (encoded.isNullOrEmpty()) return null
+    var selected: Boolean? = null
+    for (entry in encoded.split(',')) {
+        val decoded = try {
+            val bytes = Base64.getDecoder().decode(entry)
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes)).toString()
+        } catch (_: Exception) {
+            // Never include a define's contents: other values can be private.
+            throw GradleException("Malformed Flutter dart-defines encoding.")
+        }
+        val key = decoded.substringBefore('=')
+        if (key != "DROPO_PLAY_DISTRIBUTION") continue
+        if (!decoded.contains('=') || selected != null) {
+            throw GradleException("DROPO_PLAY_DISTRIBUTION must occur exactly once with a boolean value.")
+        }
+        selected = dropoDistributionFlag(decoded.substringAfter('='))
+    }
+    return selected
+}
+val dartPlayDistribution = dropoDistributionDefine(gradle.startParameter.projectProperties["dart-defines"])
+val explicitPlayDistribution = gradle.startParameter.projectProperties["dropoPlayDistribution"]
+    ?.let(::dropoDistributionFlag)
+if (explicitPlayDistribution != null && explicitPlayDistribution != dartPlayDistribution) {
+    throw GradleException("Native distribution override must match the explicit Flutter Dart distribution define.")
+}
+val playDistribution = dartPlayDistribution ?: false
+val playBundleRequested = gradle.startParameter.taskNames.any {
+    it.contains("bundle", ignoreCase = true) && it.contains("release", ignoreCase = true)
+}
+if (playBundleRequested && dartPlayDistribution != true) {
+    throw GradleException("Release AAB requires --dart-define=DROPO_PLAY_DISTRIBUTION=true.")
+}
+val signingPrefix = if (playDistribution) "DROPO_ANDROID_UPLOAD" else "DROPO_ANDROID"
 val releaseSigningProperties = Properties()
-val releaseSigningPropertiesFile = System.getenv("DROPO_ANDROID_SIGNING_PROPERTIES")
+val releaseSigningPropertiesFile = System.getenv("${signingPrefix}_SIGNING_PROPERTIES")
     ?.takeIf { it.isNotBlank() }
     ?.let(::file)
-    ?: file("${System.getProperty("user.home")}/.dropo-signing/android-signing.properties")
+    ?: file("${System.getProperty("user.home")}/.dropo-signing/" +
+        if (playDistribution) "google-play/android-upload-signing.properties" else "android-signing.properties")
 if (releaseSigningPropertiesFile.isFile) {
-    FileInputStream(releaseSigningPropertiesFile).use(releaseSigningProperties::load)
+    releaseSigningPropertiesFile.reader(Charsets.UTF_8).use(releaseSigningProperties::load)
 }
 
 fun releaseSigningValue(environmentName: String, propertyName: String): String? =
     System.getenv(environmentName)?.takeIf { it.isNotBlank() }
         ?: releaseSigningProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
 
-val releaseKeystorePath = releaseSigningValue("DROPO_ANDROID_KEYSTORE_PATH", "storeFile")
-val releaseStorePassword = releaseSigningValue("DROPO_ANDROID_STORE_PASSWORD", "storePassword")
-val releaseKeyAlias = releaseSigningValue("DROPO_ANDROID_KEY_ALIAS", "keyAlias")
-val releaseKeyPassword = releaseSigningValue("DROPO_ANDROID_KEY_PASSWORD", "keyPassword")
+val releaseKeystorePath = releaseSigningValue("${signingPrefix}_KEYSTORE_PATH", "storeFile")
+val releaseStorePassword = releaseSigningValue("${signingPrefix}_STORE_PASSWORD", "storePassword")
+val releaseKeyAlias = releaseSigningValue("${signingPrefix}_KEY_ALIAS", "keyAlias")
+val releaseKeyPassword = releaseSigningValue("${signingPrefix}_KEY_PASSWORD", "keyPassword")
 val releaseSigningReady = listOf(
     releaseKeystorePath,
     releaseStorePassword,
@@ -34,7 +82,7 @@ val releaseBuildRequested = gradle.startParameter.taskNames.any { it.contains("r
 
 if (releaseBuildRequested && !releaseSigningReady) {
     throw GradleException(
-        "Android release signing is required. Set DROPO_ANDROID_SIGNING_* variables " +
+        "Android release signing is required. Set ${signingPrefix}_* variables " +
             "or provide ${releaseSigningPropertiesFile.absolutePath}.",
     )
 }
@@ -62,6 +110,7 @@ android {
 
     buildFeatures {
         resValues = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -78,9 +127,20 @@ android {
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        buildConfigField("boolean", "PLAY_DISTRIBUTION", playDistribution.toString())
         ndk {
             abiFilters += targetAbis
         }
+    }
+
+    sourceSets {
+        // Only the sideload channel can request APK installation. Play has no
+        // installer permission, APK FileProvider or installer intent query.
+        getByName("release").manifest.srcFile(
+            if (playDistribution) "src/play/AndroidManifest.xml" else "src/sideload/AndroidManifest.xml",
+        )
+        getByName("profile").manifest.srcFile("src/sideload/AndroidManifest.xml")
+        getByName("debug").manifest.srcFile("src/sideload/AndroidManifest.xml")
     }
 
     signingConfigs {
