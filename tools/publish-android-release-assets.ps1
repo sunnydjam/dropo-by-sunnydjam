@@ -5,7 +5,7 @@ param(
     [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')]
     [string]$Repository = 'sunnydjam/dropo-by-sunnydjam',
     [string]$SdkRoot,
-    [ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ExpectedUploadCertificateSHA256,
+    # Compatibility alias: every public Android release is now APK-only.
     [switch]$PreviewOnly,
     [switch]$FunctionsOnly
 )
@@ -38,8 +38,19 @@ function Assert-AndroidReleaseChecksum {
 
 function Get-AndroidAssetPublicationPlan {
     param([object[]]$LocalAssets, [object[]]$ExistingAssets)
+    $publicAssetNames = @('dropo-Android-Preview-universal.apk',
+        'dropo-Android-Preview-universal.apk.sha256')
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $plan = @()
     foreach ($local in $LocalAssets) {
+        if ([string]$local.Name -cnotin $publicAssetNames -or
+            (-not [string]::IsNullOrWhiteSpace([string]$local.Path) -and
+                [IO.Path]::GetFileName([string]$local.Path) -cne [string]$local.Name)) {
+            throw 'Public Android assets are limited to the Preview APK and its SHA-256 sidecar; AABs stay in the build archive.'
+        }
+        if (-not $seen.Add([string]$local.Name)) {
+            throw 'Duplicate local Android release asset.'
+        }
         $matching = @($ExistingAssets | Where-Object { $_.name -ceq $local.Name })
         if ($matching.Count -gt 1) { throw 'Ambiguous existing Android release asset.' }
         if ($matching.Count -eq 1) {
@@ -129,25 +140,12 @@ if ([IO.Path]::GetFileName($ReleaseFolder) -cne "dropo-$version-$($SourceRevisio
 
 $apkPath = Join-Path $ReleaseFolder 'dropo-Android-Preview-universal.apk'
 $artifactPaths = @($apkPath)
-if (-not $PreviewOnly) {
-    $artifactPaths += Join-Path $ReleaseFolder 'dropo-Android-Play-universal.aab'
-    if (-not $ExpectedUploadCertificateSHA256) {
-        $pinPath = Join-Path $repositoryRoot 'signing/android-upload-cert.sha256'
-        if (-not (Test-Path -LiteralPath $pinPath -PathType Leaf)) {
-            throw 'Configure the owner upload certificate pin or pass -ExpectedUploadCertificateSHA256.'
-        }
-        $ExpectedUploadCertificateSHA256 = (Get-Content -LiteralPath $pinPath -Raw).Trim()
-    }
-    if ($ExpectedUploadCertificateSHA256 -cnotmatch '^[0-9a-fA-F]{64}$') {
-        throw 'The upload certificate pin must be a SHA-256 public certificate fingerprint.'
-    }
-}
+# AABs and their build records are archive-only, never public release assets.
 $localAssets = @()
 foreach ($artifact in $artifactPaths) {
     $hash = Assert-AndroidReleaseChecksum -ArtifactPath $artifact -SidecarPath "$artifact.sha256"
-    $channel = if ($artifact -ceq $apkPath) { 'preview' } else { 'play' }
     Assert-AndroidBuildRecord -Path "$artifact.build.json" -SourceRevision $SourceRevision `
-        -Version $version -VersionCode $versionCode -Channel $channel `
+        -Version $version -VersionCode $versionCode -Channel preview `
         -ArtifactName ([IO.Path]::GetFileName($artifact)) -SHA256 $hash
     foreach ($path in @($artifact, "$artifact.sha256")) {
         $file = Get-Item -LiteralPath $path
@@ -173,13 +171,6 @@ if ($previewSigners.Count -ne 1 -or $previewSigners[0].Groups[1].Value.ToLowerIn
     '8f2c5d427fd51f1f7afd36434b908fc074342d63b88a718ac8f2cab53e533e3c') {
     throw 'Android Preview update certificate continuity failed.'
 }
-if (-not $PreviewOnly) {
-    & (Join-Path $PSScriptRoot 'verify-android-aab.ps1') -Path $artifactPaths[1] `
-        -ExpectedVersion $version -SdkRoot $SdkRoot `
-        -ExpectedCertificateSHA256 $ExpectedUploadCertificateSHA256 | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'Android Play bundle verification failed.' }
-}
-
 # Only completed latest CI and Windows package gates for this exact commit count.
 . (Join-Path $PSScriptRoot 'check-release-readiness.ps1') -FunctionsOnly `
     -Repository $Repository -Sha $SourceRevision
@@ -220,4 +211,4 @@ foreach ($step in $plan) {
     }
     Write-Host "[OK] Published $($step.Asset.Name)"
 }
-Write-Host "[SUCCESS] Android assets attached to $releaseTag; Windows assets unchanged."
+Write-Host "[SUCCESS] Android APK and checksum attached to $releaseTag; Windows assets unchanged; AABs remain in the build archive."

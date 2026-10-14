@@ -15,6 +15,7 @@ app/build/bin/resources/
 
 # Release builds
 release/
+/build-archive/
 /build/
 
 # Local development documentation

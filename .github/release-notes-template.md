@@ -12,12 +12,12 @@ Windows-выпуск и совместимый Android Preview независи�
 | Windows 10/11 x64 | `dropo-Windows-Setup-x64.exe` | [Установщик](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/{{TAG}}/dropo-Windows-Setup-x64.exe) | Рекомендуемая установка с защищённым runtime-каталогом и обновлением поверх предыдущей версии. |
 | Windows 10/11 x64 | `dropo-Windows-Portable-x64.zip` | [Portable](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/{{TAG}}/dropo-Windows-Portable-x64.zip) | Версия без установки; настройки сохраняются в AppData. |
 | Android 10+, ARM32/ARM64 | `dropo-Android-Preview-universal.apk` | [Android Preview](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/{{TAG}}/dropo-Android-Preview-universal.apk) | Обновление существующего Preview; development-подпись, не стабильный Android-канал. |
-| Google Play, Android 10+, ARM32/ARM64 | `dropo-Android-Play-universal.aab`, если прикреплён к выпуску | [Инструкция для Play](https://github.com/sunnydjam/dropo-by-sunnydjam/blob/{{TAG}}/ANDROID_GOOGLE_PLAY_RELEASE.md) | Для загрузки владельцем в Play Console; не устанавливается напрямую и не заменяет Preview. |
 
-Android APK и AAB прикрепляются после отдельных проверок к тому же исходному
-коммиту. Для AAB требуется настроенный upload-ключ; его наличие проверяйте в
-списке файлов выпуска. `.sha256` находятся рядом с прикреплёнными файлами.
-Наличие AAB в GitHub не означает публикацию или одобрение Google Play.
+Android APK прикрепляется после отдельных проверок к тому же исходному коммиту.
+`.sha256` находятся рядом с прикреплёнными файлами. Google Play AAB хранится
+отдельно в локальном архиве сборок и не публикуется в GitHub Releases. Отправка
+в Play Console выполняется владельцем отдельно.
+[Инструкция для Play](https://github.com/sunnydjam/dropo-by-sunnydjam/blob/{{TAG}}/ANDROID_GOOGLE_PLAY_RELEASE.md).
 
 Windows installer SHA-256: `__WINDOWS_INSTALLER_SHA256_PENDING_LOCAL_UPLOAD__`
 

@@ -4,7 +4,9 @@ Dropo выпускает Windows installer и portable, Android Preview APK дл
 установки и Android App Bundle для Google Play. AAB — пакет для загрузки в
 Play Console, а не файл для установки на телефон. Google Play создаёт из него
 подходящие устройству APK. Подготовленная сборка не означает одобрение приложения
-магазином. [Об Android App Bundle](https://developer.android.com/guide/app-bundle).
+магазином. На GitHub публикуются Windows-пакеты и APK; AAB сохраняется в локальном
+архиве сборок для отдельной отправки в Play Console.
+[Об Android App Bundle](https://developer.android.com/guide/app-bundle).
 
 ## Каналы Android
 
@@ -93,6 +95,29 @@ Play-загрузки должен быть больше всех предыду
 имеет `.sha256` и `.build.json` с полной исходной ревизией, каналом и хешем.
 Подписанные файлы не меняются после выпуска.
 
+## Локальный архив AAB
+
+Чистая проверенная Play-сборка автоматически сохраняется в
+`build-archive/android-play/<version>/<full-commit-sha>-<aab-hash-prefix>/`.
+Архив содержит только AAB, его `.sha256` и `.build.json`; ключ подписи, пароли и
+`signing.properties` туда не копируются. Каталог исключён из Git и не затрагивается
+очисткой старых каталогов `release/`. Архив локальный: резервную копию храните
+отдельно от этого ПК.
+
+Уже собранный чистый AAB можно сохранить без повторной сборки:
+
+```powershell
+pwsh -File .\tools\archive-android-aab.ps1 `
+    -ReleaseFolder .\release\dropo-<version>-<commit>
+```
+
+Перед сохранением проверяются подпись, SHA-256 и данные исходного коммита.
+Повторное архивирование идентичных файлов безопасно; существующие файлы с другими
+байтами не заменяются. Сборки из незакоммиченных исходников, разрешённые через
+`-AllowDirtySource`, остаются только в рабочем каталоге `release/` и не попадают
+в архив релизов. Для Play Console используйте
+AAB из архива, соответствующий нужной версии.
+
 ## Проверка AAB
 
 ```powershell
@@ -111,8 +136,10 @@ MPL-исходники в assets. Одного переименования APK 
 
 Сначала общий CI и Windows package gate должны успешно завершиться для одного
 полного SHA. Workflow создаёт GitHub release с проверенными Windows-файлами.
-Android-пакеты добавляются к этому же tag отдельным локальным шагом; Windows-файлы
-не заменяются, signing secrets в Actions не передаются.
+Android APK и его SHA-256 добавляются к этому же tag отдельным локальным шагом;
+Windows-файлы не заменяются, signing secrets в Actions не передаются. AAB и его
+сопутствующие файлы остаются в локальном архиве, загрузка в GitHub запрещена
+проверкой допустимых имён файлов.
 
 ```powershell
 pwsh -File .\tools\publish-android-release-assets.ps1 `
@@ -123,7 +150,6 @@ pwsh -File .\tools\publish-android-release-assets.ps1 `
 Команда требует чистый checkout, совпадение SHA в `.build.json`, tag и последних
 успешных CI/gate, подходящие подписи и SHA-256 sidecars. Уже опубликованные
 идентичные файлы пропускаются; отличающиеся файлы с тем же именем не перезаписываются.
-`-PreviewOnly` используется лишь для намеренного выпуска APK без Play-пакета.
 Этот шаг не создаёт release, не меняет Windows-пакеты и не загружает приложение
 в Play Console. Для Android используйте его, а не прежний
 `tools/publish-release-assets.ps1` со стабильным ARM64 APK и Windows preflight.

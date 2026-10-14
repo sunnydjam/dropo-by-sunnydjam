@@ -75,6 +75,7 @@ foreach ($required in @(
     'Get-DropoAndroidBundleBuildArguments', '$UseCachedFlutterPackages',
     '& $FlutterCmd pub get --offline', "`$androidBundleArguments += '--no-pub'",
     'Write-DropoAndroidBuildMetadata', "-Channel 'play'",
+    "tools\archive-android-aab.ps1') -ReleaseFolder `$VersionDir", 'if (-not $SourceDirty)',
     'build\app\outputs\bundle\release\app-release.aab'
 )) {
     if (-not $bundleBody.Contains($required)) { throw "Google Play bundle integration missing: $required" }

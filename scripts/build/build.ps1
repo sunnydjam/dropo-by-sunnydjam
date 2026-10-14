@@ -1834,6 +1834,14 @@ function Build-AndroidAppBundle {
     [IO.File]::WriteAllText("$destBundle.sha256", "$sha  $AndroidBundleAsset`n", [Text.UTF8Encoding]::new($false))
     Write-DropoAndroidBuildMetadata -ArtifactPath $destBundle -ArtifactSHA256 $sha `
         -Channel 'play' -PackageName 'in.droponevedimka.dropo' -Architecture 'universal'
+    # Play bundles stay in a local immutable archive, never in GitHub assets.
+    # Keep it outside release/: normal Windows cleanup may remove old builds.
+    if (-not $SourceDirty) {
+        $archived = & (Join-Path $ScriptRoot 'tools\archive-android-aab.ps1') -ReleaseFolder $VersionDir
+        Write-Host "[OK] Local Google Play archive: $($archived.archivePath)" -ForegroundColor Green
+    } else {
+        Write-Host '[INFO] Development AAB kept only in the working build folder; release archive unchanged.' -ForegroundColor Gray
+    }
     $bundleMB = [math]::Round((Get-Item -LiteralPath $destBundle).Length / 1MB, 2)
     Write-Host "[OK] Created Google Play AAB: $AndroidBundleAsset ($bundleMB MB)" -ForegroundColor Green
     Write-Host "[OK] SHA256: $sha" -ForegroundColor Green

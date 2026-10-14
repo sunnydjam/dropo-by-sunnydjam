@@ -45,6 +45,7 @@ jobs:
           ./tools/test-android-build-options.ps1
           ./tools/test-android-aab-verifier.ps1 -RunJavaTests
           ./tools/test-android-release-publication.ps1
+          ./tools/test-android-aab-archive.ps1
           ./tools/test-android-upload-signing.ps1
           ./tools/test-android-xhttp-overlay.ps1
       - name: Verify bundled blocked lists are current
