@@ -1,10 +1,16 @@
-# Dropo by sunnydjam
+# Dropo Connect Booster
 
-Windows-first VPN-клиент с двумя режимами маршрутизации. Проект позволяет
-отправлять выбранные сервисы через VPN, оставляя игры, сайты и остальной трафик
-на прямом подключении. Также доступен режим полного VPN и экспериментальный
-встроенный режим обхода блокировок. Новые Windows-установки начинают с «Всё через
-VPN», а обновления сохраняют прежний выбор пользователя.
+Твой интернет. Твои правила.
+
+Приложение для Windows и Android с двумя режимами подключения: всё устройство
+или только выбранные сервисы. Добавляйте свои подписки или используйте Dropo
+Free; управляйте источниками и сохраняйте нужные маршруты. Обновления сохраняют
+ваш выбор режима, источников и правил.
+
+Connect Booster — название приложения, а не обещание увеличения скорости.
+Будущий платный Dropo Boost — отдельная возможность; покупки пока отключены.
+Подробнее о публичном названии и описании для магазина:
+[Публичное позиционирование](docs/public-branding.md).
 
 [![CI](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml/badge.svg?branch=Dzhamuha-develop)](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -79,12 +85,18 @@ flutter run -d windows --dart-define=BRIDGE=mock `
 и общий HTTPS backend для Windows/Android. Защищённые сессии хранятся через
 Windows DPAPI и Android Keystore; временная ошибка сервера не удаляет аккаунт.
 
-Рабочий backend этой доработки: `https://ms-api.ordaflow.net`, бот
+Production origin новых сборок: `https://dropo.fun`, бот
 `@DropoRigistration_bot`. В новых сборках передавайте
-`-AccountEndpoint https://ms-api.ordaflow.net` в `scripts/build/build.ps1` для
+`-AccountEndpoint https://dropo.fun` в `scripts/build/build.ps1` для
 Windows и Android. Bot token и серверные секреты никогда не входят в приложение.
 Сам запуск backend не обновляет установленный клиент; для его подключения нужна
 новая сборка с этим HTTPS origin. При отсутствии define вход остаётся недоступен.
+
+Публичная политика: `https://dropo.fun/privacy`. Запрос удаления аккаунта без
+установленного приложения: `https://dropo.fun/account/delete`. Смена origin не
+переносит локальный токен со старого сервера автоматически: после обновления
+пользователь явно входит через Telegram. Серверная миграция должна сохранять
+существующие аккаунты и запускать ровно одного владельца Telegram polling.
 
 Ручная проверка настоящего Telegram-входа пройдена: профиль создан без номера
 телефона, повторное использование заявки отклоняется, оплата запрещена.

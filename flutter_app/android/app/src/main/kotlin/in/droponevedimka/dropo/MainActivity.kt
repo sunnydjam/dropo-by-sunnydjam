@@ -180,6 +180,26 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleCoreCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "getVpnDisclosureConsent") {
+            result.success(mapOf(
+                "accepted" to VpnDisclosureConsent.isAccepted(this),
+                "version" to VpnDisclosurePolicy.VERSION,
+            ))
+            return
+        }
+        if (call.method == "acceptVpnDisclosureConsent") {
+            val requested = (call.arguments as? Map<*, *>)?.get("version")
+            val version = if (requested is Number &&
+                requested.toDouble() == VpnDisclosurePolicy.VERSION.toDouble()
+            ) VpnDisclosurePolicy.VERSION else 0
+            val saved = VpnDisclosureConsent.accept(this, version)
+            result.success(mapOf(
+                "success" to saved,
+                "version" to VpnDisclosurePolicy.VERSION,
+                "error" to if (saved) "" else "Не удалось сохранить согласие на использование VPN.",
+            ))
+            return
+        }
         val requestedMethod = if (call.method == "call") stringArg(call, "method") else call.method
         if (AndroidDistributionPolicy.blocksMethod(BuildConfig.PLAY_DISTRIBUTION, requestedMethod)) {
             result.success(errorJson("Эта версия обновляется только через Google Play."))
@@ -331,6 +351,10 @@ class MainActivity : FlutterActivity() {
             result.success(errorJson("VPN start is already pending"))
             return
         }
+        if (!VpnDisclosureConsent.isAccepted(this)) {
+            result.success(errorJson(VpnDisclosurePolicy.REQUIRED_MESSAGE))
+            return
+        }
         pendingConnectResult = result
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             androidNotificationsEnabled() &&
@@ -348,6 +372,10 @@ class MainActivity : FlutterActivity() {
 
     private fun continueVpnPrepare() {
         if (destroyed || pendingConnectResult == null) return
+        if (!VpnDisclosureConsent.isAccepted(this)) {
+            resolvePendingConnect(errorJson(VpnDisclosurePolicy.REQUIRED_MESSAGE))
+            return
+        }
         val prepareIntent = VpnService.prepare(this)
         if (prepareIntent != null) {
             @Suppress("DEPRECATION")
@@ -359,6 +387,10 @@ class MainActivity : FlutterActivity() {
 
     private fun startVpnAndResolve() {
         if (destroyed || pendingConnectResult == null) return
+        if (!VpnDisclosureConsent.isAccepted(this)) {
+            resolvePendingConnect(errorJson(VpnDisclosurePolicy.REQUIRED_MESSAGE))
+            return
+        }
         try {
             DropoVpnRuntime.setStarting("Android VPN start requested")
             recordCoreCall("AndroidServiceState", "[\"starting\",\"Android VPN start requested\",\"\"]")
@@ -383,6 +415,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun ensureCoreStarted(): String {
+        Dropoandroid.configureDistribution(BuildConfig.PLAY_DISTRIBUTION)
         return Dropoandroid.ensureStarted(filesDir.absolutePath, packageVersionName())
     }
 

@@ -26,7 +26,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       # Public origin only; bot tokens and server secrets never enter builds.
-      DROPO_ACCOUNT_ENDPOINT: https://ms-api.ordaflow.net
+      DROPO_ACCOUNT_ENDPOINT: https://dropo.fun
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

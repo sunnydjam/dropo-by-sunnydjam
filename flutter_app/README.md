@@ -1,7 +1,9 @@
-# dropo Flutter UI
+# Dropo Connect Booster Flutter UI
 
-Production Flutter UI for Windows and Android. Windows uses the local HTTP
-bridge to `dropo-core.exe`; Android uses a method channel and a gomobile AAR.
+Shared Flutter UI for Dropo Connect Booster on Windows and Android. Windows
+uses the local HTTP bridge to `dropo-core.exe`; Android uses a method channel
+and a gomobile AAR. The public brand does not change the existing interface,
+runtime names, package IDs, or update channels.
 
 ## Hot reload
 

@@ -33,6 +33,8 @@ part 'connection_health.dart';
 part 'guided_help.dart';
 part 'android_vpn_protection.dart';
 part 'account.dart';
+part 'privacy_links.dart';
+part 'vpn_disclosure.dart';
 
 const String _coreEndpoint = String.fromEnvironment(
   'DROPO_CORE_ENDPOINT',
@@ -4820,6 +4822,10 @@ class _DropoHomePageState extends State<DropoHomePage>
       return;
     }
     final target = !status.connected;
+    if (target && _isAndroidPlatform && !await _ensureAndroidVpnDisclosure()) {
+      return;
+    }
+    if (!mounted || controlsDisabled || connectionBusy) return;
     if (target &&
         (_isMobileShell || appConfig.routingMode == 'all_traffic') &&
         !await _ensureVpnSource()) {
@@ -4828,6 +4834,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     // Source preparation yields to other UI/session work. Do not start a
     // connection while a settings save or another connection became active.
     if (!mounted || controlsDisabled || connectionBusy) return;
+    if (status.connected == target) return;
     setState(() => _setConnectionPrimed(target));
     await _runBusy(() async {
       if (target) {
@@ -4835,6 +4842,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         if (!canStart) {
           return;
         }
+        if (!mounted || status.connected) return;
       }
       setState(() {
         busyTasks[target ? 'vpn-connect' : 'vpn-disconnect'] = target
@@ -4886,6 +4894,36 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       await _refresh(all: true);
     }, clearConnectionBusy: true);
+  }
+
+  Future<bool> _ensureAndroidVpnDisclosure() async {
+    setState(() => preparingFullVpnSource = true);
+    try {
+      final store = VpnDisclosureConsentStore();
+      if (await store.isAccepted()) return true;
+      if (!mounted || quitting) return false;
+      final accepted = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _VpnDisclosureDialog(
+          onAccept: store.accept,
+          onOpenPrivacy: () =>
+              widget.bridge.openExternal(dropoPrivacyPolicyUrl),
+        ),
+      );
+      return mounted && !quitting && accepted == true;
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          statusMessage = 'Не удалось проверить согласие на VPN';
+          connectionHint = 'Подключение не запущено. Повторите попытку.';
+          connectionHintDanger = true;
+        });
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => preparingFullVpnSource = false);
+    }
   }
 
   Future<bool> _ensureVpnSource() async {
@@ -8728,6 +8766,55 @@ class _AndroidRiskAppRow extends StatelessWidget {
         : app.installed
         ? Icons.phone_android
         : Icons.radio_button_unchecked;
+    final details = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          app.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: app.installed
+                ? const Color(0xFFF5FFFC)
+                : const Color(0xFF71837F),
+            fontSize: 11.5,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          app.statusText,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: color,
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+    final Widget? action;
+    if (app.inDropoSpace) {
+      action = _IconMiniButton(
+        icon: Icons.add_to_home_screen,
+        tooltip: 'Создать ярлык dropo',
+        onPressed: saving ? null : () => onShortcut(app),
+      );
+    } else if (app.installed) {
+      action = _CompactActionChip(
+        icon: dropoSpaceReady ? Icons.work_outline : Icons.start,
+        label: dropoSpaceReady ? 'Добавить' : 'Настроить',
+        onPressed:
+            saving ||
+                dropoSpacePaused ||
+                (!dropoSpaceReady && !dropoSpaceCanCreate)
+            ? null
+            : () => onMoveApp(app),
+      );
+    } else {
+      action = null;
+    }
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -8738,59 +8825,32 @@ class _AndroidRiskAppRow extends StatelessWidget {
         borderRadius: BorderRadius.circular(7),
         border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
-      child: Row(
-        children: [
-          Icon(icon, size: 17, color: color),
-          const SizedBox(width: 9),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  app.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: app.installed
-                        ? const Color(0xFFF5FFFC)
-                        : const Color(0xFF71837F),
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  app.statusText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: color,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final stacked =
+              constraints.maxWidth < 300 ||
+              MediaQuery.textScalerOf(context).scale(11.5) > 15;
+          final summary = Row(
+            children: [
+              Icon(icon, size: 17, color: color),
+              const SizedBox(width: 9),
+              Expanded(child: details),
+              if (!stacked && action != null) ...[
+                const SizedBox(width: 8),
+                action,
               ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          if (app.inDropoSpace)
-            _IconMiniButton(
-              icon: Icons.add_to_home_screen,
-              tooltip: 'Создать ярлык dropo',
-              onPressed: saving ? null : () => onShortcut(app),
-            )
-          else if (app.installed)
-            _CompactActionChip(
-              icon: dropoSpaceReady ? Icons.work_outline : Icons.start,
-              label: dropoSpaceReady ? 'Добавить' : 'Настроить',
-              onPressed:
-                  saving ||
-                      dropoSpacePaused ||
-                      (!dropoSpaceReady && !dropoSpaceCanCreate)
-                  ? null
-                  : () => onMoveApp(app),
-            ),
-        ],
+            ],
+          );
+          if (!stacked || action == null) return summary;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              summary,
+              const SizedBox(height: 8),
+              Align(alignment: Alignment.centerRight, child: action),
+            ],
+          );
+        },
       ),
     );
   }
@@ -8958,21 +9018,16 @@ class _AndroidCompatibilityPageState extends State<_AndroidCompatibilityPage> {
   String statusText = '';
   bool saving = false;
 
-  @override
-  void initState() {
-    super.initState();
-    if (_isAndroidPlatform) {
-      unawaited(_loadAndroidCompatibility());
-    }
-  }
-
   Future<void> _loadAndroidCompatibility() async {
+    if (!mounted || androidCompatibilityLoading) return;
     setState(() {
       androidCompatibilityLoading = true;
       androidCompatibilityError = '';
     });
     try {
-      final info = await widget.bridge.androidCompatibility();
+      final info = await widget.bridge.androidCompatibility().timeout(
+        const Duration(seconds: 8),
+      );
       if (!mounted) {
         return;
       }
@@ -8986,7 +9041,9 @@ class _AndroidCompatibilityPageState extends State<_AndroidCompatibilityPage> {
       }
       setState(() {
         androidCompatibilityLoading = false;
-        androidCompatibilityError = _cleanError(error);
+        androidCompatibilityError = error is TimeoutException
+            ? 'Android не ответил вовремя.'
+            : _cleanError(error);
       });
     }
   }
@@ -9555,17 +9612,64 @@ class _AndroidCompatibilityPageState extends State<_AndroidCompatibilityPage> {
                 'Dropo Space доступен в Android-версии. На этой платформе раздел оставлен как справка.',
           )
         else ...[
-          _AndroidCompatibilityPanel(
-            info: androidCompatibility,
-            loading: androidCompatibilityLoading,
-            error: androidCompatibilityError,
-            saving: saving,
-            onRefresh: _loadAndroidCompatibility,
-            onCreateSpace: _createDropoSpace,
-            onOpenSearch: _openCloneHelpSearch,
-            onMoveApp: _moveRiskAppToDropoSpace,
-            onShortcut: _requestRiskAppShortcut,
+          const _InfoBand(
+            icon: Icons.privacy_tip_outlined,
+            title: 'Локальная проверка — только по вашему запросу',
+            body:
+                'Для диагностики Dropo Space приложение проверяет наличие '
+                'известных приложений из ограниченного списка, состояние '
+                'рабочего профиля, модель и версию Android. Это не полный '
+                'список установленных приложений. Результат обрабатывается '
+                'на телефоне и не отправляется автоматически на сервер.\n\n'
+                'Создание рабочего профиля запускается отдельно через '
+                'системный мастер Android. После вашего подтверждения '
+                'Dropo Space может настраивать копии приложений из этого же '
+                'списка внутри созданного профиля. Данные и входы в аккаунты '
+                'не переносятся автоматически. Для обычного подключения VPN '
+                'эта проверка не нужна.',
           ),
+          const SizedBox(height: 12),
+          if (androidCompatibility == null) ...[
+            FilledButton(
+              key: const ValueKey('android-compatibility-check'),
+              onPressed: androidCompatibilityLoading || saving
+                  ? null
+                  : () => unawaited(_loadAndroidCompatibility()),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  androidCompatibilityLoading
+                      ? 'Проверяем совместимость…'
+                      : 'Проверить совместимость',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+            if (androidCompatibilityLoading) ...[
+              const SizedBox(height: 12),
+              const Center(child: CircularProgressIndicator()),
+            ],
+            if (androidCompatibilityError.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _InfoBand(
+                icon: Icons.info_outline,
+                title: 'Не удалось проверить совместимость',
+                body:
+                    '$androidCompatibilityError\nПовторите проверку или вернитесь к VPN. Никакие приложения и профили не изменены.',
+              ),
+            ],
+          ] else
+            _AndroidCompatibilityPanel(
+              info: androidCompatibility,
+              loading: androidCompatibilityLoading,
+              error: androidCompatibilityError,
+              saving: saving || androidCompatibilityLoading,
+              onRefresh: _loadAndroidCompatibility,
+              onCreateSpace: _createDropoSpace,
+              onOpenSearch: _openCloneHelpSearch,
+              onMoveApp: _moveRiskAppToDropoSpace,
+              onShortcut: _requestRiskAppShortcut,
+            ),
           if (statusText.isNotEmpty) ...[
             const SizedBox(height: 6),
             _InfoBand(

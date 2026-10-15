@@ -69,7 +69,7 @@ debug/Preview-подпись вместо неё не используется.
 
 ```powershell
 pwsh -File .\scripts\build\build.ps1 -AndroidBundle `
-    -KeepExistingBuilds -AccountEndpoint https://ms-api.ordaflow.net
+    -KeepExistingBuilds -AccountEndpoint https://dropo.fun
 ```
 
 Android Preview APK и Play AAB:
@@ -77,7 +77,7 @@ Android Preview APK и Play AAB:
 ```powershell
 pwsh -File .\scripts\build\build.ps1 -AndroidPreview -AndroidBundle `
     -AndroidArchitecture universal -KeepExistingBuilds `
-    -AccountEndpoint https://ms-api.ordaflow.net
+    -AccountEndpoint https://dropo.fun
 ```
 
 Windows installer, Windows portable, Android Preview APK и Play AAB:
@@ -85,7 +85,7 @@ Windows installer, Windows portable, Android Preview APK и Play AAB:
 ```powershell
 pwsh -File .\scripts\build\build.ps1 -All -AndroidPreview `
     -AndroidArchitecture universal -KeepExistingBuilds `
-    -AccountEndpoint https://ms-api.ordaflow.net
+    -AccountEndpoint https://dropo.fun
 ```
 
 `-All` без `-AndroidPreview` собирает стабильный APK и поэтому дополнительно

@@ -142,6 +142,14 @@ class DropoVpnService :
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         refreshVpnProtectionAndNotification()
+        if (!VpnDisclosureConsent.isAccepted(this)) {
+            // Also applies to OS Always-on / process-restart launches. An
+            // upgraded app must show the new disclosure, never infer consent
+            // from a previously granted Android VpnService permission.
+            showForeground(VpnDisclosurePolicy.REQUIRED_MESSAGE)
+            stopVpn(stopSelf = true, failureMessage = VpnDisclosurePolicy.REQUIRED_MESSAGE)
+            return START_NOT_STICKY
+        }
         return when (intent?.action) {
             ACTION_STOP -> {
                 val protection = publishVpnProtection()
@@ -201,6 +209,11 @@ class DropoVpnService :
 
     private fun startVpn() {
         createNotificationChannel()
+        if (!VpnDisclosureConsent.isAccepted(this)) {
+            showForeground(VpnDisclosurePolicy.REQUIRED_MESSAGE)
+            stopVpn(stopSelf = true, failureMessage = VpnDisclosurePolicy.REQUIRED_MESSAGE)
+            return
+        }
         if (stopping) return
         if (starting || commandServer != null) {
             executor.execute { coreLog("start skipped: VPN service is already running") }
@@ -223,6 +236,7 @@ class DropoVpnService :
         }) return
         executor.execute {
             try {
+                Dropoandroid.configureDistribution(BuildConfig.PLAY_DISTRIBUTION)
                 Dropoandroid.ensureStarted(filesDir.absolutePath, packageVersionName())
                 if (!sessionFence.commit(generation) {
                     syncCoreServiceState("starting", "VPN запускается")

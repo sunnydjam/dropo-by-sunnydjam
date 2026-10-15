@@ -137,11 +137,22 @@ void main() {
   setUp(() {
     debugMobileShellOverride = true;
     debugAndroidPlatformOverride = true;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('dropo/core'), (
+          call,
+        ) async {
+          if (call.method == 'getVpnDisclosureConsent') {
+            return {'accepted': true, 'version': 1};
+          }
+          return null;
+        });
   });
 
   tearDown(() {
     debugMobileShellOverride = null;
     debugAndroidPlatformOverride = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('dropo/core'), null);
   });
 
   testWidgets('source preparation blocks route edits and duplicate Connect', (

@@ -1,6 +1,13 @@
 part of 'main.dart';
 
-enum _AccountPhase { loading, signedOut, pendingAuth, signedIn, offline }
+enum _AccountPhase {
+  loading,
+  signedOut,
+  pendingAuth,
+  signedIn,
+  offline,
+  deletionCleanup,
+}
 
 /// Server expiry is authoritative, but a broken/missing response cannot keep
 /// the client waiting forever. These are UI bounds, not a server TTL change.
@@ -443,6 +450,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   bool _busy = false;
   bool _registrationAvailable = false;
   bool _purchasingAvailable = false;
+  bool _accountDeletionAvailable = false;
   bool _development = false;
   int? _pollingGeneration;
   bool _openingTelegram = false;
@@ -517,6 +525,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     _message = '';
     _registrationAvailable = false;
     _purchasingAvailable = false;
+    _accountDeletionAvailable = false;
     _development = false;
     try {
       final response = await _api.request('GET', '/v1/capabilities');
@@ -527,6 +536,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
           response['authMode'] == 'telegram_bot';
       _purchasingAvailable =
           _accountPurchasesEnabled && response['purchasingAvailable'] == true;
+      _accountDeletionAvailable = response['accountDeletionAvailable'] == true;
       if (!_registrationAvailable) {
         _message = 'Вход через Telegram пока не настроен на сервере.';
       }
@@ -897,6 +907,50 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     widget.onDisplayChanged?.call(null);
   }
 
+  Future<void> _deleteAccount() async {
+    final token = _token;
+    if (_busy || token == null || !_accountDeletionAvailable) return;
+    setState(() => _busy = true);
+    final deleted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _DeleteAccountDialog(
+        api: _api,
+        token: token,
+        endpoint: widget.endpoint,
+        development: _development,
+        onOpenExternal: widget.onOpenExternal,
+      ),
+    );
+    if (deleted == true) {
+      // Erasure has already revoked every server session. Even if navigation
+      // disposes this page, still attempt to remove the local credential.
+      _stopAuthTimers();
+      _authGeneration++;
+      _account = null;
+      widget.onDisplayChanged?.call(null);
+      await _finishDeletionCleanup();
+    } else if (mounted) {
+      setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _finishDeletionCleanup() async {
+    if (mounted) setState(() => _busy = true);
+    final cleared = await _vault.clear();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _phase = cleared
+          ? _AccountPhase.signedOut
+          : _AccountPhase.deletionCleanup;
+      if (cleared) _token = null;
+      _message = cleared
+          ? 'Аккаунт удалён, все сессии завершены. Личные VPN-источники и настройки на устройстве сохранены.'
+          : 'Аккаунт на сервере удалён, все сессии завершены. Не удалось удалить сохранённый токен из защищённого хранилища. Повторите очистку на этом устройстве.';
+    });
+  }
+
   Future<void> _openPurchase() async {
     if (!_purchasingAvailable || !_accountPurchasesEnabled) return;
     final token = _token;
@@ -1012,6 +1066,8 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
             ),
           ],
         ),
+        const SizedBox(height: 20),
+        _PrivacyActions(onOpenExternal: widget.onOpenExternal),
       ],
     ),
   );
@@ -1061,6 +1117,28 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       _AccountPhase.pendingAuth => _pendingAuth(),
       _AccountPhase.signedIn => _signedIn(),
       _AccountPhase.offline => _offlineAccount(),
+      _AccountPhase.deletionCleanup => _page(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Завершите очистку устройства',
+              style: TextStyle(color: _atlasText, fontSize: 24),
+            ),
+            const SizedBox(height: 16),
+            _AccountNotice(message: _message),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              key: const ValueKey('account-delete-cleanup-retry'),
+              onPressed: _busy ? null : _finishDeletionCleanup,
+              icon: const Icon(Icons.delete_outline),
+              label: Text(_busy ? 'Удаляем токен…' : 'Повторить очистку'),
+            ),
+            const SizedBox(height: 16),
+            _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+          ],
+        ),
+      ),
     };
   }
 
@@ -1086,6 +1164,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
           recovery: _authPurpose == 'recovery',
           retry: _authRetryAvailable,
           message: _message,
+          onOpenExternal: widget.onOpenExternal,
           onSubmit: () => _startAuth(purpose: _authPurpose),
           onToggleRecovery: () => setState(() {
             _authPurpose = _authPurpose == 'login' ? 'recovery' : 'login';
@@ -1388,13 +1467,374 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                   detail: 'Просмотр устройств и безопасный выход',
                   onTap: _busy ? null : _showSessions,
                 ),
+                const Divider(height: 1),
+                _AccountActionRow(
+                  key: const ValueKey('account-delete'),
+                  icon: Icons.delete_outline,
+                  title: 'Удалить аккаунт',
+                  detail: _accountDeletionAvailable
+                      ? 'Безвозвратно удалить данные аккаунта и завершить все сессии'
+                      : 'Удаление через приложение временно недоступно — откройте страницу ниже',
+                  onTap: _busy || !_accountDeletionAvailable
+                      ? null
+                      : _deleteAccount,
+                ),
               ],
             ),
           ),
+          const SizedBox(height: 16),
+          const Text(
+            '«Выйти» завершает сессию только на этом устройстве и не удаляет аккаунт.',
+            style: TextStyle(color: _atlasMuted, height: 1.4),
+          ),
+          const SizedBox(height: 8),
+          _PrivacyActions(onOpenExternal: widget.onOpenExternal),
         ],
       ),
     );
   }
+}
+
+class _DeleteAccountDialog extends StatefulWidget {
+  const _DeleteAccountDialog({
+    required this.api,
+    required this.token,
+    required this.endpoint,
+    required this.development,
+    required this.onOpenExternal,
+  });
+
+  final AccountTransport api;
+  final String token, endpoint;
+  final bool development;
+  final Future<void> Function(String) onOpenExternal;
+
+  @override
+  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
+}
+
+class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  String? _confirmation, _telegramUrl;
+  DateTime? _deadline;
+  String _message = '';
+  Timer? _poll, _expiry;
+  bool _working = false, _checking = false, _openingTelegram = false;
+  bool _uncertainResult = false;
+  bool _expired = false;
+  int _generation = 0;
+
+  @override
+  void dispose() {
+    ++_generation;
+    _stopTimers();
+    super.dispose();
+  }
+
+  void _stopTimers() {
+    _poll?.cancel();
+    _poll = null;
+    _expiry?.cancel();
+    _expiry = null;
+  }
+
+  bool _validConfirmationLink(String value, String confirmation) {
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.userInfo.isNotEmpty || uri.hasFragment) return false;
+    if (uri.scheme == 'https' &&
+        uri.host == 't.me' &&
+        (!uri.hasPort || uri.port == 443) &&
+        !uri.hasQuery &&
+        uri.pathSegments.length == 1 &&
+        RegExp(
+          r'^[A-Za-z][A-Za-z0-9_]{4,31}$',
+        ).hasMatch(uri.pathSegments.first)) {
+      return true;
+    }
+    final endpoint = Uri.tryParse(widget.endpoint);
+    return widget.development &&
+        kDebugMode &&
+        endpoint != null &&
+        endpoint.scheme == 'http' &&
+        accountEndpointAvailable(widget.endpoint) &&
+        uri.scheme == 'http' &&
+        uri.origin == endpoint.origin &&
+        !uri.hasQuery &&
+        uri.path == '/dev/action/$confirmation';
+  }
+
+  Future<void> _createConfirmation() async {
+    if (_working) return;
+    _stopTimers();
+    final generation = ++_generation;
+    setState(() {
+      _working = true;
+      _message = '';
+      _expired = false;
+    });
+    try {
+      final response = await widget.api
+          .request(
+            'POST',
+            '/v1/action-confirmations',
+            token: widget.token,
+            body: const {'action': 'account.delete'},
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted || generation != _generation) return;
+      final confirmation = response['confirmationToken'];
+      final link = response['telegramUrl'];
+      final rawExpiry = response['expiresAt'];
+      final expiry = rawExpiry is String ? DateTime.tryParse(rawExpiry) : null;
+      if (confirmation is! String ||
+          !RegExp(r'^[A-Za-z0-9_-]{8,256}$').hasMatch(confirmation) ||
+          link is! String ||
+          !_validConfirmationLink(link, confirmation) ||
+          response['status'] != 'pending' ||
+          expiry == null ||
+          !expiry.isAfter(DateTime.now())) {
+        throw const AccountApiException(
+          'Сервер вернул некорректное подтверждение удаления. Аккаунт не удалён.',
+        );
+      }
+      final wait = accountAuthWaitDuration(rawExpiry, now: DateTime.now());
+      setState(() {
+        _confirmation = confirmation;
+        _telegramUrl = link;
+        _deadline = DateTime.now().add(wait);
+        _working = false;
+      });
+      _expiry = Timer(wait, () {
+        if (!mounted || generation != _generation || _working) return;
+        _stopTimers();
+        setState(() {
+          _expired = true;
+          _message =
+              'Время подтверждения истекло. Закройте окно и начните заново. Удаление аккаунта не подтверждено.';
+        });
+      });
+      _poll = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => unawaited(_checkConfirmation()),
+      );
+      await _openTelegram();
+      if (mounted && generation == _generation) {
+        unawaited(_checkConfirmation());
+      }
+    } catch (error) {
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _working = false;
+        _message = _accountError(error);
+      });
+    }
+  }
+
+  Future<void> _openTelegram() async {
+    final link = _telegramUrl;
+    if (_openingTelegram || link == null) return;
+    final generation = _generation;
+    setState(() => _openingTelegram = true);
+    try {
+      await widget.onOpenExternal(link).timeout(const Duration(seconds: 6));
+    } catch (_) {
+      if (mounted && generation == _generation) {
+        setState(() {
+          _message = widget.development
+              ? 'Не удалось открыть тестовую страницу. Повторите открытие или отмените удаление.'
+              : 'Не удалось открыть Telegram. Повторите открытие или отмените удаление.';
+        });
+      }
+    } finally {
+      if (mounted && generation == _generation) {
+        setState(() => _openingTelegram = false);
+      }
+    }
+  }
+
+  Future<void> _checkConfirmation() async {
+    final confirmation = _confirmation;
+    if (_checking || _working || confirmation == null) return;
+    // A lost consume response can be checked through its deletion receipt even
+    // after the original Telegram challenge expires. Never create a new action
+    // while the result of a previously submitted deletion is unknown.
+    if (!_uncertainResult &&
+        (_expired ||
+            _deadline != null && !DateTime.now().isBefore(_deadline!))) {
+      return;
+    }
+    final generation = _generation;
+    _checking = true;
+    try {
+      final response = await widget.api
+          .request(
+            'GET',
+            '/v1/action-confirmations/$confirmation',
+            token: widget.token,
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted || generation != _generation) return;
+      final status = response['status'];
+      if (status == 'approved' ||
+          status == 'exchanged' &&
+              response['deleted'] == true &&
+              response['sessionsRevoked'] == true) {
+        if (!_uncertainResult &&
+            (_expired ||
+                _deadline != null && !DateTime.now().isBefore(_deadline!))) {
+          return;
+        }
+        await _consumeConfirmation(confirmation, generation);
+      } else if (status == 'denied' || status == 'expired') {
+        _stopTimers();
+        setState(() {
+          _message = status == 'denied'
+              ? 'Удаление отклонено в Telegram. Аккаунт сохранён.'
+              : 'Подтверждение истекло. Начните удаление заново.';
+        });
+      } else if (status != 'pending') {
+        throw const AccountApiException(
+          'Не удалось подтвердить статус удаления. Повторите проверку.',
+        );
+      }
+    } catch (error) {
+      if (mounted && generation == _generation) {
+        setState(() => _message = _accountError(error));
+      }
+    } finally {
+      _checking = false;
+    }
+  }
+
+  Future<void> _consumeConfirmation(String confirmation, int generation) async {
+    _stopTimers();
+    setState(() {
+      _working = true;
+      _message = '';
+      _uncertainResult = true;
+    });
+    try {
+      final response = await widget.api
+          .request(
+            'POST',
+            '/v1/action-confirmations/$confirmation/consume',
+            token: widget.token,
+            body: const {},
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted || generation != _generation) return;
+      if (response['success'] != true ||
+          response['deleted'] != true ||
+          response['sessionsRevoked'] != true) {
+        throw const AccountApiException(
+          'Сервер не подтвердил полное удаление аккаунта и завершение сессий.',
+        );
+      }
+      Navigator.pop(context, true);
+    } catch (error) {
+      if (mounted && generation == _generation) {
+        setState(() {
+          _working = false;
+          final detail = error is AccountApiException ? error.message : '';
+          const resultMessage =
+              'Не удалось подтвердить результат удаления. Сохранённый токен пока не удалён. Нажмите «Проверить результат»; не начинайте новое удаление.';
+          _message = detail.isEmpty ? resultMessage : '$detail\n$resultMessage';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+    canPop: !_working,
+    child: AlertDialog(
+      title: const Text('Удалить аккаунт Dropo?'),
+      scrollable: true,
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Будут безвозвратно удалены Telegram-привязка, профиль, сессии устройств и связанные данные аккаунта. Все устройства выйдут из аккаунта. Это не обычный выход из приложения.',
+              style: TextStyle(height: 1.45),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Личные VPN-источники, подписки, настройки и локальные журналы на устройствах останутся. Их можно удалить отдельно в приложении или очистить его хранилище.',
+              style: TextStyle(color: _atlasMuted, height: 1.45),
+            ),
+            const SizedBox(height: 12),
+            _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+            if (_confirmation != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                widget.development
+                    ? 'Локальная имитация: подтвердите удаление на тестовой странице. Настоящий Telegram не используется.'
+                    : 'Подтвердите именно удаление аккаунта в боте Dropo и вернитесь сюда. После подтверждения приложение завершит удаление.',
+                style: const TextStyle(height: 1.45),
+              ),
+            ],
+            if (_message.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Text(
+                _message,
+                style: const TextStyle(color: Colors.orangeAccent),
+              ),
+            ],
+            if (_working) ...[
+              const SizedBox(height: 16),
+              const LinearProgressIndicator(),
+              const SizedBox(height: 8),
+              Text(
+                _uncertainResult
+                    ? 'Удаляем аккаунт и завершаем сессии…'
+                    : 'Создаём подтверждение…',
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('account-delete-cancel'),
+          onPressed: _working ? null : () => Navigator.pop(context, false),
+          child: const Text('Закрыть'),
+        ),
+        if (_confirmation == null)
+          FilledButton(
+            key: const ValueKey('account-delete-confirm'),
+            onPressed: _working ? null : _createConfirmation,
+            child: Text(
+              widget.development
+                  ? 'Подтвердить в локальном тесте'
+                  : 'Подтвердить удаление в Telegram',
+            ),
+          )
+        else ...[
+          if (!_uncertainResult)
+            OutlinedButton(
+              key: const ValueKey('account-delete-open-telegram'),
+              onPressed: _working || _openingTelegram ? null : _openTelegram,
+              child: Text(
+                widget.development
+                    ? 'Открыть тестовую страницу'
+                    : 'Открыть Telegram',
+              ),
+            ),
+          FilledButton(
+            key: const ValueKey('account-delete-check'),
+            onPressed: _working ? null : _checkConfirmation,
+            child: Text(
+              _uncertainResult
+                  ? 'Проверить результат'
+                  : 'Проверить подтверждение',
+            ),
+          ),
+        ],
+      ],
+    ),
+  );
 }
 
 class _AuthForm extends StatelessWidget {
@@ -1407,10 +1847,12 @@ class _AuthForm extends StatelessWidget {
     required this.message,
     required this.onSubmit,
     required this.onToggleRecovery,
+    required this.onOpenExternal,
   });
   final bool busy, recovery, available, development, retry;
   final String message;
   final VoidCallback onSubmit, onToggleRecovery;
+  final Future<void> Function(String) onOpenExternal;
 
   @override
   Widget build(BuildContext context) => Column(
@@ -1423,6 +1865,14 @@ class _AuthForm extends StatelessWidget {
         style: const TextStyle(color: _atlasMuted, fontSize: 15, height: 1.5),
       ),
       const SizedBox(height: 20),
+      const Text(
+        'При входе через Telegram сервер Dropo получает Telegram ID аккаунта и чата, имя и имя пользователя (если указаны). После подтверждения хранит профиль, сессии устройств и события действий с аккаунтом. Эти данные нужны для входа и безопасности. VPN-трафик и личные подписки в сервис аккаунтов не отправляются. Вход необязателен; аккаунт можно удалить.',
+        key: ValueKey('account-auth-disclosure'),
+        style: TextStyle(color: _atlasMuted, height: 1.45),
+      ),
+      const SizedBox(height: 4),
+      _PrivacyActions(onOpenExternal: onOpenExternal),
+      const SizedBox(height: 12),
       if (message.isNotEmpty) _AccountNotice(message: message),
       const SizedBox(height: 14),
       FilledButton.icon(
@@ -1659,6 +2109,7 @@ class _AccountPanel extends StatelessWidget {
 
 class _AccountActionRow extends StatelessWidget {
   const _AccountActionRow({
+    super.key,
     required this.icon,
     required this.title,
     required this.detail,

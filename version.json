@@ -1,8 +1,8 @@
 {
-  "version": "3.0.47",
+  "version": "3.0.48",
   "name": "dropo",
   "productName": "dropo",
-  "description": "Dropo by sunnydjam VPN client with selective routing",
+  "description": "Dropo Connect Booster client with two connection modes",
   "author": "Droponevedimka (upstream); sunnydjam (fork)",
   "license": "MIT",
   "homepage": "https://github.com/sunnydjam/dropo-by-sunnydjam",

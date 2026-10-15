@@ -27,6 +27,11 @@ var xhttpFixtureExecutable struct {
 }
 
 func TestMain(m *testing.M) {
+	// Existing transport fixtures exercise Preview/sideload compatibility,
+	// including intentionally plaintext synthetic loopback server transports.
+	if ConfigureDistribution(false) != nil {
+		os.Exit(1)
+	}
 	code := m.Run()
 	if xhttpFixtureExecutable.dir != "" {
 		// The directory is allocated only by MkdirTemp under the system temp

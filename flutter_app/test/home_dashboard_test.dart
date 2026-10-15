@@ -96,21 +96,28 @@ class _SpaceBridge extends _HomeBridge {
   int promptWrites = 0;
   int spaceCreates = 0;
   int helpSearches = 0;
+  Completer<AndroidCompatibilityInfo>? pendingCompatibility;
+  Object? compatibilityFailure;
+
+  AndroidCompatibilityInfo get compatibilityInfo =>
+      AndroidCompatibilityInfo.fromJson({
+        'supported': true,
+        'deviceLabel': 'Poco F5',
+        'sdk': 35,
+        'dropoSpaceSupported': canCreate,
+        'dropoSpaceCanCreate': canCreate,
+        'promptDismissed': false,
+        'riskApps': const [
+          {'packageName': 'ru.oneme.app', 'name': 'MAX', 'installed': true},
+        ],
+      });
 
   @override
   Future<AndroidCompatibilityInfo> androidCompatibility() async {
     compatibilityReads++;
-    return AndroidCompatibilityInfo.fromJson({
-      'supported': true,
-      'deviceLabel': 'Poco F5',
-      'sdk': 35,
-      'dropoSpaceSupported': canCreate,
-      'dropoSpaceCanCreate': canCreate,
-      'promptDismissed': false,
-      'riskApps': const [
-        {'packageName': 'ru.oneme.app', 'name': 'MAX', 'installed': true},
-      ],
-    });
+    if (pendingCompatibility != null) return pendingCompatibility!.future;
+    if (compatibilityFailure != null) throw compatibilityFailure!;
+    return compatibilityInfo;
   }
 
   @override
@@ -464,6 +471,28 @@ void main() {
       'MaterialIcons',
     )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
     expect(await preloadAtlasPlanetForTesting(), isTrue);
+  });
+
+  // These dashboard tests model an existing user's saved VPN disclosure.
+  // First-time acceptance, refusal and storage failures are tested separately
+  // in vpn_disclosure_test.dart without bypassing the production consent gate.
+  setUp(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('dropo/core'), (
+          call,
+        ) async {
+          if (call.method == 'getVpnDisclosureConsent') {
+            return {
+              'accepted': true,
+              'version': VpnDisclosureConsentStore.version,
+            };
+          }
+          throw MissingPluginException('Unexpected method: ${call.method}');
+        });
+  });
+  tearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('dropo/core'), null);
   });
 
   test('traffic capability keeps unavailable counters distinct from zero', () {
@@ -1464,6 +1493,14 @@ void main() {
     expect(bridge.compatibilityReads, 0);
     await _tap(tester, 'nav-dropo_space');
     expect(find.byKey(const ValueKey('dropo-space-section')), findsOneWidget);
+    expect(find.text('Проверить совместимость'), findsOneWidget);
+    expect(
+      find.textContaining('не отправляется автоматически на сервер'),
+      findsOneWidget,
+    );
+    expect(find.text('Создать Dropo Space'), findsNothing);
+    expect(bridge.compatibilityReads, 0);
+    await _tap(tester, 'android-compatibility-check');
     expect(find.text('Создать Dropo Space'), findsOneWidget);
     expect(find.text('MAX'), findsOneWidget);
     expect(bridge.compatibilityReads, 1);
@@ -1475,6 +1512,7 @@ void main() {
 
     final create = find.text('Создать Dropo Space');
     await tester.ensureVisible(create);
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(create);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
@@ -1502,12 +1540,15 @@ void main() {
     await _pumpHome(tester, bridge, size: const Size(390, 844));
     expect(bridge.compatibilityReads, 0);
     await _tap(tester, 'nav-dropo_space');
+    expect(bridge.compatibilityReads, 0);
+    await _tap(tester, 'android-compatibility-check');
     expect(find.text('Dropo Space недоступен'), findsOneWidget);
     expect(find.text('Создать Dropo Space'), findsNothing);
     expect(bridge.compatibilityReads, 1);
     expect(bridge.helpSearches, 0);
     final help = find.text('Искать инструкцию');
     await tester.ensureVisible(help);
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(help);
     await tester.pump();
     expect(bridge.helpSearches, 1);
@@ -1519,6 +1560,145 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
   });
+
+  testWidgets(
+    'Android Space stays private when the user leaves without checking',
+    (tester) async {
+      debugMobileShellOverride = true;
+      debugAndroidPlatformOverride = true;
+      addTearDown(() {
+        debugMobileShellOverride = null;
+        debugAndroidPlatformOverride = null;
+      });
+      final bridge = _SpaceBridge();
+      await _pumpHome(tester, bridge, size: const Size(390, 844));
+      await _tap(tester, 'nav-dropo_space');
+      await tester.pump(const Duration(seconds: 10));
+      expect(find.text('Проверить совместимость'), findsOneWidget);
+      expect(bridge.compatibilityReads, 0);
+      expect(bridge.spaceCreates, 0);
+      await _tap(tester, 'nav-home');
+      await _tap(tester, 'nav-dropo_space');
+      expect(bridge.compatibilityReads, 0);
+      expect(bridge.promptWrites, 0);
+      expect(bridge.helpSearches, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
+  testWidgets(
+    'Android Space coalesces repeated explicit compatibility checks',
+    (tester) async {
+      debugMobileShellOverride = true;
+      debugAndroidPlatformOverride = true;
+      addTearDown(() {
+        debugMobileShellOverride = null;
+        debugAndroidPlatformOverride = null;
+      });
+      final pending = Completer<AndroidCompatibilityInfo>();
+      final bridge = _SpaceBridge()..pendingCompatibility = pending;
+      await _pumpHome(tester, bridge, size: const Size(390, 844));
+      await _tap(tester, 'nav-dropo_space');
+      final check = find.byKey(const ValueKey('android-compatibility-check'));
+      await tester.ensureVisible(check);
+      final callback = tester.widget<FilledButton>(check).onPressed!;
+      callback();
+      callback();
+      await tester.pump();
+      expect(bridge.compatibilityReads, 1);
+      expect(tester.widget<FilledButton>(check).onPressed, isNull);
+      expect(find.text('Проверяем совместимость…'), findsOneWidget);
+      pending.complete(bridge.compatibilityInfo);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('MAX'), findsOneWidget);
+      expect(bridge.compatibilityReads, 1);
+      expect(bridge.spaceCreates, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
+  testWidgets(
+    'Android Space timed-out check can retry and ignores late result',
+    (tester) async {
+      debugMobileShellOverride = true;
+      debugAndroidPlatformOverride = true;
+      addTearDown(() {
+        debugMobileShellOverride = null;
+        debugAndroidPlatformOverride = null;
+      });
+      final pending = Completer<AndroidCompatibilityInfo>();
+      final bridge = _SpaceBridge()..pendingCompatibility = pending;
+      await _pumpHome(tester, bridge, size: const Size(390, 844));
+      await _tap(tester, 'nav-dropo_space');
+      await _tap(tester, 'android-compatibility-check');
+      expect(bridge.compatibilityReads, 1);
+      await tester.pump(const Duration(seconds: 9));
+      expect(
+        find.textContaining('Android не ответил вовремя.'),
+        findsOneWidget,
+      );
+      expect(find.text('Проверить совместимость'), findsOneWidget);
+      pending.complete(bridge.compatibilityInfo);
+      await tester.pump();
+      expect(find.text('MAX'), findsNothing);
+      expect(find.text('Создать Dropo Space'), findsNothing);
+      bridge.pendingCompatibility = null;
+      await _tap(tester, 'android-compatibility-check');
+      expect(bridge.compatibilityReads, 2);
+      expect(find.text('MAX'), findsOneWidget);
+      expect(bridge.spaceCreates, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
+  for (final failure in [false, true]) {
+    testWidgets(
+      'Android Space disclosure and ${failure ? 'failed' : 'successful'} check fit 200 percent text',
+      (tester) async {
+        debugMobileShellOverride = true;
+        debugAndroidPlatformOverride = true;
+        addTearDown(() {
+          debugMobileShellOverride = null;
+          debugAndroidPlatformOverride = null;
+        });
+        final bridge = _SpaceBridge()
+          ..compatibilityFailure = failure
+              ? StateError('Проверка недоступна')
+              : null;
+        await _pumpHome(tester, bridge, size: const Size(320, 568), scale: 2);
+        await _tap(tester, 'nav-dropo_space');
+        expect(bridge.compatibilityReads, 0);
+        expect(tester.takeException(), isNull);
+        await _tap(tester, 'android-compatibility-check');
+        expect(bridge.compatibilityReads, 1);
+        expect(tester.takeException(), isNull);
+        if (failure) {
+          expect(
+            find.text('Не удалось проверить совместимость'),
+            findsOneWidget,
+          );
+          expect(find.text('Создать Dropo Space'), findsNothing);
+          bridge.compatibilityFailure = null;
+          await _tap(tester, 'android-compatibility-check');
+          expect(bridge.compatibilityReads, 2);
+        }
+        await tester.ensureVisible(find.text('MAX'));
+        await tester.pump();
+        expect(find.text('MAX'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        expect(bridge.spaceCreates, 0);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+  }
 
   testWidgets('Android drawer preserves Space and connected route guards', (
     tester,

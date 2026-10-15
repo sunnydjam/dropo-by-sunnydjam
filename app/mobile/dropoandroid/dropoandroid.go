@@ -59,7 +59,7 @@ func Call(method, argsJSON string) string {
 }
 
 func BuildSingBoxConfig() string {
-	return core.BuildSingBoxConfig()
+	return enforceBuiltVPNConfig(core.BuildSingBoxConfig())
 }
 
 func CancelPendingSourceWork() {
@@ -80,6 +80,9 @@ func Setup(options *SetupOptions) error {
 }
 
 func CheckConfig(configContent string) error {
+	if err := enforceVPNEncryption(configContent); err != nil {
+		return err
+	}
 	normalized, _, err := normalizeXHTTPConfig(configContent, nil, false)
 	if err != nil {
 		return err
@@ -155,6 +158,9 @@ func (s *CommandServer) StartOrReloadService(configContent string, options *Over
 	if s.xhttpRuntime != nil {
 		s.xhttpRuntime.close()
 		s.xhttpRuntime = nil
+	}
+	if err := enforceVPNEncryption(configContent); err != nil {
+		return err
 	}
 	normalized, runtime, err := normalizeXHTTPConfig(configContent, s.platform, true, s.xhttpEpoch)
 	if err != nil {

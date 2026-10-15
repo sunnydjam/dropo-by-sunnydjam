@@ -249,9 +249,28 @@ void main() {
     await preloadAtlasPlanetForTesting();
   });
 
+  // Source onboarding and help fixtures represent a user with saved VPN data
+  // consent; vpn_disclosure_test.dart exercises the separate first-time flow.
+  setUp(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('dropo/core'), (
+          call,
+        ) async {
+          if (call.method == 'getVpnDisclosureConsent') {
+            return {
+              'accepted': true,
+              'version': VpnDisclosureConsentStore.version,
+            };
+          }
+          throw MissingPluginException('Unexpected method: ${call.method}');
+        });
+  });
+
   tearDown(() {
     debugMobileShellOverride = null;
     debugAndroidPlatformOverride = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('dropo/core'), null);
   });
 
   for (final mode in ['all_traffic', 'blocked_only']) {

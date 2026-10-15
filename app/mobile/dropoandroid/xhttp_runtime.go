@@ -397,6 +397,12 @@ func (r *xhttpRuntime) resetNetwork() {
 // only builds protobuf and substitutes a syntactic localhost SOCKS endpoint:
 // it never instantiates Xray, reserves a port, or reaches the network.
 func normalizeXHTTPConfig(content string, platform PlatformInterface, start bool, ownerEpochs ...uint64) (string, *xhttpRuntime, error) {
+	// Keep the sidecar boundary independently guarded as well as the public
+	// service entry points: no internal probe/normalization caller may start a
+	// plaintext remote XHTTP transport in the Play distribution.
+	if err := enforceVPNEncryption(content); err != nil {
+		return "", nil, err
+	}
 	var config map[string]json.RawMessage
 	if json.Unmarshal([]byte(content), &config) != nil {
 		return "", nil, errXHTTPConfig

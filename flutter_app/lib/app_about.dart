@@ -86,6 +86,20 @@ class _AboutContent extends StatelessWidget {
         ),
         const Divider(height: 24),
         _AboutLink(
+          label: 'Политика конфиденциальности',
+          detail: 'Какие данные обрабатывает Dropo и как их удалить',
+          url: dropoPrivacyPolicyUrl,
+          icon: Icons.privacy_tip_outlined,
+          onOpenExternal: onOpenExternal,
+        ),
+        _AboutLink(
+          label: 'Удаление аккаунта',
+          detail: 'Удалить аккаунт можно и без установленного приложения',
+          url: dropoAccountDeletionUrl,
+          icon: Icons.manage_accounts_outlined,
+          onOpenExternal: onOpenExternal,
+        ),
+        _AboutLink(
           label: 'Исходный код',
           detail: Uri.parse(repository).path.substring(1),
           url: repository,
@@ -94,7 +108,9 @@ class _AboutContent extends StatelessWidget {
         ),
         _AboutLink(
           label: 'Релизы и изменения',
-          detail: 'Скачать версию из репозитория проекта',
+          detail: _isPlayDistribution
+              ? 'История изменений проекта. Обновления — через Google Play.'
+              : 'Скачать версию из репозитория проекта',
           url: '$repository/releases',
           icon: Icons.new_releases_outlined,
           onOpenExternal: onOpenExternal,

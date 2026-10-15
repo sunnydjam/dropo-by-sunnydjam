@@ -672,6 +672,42 @@ void main() {
   });
 
   testWidgets(
+    'domain migration requires explicit sign-in and preserves old credential',
+    (tester) async {
+      final service = _FakeAccountTransport();
+      final vaultCalls = <String>[];
+      final storedRecord = jsonEncode({
+        'endpoint': 'https://ms-api.ordaflow.net',
+        'token': 'old-origin-session',
+      });
+      const channel = MethodChannel('dropo/account_session');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        vaultCalls.add(call.method);
+        return call.method == 'read' ? storedRecord : null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+      await _pumpAccount(
+        tester,
+        service,
+        endpoint: 'https://dropo.fun',
+        persistSession: true,
+      );
+      expect(find.text('Войти в Dropo'), findsOneWidget);
+      expect(service.requests, [('GET', '/v1/capabilities')]);
+      expect(service.requestTokens, [null]);
+      expect(vaultCalls, ['read']);
+      expect(service.authBodies, isEmpty);
+    },
+  );
+
+  testWidgets(
     'failed protected write keeps explicit memory session across navigation',
     (tester) async {
       final service = _FakeAccountTransport()..authApproved = true;
@@ -877,6 +913,7 @@ Future<void> _pumpAccount(
 
 class _FakeAccountTransport implements AccountTransport {
   final List<(String, String)> requests = [];
+  final List<String?> requestTokens = [];
   final List<Map<String, dynamic>> authBodies = [];
   bool authApproved = false;
   bool orderPaid = false;
@@ -901,6 +938,7 @@ class _FakeAccountTransport implements AccountTransport {
     Map<String, dynamic>? body,
   }) async {
     requests.add((method, path));
+    requestTokens.add(token);
     if (path == '/v1/capabilities') {
       return {
         'authMode': 'telegram_bot',

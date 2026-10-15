@@ -69,6 +69,8 @@ void main() {
     const expected = {
       'Разработчик этой версии': 'https://github.com/sunnydjam',
       'Основа проекта': 'https://github.com/Droponevedimka',
+      'Политика конфиденциальности': 'https://dropo.fun/privacy',
+      'Удаление аккаунта': 'https://dropo.fun/account/delete',
       'Исходный код': 'https://github.com/sunnydjam/dropo-by-sunnydjam',
       'Релизы и изменения':
           'https://github.com/sunnydjam/dropo-by-sunnydjam/releases',
@@ -102,6 +104,25 @@ void main() {
     await tester.pump();
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'Play About release link describes changes instead of APK updates',
+    (tester) async {
+      debugAndroidPlatformOverride = true;
+      debugPlayDistributionOverride = true;
+      addTearDown(() {
+        debugAndroidPlatformOverride = null;
+        debugPlayDistributionOverride = null;
+      });
+      await _pumpAbout(tester, onOpenExternal: (_) async {});
+      expect(
+        find.text('История изменений проекта. Обновления — через Google Play.'),
+        findsOneWidget,
+      );
+      expect(find.text('Скачать версию из репозитория проекта'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets(
     'About ignores legacy Telegram metadata and unsafe repository URL',
