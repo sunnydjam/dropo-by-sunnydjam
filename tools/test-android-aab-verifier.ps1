@@ -168,8 +168,13 @@ function Assert-ContentsFixture {
 }
 function Invoke-FixtureJavaVerifier {
     param([string]$Path, [string]$Fingerprint, [bool]$ShouldPass)
+    $callerExitCode = $global:LASTEXITCODE
     $output = & $jdkTools.java (Join-Path $PSScriptRoot 'android/VerifyBundleSignature.java') $Path $Fingerprint 2>&1
     if (($LASTEXITCODE -eq 0) -ne $ShouldPass) { throw "AAB cryptographic fixture failed: $($output | Select-Object -Last 3)" }
+    # An expected rejection is a passing test, not a failed CI shell command.
+    # Restore only after validation: an unexpected result must still throw and
+    # retain the native failure instead of being hidden by a finally/reset.
+    $global:LASTEXITCODE = $callerExitCode
     $script:fixtureCount++
 }
 
@@ -262,6 +267,27 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Cannot export debug fixture certificate.' }
         $debugFingerprint = (Get-FileHash -LiteralPath $certificate -Algorithm SHA256).Hash.ToLowerInvariant()
         Invoke-FixtureJavaVerifier $debug $debugFingerprint $false
+
+        # GitHub Actions exits with LASTEXITCODE after this script. A verified
+        # negative fixture must consume its own exit code without clearing an
+        # earlier, unrelated native failure in the calling shell.
+        $callerExitCode = $global:LASTEXITCODE
+        foreach ($initialExitCode in @(0, 23)) {
+            $global:LASTEXITCODE = $initialExitCode
+            Invoke-FixtureJavaVerifier $signed $fingerprint $true
+            if ($global:LASTEXITCODE -ne $initialExitCode) { throw 'Passing Java fixture changed the caller exit code.' }
+            $fixtureCount++
+            Invoke-FixtureJavaVerifier $validPath $fingerprint $false
+            if ($global:LASTEXITCODE -ne $initialExitCode) { throw 'Expected Java rejection leaked or cleared the caller exit code.' }
+            $fixtureCount++
+        }
+
+        Assert-Rejected { Invoke-FixtureJavaVerifier $validPath $fingerprint $true } 'AAB cryptographic fixture failed'
+        if ($global:LASTEXITCODE -eq 0) { throw 'Unexpected Java rejection lost its native failure exit code.' }
+        $fixtureCount++
+        # The assertion above intentionally consumed this failed invocation.
+        $global:LASTEXITCODE = $callerExitCode
+        Assert-Rejected { Invoke-FixtureJavaVerifier $signed $fingerprint $false } 'AAB cryptographic fixture failed'
     }
     Write-Host "Android AAB verifier passed ($fixtureCount manifest, ABI, ELF, source, tool-pin and signing fixtures; Java signing: $RunJavaTests)."
 } finally {
