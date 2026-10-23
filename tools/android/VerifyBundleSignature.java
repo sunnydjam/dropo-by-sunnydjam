@@ -55,7 +55,11 @@ class VerifyBundleSignature {
                 String fingerprint = HexFormat.of().formatHex(
                         MessageDigest.getInstance("SHA-256").digest(certificate.getEncoded()));
                 if (!fingerprint.equals(args[1])) {
-                    throw new SecurityException("Unexpected AAB upload certificate.");
+                    String sha1 = HexFormat.ofDelimiter(":").withUpperCase().formatHex(
+                            MessageDigest.getInstance("SHA-1").digest(certificate.getEncoded()));
+                    throw new SecurityException("Unexpected AAB upload certificate. Expected SHA-256: "
+                            + args[1] + "; actual SHA-256: " + fingerprint + "; actual SHA-1: " + sha1
+                            + ". Use the upload key registered in Play Console, or complete its reset first.");
                 }
                 signedEntries++;
             }

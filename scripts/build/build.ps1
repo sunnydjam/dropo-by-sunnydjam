@@ -1390,19 +1390,25 @@ function Build-Application {
 }
 
 function Get-FlutterCommand {
-    $flutter = Get-Command flutter -ErrorAction SilentlyContinue
-    if ($flutter) {
-        return $flutter.Source
-    }
-
+    # A configured project SDK takes precedence over another project's PATH.
     $toolchainFlutter = Join-Path $ToolchainRoot "flutter\bin\flutter.bat"
     if (Test-Path -LiteralPath $toolchainFlutter -PathType Leaf) {
         return $toolchainFlutter
     }
 
-    $localFlutter = "E:\flutter-sdk\flutter\bin\flutter.bat"
-    if (Test-Path -LiteralPath $localFlutter -PathType Leaf) {
-        return $localFlutter
+    $flutter = Get-Command flutter -ErrorAction SilentlyContinue
+    if ($flutter) {
+        return $flutter.Source
+    }
+
+    foreach ($sdkRoot in @(
+        (Join-Path (Split-Path $ScriptRoot -Parent) 'flutter-sdk'),
+        (Join-Path ([IO.Path]::GetPathRoot($ScriptRoot)) 'flutter-sdk')
+    )) {
+        $localFlutter = Join-Path $sdkRoot 'flutter/bin/flutter.bat'
+        if (Test-Path -LiteralPath $localFlutter -PathType Leaf) {
+            return $localFlutter
+        }
     }
 
     return $null
@@ -1453,17 +1459,32 @@ function Initialize-AndroidBuildEnvironment {
         if (Test-Path -LiteralPath $androidBin) { $env:Path = "$androidBin;$env:Path" }
     }
     if (-not $env:ANDROID_HOME -and -not $env:ANDROID_SDK_ROOT) {
-        $localAndroidSdk = "E:\android-sdk"
-        if (Test-Path $localAndroidSdk) {
-            $env:ANDROID_HOME = $localAndroidSdk
-            $env:ANDROID_SDK_ROOT = $localAndroidSdk
+        $sdkCandidates = @(
+            (Join-Path (Split-Path $ScriptRoot -Parent) 'android-sdk'),
+            (Join-Path ([IO.Path]::GetPathRoot($ScriptRoot)) 'android-sdk')
+        )
+        foreach ($localAndroidSdk in $sdkCandidates) {
+            if (Test-Path -LiteralPath $localAndroidSdk -PathType Container) {
+                $env:ANDROID_HOME = $localAndroidSdk
+                $env:ANDROID_SDK_ROOT = $localAndroidSdk
+                break
+            }
         }
     }
 
     if (-not $env:JAVA_HOME) {
-        $localJdk = "E:\java\jdk-21.0.11+10"
-        if (Test-Path $localJdk) {
-            $env:JAVA_HOME = $localJdk
+        $javaCandidates = @(
+            (Join-Path (Split-Path $ScriptRoot -Parent) 'java'),
+            (Join-Path ([IO.Path]::GetPathRoot($ScriptRoot)) 'java')
+        )
+        foreach ($javaRoot in $javaCandidates) {
+            $localJdk = Get-ChildItem -LiteralPath $javaRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bin/java.exe') -PathType Leaf } |
+                Sort-Object Name -Descending | Select-Object -First 1
+            if ($localJdk) {
+                $env:JAVA_HOME = $localJdk.FullName
+                break
+            }
         }
     }
 
@@ -1594,7 +1615,8 @@ function Build-AndroidBridgeAAR {
     # Verify the pinned upstream bytes and bundled corresponding MPL source
     # before either compiling or reusing an AAR. No module-cache edits or
     # silently unpatched fallback are permitted.
-    $xhttpOverlay = & (Join-Path $ScriptRoot "tools\prepare-android-xhttp-overlay.ps1")
+    $xhttpOverlay = & (Join-Path $ScriptRoot "tools\prepare-android-xhttp-overlay.ps1") `
+        -OutputDirectory (Join-Path $ToolchainRoot 'android-xhttp-overlay')
     $fingerprint = Get-AndroidBridgeFingerprint -BridgeDir $MobileBridgeDir -CoreDir $MobileCoreDir
     if ((Test-Path $AARPath) -and (Test-Path $VersionMarker) -and ((Get-Content $VersionMarker -Raw).Trim() -eq $fingerprint)) {
         $aarMB = [math]::Round((Get-Item $AARPath).Length / 1MB, 2)
@@ -1833,7 +1855,7 @@ function Build-AndroidAppBundle {
     $sha = (Get-FileHash -LiteralPath $destBundle -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText("$destBundle.sha256", "$sha  $AndroidBundleAsset`n", [Text.UTF8Encoding]::new($false))
     Write-DropoAndroidBuildMetadata -ArtifactPath $destBundle -ArtifactSHA256 $sha `
-        -Channel 'play' -PackageName 'com.dropo_dzhamuha.app' -Architecture 'universal'
+        -Channel 'play' -PackageName 'com.dropo.myapp' -Architecture 'universal'
     # Play bundles stay in a local immutable archive, never in GitHub assets.
     # Keep it outside release/: normal Windows cleanup may remove old builds.
     if (-not $SourceDirty) {

@@ -94,6 +94,7 @@ pids/
 **/*.keystore
 **/*.jks
 **/*signing.properties
+/upload-key/
 # Subscription / proxy material accidentally dumped to disk
 **/sub.txt
 **/subscription*.txt

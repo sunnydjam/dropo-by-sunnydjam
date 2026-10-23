@@ -36,8 +36,8 @@ function Assert-DropoAabManifest {
     param([xml]$Manifest, [string]$Version)
     $namespace = 'http://schemas.android.com/apk/res/android'
     $root = $Manifest.DocumentElement
-    if ($root.LocalName -cne 'manifest' -or $root.GetAttribute('package') -cne 'com.dropo_dzhamuha.app') {
-        throw 'Unexpected AAB package. Google Play requires com.dropo_dzhamuha.app.'
+    if ($root.LocalName -cne 'manifest' -or $root.GetAttribute('package') -cne 'com.dropo.myapp') {
+        throw 'Unexpected AAB package. Google Play requires com.dropo.myapp.'
     }
     if ($root.GetAttribute('versionName', $namespace) -cne $Version) { throw 'AAB versionName does not match the expected release.' }
     $parts = $Version.Split('.')
@@ -239,7 +239,7 @@ $archive = [IO.Compression.ZipFile]::OpenRead($bundlePath)
 try { Assert-DropoAabContents -Archive $archive -RepositoryRoot $repositoryRoot } finally { $archive.Dispose() }
 [pscustomobject]@{
     Path = $bundlePath
-    Package = 'com.dropo_dzhamuha.app'
+    Package = 'com.dropo.myapp'
     Version = $version
     VersionCode = $versionCode
     Distribution = 'Google Play (APK self-update disabled)'

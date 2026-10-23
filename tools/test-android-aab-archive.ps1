@@ -23,7 +23,7 @@ function Write-ArchiveFixture {
     $record = [ordered]@{
         artifactName = 'dropo-Android-Play-universal.aab'; sha256 = $hash
         sourceRevision = ('a' * 40); sourceDirty = $false; channel = 'play'
-        packageName = 'com.dropo_dzhamuha.app'; version = '3.0.47'; versionCode = 30047; architecture = 'universal'
+        packageName = 'com.dropo.myapp'; version = '3.0.47'; versionCode = 30047; architecture = 'universal'
     }
     foreach ($key in $Overrides.Keys) { $record[$key] = $Overrides[$key] }
     [IO.File]::WriteAllText("$aab.build.json", ($record | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
@@ -80,9 +80,10 @@ try {
         @{ label = 'short source revisions'; data = @{ sourceRevision = 'abcdef0' } },
         @{ label = 'unsafe source revisions'; data = @{ sourceRevision = '../unsafe' } },
         @{ label = 'preview channel'; data = @{ channel = 'preview' } },
+        @{ label = 'previous fork Play package'; data = @{ packageName = 'com.dropo_dzhamuha.app' } },
         @{ label = 'old Play package'; data = @{ packageName = 'in.droponevedimka.dropo' } },
         @{ label = 'preview package'; data = @{ packageName = 'in.droponevedimka.dropo.preview' } },
-        @{ label = 'new package preview suffix'; data = @{ packageName = 'com.dropo_dzhamuha.app.preview' } },
+        @{ label = 'new package preview suffix'; data = @{ packageName = 'com.dropo.myapp.preview' } },
         @{ label = 'arm64-only architecture'; data = @{ architecture = 'arm64' } },
         @{ label = 'wrong record filename'; data = @{ artifactName = 'other.aab' } },
         @{ label = 'wrong record hash'; data = @{ sha256 = ('0' * 64) } },

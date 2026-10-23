@@ -75,7 +75,7 @@ foreach ($required in @(
     'Get-DropoAndroidBundleBuildArguments', '$UseCachedFlutterPackages',
     '& $FlutterCmd pub get --offline', "`$androidBundleArguments += '--no-pub'",
     'Write-DropoAndroidBuildMetadata', "-Channel 'play'",
-    "-Channel 'play' -PackageName 'com.dropo_dzhamuha.app'",
+    "-Channel 'play' -PackageName 'com.dropo.myapp'",
     "tools\archive-android-aab.ps1') -ReleaseFolder `$VersionDir", 'if (-not $SourceDirty)',
     'build\app\outputs\bundle\release\app-release.aab'
 )) {
@@ -97,7 +97,7 @@ foreach ($required in @(
     'explicitPlayDistribution != dartPlayDistribution', 'dartPlayDistribution ?: false',
     'playBundleRequested && dartPlayDistribution != true', 'Base64.getDecoder()',
     'CodingErrorAction.REPORT', 'selected != null'
-    'applicationId = if (playDistribution) "com.dropo_dzhamuha.app" else "in.droponevedimka.dropo"',
+    'applicationId = if (playDistribution) "com.dropo.myapp" else "in.droponevedimka.dropo"',
     'namespace = "in.droponevedimka.dropo"', 'applicationIdSuffix = ".preview"'
 )) {
     if (-not $gradleSource.Contains($required)) { throw "Native/Dart distribution consistency missing: $required" }
@@ -170,12 +170,12 @@ $artifactPath = Join-Path $fixtureDirectory 'dropo-Android-Play-universal.aab'
 $metadataPath = "$artifactPath.build.json"
 try {
     Write-DropoAndroidBuildMetadata -ArtifactPath $artifactPath -ArtifactSHA256 ('b' * 64) `
-        -Channel 'play' -PackageName 'com.dropo_dzhamuha.app' -Architecture 'universal'
+        -Channel 'play' -PackageName 'com.dropo.myapp' -Architecture 'universal'
     $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
     if ($metadata.artifactName -cne 'dropo-Android-Play-universal.aab' -or
         $metadata.sourceRevision -cne $SourceRevision -or -not $metadata.sourceDirty -or
         $metadata.sha256 -cne ('b' * 64) -or $metadata.channel -cne 'play' -or
-        $metadata.packageName -cne 'com.dropo_dzhamuha.app' -or
+        $metadata.packageName -cne 'com.dropo.myapp' -or
         $metadata.version -cne '3.0.47' -or $metadata.versionCode -ne 30047 -or
         $metadata.architecture -cne 'universal') {
         throw 'Android artifact metadata provenance fixture failed.'

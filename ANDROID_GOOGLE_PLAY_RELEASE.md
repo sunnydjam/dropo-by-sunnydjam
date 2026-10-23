@@ -13,7 +13,7 @@ Play Console, а не файл для установки на телефон. Go
 | Канал | Файл | Package | Подпись и обновления |
 | --- | --- | --- | --- |
 | Прямая установка Preview | `dropo-Android-Preview-universal.apk` | `in.droponevedimka.dropo.preview` | Прежняя Preview-подпись; подтверждённая загрузка и установка APK из GitHub. |
-| Google Play | `dropo-Android-Play-universal.aab` | `com.dropo_dzhamuha.app` | Сохранённый upload-ключ; установленные APK подписывает Play App Signing, обновления через Google Play. |
+| Google Play | `dropo-Android-Play-universal.aab` | `com.dropo.myapp` | Сохранённый upload-ключ; установленные APK подписывает Play App Signing, обновления через Google Play. |
 
 Оба пакета включают ARM32 и ARM64, Android 10+ и target SDK 36. Preview остаётся
 отдельным приложением: AAB не заменяет установленный Preview поверх него и не
@@ -49,6 +49,13 @@ APK нельзя подменять выбором upload-ключа. Если �
 защищённую резервную копию ключа и паролей отдельно от этого ПК.
 
 Можно указать другой файл через `DROPO_ANDROID_UPLOAD_SIGNING_PROPERTIES`.
+Для текущего проекта действующий upload-ключ находится в игнорируемой папке `upload-key/`.
+Play-сборка автоматически читает `upload-key/android-upload-signing.properties`
+относительно корня проекта; переменная окружения имеет приоритет.
+Для передачи другому разработчику нужны keystore и файл properties из этой папки;
+на другом компьютере обновите локальный `storeFile` на фактический путь keystore.
+В Git находится только отпечаток публичного сертификата. `/upload-key/` исключён
+из Git; приватные файлы из этой папки не должны попадать в публичные артефакты.
 Для процессного окружения также поддерживаются
 `DROPO_ANDROID_UPLOAD_KEYSTORE_PATH`, `DROPO_ANDROID_UPLOAD_STORE_PASSWORD`,
 `DROPO_ANDROID_UPLOAD_KEY_ALIAS`, `DROPO_ANDROID_UPLOAD_KEY_PASSWORD`.
@@ -58,7 +65,35 @@ APK нельзя подменять выбором upload-ключа. Если �
 Без настроенной подписи и подходящего сертификата Play-сборка завершается ошибкой;
 debug/Preview-подпись вместо неё не используется.
 
+### Зарегистрированный upload key и сброс
+
+21 октября 2026 года раздел Upload key в Play Console для `com.dropo.myapp`
+подтверждает SHA-1 `2A:55:27:33:B2:7F:52:3A:AB:DC:36:2E:09:6F:AF:1B:95:F4:FE:A6`
+и SHA-256 `d799d19e47b91556668e20db54d16d28b6d170cdc7b964072009b8ff85bfdf5e`.
+Именно зарегистрированный сертификат закреплён в `signing/android-upload-cert.sha256`.
+Создание другого локального ключа не меняет настройки приложения в магазине.
+
+22 октября 2026 года владелец подтвердил успешную публикацию AAB с предоставленным
+исходным ключом `2A:55:27:33:B2:7F:52:3A:AB:DC:36:2E:09:6F:AF:1B:95:F4:FE:A6`.
+Этот ключ установлен как действующий в `upload-key/`; закреплённый SHA-256 сохранён.
+Сгенерированный ранее ключ `E5:87:54:49:5C:C0:16:FF:64:55:7F:90:89:75:29:D6:51:99:9C:1B`
+сохранён только как резервная история в игнорируемой папке
+`upload-key/retired-generated-E5875449/` и для Play-сборок не используется.
+Keystore и properties в Google Play не загружаются.
+[Процедура сброса upload key](https://support.google.com/googleplay/android-developer/answer/9842756?hl=en#request_an_upload_key_reset).
+
 ## Сборка пакетов
+
+Результаты сборки сохраняются в `release/dropo-{version}-{source-hash}/` текущего
+проекта независимо от рабочего каталога оболочки. При переносе проекта обновите
+`storeFile` в локальном файле подписи. Java и Android SDK можно задать переменными
+окружения; локальный поиск также проверяет папки `java/` и `android-sdk/` рядом с
+проектом и в корне его диска, без привязки к букве `E:`.
+Локальный Flutter SDK в `.toolchain/flutter/` (или в явно заданном
+`DROPO_TOOLCHAIN_ROOT`) имеет приоритет над `PATH`. Это позволяет использовать
+отдельную версию SDK для проекта. Кэш Android XHTTP создаётся в
+`<toolchain-root>/android-xhttp-overlay/`, чтобы перенесённый проект не использовал
+общий временный кэш с путями от прежнего расположения.
 
 Требуются настроенные Go, Flutter, Java и Android SDK. Для проверки AAB используется
 закреплённый bundletool. Если его ещё нет в локальном build-cache, подготовьте его
@@ -166,7 +201,7 @@ pwsh -File .\tools\publish-android-release-assets.ps1 `
 1. Подготовьте подтверждённый **аккаунт организации**: Google требует такой тип
    аккаунта для приложений, одобренных к использованию `VpnService`. Для организации
    требуется D-U-N-S. Проверьте доступность и владение package
-   `com.dropo_dzhamuha.app` до первого выпуска; не меняйте его после публикации.
+   `com.dropo.myapp` до первого выпуска; не меняйте его после публикации.
    [Требования Play Console](https://support.google.com/googleplay/android-developer/answer/10788890?hl=en),
    [выбор аккаунта](https://support.google.com/googleplay/android-developer/answer/13634885?hl=en).
 2. Создайте приложение и настройте Play App Signing. Загрузите проверенный AAB

@@ -55,9 +55,11 @@ if (playBundleRequested && dartPlayDistribution != true) {
 }
 val signingPrefix = if (playDistribution) "DROPO_ANDROID_UPLOAD" else "DROPO_ANDROID"
 val releaseSigningProperties = Properties()
+val projectUploadSigningPropertiesFile = rootProject.file("../../upload-key/android-upload-signing.properties")
 val releaseSigningPropertiesFile = System.getenv("${signingPrefix}_SIGNING_PROPERTIES")
     ?.takeIf { it.isNotBlank() }
     ?.let(::file)
+    ?: projectUploadSigningPropertiesFile.takeIf { playDistribution && it.isFile }
     ?: file("${System.getProperty("user.home")}/.dropo-signing/" +
         if (playDistribution) "google-play/android-upload-signing.properties" else "android-signing.properties")
 if (releaseSigningPropertiesFile.isFile) {
@@ -120,7 +122,7 @@ android {
 
     defaultConfig {
         // Play Console owns this identity; sideload/Preview keep update continuity.
-        applicationId = if (playDistribution) "com.dropo_dzhamuha.app" else "in.droponevedimka.dropo"
+        applicationId = if (playDistribution) "com.dropo.myapp" else "in.droponevedimka.dropo"
         resValue("string", "app_name", "dropo")
         // Android 10 supplies connection-owner lookup and authoritative
         // Always-on/lockdown state used by service routing and protection UI.

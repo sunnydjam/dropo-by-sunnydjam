@@ -58,7 +58,7 @@ const String _accountEndpoint = String.fromEnvironment(
 );
 const bool _playDistribution = bool.fromEnvironment('DROPO_PLAY_DISTRIBUTION');
 const String _playStoreUrl =
-    'https://play.google.com/store/apps/details?id=com.dropo_dzhamuha.app';
+    'https://play.google.com/store/apps/details?id=com.dropo.myapp';
 
 bool get _accountConfigured => accountEndpointAvailable(_accountEndpoint);
 

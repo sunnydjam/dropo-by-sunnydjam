@@ -85,7 +85,7 @@ function Get-DropoAabArchiveInput {
         $record.sourceDirty -isnot [bool] -or $record.sourceDirty) {
         throw 'Only clean builds with a complete source commit revision may enter the AAB archive.'
     }
-    if ($record.channel -cne 'play' -or $record.packageName -cne 'com.dropo_dzhamuha.app' -or
+    if ($record.channel -cne 'play' -or $record.packageName -cne 'com.dropo.myapp' -or
         $record.architecture -cne 'universal') {
         throw 'AAB archive accepts only the stable Google Play universal Android channel.'
     }

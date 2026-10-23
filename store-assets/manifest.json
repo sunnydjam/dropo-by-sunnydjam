@@ -1,0 +1,200 @@
+﻿[
+    {
+        "file":  "app-icon-512.png",
+        "width":  512,
+        "height":  512,
+        "bits":  32,
+        "bytes":  606727,
+        "colorSpace":  "sRGB",
+        "sha256":  "c482065a4e5a603a05a5081044c8132ca6bb538da0de029b92e43c2294c7774a"
+    },
+    {
+        "file":  "ru-RU/feature-graphic-1024x500.png",
+        "width":  1024,
+        "height":  500,
+        "bits":  24,
+        "bytes":  1139696,
+        "colorSpace":  "sRGB",
+        "sha256":  "eb6408884ff303ea781bebad97978d569f6161b6602cb3a3c6de7cc1fa32a373"
+    },
+    {
+        "file":  "ru-RU/phone/01-connection.png",
+        "width":  1080,
+        "height":  1920,
+        "bits":  24,
+        "bytes":  1811867,
+        "colorSpace":  "sRGB",
+        "sha256":  "21e5f452e94c92f71d192f37979b349e7928bfdb9dc04a3097bc01e05ba485c2"
+    },
+    {
+        "file":  "ru-RU/phone/02-profiles.png",
+        "width":  1080,
+        "height":  1920,
+        "bits":  24,
+        "bytes":  1794547,
+        "colorSpace":  "sRGB",
+        "sha256":  "a3ced514d9683c38b59bb02f9b4a4251f870dcf068d6dd2d12697f229823b393"
+    },
+    {
+        "file":  "ru-RU/phone/03-settings.png",
+        "width":  1080,
+        "height":  1920,
+        "bits":  24,
+        "bytes":  1811856,
+        "colorSpace":  "sRGB",
+        "sha256":  "e321f1d883533cd1aa0b930b4decc05ecbe8cc79ae30e8584e51c1fd416e301e"
+    },
+    {
+        "file":  "ru-RU/phone/04-statistics.png",
+        "width":  1080,
+        "height":  1920,
+        "bits":  24,
+        "bytes":  1732673,
+        "colorSpace":  "sRGB",
+        "sha256":  "f709b644f147bab64e87253c9e5f460d8acdec7214be08acbdfd3e5d0e63b872"
+    },
+    {
+        "file":  "ru-RU/tablet-7/01-connection.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1948138,
+        "colorSpace":  "sRGB",
+        "sha256":  "cfdaae625eb259cd6b16a2bebcd86fd0b5b7f2117aa46a0d484d7b3c4c0f2a8f"
+    },
+    {
+        "file":  "ru-RU/tablet-7/02-profiles.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1830596,
+        "colorSpace":  "sRGB",
+        "sha256":  "b9a5c3a11a150a24ff3059c906f9cb2655554a8201e536a1c9c765f8c923ee71"
+    },
+    {
+        "file":  "ru-RU/tablet-7/03-settings.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1873279,
+        "colorSpace":  "sRGB",
+        "sha256":  "22c5f206cfbbeb988ef182406ffb2645f87e72cf593b1e86221a289232bc0f1b"
+    },
+    {
+        "file":  "ru-RU/tablet-7/04-statistics.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1832981,
+        "colorSpace":  "sRGB",
+        "sha256":  "21a14b8e3c606ad7d0a24b70e7266b26629d5d2e26e885ef77991907a57bcb24"
+    },
+    {
+        "file":  "ru-RU/tablet-10/01-connection.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1924859,
+        "colorSpace":  "sRGB",
+        "sha256":  "33bcf0e79640d996addfa04777250e95e87ae03a9891fa3862196d5b54e12dec"
+    },
+    {
+        "file":  "ru-RU/tablet-10/02-profiles.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1913625,
+        "colorSpace":  "sRGB",
+        "sha256":  "fc69b3842b4c1212fd980c9ce779eb21b81141e8d4216c01b2a1156c9694cfc0"
+    },
+    {
+        "file":  "ru-RU/tablet-10/03-settings.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1927412,
+        "colorSpace":  "sRGB",
+        "sha256":  "0b025317cf1563d1e352bf5b91d3ad4fb3c3c903c94ee359f0f6993b644c7c1a"
+    },
+    {
+        "file":  "ru-RU/tablet-10/04-statistics.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1870485,
+        "colorSpace":  "sRGB",
+        "sha256":  "4811495bc95d2eed71e1180b2aa289004387b82d1c2ff68902f7ea66caf35c95"
+    },
+    {
+        "file":  "ru-RU/chromebook/01-connection.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1930393,
+        "colorSpace":  "sRGB",
+        "sha256":  "40144bc5d14f8ec397c619ad09c5df0dff9c1a941c58487690ac0234bba391ae"
+    },
+    {
+        "file":  "ru-RU/chromebook/02-profiles.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1943573,
+        "colorSpace":  "sRGB",
+        "sha256":  "c85e59ec58ea4b826d62c5c32f308c11b5dca7245b67335b69ecde3598a3eeec"
+    },
+    {
+        "file":  "ru-RU/chromebook/03-settings.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1951358,
+        "colorSpace":  "sRGB",
+        "sha256":  "ca349708fbe2f6f6891960b03f9520b7c5ab4f13d6928e3c6dc720e956f90453"
+    },
+    {
+        "file":  "ru-RU/chromebook/04-statistics.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1891824,
+        "colorSpace":  "sRGB",
+        "sha256":  "2ac8951446e7ee88e081ed4d66950ea31592a280953b666422e45a1586bccc04"
+    },
+    {
+        "file":  "ru-RU/windows/01-connection.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  2007674,
+        "colorSpace":  "sRGB",
+        "sha256":  "92e021f13f94774b54dfb02b5f6d20081665d06776d6928bd1ef9f027a516eeb"
+    },
+    {
+        "file":  "ru-RU/windows/02-profiles.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1899762,
+        "colorSpace":  "sRGB",
+        "sha256":  "845e48d273af393f71553ec9ee664e3a4460def10e2bb6754c9420307add028f"
+    },
+    {
+        "file":  "ru-RU/windows/03-settings.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1958705,
+        "colorSpace":  "sRGB",
+        "sha256":  "a82786d43fedff76cffcff481e2f54c0685f23566323284b3875c9fd158dd846"
+    },
+    {
+        "file":  "ru-RU/windows/04-statistics.png",
+        "width":  1920,
+        "height":  1080,
+        "bits":  24,
+        "bytes":  1892309,
+        "colorSpace":  "sRGB",
+        "sha256":  "d1d822a4442e732bbb93dedd5a31bc7bc1dddf88d6d252ea192792334a4ce75a"
+    }
+]

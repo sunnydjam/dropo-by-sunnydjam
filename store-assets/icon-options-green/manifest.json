@@ -1,0 +1,32 @@
+﻿[
+    {
+        "file":  "01-shield-512.png",
+        "width":  512,
+        "height":  512,
+        "bits":  32,
+        "opaque":  true,
+        "colorSpace":  "sRGB",
+        "bytes":  609088,
+        "sha256":  "407ffc544034ddac86a44ac2b02ff84e6c0659a85acdd97c2aac2a19612839b3"
+    },
+    {
+        "file":  "02-tunnel-512.png",
+        "width":  512,
+        "height":  512,
+        "bits":  32,
+        "opaque":  true,
+        "colorSpace":  "sRGB",
+        "bytes":  609992,
+        "sha256":  "97dcc081db3a8f52c2043fcc98f7f0377850d070e0b695dbceb695f9ca61882c"
+    },
+    {
+        "file":  "03-globe-512.png",
+        "width":  512,
+        "height":  512,
+        "bits":  32,
+        "opaque":  true,
+        "colorSpace":  "sRGB",
+        "bytes":  598423,
+        "sha256":  "56a7406b828657ce3d1864134375caa3441b72618045d4936b7eacd7f140d4e9"
+    }
+]

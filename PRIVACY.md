@@ -6,7 +6,7 @@ Developer: Indzhiev Ayush. Privacy and support contact:
 Last updated: 15 October 2026.
 
 This policy covers Dropo (Dropo Connect Booster) for Windows and Android,
-including the Google Play package `com.dropo_dzhamuha.app` and the separate Android Preview package
+including the Google Play package `com.dropo.myapp` and the separate Android Preview package
 `in.droponevedimka.dropo.preview`. Dropo provides VPN connections and service-based
 routing. Telegram registration is optional: free VPN and personal subscriptions
 do not require an account.

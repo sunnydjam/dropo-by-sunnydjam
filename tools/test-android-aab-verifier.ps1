@@ -26,7 +26,7 @@ if ($verifierAst.Extent.Text.Contains('-Download') -or $verifierAst.Extent.Text.
 }
 
 $manifestText = @'
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.dropo_dzhamuha.app" android:versionCode="30047" android:versionName="3.0.47">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.dropo.myapp" android:versionCode="30047" android:versionName="3.0.47">
   <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="36" />
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -63,9 +63,10 @@ foreach ($encodedType in @('0x40000000', '1073741824')) {
     $fixtureCount++
 }
 foreach ($case in @(
-    @('package="com.dropo_dzhamuha.app"', 'package="in.droponevedimka.dropo"', 'package'),
-    @('package="com.dropo_dzhamuha.app"', 'package="in.droponevedimka.dropo.preview"', 'package'),
-    @('package="com.dropo_dzhamuha.app"', 'package="com.dropo_dzhamuha.app.preview"', 'package'),
+    @('package="com.dropo.myapp"', 'package="com.dropo_dzhamuha.app"', 'package'),
+    @('package="com.dropo.myapp"', 'package="in.droponevedimka.dropo"', 'package'),
+    @('package="com.dropo.myapp"', 'package="in.droponevedimka.dropo.preview"', 'package'),
+    @('package="com.dropo.myapp"', 'package="com.dropo.myapp.preview"', 'package'),
     @('versionName="3.0.47"', 'versionName="3.0.47-preview"', 'versionName'),
     @('versionCode="30047"', 'versionCode="30046"', 'versionCode'),
     @('minSdkVersion="29"', 'minSdkVersion="28"', 'API 36'),
@@ -75,14 +76,14 @@ foreach ($case in @(
     @('android.permission.INTERNET', 'android.permission.REQUEST_INSTALL_PACKAGES', 'REQUEST_INSTALL_PACKAGES'),
     @('android.permission.FOREGROUND_SERVICE_SPECIAL_USE', 'android.permission.POST_NOTIFICATIONS', 'required VPN'),
     @('in.droponevedimka.dropo.MainActivity', '.MainActivity', 'MainActivity entry point'),
-    @('in.droponevedimka.dropo.MainActivity', 'com.dropo_dzhamuha.app.MainActivity', 'MainActivity entry point'),
+    @('in.droponevedimka.dropo.MainActivity', 'com.dropo.myapp.MainActivity', 'MainActivity entry point'),
     @('in.droponevedimka.dropo.DropoDeviceAdminReceiver', '.DropoDeviceAdminReceiver', 'DropoDeviceAdminReceiver entry point'),
-    @('in.droponevedimka.dropo.DropoDeviceAdminReceiver', 'com.dropo_dzhamuha.app.DropoDeviceAdminReceiver', 'DropoDeviceAdminReceiver entry point'),
+    @('in.droponevedimka.dropo.DropoDeviceAdminReceiver', 'com.dropo.myapp.DropoDeviceAdminReceiver', 'DropoDeviceAdminReceiver entry point'),
     @('</application>', '<activity android:name="in.droponevedimka.dropo.MainActivity" /></application>', 'MainActivity entry point'),
     @('</application>', '<receiver android:name="in.droponevedimka.dropo.DropoDeviceAdminReceiver" /></application>', 'DropoDeviceAdminReceiver entry point'),
     @('android.permission.BIND_VPN_SERVICE', 'android.permission.INTERNET', 'protected'),
     @('in.droponevedimka.dropo.DropoVpnService', '.DropoVpnService', 'protected'),
-    @('in.droponevedimka.dropo.DropoVpnService', 'com.dropo_dzhamuha.app.DropoVpnService', 'protected'),
+    @('in.droponevedimka.dropo.DropoVpnService', 'com.dropo.myapp.DropoVpnService', 'protected'),
     @('android:exported="false"', 'android:exported="true"', 'non-exported'),
     @('android.net.VpnService', 'android.intent.action.VIEW', 'VpnService'),
     @('android:foregroundServiceType="specialUse"', 'android:foregroundServiceType="dataSync"', 'foreground VpnService'),
@@ -90,9 +91,9 @@ foreach ($case in @(
     @('android:foregroundServiceType="specialUse"', 'android:foregroundServiceType="1073741825"', 'foreground VpnService'),
     @('android:foregroundServiceType="specialUse"', 'android:foregroundServiceType="specialUse|dataSync"', 'foreground VpnService'),
     @('</application>', '<provider android:name="androidx.core.content.FileProvider" android:authorities="in.droponevedimka.dropo.updates" /></application>', 'update FileProvider'),
-    @('</application>', '<provider android:name="androidx.core.content.FileProvider" android:authorities="com.dropo_dzhamuha.app.updates" /></application>', 'update FileProvider'),
+    @('</application>', '<provider android:name="androidx.core.content.FileProvider" android:authorities="com.dropo.myapp.updates" /></application>', 'update FileProvider'),
     @('</application>', '<provider android:name="androidx.core.content.FileProvider" android:authorities="updates" /></application>', 'update FileProvider'),
-    @('</application>', '<provider android:name="androidx.core.content.FileProvider" android:authorities="com.dropo_dzhamuha.app.files; com.dropo_dzhamuha.app.UPDATES " /></application>', 'update FileProvider'),
+    @('</application>', '<provider android:name="androidx.core.content.FileProvider" android:authorities="com.dropo.myapp.files; com.dropo.myapp.UPDATES " /></application>', 'update FileProvider'),
     @('</manifest>', '<queries><intent><action android:name="android.intent.action.VIEW" /><data android:mimeType="application/vnd.android.package-archive" /></intent></queries></manifest>', 'installer queries')
 )) {
     $modified = $manifestText.Replace($case[0], $case[1])
