@@ -22,7 +22,7 @@ Duration accountAuthWaitDuration(Object? expiresAt, {required DateTime now}) {
       : remaining;
 }
 
-/// Release builds never use a local mock or send credentials over plain HTTP.
+/// Real account sessions never use a local server mock or plain HTTP in release.
 bool accountEndpointAvailable(
   String endpoint, {
   bool allowLocalDevelopment = kDebugMode,
@@ -1107,6 +1107,8 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
             ),
           ],
         ),
+        demoEntry: true,
+        demoFirst: true,
       );
     }
     return switch (_phase) {
@@ -1142,13 +1144,28 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     };
   }
 
-  Widget _page(Widget child) => Align(
+  Widget _page(
+    Widget child, {
+    bool demoEntry = false,
+    bool demoFirst = false,
+  }) => Align(
     alignment: Alignment.topCenter,
     child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 960),
       child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
-        child: child,
+        child: demoEntry
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (!demoFirst) child,
+                  if (!demoFirst) const SizedBox(height: 28),
+                  _AccountDemoEntry(onOpenExternal: widget.onOpenExternal),
+                  if (demoFirst) const SizedBox(height: 28),
+                  if (demoFirst) child,
+                ],
+              )
+            : child,
       ),
     ),
   );
@@ -1223,6 +1240,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         );
       },
     ),
+    demoEntry: true,
   );
 
   Widget _pendingAuth() => _page(

@@ -221,7 +221,10 @@ func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, lo
 				"mtu":          1500,
 				"auto_route":   true,
 				"strict_route": true,
-				"stack":        "mixed",
+				// Keep TCP in userspace as well as UDP. With Dropo's UID
+				// excluded from VpnService, mixed's kernel TCP forwarder
+				// timed out in the Android 11 release data-path check.
+				"stack": "gvisor",
 			},
 		},
 		"outbounds": outbounds,

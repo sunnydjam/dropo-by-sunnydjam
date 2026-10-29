@@ -33,6 +33,7 @@ part 'connection_health.dart';
 part 'guided_help.dart';
 part 'android_vpn_protection.dart';
 part 'account.dart';
+part 'account_demo.dart';
 part 'privacy_links.dart';
 part 'vpn_disclosure.dart';
 
