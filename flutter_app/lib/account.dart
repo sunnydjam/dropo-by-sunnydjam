@@ -76,7 +76,11 @@ class _AccountRecord {
     maskedPhone: json['maskedPhone']?.toString() ?? '',
     plan: json['plan']?.toString() ?? 'Dropo Free',
     telegramUsername: json['telegramUsername']?.toString() ?? '',
-    authMethod: json['authMethod'] == 'password' ? 'password' : 'telegram',
+    authMethod: json['authMethod'] == 'guest'
+        ? 'guest'
+        : json['authMethod'] == 'password'
+        ? 'password'
+        : 'telegram',
     demoAccount: json['demoAccount'] == true,
     username: json['username']?.toString() ?? '',
     speedBoostUntil: DateTime.tryParse(
@@ -88,6 +92,7 @@ class _AccountRecord {
   final String authMethod, username;
   final bool demoAccount;
   bool get passwordAccount => authMethod == 'password';
+  bool get guestAccount => authMethod == 'guest';
   final DateTime? speedBoostUntil;
 }
 
@@ -419,6 +424,7 @@ class AccountPage extends StatefulWidget {
     this.transport,
     this.initialToken,
     this.onDisplayChanged,
+    this.identity,
   });
 
   final String endpoint;
@@ -428,6 +434,7 @@ class AccountPage extends StatefulWidget {
   final AccountTransport? transport;
   final String? initialToken;
   final ValueChanged<AccountDisplaySnapshot?>? onDisplayChanged;
+  final GuestIdentityCoordinator? identity;
 
   @override
   State<AccountPage> createState() => _AccountPageState();
@@ -474,12 +481,14 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.identity?.addListener(_identityUpdated);
     unawaited(_restore());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.identity?.removeListener(_identityUpdated);
     _stopAuthTimers();
     _authGeneration++;
     if (widget.transport == null) _api.close();
@@ -503,8 +512,23 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     }
     await _loadCapabilities();
     if (!mounted) return;
-    final token = await _vault.read();
+    // A pending background profile request must not hide local logout. Once a
+    // credential is restored, this page can perform its own bounded refresh.
+    if (widget.identity?.token == null) await widget.identity?.restore();
+    if (!mounted) return;
+    final token = widget.identity != null
+        ? widget.identity!.token
+        : await _vault.read();
     if (token == null || token.isEmpty) {
+      final identity = widget.identity;
+      if (identity?.state == 'storage_error') {
+        setState(() {
+          _phase = _AccountPhase.offline;
+          _message =
+              'Не удалось прочитать защищённый профиль. Новый профиль не создан. VPN продолжает работать.';
+        });
+        return;
+      }
       if (mounted) setState(() => _phase = _AccountPhase.signedOut);
       if (mounted) widget.onDisplayChanged?.call(null);
       return;
@@ -517,7 +541,11 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
           error is AccountApiException &&
           (error.status == 401 || error.code == 'invalid_session');
       if (invalid) {
-        await _vault.clear();
+        if (widget.identity != null) {
+          await widget.identity!.logout();
+        } else {
+          await _vault.clear();
+        }
         _token = null;
         if (mounted) widget.onDisplayChanged?.call(null);
       }
@@ -586,8 +614,39 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     );
   }
 
+  void _identityUpdated() {
+    if (!mounted || _busy || _phase == _AccountPhase.pendingAuth) return;
+    final identity = widget.identity;
+    if (identity == null) return;
+    final account = identity.account;
+    setState(() {
+      _token = identity.token;
+      _account = account == null ? null : _AccountRecord.fromJson(account);
+      if (account != null && _token != null) _phase = _AccountPhase.signedIn;
+      if (identity.suppressed) _phase = _AccountPhase.signedOut;
+    });
+  }
+
+  Future<bool> _acceptSession(
+    String token,
+    Map<String, dynamic> account,
+  ) async {
+    if (widget.identity == null) return _vault.write(token);
+    try {
+      await widget.identity!.acceptRegisteredSession(token, account);
+      return true;
+    } catch (_) {
+      await _discardUnclaimedAccountSession(_api, token);
+      rethrow;
+    }
+  }
+
   Future<void> _startPasswordSignIn() async {
-    if (_busy || !_passwordLoginAvailable) return;
+    if (_busy ||
+        !_passwordLoginAvailable ||
+        widget.identity?.deletionPending == true) {
+      return;
+    }
     _stopAuthTimers();
     final generation = ++_authGeneration;
     setState(() {
@@ -610,7 +669,10 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       }
       // A native secure write cannot be cancelled once started. Fence it before
       // entry and keep all competing authentication actions disabled until done.
-      final persisted = await _vault.write(token);
+      final persisted = await _acceptSession(
+        token,
+        _asMap(response['account']),
+      );
       _token = token;
       if (!mounted || generation != _authGeneration) return;
       setState(() {
@@ -641,7 +703,11 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   }
 
   Future<void> _startAuth({String purpose = 'login'}) async {
-    if (_busy || !_registrationAvailable) return;
+    if (_busy ||
+        !_registrationAvailable ||
+        widget.identity?.deletionPending == true) {
+      return;
+    }
     _stopAuthTimers();
     final generation = ++_authGeneration;
     setState(() {
@@ -908,7 +974,10 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       // A started native secure write cannot be cancelled. The approved
       // exchange is fenced before it starts; the UI remains busy until done.
       _stopAuthTimers();
-      final persisted = await _vault.write(token);
+      final persisted = await _acceptSession(
+        token,
+        _asMap(response['account']),
+      );
       _token = token;
       if (!mounted || generation != _authGeneration) return;
       setState(() {
@@ -945,14 +1014,20 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     _authGeneration++;
     final token = _token;
     setState(() => _busy = true);
+    bool identityCleared = false;
     try {
-      if (token != null) {
+      if (widget.identity != null) {
+        await widget.identity!.logout();
+        identityCleared = true;
+      } else if (token != null) {
         await _api.request('DELETE', '/v1/sessions/current', token: token);
       }
     } catch (_) {
       // Local sign-out still removes the credential when the backend is down.
     }
-    final cleared = await _vault.clear();
+    final cleared = widget.identity != null
+        ? identityCleared
+        : await _vault.clear();
     _authPoll?.cancel();
     if (!mounted) return;
     if (!cleared) {
@@ -1006,7 +1081,17 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
 
   Future<void> _finishDeletionCleanup() async {
     if (mounted) setState(() => _busy = true);
-    final cleared = await _vault.clear();
+    bool cleared;
+    if (widget.identity != null) {
+      try {
+        await widget.identity!.logout(forgetInstallation: true);
+        cleared = true;
+      } catch (_) {
+        cleared = false;
+      }
+    } else {
+      cleared = await _vault.clear();
+    }
     if (!mounted) return;
     setState(() {
       _busy = false;
@@ -1240,7 +1325,9 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         final compact = constraints.maxWidth < 700;
         final form = _AuthForm(
           busy: _busy,
-          available: _registrationAvailable,
+          available:
+              _registrationAvailable &&
+              widget.identity?.deletionPending != true,
           development: _development,
           recovery: _authPurpose == 'recovery',
           retry: _authRetryAvailable,
@@ -1266,6 +1353,51 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
               ),
             ),
             const SizedBox(height: 10),
+            if (widget.identity?.suppressed == true) ...[
+              Text(
+                widget.identity!.deletionPending
+                    ? 'Удаление бесплатного профиля ожидает соединения с сервером. Автоматическое создание нового профиля отключено.'
+                    : 'Автоматическое создание бесплатного профиля отключено после выхода или удаления.',
+              ),
+              const SizedBox(height: 12),
+              if (!widget.identity!.deletionPending &&
+                  widget.identity!.guestAvailable)
+                OutlinedButton(
+                  key: const ValueKey('guest-create-new'),
+                  onPressed: _busy
+                      ? null
+                      : () async {
+                          setState(() => _busy = true);
+                          try {
+                            await widget.identity!.createNewGuest();
+                            await _restore();
+                          } catch (_) {
+                            if (mounted) {
+                              setState(
+                                () => _message =
+                                    'Не удалось создать профиль. Повторите позже.',
+                              );
+                            }
+                          } finally {
+                            if (mounted) setState(() => _busy = false);
+                          }
+                        },
+                  child: const Text('Создать новый бесплатный профиль'),
+                ),
+              if (widget.identity!.deletionPending)
+                TextButton(
+                  onPressed: _busy ? null : _retryAccount,
+                  child: const Text('Повторить удаление'),
+                ),
+              const SizedBox(height: 16),
+            ],
+            if (widget.identity?.accountKind == 'guest') ...[
+              TextButton(
+                onPressed: _busy ? null : _retryAccount,
+                child: const Text('Вернуться к бесплатному профилю'),
+              ),
+              const SizedBox(height: 12),
+            ],
             Text(
               _passwordLoginAvailable
                   ? 'Выберите способ входа: Telegram или выданный логин и пароль. Бесплатный VPN работает и без входа.'
@@ -1276,7 +1408,9 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
             if (_passwordLoginAvailable) ...[
               OutlinedButton.icon(
                 key: const ValueKey('account-password-open'),
-                onPressed: _busy ? null : _startPasswordSignIn,
+                onPressed: _busy || widget.identity?.deletionPending == true
+                    ? null
+                    : _startPasswordSignIn,
                 icon: const Icon(Icons.password_outlined),
                 label: const Text('Войти по логину и паролю'),
               ),
@@ -1427,8 +1561,134 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     ),
   );
 
+  Future<void> _deleteGuestProfile() async {
+    final identity = widget.identity;
+    if (_busy || identity == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить бесплатный профиль?'),
+        content: const Text(
+          'Профиль и его сессии будут удалены. Настройки VPN на устройстве сохранятся. Новый профиль не будет создан автоматически.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            key: const ValueKey('guest-delete-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await identity.deleteGuest();
+      if (!mounted) return;
+      setState(() {
+        _token = null;
+        _account = null;
+        _phase = _AccountPhase.signedOut;
+      });
+      widget.onDisplayChanged?.call(null);
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _message =
+              'Не удалось сохранить запрос удаления. Повторите попытку.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _guestProfile() => _page(
+    Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Бесплатный профиль',
+          key: ValueKey('guest-profile-title'),
+          style: TextStyle(
+            color: _atlasText,
+            fontSize: 28,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Dropo Free · Telegram и пароль не нужны. Профиль сохранён на этом устройстве. После удаления приложения доступ к нему может быть утрачен.',
+          style: TextStyle(color: _atlasMuted, height: 1.5),
+        ),
+        const SizedBox(height: 24),
+        if (_message.isNotEmpty) ...[
+          _AccountNotice(message: _message),
+          const SizedBox(height: 16),
+        ],
+        const Text(
+          'Уже есть аккаунт?',
+          style: TextStyle(
+            color: _atlasText,
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'По желанию войдите в свой аккаунт. Бесплатный профиль будет привязан только после подтверждения входа.',
+          style: TextStyle(color: _atlasMuted, height: 1.5),
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            if (_registrationAvailable)
+              OutlinedButton.icon(
+                key: const ValueKey('guest-link-telegram'),
+                onPressed: _busy ? null : () => _startAuth(purpose: 'login'),
+                icon: const Icon(Icons.send_outlined),
+                label: const Text('Войти через Telegram'),
+              ),
+            if (_passwordLoginAvailable)
+              OutlinedButton.icon(
+                key: const ValueKey('account-password-open'),
+                onPressed: _busy ? null : _startPasswordSignIn,
+                icon: const Icon(Icons.password_outlined),
+                label: const Text('Войти по логину и паролю'),
+              ),
+          ],
+        ),
+        const SizedBox(height: 24),
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            TextButton(
+              onPressed: _busy ? null : _logout,
+              child: const Text('Выйти'),
+            ),
+            TextButton(
+              key: const ValueKey('guest-delete'),
+              onPressed: _busy ? null : _deleteGuestProfile,
+              child: const Text('Удалить бесплатный профиль'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+      ],
+    ),
+  );
+
   Widget _signedIn() {
     final account = _account!;
+    if (account.guestAccount) return _guestProfile();
     return _page(
       Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

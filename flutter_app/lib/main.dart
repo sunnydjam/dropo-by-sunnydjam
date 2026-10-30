@@ -31,8 +31,10 @@ part 'service_icons.dart';
 part 'minimal_settings.dart';
 part 'connection_health.dart';
 part 'guided_help.dart';
+part 'incident_reporting.dart';
 part 'android_vpn_protection.dart';
 part 'account.dart';
+part 'guest_identity.dart';
 part 'account_login.dart';
 part 'privacy_links.dart';
 part 'vpn_disclosure.dart';
@@ -3846,6 +3848,20 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool preparingFullVpnSource = false;
   final List<String> _sectionHistory = [];
   late final _AccountDisplayController _accountDisplay;
+  late final GuestIdentityCoordinator _guestIdentity;
+  late final IncidentReporter _incidents;
+
+  void _identityChanged() {
+    _incidents.synchronizeIdentity();
+    final account = _guestIdentity.account;
+    _accountDisplay.publish(
+      account != null
+          ? AccountDisplaySnapshot.fromJson(account)
+          : _guestIdentity.token != null
+          ? const AccountDisplaySnapshot(displayName: 'Аккаунт')
+          : null,
+    );
+  }
 
   void _accountDisplayChanged() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -3892,7 +3908,34 @@ class _DropoHomePageState extends State<DropoHomePage>
       transport: debugAccountTransport,
       initialToken: debugAccountSessionToken,
     )..addListener(_accountDisplayChanged);
-    unawaited(_accountDisplay.restore());
+    _guestIdentity = GuestIdentityCoordinator(
+      endpoint: _accountEndpoint,
+      available: debugAccountTransport != null || _accountConfigured,
+      persistSession:
+          debugAccountTransport == null &&
+          !(kDebugMode && _bridgeMode == 'mock'),
+      transport: debugAccountTransport,
+      initialToken: debugAccountSessionToken,
+    )..addListener(_identityChanged);
+    _incidents = IncidentReporter(
+      readState: () => _guestIdentity.readPrivateState('incidents'),
+      writeState: (value) =>
+          _guestIdentity.writePrivateState('incidents', value),
+      identity: () => IncidentIdentity(
+        owner:
+            _guestIdentity.installationId ??
+            _guestIdentity.account?['id']?.toString() ??
+            '',
+        epoch: _guestIdentity.identityEpoch,
+        token: _guestIdentity.token,
+        available:
+            _guestIdentity.incidentsAvailable && !_guestIdentity.suppressed,
+      ),
+      openTransport: () => _AccountApi(_accountEndpoint),
+      platform: _isAndroidPlatform ? 'android' : 'windows',
+    );
+    unawaited(_incidents.initialize());
+    unawaited(_guestIdentity.restore());
     WidgetsBinding.instance.addObserver(this);
     pushEventsSubscription = widget.bridge.watchEvents().listen(
       _handlePushEvent,
@@ -3903,6 +3946,9 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   @override
   void dispose() {
+    _incidents.dispose();
+    _guestIdentity.removeListener(_identityChanged);
+    _guestIdentity.dispose();
     _accountDisplay.removeListener(_accountDisplayChanged);
     _accountDisplay.dispose();
     WidgetsBinding.instance.removeObserver(this);
@@ -3948,6 +3994,8 @@ class _DropoHomePageState extends State<DropoHomePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
+    _guestIdentity.setForeground(state == AppLifecycleState.resumed);
+    _incidents.setForeground(state == AppLifecycleState.resumed);
     switch (state) {
       case AppLifecycleState.resumed:
         if (!windowVisible && mounted) {
@@ -4150,6 +4198,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           homeSourcesRequest++;
         }
         status = loadedStatus;
+        _incidents.observeConnection(loadedStatus, loadedAppConfig.routingMode);
         logs = loadedLogs;
         subscription = loadedSubscription;
         routes = loadedRoutes.isEmpty ? fallbackRoutes : loadedRoutes;
@@ -4410,6 +4459,19 @@ class _DropoHomePageState extends State<DropoHomePage>
       case 'android-service-status':
       case 'vpn-status-changed':
         _applyServiceStatePayload(event.payload);
+        _incidents.observeConnection(status, appConfig.routingMode);
+        break;
+      case 'client-check-done':
+        if (status.connected &&
+            !status.connecting &&
+            !status.disconnecting &&
+            event.payload['sessionValid'] == true) {
+          _incidents.observeReport(
+            ConnectionHealthReport.fromJson(event.payload),
+            status.version.version,
+            appConfig.routingMode,
+          );
+        }
         break;
       case 'android-log':
         final line = event.payload['line']?.toString() ?? '';
@@ -6294,6 +6356,13 @@ class _DropoHomePageState extends State<DropoHomePage>
   );
 
   Widget _buildMenuSection() {
+    return IncidentScope(
+      reporter: _incidents,
+      child: _buildMenuSectionContent(),
+    );
+  }
+
+  Widget _buildMenuSectionContent() {
     switch (activeMenuSection) {
       case 'settings':
       case 'advanced':
@@ -6337,6 +6406,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           transport: debugAccountTransport,
           initialToken: debugAccountSessionToken,
           onDisplayChanged: _accountDisplay.publish,
+          identity: _guestIdentity,
         );
       case 'sources':
         return VpnSourcesDialog(
@@ -9942,6 +10012,11 @@ class _SettingsDialogState extends State<_SettingsDialog>
           ),
           const SizedBox(height: 14),
         ],
+        if (!widget.advanced)
+          const _SettingsGroup(
+            title: 'Конфиденциальность',
+            children: [IncidentPrivacySetting()],
+          ),
         if (widget.advanced || !isMobile)
           _SettingsGroup(
             title: 'Общие',

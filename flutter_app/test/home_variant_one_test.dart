@@ -284,13 +284,17 @@ void main() {
     );
   }
 
-  testWidgets('no stored session makes no background account requests', (
+  testWidgets('disabled guest capability never creates a background profile', (
     tester,
   ) async {
     final service = _DisplayTransport();
     debugAccountTransport = service;
     await _pump(tester, size: const Size(820, 560));
-    expect(service.paths, isEmpty);
+    expect(service.paths, ['/v1/capabilities']);
+    expect(
+      service.paths.where((path) => path.startsWith('/v1/auth/')),
+      isEmpty,
+    );
     expect(find.text('Войти через Telegram'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('home-connect')).hitTestable(),
@@ -312,7 +316,7 @@ void main() {
             .data,
         'Аккаунт',
       );
-      expect(service.paths, ['/v1/me']);
+      expect(service.paths, ['/v1/capabilities', '/v1/me']);
       expect(
         find.byKey(const ValueKey('home-connect')).hitTestable(),
         findsOneWidget,
@@ -400,7 +404,7 @@ void main() {
       expect(find.text('Джамуха'), findsOneWidget);
       expect(find.text('@dropo_owner'), findsOneWidget);
       expect(find.text('private-phone-value'), findsNothing);
-      expect(service.paths, ['/v1/me']);
+      expect(service.paths, ['/v1/capabilities', '/v1/me']);
       service.name = 'Новое имя';
       await _tap(tester, 'nav-account');
       expect(find.text('Новое имя'), findsNWidgets(2));

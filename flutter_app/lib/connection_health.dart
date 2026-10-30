@@ -229,6 +229,9 @@ class _ConnectionHealthPanelState extends State<_ConnectionHealthPanel> {
             ? _cleanError(parsed.error)
             : '';
       });
+      IncidentScope.maybeOf(
+        context,
+      )?.observeReport(parsed, _bundledAppVersion, widget.routingMode);
     } catch (error) {
       if (!mounted || generation != checkGeneration || !widget.connected) {
         return;

@@ -336,6 +336,11 @@ class _GuidedHelpPageState extends State<_GuidedHelpPage> {
         checking = false;
         report = parsed;
       });
+      IncidentScope.maybeOf(context)?.observeReport(
+        parsed,
+        widget.status.version.version,
+        widget.routingMode,
+      );
       final remaining =
           const Duration(seconds: 90) -
           DateTime.now().difference(parsed.checkedAt!);
