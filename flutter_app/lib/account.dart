@@ -64,6 +64,9 @@ class _AccountRecord {
     required this.maskedPhone,
     required this.plan,
     required this.telegramUsername,
+    this.authMethod = 'telegram',
+    this.demoAccount = false,
+    this.username = '',
     this.speedBoostUntil,
   });
 
@@ -73,12 +76,18 @@ class _AccountRecord {
     maskedPhone: json['maskedPhone']?.toString() ?? '',
     plan: json['plan']?.toString() ?? 'Dropo Free',
     telegramUsername: json['telegramUsername']?.toString() ?? '',
+    authMethod: json['authMethod'] == 'password' ? 'password' : 'telegram',
+    demoAccount: json['demoAccount'] == true,
+    username: json['username']?.toString() ?? '',
     speedBoostUntil: DateTime.tryParse(
       json['speedBoostUntil']?.toString() ?? '',
     ),
   );
 
   final String id, displayName, maskedPhone, plan, telegramUsername;
+  final String authMethod, username;
+  final bool demoAccount;
+  bool get passwordAccount => authMethod == 'password';
   final DateTime? speedBoostUntil;
 }
 
@@ -449,6 +458,8 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   String _message = '';
   bool _busy = false;
   bool _registrationAvailable = false;
+  bool _passwordLoginAvailable = false;
+  bool _passwordDialogOpen = false;
   bool _purchasingAvailable = false;
   bool _accountDeletionAvailable = false;
   bool _development = false;
@@ -514,7 +525,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         setState(() {
           _phase = invalid ? _AccountPhase.signedOut : _AccountPhase.offline;
           _message = invalid
-              ? 'Сессия завершена. Войдите через Telegram снова.'
+              ? 'Сессия завершена. Войдите в аккаунт снова.'
               : 'Сервис аккаунтов временно недоступен. Сохранённая сессия не удалена; VPN продолжает работать независимо от аккаунта.';
         });
       }
@@ -524,6 +535,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   Future<void> _loadCapabilities() async {
     _message = '';
     _registrationAvailable = false;
+    _passwordLoginAvailable = false;
     _purchasingAvailable = false;
     _accountDeletionAvailable = false;
     _development = false;
@@ -537,7 +549,8 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       _purchasingAvailable =
           _accountPurchasesEnabled && response['purchasingAvailable'] == true;
       _accountDeletionAvailable = response['accountDeletionAvailable'] == true;
-      if (!_registrationAvailable) {
+      _passwordLoginAvailable = response['passwordLoginAvailable'] == true;
+      if (!_registrationAvailable && !_passwordLoginAvailable) {
         _message = 'Вход через Telegram пока не настроен на сервере.';
       }
       if (_purchasingAvailable) await _loadProduct();
@@ -571,6 +584,60 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     widget.onDisplayChanged?.call(
       AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
     );
+  }
+
+  Future<void> _startPasswordSignIn() async {
+    if (_busy || !_passwordLoginAvailable) return;
+    _stopAuthTimers();
+    final generation = ++_authGeneration;
+    setState(() {
+      _busy = true;
+      _passwordDialogOpen = true;
+      _message = '';
+    });
+    try {
+      final response = await showDialog<Map<String, dynamic>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) =>
+            _PasswordSignInDialog(api: _api, deviceName: _deviceName()),
+      );
+      if (response == null) return;
+      final token = response['accessToken'] as String;
+      if (!mounted || generation != _authGeneration) {
+        await _discardUnclaimedAccountSession(_api, token);
+        return;
+      }
+      // A native secure write cannot be cancelled once started. Fence it before
+      // entry and keep all competing authentication actions disabled until done.
+      final persisted = await _vault.write(token);
+      _token = token;
+      if (!mounted || generation != _authGeneration) return;
+      setState(() {
+        _account = _AccountRecord.fromJson(_asMap(response['account']));
+        _phase = _AccountPhase.signedIn;
+        _authRetryAvailable = false;
+        _message = persisted
+            ? ''
+            : _vault.previousCredentialMayRemain
+            ? 'Вход сохранён только до закрытия приложения. Не удалось очистить прежнюю защищённую сессию. Повторите выход из аккаунта.'
+            : 'Вход выполнен, но защищённое хранилище недоступно. Сессия сохранена только до закрытия приложения.';
+      });
+      widget.onDisplayChanged?.call(
+        AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
+      );
+    } catch (error) {
+      if (mounted && generation == _authGeneration) {
+        setState(() => _message = _accountError(error));
+      }
+    } finally {
+      if (mounted && generation == _authGeneration) {
+        setState(() {
+          _busy = false;
+          _passwordDialogOpen = false;
+        });
+      }
+    }
   }
 
   Future<void> _startAuth({String purpose = 'login'}) async {
@@ -919,6 +986,8 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         token: token,
         endpoint: widget.endpoint,
         development: _development,
+        passwordAccount: _account?.passwordAccount == true,
+        demoAccount: _account?.demoAccount == true,
         onOpenExternal: widget.onOpenExternal,
       ),
     );
@@ -993,7 +1062,9 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
 
   Future<void> _showSessions() async {
     final token = _token;
-    if (token == null) return;
+    if (_busy || token == null) return;
+    final generation = _authGeneration;
+    setState(() => _busy = true);
     try {
       final response = await _api.request('GET', '/v1/sessions', token: token);
       final raw = response['sessions'];
@@ -1006,7 +1077,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                 )
                 .toList()
           : <_AccountSession>[];
-      if (!mounted) return;
+      if (!mounted || generation != _authGeneration || _token != token) return;
       await showDialog<void>(
         context: context,
         barrierDismissible: false,
@@ -1014,11 +1085,18 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
           sessions: sessions,
           api: _api,
           token: token,
+          passwordAccount: _account?.passwordAccount == true,
           onOpenExternal: widget.onOpenExternal,
         ),
       );
     } catch (error) {
-      if (mounted) setState(() => _message = _accountError(error));
+      if (mounted && generation == _authGeneration) {
+        setState(() => _message = _accountError(error));
+      }
+    } finally {
+      if (mounted && generation == _authGeneration) {
+        setState(() => _busy = false);
+      }
     }
   }
 
@@ -1107,15 +1185,16 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
             ),
           ],
         ),
-        demoEntry: true,
-        demoFirst: true,
       );
     }
     return switch (_phase) {
       _AccountPhase.loading => const Center(
         child: CircularProgressIndicator(strokeWidth: 2.5),
       ),
-      _AccountPhase.signedOut => _signedOut(),
+      _AccountPhase.signedOut => TickerMode(
+        enabled: !_passwordDialogOpen,
+        child: _signedOut(),
+      ),
       _AccountPhase.pendingAuth => _pendingAuth(),
       _AccountPhase.signedIn => _signedIn(),
       _AccountPhase.offline => _offlineAccount(),
@@ -1144,28 +1223,13 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     };
   }
 
-  Widget _page(
-    Widget child, {
-    bool demoEntry = false,
-    bool demoFirst = false,
-  }) => Align(
+  Widget _page(Widget child) => Align(
     alignment: Alignment.topCenter,
     child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 960),
       child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
-        child: demoEntry
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (!demoFirst) child,
-                  if (!demoFirst) const SizedBox(height: 28),
-                  _AccountDemoEntry(onOpenExternal: widget.onOpenExternal),
-                  if (demoFirst) const SizedBox(height: 28),
-                  if (demoFirst) child,
-                ],
-              )
-            : child,
+        child: child,
       ),
     ),
   );
@@ -1202,11 +1266,27 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
               ),
             ),
             const SizedBox(height: 10),
-            const Text(
-              'Войдите через Telegram. При первом подтверждении аккаунт создаётся автоматически. Бесплатный VPN работает и без входа.',
-              style: TextStyle(color: _atlasMuted, fontSize: 15),
+            Text(
+              _passwordLoginAvailable
+                  ? 'Выберите способ входа: Telegram или выданный логин и пароль. Бесплатный VPN работает и без входа.'
+                  : 'Войдите через Telegram. При первом подтверждении аккаунт создаётся автоматически. Бесплатный VPN работает и без входа.',
+              style: const TextStyle(color: _atlasMuted, fontSize: 15),
             ),
             const SizedBox(height: 28),
+            if (_passwordLoginAvailable) ...[
+              OutlinedButton.icon(
+                key: const ValueKey('account-password-open'),
+                onPressed: _busy ? null : _startPasswordSignIn,
+                icon: const Icon(Icons.password_outlined),
+                label: const Text('Войти по логину и паролю'),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Для аккаунтов с выданными данными входа. Telegram не требуется.',
+                style: TextStyle(color: _atlasMuted, height: 1.4),
+              ),
+              const SizedBox(height: 28),
+            ],
             if (_development) ...[
               const _AccountNotice(
                 message:
@@ -1240,7 +1320,6 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         );
       },
     ),
-    demoEntry: true,
   );
 
   Widget _pendingAuth() => _page(
@@ -1354,10 +1433,19 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_development) ...[
+          if (_development && !account.passwordAccount) ...[
             const _AccountNotice(
               message:
                   'Локальный тестовый аккаунт. Это имитация регистрации; настоящий Telegram не подключён.',
+            ),
+            const SizedBox(height: 20),
+          ],
+          if (account.demoAccount) ...[
+            const _AccountNotice(
+              message:
+                  'Тестовый аккаунт на сервере. Подключение и действия с сессиями настоящие. '
+                  'Удаление стирает профиль и завершает все сессии. Следующий вход выданными '
+                  'данными создаст новый пустой тестовый профиль без восстановления удалённых данных.',
             ),
             const SizedBox(height: 20),
           ],
@@ -1371,7 +1459,12 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                   color: _atlasMint.withValues(alpha: 0.12),
                   border: Border.all(color: _atlasMint.withValues(alpha: 0.45)),
                 ),
-                child: const Icon(Icons.send_rounded, color: _atlasMint),
+                child: Icon(
+                  account.passwordAccount
+                      ? Icons.person_outline
+                      : Icons.send_rounded,
+                  color: _atlasMint,
+                ),
               ),
               const SizedBox(width: 16),
               Expanded(
@@ -1388,7 +1481,11 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      _development
+                      account.passwordAccount
+                          ? account.username.isEmpty
+                                ? 'Вход по паролю'
+                                : account.username
+                          : _development
                           ? 'Telegram не подключён'
                           : account.telegramUsername.isNotEmpty
                           ? '@${account.telegramUsername}'
@@ -1460,24 +1557,30 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                 _AccountActionRow(
                   icon: Icons.shield_outlined,
                   title: 'Подтверждение действий',
-                  detail: _development
+                  detail: account.passwordAccount
+                      ? 'Чувствительные действия подтверждаются паролем Dropo'
+                      : _development
                       ? 'Подтверждения имитируются на локальной странице'
                       : 'Вход и завершение сессий подтверждаются в Telegram',
                   onTap: () => _showTextDialog(
                     context,
                     'Подтверждение действий',
-                    _development
+                    account.passwordAccount
+                        ? 'Повторный ввод пароля Dropo подтверждает удаление аккаунта и завершение других сессий. Пароль Telegram не требуется.'
+                        : _development
                         ? 'Это локальная проверка интерфейса, а не реальная авторизация. Для настоящего входа нужно настроить Telegram-бота и HTTPS backend.'
                         : 'Dropo никогда не запрашивает код входа или пароль Telegram. Подтверждайте действие только в официальном боте после запуска из приложения.',
                   ),
                 ),
-                const Divider(height: 1),
-                _AccountActionRow(
-                  icon: Icons.key_outlined,
-                  title: 'Восстановить доступ',
-                  detail: 'Подтвердить Telegram и завершить другие сессии',
-                  onTap: _busy ? null : _startRecoveryDialog,
-                ),
+                if (!account.passwordAccount) ...[
+                  const Divider(height: 1),
+                  _AccountActionRow(
+                    icon: Icons.key_outlined,
+                    title: 'Восстановить доступ',
+                    detail: 'Подтвердить Telegram и завершить другие сессии',
+                    onTap: _busy ? null : _startRecoveryDialog,
+                  ),
+                ],
                 const Divider(height: 1),
                 _AccountActionRow(
                   icon: Icons.devices_outlined,
@@ -1520,11 +1623,14 @@ class _DeleteAccountDialog extends StatefulWidget {
     required this.endpoint,
     required this.development,
     required this.onOpenExternal,
+    this.passwordAccount = false,
+    this.demoAccount = false,
   });
 
   final AccountTransport api;
   final String token, endpoint;
   final bool development;
+  final bool passwordAccount, demoAccount;
   final Future<void> Function(String) onOpenExternal;
 
   @override
@@ -1532,6 +1638,7 @@ class _DeleteAccountDialog extends StatefulWidget {
 }
 
 class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  final _password = TextEditingController();
   String? _confirmation, _telegramUrl;
   DateTime? _deadline;
   String _message = '';
@@ -1545,6 +1652,8 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
   void dispose() {
     ++_generation;
     _stopTimers();
+    _password.clear();
+    _password.dispose();
     super.dispose();
   }
 
@@ -1582,6 +1691,14 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
 
   Future<void> _createConfirmation() async {
     if (_working) return;
+    final password = _password.text;
+    if (widget.passwordAccount && password.isEmpty) {
+      setState(
+        () => _message = 'Введите пароль Dropo для подтверждения удаления.',
+      );
+      return;
+    }
+    _password.clear();
     _stopTimers();
     final generation = ++_generation;
     setState(() {
@@ -1593,12 +1710,26 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
       final response = await widget.api
           .request(
             'POST',
-            '/v1/action-confirmations',
+            widget.passwordAccount
+                ? '/v1/action-confirmations/password'
+                : '/v1/action-confirmations',
             token: widget.token,
-            body: const {'action': 'account.delete'},
+            body: {
+              'action': 'account.delete',
+              if (widget.passwordAccount) 'password': password,
+            },
           )
           .timeout(const Duration(seconds: 20));
       if (!mounted || generation != _generation) return;
+      if (widget.passwordAccount) {
+        final confirmation = _approvedPasswordConfirmation(response);
+        setState(() {
+          _confirmation = confirmation;
+          _deadline = DateTime.tryParse(response['expiresAt'] as String);
+        });
+        await _consumeConfirmation(confirmation, generation);
+        return;
+      }
       final confirmation = response['confirmationToken'];
       final link = response['telegramUrl'];
       final rawExpiry = response['expiresAt'];
@@ -1773,10 +1904,18 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Будут безвозвратно удалены Telegram-привязка, профиль, сессии устройств и связанные данные аккаунта. Все устройства выйдут из аккаунта. Это не обычный выход из приложения.',
-              style: TextStyle(height: 1.45),
+            Text(
+              widget.passwordAccount
+                  ? 'Будут безвозвратно удалены профиль, сессии устройств и связанные данные аккаунта. Все устройства выйдут из аккаунта. Это не обычный выход из приложения.'
+                  : 'Будут безвозвратно удалены Telegram-привязка, профиль, сессии устройств и связанные данные аккаунта. Все устройства выйдут из аккаунта. Это не обычный выход из приложения.',
+              style: const TextStyle(height: 1.45),
             ),
+            if (widget.demoAccount) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'Выданные тестовые данные входа останутся действительными. Следующий вход создаст новый пустой профиль; удалённые данные не восстановятся.',
+              ),
+            ],
             const SizedBox(height: 12),
             const Text(
               'Личные VPN-источники, подписки, настройки и локальные журналы на устройствах останутся. Их можно удалить отдельно в приложении или очистить его хранилище.',
@@ -1784,7 +1923,16 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
             ),
             const SizedBox(height: 12),
             _PrivacyActions(onOpenExternal: widget.onOpenExternal),
-            if (_confirmation != null) ...[
+            if (widget.passwordAccount && _confirmation == null) ...[
+              const SizedBox(height: 16),
+              _AccountPasswordField(
+                fieldKey: const ValueKey('account-delete-password'),
+                controller: _password,
+                enabled: !_working,
+                onSubmitted: _createConfirmation,
+              ),
+            ],
+            if (_confirmation != null && !widget.passwordAccount) ...[
               const SizedBox(height: 12),
               Text(
                 widget.development
@@ -1824,13 +1972,15 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
             key: const ValueKey('account-delete-confirm'),
             onPressed: _working ? null : _createConfirmation,
             child: Text(
-              widget.development
+              widget.passwordAccount
+                  ? 'Удалить аккаунт'
+                  : widget.development
                   ? 'Подтвердить в локальном тесте'
                   : 'Подтвердить удаление в Telegram',
             ),
           )
         else ...[
-          if (!_uncertainResult)
+          if (!_uncertainResult && !widget.passwordAccount)
             OutlinedButton(
               key: const ValueKey('account-delete-open-telegram'),
               onPressed: _working || _openingTelegram ? null : _openTelegram,
@@ -2397,27 +2547,44 @@ class _SessionsDialog extends StatefulWidget {
     required this.api,
     required this.token,
     required this.onOpenExternal,
+    this.passwordAccount = false,
   });
   final List<_AccountSession> sessions;
   final AccountTransport api;
   final String token;
+  final bool passwordAccount;
   final Future<void> Function(String) onOpenExternal;
   @override
   State<_SessionsDialog> createState() => _SessionsDialogState();
 }
 
 class _SessionsDialogState extends State<_SessionsDialog> {
+  final _password = TextEditingController();
+  int _generation = 0;
   bool busy = false;
   String message = '';
   Timer? poll;
 
   @override
   void dispose() {
+    ++_generation;
     poll?.cancel();
+    _password.clear();
+    _password.dispose();
     super.dispose();
   }
 
   Future<void> _revokeOthers() async {
+    if (busy) return;
+    final password = _password.text;
+    if (widget.passwordAccount && password.isEmpty) {
+      setState(
+        () => message = 'Введите пароль Dropo для завершения других сессий.',
+      );
+      return;
+    }
+    _password.clear();
+    final generation = ++_generation;
     setState(() {
       busy = true;
       message = '';
@@ -2425,16 +2592,40 @@ class _SessionsDialogState extends State<_SessionsDialog> {
     try {
       final response = await widget.api.request(
         'POST',
-        '/v1/action-confirmations',
+        widget.passwordAccount
+            ? '/v1/action-confirmations/password'
+            : '/v1/action-confirmations',
         token: widget.token,
-        body: {'action': 'sessions.revoke_others'},
+        body: {
+          'action': 'sessions.revoke_others',
+          if (widget.passwordAccount) 'password': password,
+        },
       );
+      if (!mounted || generation != _generation) return;
+      if (widget.passwordAccount) {
+        final confirmation = _approvedPasswordConfirmation(response);
+        final result = await widget.api.request(
+          'POST',
+          '/v1/action-confirmations/$confirmation/consume',
+          token: widget.token,
+          body: const {},
+        );
+        if (!mounted || generation != _generation) return;
+        if (result['success'] != true) {
+          throw const AccountApiException(
+            'Сервер не подтвердил завершение сессий. Обновите список устройств.',
+          );
+        }
+        Navigator.pop(context);
+        return;
+      }
       final confirmation = response['confirmationToken']?.toString() ?? '';
       final url = response['telegramUrl']?.toString() ?? '';
       if (confirmation.isEmpty) {
         throw const AccountApiException('Подтверждение не создано.');
       }
       if (url.isNotEmpty) await widget.onOpenExternal(url);
+      if (!mounted || generation != _generation) return;
       poll = Timer.periodic(const Duration(seconds: 2), (_) async {
         try {
           final status = await widget.api.request(
@@ -2457,7 +2648,7 @@ class _SessionsDialogState extends State<_SessionsDialog> {
         }
       });
     } catch (error) {
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() {
           busy = false;
           message = _accountError(error);
@@ -2467,52 +2658,77 @@ class _SessionsDialogState extends State<_SessionsDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Активные сессии'),
-    content: SizedBox(
-      width: 480,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final session in widget.sessions)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(
-                session.current ? Icons.laptop_windows : Icons.devices_outlined,
-                color: session.current ? _atlasMint : _atlasMuted,
+  Widget build(BuildContext context) => PopScope(
+    canPop: !busy,
+    child: AlertDialog(
+      title: const Text('Активные сессии'),
+      scrollable: true,
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final session in widget.sessions)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  session.current
+                      ? Icons.laptop_windows
+                      : Icons.devices_outlined,
+                  color: session.current ? _atlasMint : _atlasMuted,
+                ),
+                title: Text(session.deviceName),
+                subtitle: Text(
+                  session.lastSeenAt == null
+                      ? 'Время неизвестно'
+                      : 'Активность: ${_dateTimeLabel(session.lastSeenAt!)}',
+                ),
+                trailing: session.current
+                    ? const Text('Текущая', style: TextStyle(color: _atlasMint))
+                    : null,
               ),
-              title: Text(session.deviceName),
-              subtitle: Text(
-                session.lastSeenAt == null
-                    ? 'Время неизвестно'
-                    : 'Активность: ${_dateTimeLabel(session.lastSeenAt!)}',
+            if (message.isNotEmpty)
+              Text(message, style: const TextStyle(color: Colors.orangeAccent)),
+            if (widget.passwordAccount &&
+                widget.sessions.any((item) => !item.current)) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'Для завершения остальных сессий введите пароль Dropo.',
               ),
-              trailing: session.current
-                  ? const Text('Текущая', style: TextStyle(color: _atlasMint))
-                  : null,
-            ),
-          if (message.isNotEmpty)
-            Text(message, style: const TextStyle(color: Colors.orangeAccent)),
-          if (busy) ...[
-            const SizedBox(height: 12),
-            const LinearProgressIndicator(),
-            const SizedBox(height: 8),
-            const Text('Подтвердите действие в Telegram.'),
+              const SizedBox(height: 8),
+              _AccountPasswordField(
+                fieldKey: const ValueKey('account-sessions-password'),
+                controller: _password,
+                enabled: !busy,
+                onSubmitted: _revokeOthers,
+              ),
+            ],
+            if (busy) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(),
+              const SizedBox(height: 8),
+              Text(
+                widget.passwordAccount
+                    ? 'Завершаем другие сессии…'
+                    : 'Подтвердите действие в Telegram.',
+              ),
+            ],
           ],
-        ],
-      ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: busy ? null : () => Navigator.pop(context),
-        child: const Text('Закрыть'),
-      ),
-      if (widget.sessions.where((item) => !item.current).isNotEmpty)
-        FilledButton(
-          onPressed: busy ? null : _revokeOthers,
-          child: const Text('Завершить остальные'),
         ),
-    ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: busy ? null : () => Navigator.pop(context),
+          child: const Text('Закрыть'),
+        ),
+        if (widget.sessions.where((item) => !item.current).isNotEmpty)
+          FilledButton(
+            key: const ValueKey('account-sessions-revoke'),
+            onPressed: busy ? null : _revokeOthers,
+            child: const Text('Завершить остальные'),
+          ),
+      ],
+    ),
   );
 }
 

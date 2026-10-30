@@ -3,7 +3,7 @@
 Developer: Indzhiev Ayush. Privacy and support contact:
 [dr.oponevedimka@gmail.com](mailto:dr.oponevedimka@gmail.com).
 
-Last updated: 15 October 2026.
+Last updated: 30 October 2026.
 
 This policy covers Dropo (Dropo Connect Booster) for Windows and Android,
 including the Google Play package `com.dropo.myapp` and the separate Android Preview package
@@ -79,7 +79,7 @@ GitHub, IPinfo and chosen VPN operators, apply their own policies. The account
 service is not a VPN relay and does not receive VPN traffic, browsing history,
 DNS history or personal subscription URLs.
 
-## Optional Telegram account
+## Optional account
 
 An explicit sign-in action opens `@DropoRigistration_bot`. Opening the bot's
 sign-in link sends Telegram user and chat IDs and available display name and
@@ -93,6 +93,14 @@ New registration does not request a phone number, contacts, Telegram password or
 login codes. Legacy accounts may retain a previously stored pseudonymised phone
 digest and last four digits; deletion removes them too. Bot conversations remain
 in Telegram; users can remove the chat with Telegram's own controls.
+
+Pre-provisioned demonstration accounts also support username/password sign-in
+without Telegram. The service processes the username and password to authenticate
+and confirm sensitive actions. Passwords travel only over HTTPS and are stored
+on the server as slow cryptographic hashes with individual salts, never as plain
+text. The app does not save passwords. These accounts use real server profiles,
+sessions and deletion, and the normal VPN sources. Do not add personal data to
+demonstration accounts.
 
 Account requests use HTTPS. Windows session tokens use current-user DPAPI;
 Android uses Keystore-backed encrypted private storage. Android app-data backups
@@ -111,6 +119,11 @@ collect payment details.
   local application data.
 - Account profiles remain until confirmed deletion. Active sessions remain until
   expiry or revocation; expired or revoked session rows are removed within 30 days.
+- A pre-provisioned demonstration login and its protected password hash remain
+  until the developer disables test access, so review can be repeated. After
+  profile deletion the login no longer references the erased sessions or history.
+  Only a later explicit sign-in creates a new empty profile with a new identifier;
+  erased data is never restored.
 - Expired login, action-confirmation and web-deletion challenges are removed within
   24 hours of expiry.
 - Account security events remain for at most 30 days. Associated events are
@@ -133,8 +146,9 @@ not record their tokens, account IDs or Telegram identities.
 
 Request deletion in the Dropo account section or on the
 [external deletion page](https://dropo.fun/account/delete), even without
-the app installed. Confirm in the same Telegram identity used for registration.
-No account is deleted without that explicit confirmation.
+the app installed. Telegram accounts confirm through the same Telegram identity
+used for registration. Password demonstration accounts confirm with their
+password. No account is deleted without explicit confirmation.
 
 Confirmed deletion removes the profile and related data from the active server
 database: Telegram IDs, name, username, legacy registration data, every session,
