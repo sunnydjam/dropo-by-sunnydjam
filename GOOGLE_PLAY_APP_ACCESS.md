@@ -1,4 +1,4 @@
-# Google Play app access — 3.0.52
+# Google Play app access — 3.0.54
 
 This release replaces the local mock account demonstration with server-backed
 demonstration accounts. They use real session, revocation and deletion operations.
@@ -25,6 +25,16 @@ separately in Play Console App access.
    Use a different supplied account for independent/concurrent tests.
 5. Deletion is also available without the installed app at
    https://dropo.fun/account/delete using the username/password form.
+
+Guest profiles do not require Telegram or a password account. To review their
+external deletion, use a fresh installation, open **Account / Аккаунт → Deletion
+on the website / Удаление на сайте**, and create and save the deletion code. Open
+https://dropo.fun/account/delete in a browser (the app may be closed or uninstalled),
+enter the saved code in the guest form, confirm, and submit. The profile, sessions
+and related connection diagnostics are removed immediately. This code grants no
+login or data access and becomes invalid if the guest is linked to a registered
+account. Guest deletion is also available directly in the app without exporting a
+code. After external deletion the old installation cannot recreate the profile.
 
 VPN use does not require sign-in. On the home screen accept the in-app VPN
 disclosure, add **Dropo Free** when requested, choose **All through VPN / Всё через
@@ -53,11 +63,10 @@ The same implemented user functions are used by both authentication methods.
   version and activity metadata. Optional connection diagnostics require separate
   consent and are linked to the installation. Update Data safety accordingly;
   do not reuse a declaration claiming no collection or no diagnostics.
-- Guest deletion is currently offered only inside the app by product decision.
-  Review Google's external account-deletion requirement for this guest lifecycle
-  before submitting to production. The existing web deletion page covers Telegram
-  and password accounts; it must not be described as guest web deletion.
-  [Google account-deletion requirements](https://support.google.com/googleplay/android-developer/answer/13327111?hl=en).
+- Version 3.0.54 adds guest web deletion using a separately saved deletion-only
+  code. Check all three forms at https://dropo.fun/account/delete and use that URL
+  in the account-deletion field. See [GOOGLE_PLAY_DATA_SAFETY.md](GOOGLE_PLAY_DATA_SAFETY.md)
+  for the field-by-field declaration and provider facts that require verification.
 - Keep test credentials valid and the backend/free source reachable throughout
   review. Disabling an identity revokes its access; do not disable it during review.
 

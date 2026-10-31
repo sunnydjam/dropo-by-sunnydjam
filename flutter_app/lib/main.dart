@@ -35,6 +35,7 @@ part 'incident_reporting.dart';
 part 'android_vpn_protection.dart';
 part 'account.dart';
 part 'guest_identity.dart';
+part 'guest_web_deletion.dart';
 part 'account_login.dart';
 part 'privacy_links.dart';
 part 'vpn_disclosure.dart';

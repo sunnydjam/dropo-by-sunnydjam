@@ -1607,6 +1607,18 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _showGuestWebDeletion() async {
+    final identity = widget.identity;
+    if (_busy || identity == null || identity.accountKind != 'guest') return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => GuestWebDeletionDialog(
+        identity: identity,
+        onOpenExternal: widget.onOpenExternal,
+      ),
+    );
+  }
+
   Widget _guestProfile() => _page(
     Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1622,7 +1634,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         ),
         const SizedBox(height: 12),
         const Text(
-          'Dropo Free · Telegram и пароль не нужны. Профиль сохранён на этом устройстве. После удаления приложения доступ к нему может быть утрачен.',
+          'Dropo Free · Telegram и пароль не нужны. Профиль сохранён на этом устройстве. Чтобы удалить его через сайт после удаления приложения, заранее сохраните код удаления.',
           style: TextStyle(color: _atlasMuted, height: 1.5),
         ),
         const SizedBox(height: 24),
@@ -1665,6 +1677,15 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
           ],
         ),
         const SizedBox(height: 24),
+        if (widget.identity != null) ...[
+          OutlinedButton.icon(
+            key: const ValueKey('guest-web-delete'),
+            onPressed: _busy ? null : _showGuestWebDeletion,
+            icon: const Icon(Icons.key_outlined),
+            label: const Text('Удаление на сайте'),
+          ),
+          const SizedBox(height: 24),
+        ],
         Wrap(
           spacing: 12,
           runSpacing: 12,

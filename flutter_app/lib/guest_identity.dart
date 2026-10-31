@@ -39,12 +39,16 @@ class GuestIdentityCoordinator extends ChangeNotifier {
   Map<String, dynamic> _record;
   Map<String, dynamic>? _account;
   Future<void>? _restoring;
+  Future<String>? _guestDeletionRequest;
+  int? _guestDeletionRequestEpoch;
+  int? _guestDeletionRefreshEpoch;
   Timer? _renewal;
   DateTime? _lastAttempt;
   int _epoch = 0;
   bool _disposed = false, _foreground = true;
   bool _locallySuppressed = false, _changingIdentity = false;
   bool guestAvailable = false, incidentsAvailable = false;
+  bool guestWebDeletionAvailable = false;
   String state = 'idle';
 
   String? get token =>
@@ -61,6 +65,134 @@ class GuestIdentityCoordinator extends ChangeNotifier {
   Map<String, dynamic>? get account =>
       _account == null ? null : Map.unmodifiable(_account!);
   bool get deletionPending => _record['pendingDeletion'] is Map;
+
+  /// Returning from the external deletion page must check revocation even when
+  /// the user finishes within the normal background-refresh cooldown.
+  void checkGuestProfileOnReturn() {
+    if (!_disposed && accountKind == 'guest' && !suppressed) {
+      _guestDeletionRefreshEpoch = _epoch;
+    }
+  }
+
+  /// An explicit user action prepares a deletion-only credential. Never invoked
+  /// during enrollment, login, or opening the account page.
+  Future<String> guestWebDeletionCode() {
+    final epoch = _epoch;
+    final installation = installationId;
+    _requireGuestDeletionIdentity(epoch, installation);
+    if (_guestDeletionRequest != null && _guestDeletionRequestEpoch == epoch) {
+      return _guestDeletionRequest!;
+    }
+    late final Future<String> pending;
+    pending = _prepareGuestDeletionCode(epoch, installation!).whenComplete(() {
+      if (identical(_guestDeletionRequest, pending)) {
+        _guestDeletionRequest = null;
+        _guestDeletionRequestEpoch = null;
+      }
+    });
+    _guestDeletionRequest = pending;
+    _guestDeletionRequestEpoch = epoch;
+    return pending;
+  }
+
+  void _requireGuestDeletionIdentity(int epoch, String? installation) {
+    if (_disposed ||
+        epoch != _epoch ||
+        !persistSession ||
+        _changingIdentity ||
+        suppressed ||
+        deletionPending ||
+        accountKind != 'guest' ||
+        _account?['demoAccount'] == true ||
+        installation == null ||
+        installation != installationId) {
+      throw const AccountIdentityChanged();
+    }
+  }
+
+  Future<String> _prepareGuestDeletionCode(
+    int epoch,
+    String installation,
+  ) async {
+    const namespace = 'guest_web_deletion';
+    var saved = await readPrivateState(namespace);
+    _requireGuestDeletionIdentity(epoch, installation);
+    if (saved != null &&
+        (saved['installationId'] != installation ||
+            saved['registered'] is! bool ||
+            !_validGuestDeletionSecret(saved['secret']) ||
+            saved['secret'] == _record['installationSecret'])) {
+      // A corrupt record must never silently rotate an already exported code.
+      throw const FormatException('Invalid deletion credential state.');
+    }
+    if (saved?['registered'] == true) return 'dg1.${saved!['secret']}';
+    if (!guestWebDeletionAvailable) {
+      throw const AccountApiException(
+        'Удаление на сайте пока недоступно. Повторите позже.',
+        code: 'guest_web_deletion_unavailable',
+      );
+    }
+    if (saved == null) {
+      final random = math.Random.secure();
+      final secret = base64UrlEncode(
+        List<int>.generate(32, (_) => random.nextInt(256)),
+      ).replaceAll('=', '');
+      saved = {
+        'installationId': installation,
+        'secret': secret,
+        'registered': false,
+      };
+      // Persist before the request, so a lost response retries the SAME code.
+      // A failed protected-store write aborts without issuing any credential.
+      await writePrivateState(namespace, saved);
+      _requireGuestDeletionIdentity(epoch, installation);
+    }
+    final secret = saved['secret'] as String;
+    final requestToken = token;
+    Map<String, dynamic> result;
+    try {
+      result = await _api.request(
+        'PUT',
+        '/v1/guest/deletion-key',
+        token: requestToken,
+        body: {'deletionSecret': secret},
+      );
+    } on AccountApiException catch (error) {
+      _requireGuestDeletionIdentity(epoch, installation);
+      if (error.status != 401) rethrow;
+      // Reuse normal restoration: a revoked installation is suppressed rather
+      // than replaced by a new guest, while an expired bearer may be renewed.
+      await restore();
+      _requireGuestDeletionIdentity(epoch, installation);
+      if (token == requestToken || !guestWebDeletionAvailable) rethrow;
+      result = await _api.request(
+        'PUT',
+        '/v1/guest/deletion-key',
+        token: token,
+        body: {'deletionSecret': secret},
+      );
+    }
+    _requireGuestDeletionIdentity(epoch, installation);
+    if (result['ready'] != true) {
+      throw const FormatException('Deletion credential was not confirmed.');
+    }
+    await writePrivateState(namespace, {...saved, 'registered': true});
+    _requireGuestDeletionIdentity(epoch, installation);
+    return 'dg1.$secret';
+  }
+
+  static bool _validGuestDeletionSecret(dynamic value) {
+    if (value is! String || !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(value)) {
+      return false;
+    }
+    try {
+      final bytes = base64Url.decode('$value=');
+      return bytes.length == 32 &&
+          base64UrlEncode(bytes).replaceAll('=', '') == value;
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<Map<String, dynamic>?> readPrivateState(String namespace) async {
     if (persistSession) return store.readPrivateState(namespace);
@@ -143,6 +275,15 @@ class GuestIdentityCoordinator extends ChangeNotifier {
 
   Future<void> resume() async {
     if (_disposed || !_foreground || !available) return;
+    final refreshEpoch = _guestDeletionRefreshEpoch;
+    if (refreshEpoch == _epoch && accountKind == 'guest') {
+      // Finish an older refresh first; its response may predate web deletion.
+      await _restoring;
+      if (_disposed || !_foreground || refreshEpoch != _epoch) return;
+      _guestDeletionRefreshEpoch = null;
+      await restore();
+      return;
+    }
     final last = _lastAttempt;
     if (last != null && _now().difference(last) < const Duration(seconds: 30)) {
       return;
@@ -183,9 +324,12 @@ class GuestIdentityCoordinator extends ChangeNotifier {
           persistSession &&
           (_platform == 'android' || _platform == 'windows');
       incidentsAvailable = capabilities['incidentsAvailable'] == true;
+      guestWebDeletionAvailable =
+          guestAvailable && capabilities['guestWebDeletionAvailable'] == true;
     } catch (_) {
       guestAvailable = false;
       incidentsAvailable = false;
+      guestWebDeletionAvailable = false;
     }
     if (_disposed || epoch != _epoch) return;
     if (suppressed) {

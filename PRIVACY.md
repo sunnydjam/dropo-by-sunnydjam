@@ -13,8 +13,8 @@ do not require sign-in. The app automatically creates a guest installation profi
 when the account service is available; service failure does not block VPN use.
 
 The public policy is available at [dropo.fun/privacy](https://dropo.fun/privacy).
-Registered-account deletion is available at [dropo.fun/account/delete](https://dropo.fun/account/delete).
-Guest profiles can currently be deleted only inside the app.
+Account deletion, including guest profiles with a saved deletion code, is available
+at [dropo.fun/account/delete](https://dropo.fun/account/delete) without the app.
 
 ## VPN traffic and local data
 
@@ -59,6 +59,18 @@ create a new profile. Signing in to an ordinary account can link the installatio
 to that account. The current free VPN subscription remains shared; guest profiles
 do not yet provide individual VPN credentials or per-user traffic limits.
 
+For web deletion, a guest can explicitly create and save a separate random deletion
+code. The app keeps it in protected storage and sends it over HTTPS; the server
+stores only a purpose-specific cryptographic digest. The code can only delete that
+guest profile, not sign in, read data or delete a registered account. Anyone holding
+it can request deletion. Copying is an explicit user action; the code is never
+included in a website URL. Linking the guest to a registered account invalidates it.
+
+The account service uses the request's network address for abuse prevention.
+Rate-limit counters keyed by a network prefix are kept in server memory between
+requests; they are not claimed to be limited to one request or to a fixed retention
+period. They are not written to the account database or used to identify a person.
+
 The separate "Help improve connectivity" setting requires explicit consent.
 When enabled, the app sends bounded observations of connection failures,
 successful checks and recoveries, using existing checks while the app can observe
@@ -98,8 +110,8 @@ profile handle their own data under their respective privacy policies.
 - Service health checks contact the relevant service domains. Connectivity and
   latency checks also contact Google and Cloudflare test endpoints. The selected
   DNS service, including system DNS or Google Public DNS, receives domain lookups.
-- The optional network fingerprint check contacts `ipinfo.io` to obtain the
-  public IP country code.
+- The optional Windows network fingerprint check contacts `ipinfo.io` to obtain
+  the public IP country code. This check is not performed on Android.
 - Windows and directly installed APK update checks contact the fork's GitHub
   Releases API. Google Play builds update through Google Play and do not install
   replacement APKs from GitHub.
@@ -113,6 +125,12 @@ to their recipients. External services, including Telegram, Google, Cloudflare,
 GitHub, IPinfo and chosen VPN operators, apply their own policies. The account
 service is not a VPN relay and does not receive VPN traffic, browsing history,
 DNS history or personal subscription URLs.
+
+Android uses Google Public DNS over HTTPS for configured DNS paths. Google's
+[Public DNS privacy policy](https://developers.google.com/speed/public-dns/privacy)
+describes temporary IP/query logs and statistical records with location derived
+from the network address. These are provider-side processing, not a browsing
+history in the Dropo account database; the app does not collect GPS coordinates.
 
 ## Optional account
 
@@ -157,7 +175,9 @@ collect payment details.
 - Guest session tokens expire after one hour. A protected installation credential
   can restore the same active profile. After guest deletion, only the revoked
   credential digest remains for up to 30 days to reject delayed registration
-  requests; the profile, its sessions and diagnostic events are deleted.
+  requests; the profile, its sessions and diagnostic events are deleted. A web
+  deletion-code digest is retained while enabled for that guest; deletion removes
+  its account link and may leave a digest-only retry receipt for up to 24 hours.
 - Optional incident events remain locally for at most seven days and on the
   server for at most 30 days. Account deletion removes related events immediately.
 - A pre-provisioned demonstration login and its protected password hash remain
@@ -170,8 +190,8 @@ collect payment details.
 - Account security events remain for at most 30 days. Associated events are
   deleted immediately when the account is deleted.
 - For retries after a lost deletion response, an anonymous receipt containing
-  cryptographic digests of one-time tokens remains for at most 24 hours. It contains
-  no Telegram ID, name or account identifier.
+  cryptographic digests of one-time tokens or the guest deletion code remains for
+  at most 24 hours. It contains no Telegram ID, name or account identifier.
 
 Maintenance runs on service startup and hourly. If the service is unavailable,
 the next cleanup runs after recovery. Third-party services set their own
@@ -185,11 +205,16 @@ not record their tokens, account IDs or Telegram identities.
 
 ## Account deletion and local removal
 
-Delete a guest profile in the Dropo account section. Guest deletion currently has
-no external web form or exportable recovery/deletion code. Delete it before
-uninstalling if you want its server data removed; losing protected credentials
-can prevent proving ownership later. The app suppresses automatic recreation
-after deletion and retries a pending deletion only for the same installation.
+Delete a guest profile in the Dropo account section, or use the guest form on the
+[external deletion page](https://dropo.fun/account/delete). Before uninstalling,
+open **Account → Deletion on the website**, create a deletion code and save it
+somewhere private. The saved code and explicit confirmation let you delete the
+profile on the website without reinstalling Dropo or using Telegram. The website
+does not send the code in a URL or save it in browser storage. If you did not save
+the code and lost the protected app credentials, contact support to request help;
+ownership cannot be established from an IP address or device model alone, and
+automatic recovery is not available. The app suppresses automatic recreation after
+deletion and retries a pending deletion only for the same installation.
 
 For registered accounts, request deletion in the Dropo account section or on the
 [external deletion page](https://dropo.fun/account/delete), even without
