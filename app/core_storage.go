@@ -726,7 +726,13 @@ func (s *Storage) UpdateProfileVPNSources(id int, sources []VPNSource, wireGuard
 		if s.data.Profiles[index].ID != id {
 			continue
 		}
-		s.data.Profiles[index].VPNSources = append([]VPNSource(nil), sources...)
+		previous := s.data.Profiles[index]
+		nextSources := append([]VPNSource(nil), sources...)
+		// A network refresh may have captured its source list before the user
+		// renamed/starred it. Preserve current presentation metadata by identity;
+		// this does not change selected nodes, source order or routing settings.
+		preserveVPNSourceMetadata(nextSources, previous.VPNSources)
+		s.data.Profiles[index].VPNSources = nextSources
 		if len(manualPriority) > 0 {
 			s.data.Profiles[index].VPNSourceSelectionMode = "latency"
 			if manualPriority[0] {
@@ -738,7 +744,11 @@ func (s *Storage) UpdateProfileVPNSources(id int, sources []VPNSource, wireGuard
 		s.data.Profiles[index].SubscriptionURL = ""
 		s.data.Profiles[index].WireGuardConfigs = wireGuardConfigs
 		normalizeProfileVPNSources(&s.data.Profiles[index])
-		return s.saveInternal()
+		if err := s.saveInternal(); err != nil {
+			s.data.Profiles[index] = previous
+			return err
+		}
+		return nil
 	}
 	return fmt.Errorf("profile with ID %d not found", id)
 }
@@ -1558,6 +1568,10 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfile(profileID int, subscript
 // Provider order chooses node zero by default; source failover order is kept in
 // the generated selector and never expands to sibling nodes automatically.
 func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig, manualPriority ...bool) error {
+	return b.buildConfigForProfileSourcesValidated(profileID, sources, wireGuardConfigs, nil, manualPriority...)
+}
+
+func (b *ConfigBuilderForStorage) buildConfigForProfileSourcesValidated(profileID int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig, validateSources func([]VPNSource) error, manualPriority ...bool) error {
 	normalized := ProfileData{VPNSources: append([]VPNSource(nil), sources...)}
 	normalizeProfileVPNSources(&normalized)
 	sources = normalized.VPNSources
@@ -1635,6 +1649,11 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 		}
 		proxies = append(proxies, split.SingBox...)
 		xrayCandidates = append(xrayCandidates, split.XrayBridge...)
+	}
+	if validateSources != nil {
+		if err := validateSources(updatedSources); err != nil {
+			return err
+		}
 	}
 	if enabledSources > 0 && len(proxies)+len(xrayCandidates) == 0 {
 		return fmt.Errorf("no VPN source is usable: %s", strings.Join(sourceErrors, "; "))

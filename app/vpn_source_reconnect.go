@@ -20,6 +20,13 @@ type vpnSourceReconnectOps struct {
 // was active, does not return until the new configuration is running or the old
 // profile has been restored and its connection recovery has completed.
 func (a *App) changeVPNSourcesTransaction(change func(*ProfileData) error, ops vpnSourceReconnectOps) map[string]interface{} {
+	return a.changeVPNSourcesTransactionValidated(change, nil, ops)
+}
+
+// validateSources runs after subscription refresh but before any generated
+// configuration is saved. A manual stable-ID selection must not become the
+// provider's first node if the chosen server disappears during that refresh.
+func (a *App) changeVPNSourcesTransactionValidated(change func(*ProfileData) error, validateSources func([]VPNSource) error, ops vpnSourceReconnectOps) map[string]interface{} {
 	a.waitForInit()
 	a.settingsPolicyMu.Lock()
 	defer a.settingsPolicyMu.Unlock()
@@ -141,7 +148,7 @@ func (a *App) changeVPNSourcesTransaction(change func(*ProfileData) error, ops v
 
 	busyID := a.beginBusy("Обновляем цепочку VPN-источников...")
 	defer a.endBusy(busyID)
-	if err := a.configBuilder.BuildConfigForProfileSources(candidate.ID, candidate.VPNSources, candidate.WireGuardConfigs, candidate.VPNSourceSelectionMode == "priority"); err != nil {
+	if err := a.configBuilder.buildConfigForProfileSourcesValidated(candidate.ID, candidate.VPNSources, candidate.WireGuardConfigs, validateSources, candidate.VPNSourceSelectionMode == "priority"); err != nil {
 		rollbackErr := a.restoreVPNSourceProfileWith(previous, ops.restore)
 		result["rolledBack"] = rollbackErr == nil
 		recovery := rollbackRecoveryMessage(rollbackErr, wasRunning)

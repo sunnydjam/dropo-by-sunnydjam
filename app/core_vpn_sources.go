@@ -31,6 +31,7 @@ type VPNSource struct {
 	NodeCount       int           `json:"node_count,omitempty"`
 	NodeNames       []string      `json:"node_names,omitempty"`
 	NodeIDs         []string      `json:"node_ids,omitempty"`
+	FavoriteNodeIDs []string      `json:"favorite_node_ids,omitempty"`
 	CachedNodes     []string      `json:"cached_nodes,omitempty"`
 	LastUpdated     string        `json:"last_updated,omitempty"`
 	LastError       string        `json:"last_error,omitempty"`
@@ -63,6 +64,9 @@ func newVPNSource(id, name, uri string) (VPNSource, error) {
 		} else {
 			name = "VPN subscription"
 		}
+	}
+	if !validVPNSourceDisplayName(name) {
+		return VPNSource{}, fmt.Errorf("используйте название до 80 символов без ссылок и переносов строк")
 	}
 	return VPNSource{ID: id, Name: name, Kind: kind, URI: uri}, nil
 }
@@ -160,6 +164,7 @@ func normalizeProfileVPNSources(profile *ProfileData) {
 		if source.Name == "" {
 			source.Name = fmt.Sprintf("VPN source %d", index+1)
 		}
+		source.FavoriteNodeIDs = normalizeVPNFavoriteNodeIDs(source.FavoriteNodeIDs)
 		if source.SelectedNode < 0 || (source.NodeCount > 0 && source.SelectedNode >= source.NodeCount) {
 			source.SelectedNode = 0
 		}
@@ -214,6 +219,9 @@ func markVPNSourceUpdated(source *VPNSource, nodes []ProxyConfig, err error) {
 			}
 		}
 	}
+	// Favorites follow the same stable identity migration as manual selection.
+	// Keep absent identities (bounded) so a temporarily removed node can return.
+	source.FavoriteNodeIDs = migrateVPNFavoriteNodeIDs(*source)
 	source.NodeCount = len(nodes)
 	source.NodeNames = make([]string, 0, len(nodes))
 	source.NodeIDs = make([]string, 0, len(nodes))

@@ -267,6 +267,8 @@ void main() {
     expect(tester.getRect(_key('home-connect')), connectBefore);
     await _tap(tester, 'reopen-notice');
     expect(find.byType(Dialog), findsOneWidget);
+    expect(find.text('Тест: сервер временно недоступен'), findsNothing);
+    await _tap(tester, 'connection-error-details');
     expect(find.text('Тест: сервер временно недоступен'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());

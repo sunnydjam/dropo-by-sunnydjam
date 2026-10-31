@@ -84,11 +84,12 @@ Future<void> _pump(
   double scale = 1,
   bool connected = false,
   String mode = 'blocked_only',
+  _VariantBridge? providedBridge,
 }) async {
   debugMobileShellOverride = mobile;
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
-  final bridge = _VariantBridge(connected: connected);
+  final bridge = providedBridge ?? _VariantBridge(connected: connected);
   await bridge.setRoutingMode(mode);
   await bridge.saveSubscription('https://example.test/fixture-subscription');
   await tester.pumpWidget(
@@ -213,7 +214,7 @@ void main() {
         expect(tester.getSize(all), selectedSize);
         expect(
           find.text('Только выбранные сервисы. Остальное — напрямую.'),
-          findsOneWidget,
+          findsNothing,
         );
         await _capture(
           tester,
@@ -241,11 +242,52 @@ void main() {
           expect(tester.getRect(planet), planetRect);
           expect(tester.getRect(selected), selectedRect);
         }
+        await _capture(
+          tester,
+          'variant-one-${size.width.toInt()}-$scale-services-expanded',
+        );
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
       },
     );
   }
+
+  testWidgets(
+    'Android disabled mode explanation keeps planet and selector stable',
+    (tester) async {
+      final bridge = _VariantBridge();
+      await _pump(
+        tester,
+        size: const Size(390, 844),
+        mobile: true,
+        mode: 'all_traffic',
+        providedBridge: bridge,
+      );
+      final planet = find.byKey(const ValueKey('atlas-planet'));
+      final selected = find.byKey(const ValueKey('home-routing-selected'));
+      final all = find.byKey(const ValueKey('home-routing-all-vpn'));
+      final planetBefore = tester.getRect(planet);
+      final modesBefore = tester.getRect(selected);
+      final updateSlot = tester.getRect(
+        find.byKey(const ValueKey('home-update-slot')),
+      );
+      expect(updateSlot.overlaps(planetBefore), isFalse);
+      expect(
+        find.byKey(const ValueKey('home-routing-read-only')),
+        findsNothing,
+      );
+      bridge.connected = true;
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+      expect(find.text('Отключите VPN, чтобы сменить режим'), findsOneWidget);
+      expect(tester.widget<OutlinedButton>(selected).onPressed, isNull);
+      expect(tester.widget<OutlinedButton>(all).onPressed, isNull);
+      expect(tester.getRect(planet), planetBefore);
+      expect(tester.getRect(selected), modesBefore);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   for (final (size, mobile, scale) in [
     (const Size(684, 461), false, 1.0),

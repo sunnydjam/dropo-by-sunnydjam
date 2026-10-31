@@ -104,6 +104,12 @@ class _VpnResponseTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final now = DateTime.now();
     final observation = snapshot.observationAt(now);
+    // This tile belongs to Home. Missing/pending/stale samples must not look
+    // like a connection problem; an explicit failed check still stays visible.
+    if (observation != VpnResponseObservation.available &&
+        observation != VpnResponseObservation.failed) {
+      return const SizedBox.shrink();
+    }
     final label = snapshot.labelAt(now);
     final color = switch (observation) {
       VpnResponseObservation.available => _atlasMint,
@@ -113,7 +119,7 @@ class _VpnResponseTile extends StatelessWidget {
     final detail = switch (observation) {
       VpnResponseObservation.available => snapshot.ageLabelAt(now),
       VpnResponseObservation.pending => 'Проверка в фоне',
-      VpnResponseObservation.failed => 'Только HTTP-проверка',
+      VpnResponseObservation.failed => 'Тестовый адрес',
       VpnResponseObservation.stale => 'Нужен свежий замер',
       VpnResponseObservation.unavailable => 'Замер не получен',
     };
@@ -126,7 +132,7 @@ class _VpnResponseTile extends StatelessWidget {
     );
     return _AccessibleDescription(
       message:
-          'Отклик VPN: $label. HTTP-проверка через текущий VPN-источник. Не игровой пинг и не скорость скачивания. Нажмите для объяснения и помощи.',
+          'Отклик VPN: $label. Ответ тестового адреса через VPN. Не игровой пинг и не скорость загрузки. Нажмите для подробностей и помощи.',
       child: TextButton(
         key: ValueKey(compact ? 'vpn-response-compact' : 'vpn-response-panel'),
         onPressed: () => showDialog<void>(
@@ -141,17 +147,30 @@ class _VpnResponseTile extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const Text(
-                  'Время HTTP-проверки через текущий VPN-источник. Оно включает работу соединения и тестового адреса. Это не пинг конкретной игры, не проверка всех сервисов и не скорость скачивания.',
+                  'Время ответа тестового адреса через текущий VPN. Это не скорость загрузки и не игровой пинг.',
                 ),
-                const SizedBox(height: 12),
-                const Text(
-                  '«Подключено» означает, что VPN-движок запущен. HTTP-проверка выполняется отдельно в фоне и не задерживает подключение.',
-                ),
-                const SizedBox(height: 12),
-                Text(snapshot.scopeDescription(routingMode)),
-                const SizedBox(height: 12),
-                const Text(
-                  '«Проверяем…» — замер ещё выполняется. «Нет ответа» — тестовый адрес не ответил; это не доказывает, что интернет не работает. «Данные устарели» и «Нет данных» не подтверждают ни работу, ни поломку подключения. Устаревший или будущий замер не показывается как текущий отклик.',
+                if (observation == VpnResponseObservation.failed) ...[
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Тестовый адрес не ответил. Это не означает, что интернет не работает.',
+                  ),
+                ],
+                ExpansionTile(
+                  key: const ValueKey('vpn-response-details'),
+                  tilePadding: EdgeInsets.zero,
+                  title: const Text('Подробнее'),
+                  childrenPadding: const EdgeInsets.only(bottom: 12),
+                  children: [
+                    const Text(
+                      'Замер выполняется в фоне и не задерживает подключение. Статус «Подключено» подтверждает запуск VPN, но не доступность всех сайтов и приложений.',
+                    ),
+                    const SizedBox(height: 12),
+                    Text(snapshot.scopeDescription(routingMode)),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Проверка не оценивает звонки и игры. Старый или ещё не полученный замер не показывается как текущий отклик.',
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 12),
                 if (onOpenHelp != null)

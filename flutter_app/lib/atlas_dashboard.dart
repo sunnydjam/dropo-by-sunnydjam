@@ -18,6 +18,7 @@ class _AtlasHomeLayout extends StatelessWidget {
     this.telemetry,
     this.servicesExpanded = false,
     this.servicesVisible = true,
+    this.noticeLabel = 'Сообщения',
   });
   final Widget connection, routes;
   final Widget? notices;
@@ -25,6 +26,7 @@ class _AtlasHomeLayout extends StatelessWidget {
   final Widget? telemetry;
   final bool servicesExpanded;
   final bool servicesVisible;
+  final String noticeLabel;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -34,12 +36,19 @@ class _AtlasHomeLayout extends StatelessWidget {
         Positioned.fill(
           child: SingleChildScrollView(
             key: const ValueKey('home-scroll'),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: constraints.maxHeight < 460 ? 4 : 12,
+            ),
             child: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 760),
                 child: _AtlasAdaptiveHomeBody(
-                  viewportHeight: math.max(0, constraints.maxHeight - 24),
+                  viewportHeight: math.max(
+                    0,
+                    constraints.maxHeight -
+                        (constraints.maxHeight < 460 ? 8 : 24),
+                  ),
                   minimumConnectionExtent:
                       160 *
                       (MediaQuery.textScalerOf(context).scale(17) / 17).clamp(
@@ -47,7 +56,28 @@ class _AtlasHomeLayout extends StatelessWidget {
                         1.5,
                       ),
                   connection: connection,
-                  footer: routes,
+                  footer: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      routes,
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        key: const ValueKey('home-update-slot'),
+                        // Keep the connection scene stable when an update is
+                        // discovered. The manual action has its own space,
+                        // including two lines at larger accessibility scales.
+                        height: math.max(
+                          56,
+                          MediaQuery.textScalerOf(context).scale(14) * 2.6 + 20,
+                        ),
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: updateNotice ?? const SizedBox.shrink(),
+                        ),
+                      ),
+                    ],
+                  ),
                   footerExpanded: servicesExpanded,
                   footerReserveExtent: servicesVisible
                       ? 0
@@ -61,24 +91,20 @@ class _AtlasHomeLayout extends StatelessWidget {
             constraints.maxWidth >= 760 &&
             MediaQuery.textScalerOf(context).scale(12) <= 18)
           Positioned(top: 24, right: 12, width: 160, child: telemetry!),
-        if (notices != null || updateNotice != null)
+        if (notices != null)
           Positioned(
             top: 4,
             left: 12,
             right: 12,
             child: _AtlasNoticeOverlay(
-              identity: ValueKey((notices?.key, updateNotice?.key)),
-              maxHeight: MediaQuery.textScalerOf(context).scale(17) > 23
+              identity: notices!.key,
+              collapsedLabel: noticeLabel,
+              maxHeight:
+                  MediaQuery.textScalerOf(context).scale(17) > 23 ||
+                      constraints.maxHeight < 460
                   ? 48
-                  : constraints.maxHeight < 460
-                  ? 56
                   : 100,
-              pinnedChild: updateNotice,
-              hasDetails: notices != null,
-              collapsedLabel: updateNotice != null && notices == null
-                  ? 'Новое обновление'
-                  : 'Сообщения',
-              child: notices ?? const SizedBox.shrink(),
+              child: notices!,
             ),
           ),
       ],
@@ -403,18 +429,6 @@ class _AtlasRouteControls extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = controls;
     final allTraffic = c.routingMode == 'all_traffic';
-    final descriptions = [
-      'Только выбранные сервисы. Остальное — напрямую.',
-      _isMobileShell
-          ? 'Интернет-трафик — через VPN. Локальные адреса идут напрямую.'
-          : 'Общий трафик — через VPN. Локальные и рабочие сети сохраняют исключения.',
-    ];
-    const descriptionStyle = TextStyle(
-      color: _atlasMuted,
-      fontFamily: 'Inter',
-      fontSize: 13,
-      height: 1.35,
-    );
     return Column(
       key: const ValueKey('home-route-controls'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -436,13 +450,16 @@ class _AtlasRouteControls extends StatelessWidget {
                 MediaQuery.textScalerOf(context).scale(14) > 19;
             final showIcons = stacked || constraints.maxWidth >= 340;
             final buttons = [
-              _mode(
-                'selected',
-                'По сервисам',
-                !allTraffic,
-                () => c.onRoutingModeChanged('blocked_only'),
-                joined: !stacked,
-                showIcon: showIcons,
+              _AccessibleDescription(
+                message: 'Только выбранные сервисы. Остальное — напрямую.',
+                child: _mode(
+                  'selected',
+                  'По сервисам',
+                  !allTraffic,
+                  () => c.onRoutingModeChanged('blocked_only'),
+                  joined: !stacked,
+                  showIcon: showIcons,
+                ),
               ),
               _AccessibleDescription(
                 message: c.hasSubscription
@@ -481,31 +498,39 @@ class _AtlasRouteControls extends StatelessWidget {
             );
           },
         ),
-        const SizedBox(height: 10),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            // Measure both captions with the actual accessibility scale. A
-            // change of mode must not move the Earth or shrink either segment.
-            double height = 0;
-            for (final description in descriptions) {
-              final painter = TextPainter(
-                text: TextSpan(text: description, style: descriptionStyle),
-                textDirection: Directionality.of(context),
-                textScaler: MediaQuery.textScalerOf(context),
-              )..layout(maxWidth: constraints.maxWidth);
-              height = math.max(height, painter.height);
-              painter.dispose();
-            }
-            return SizedBox(
-              height: height,
-              child: Text(
-                descriptions[allTraffic ? 1 : 0],
-                textAlign: TextAlign.center,
-                style: descriptionStyle,
-              ),
-            );
-          },
-        ),
+        if (_isMobileShell)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                const explanation = 'Отключите VPN, чтобы сменить режим';
+                const style = TextStyle(
+                  color: _atlasMuted,
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  height: 1.35,
+                );
+                final painter = TextPainter(
+                  text: const TextSpan(text: explanation, style: style),
+                  textDirection: Directionality.of(context),
+                  textScaler: MediaQuery.textScalerOf(context),
+                )..layout(maxWidth: constraints.maxWidth);
+                final height = painter.height;
+                painter.dispose();
+                return SizedBox(
+                  height: height,
+                  child: c.connected
+                      ? const Text(
+                          explanation,
+                          key: ValueKey('home-routing-read-only'),
+                          textAlign: TextAlign.center,
+                          style: style,
+                        )
+                      : null,
+                );
+              },
+            ),
+          ),
         if (!c.summaryOnly) ...[
           Wrap(
             alignment: WrapAlignment.spaceBetween,

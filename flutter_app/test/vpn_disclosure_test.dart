@@ -167,6 +167,14 @@ void main() {
     await _home(tester, bridge);
     await _tap(tester, 'home-connect');
     expect(bridge.starts, 0);
+    await _tap(tester, 'expand-notice');
+    await tester.tap(
+      find.descendant(
+        of: find.byType(Dialog),
+        matching: _key('connection-error-details'),
+      ),
+    );
+    await tester.pumpAndSettle();
     expect(find.textContaining('Подключение не запущено.'), findsWidgets);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());

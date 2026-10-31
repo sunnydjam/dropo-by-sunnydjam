@@ -9,6 +9,7 @@ class _ServicesBridge extends MockCoreBridge {
   bool connected = false, failWrite = false, failRead = false;
   int routeWrites = 0, disconnects = 0;
   String savedPolicy = 'auto';
+  String? liveMethod;
   final pins = <String, bool>{};
 
   @override
@@ -36,7 +37,9 @@ class _ServicesBridge extends MockCoreBridge {
             'telegram' => 'Telegram',
             _ => tag,
           },
-          method: savedPolicy == 'vpn' ? 'VPN' : 'Прямое подключение',
+          method:
+              liveMethod ??
+              (savedPolicy == 'vpn' ? 'VPN' : 'Прямое подключение'),
           selectedMethod: tag == 'youtube' ? savedPolicy : 'auto',
           requiresVpn: tag == 'youtube' && savedPolicy == 'vpn',
           delayMs: 0,
@@ -198,7 +201,7 @@ void main() {
     expect(find.byKey(const ValueKey('service-search')), findsNothing);
     expect(find.byKey(const ValueKey('nav-services')), findsNothing);
     await _open(tester);
-    expect(find.text('Быстрые 4'), findsOneWidget);
+    expect(find.text('Закреплённые 4'), findsOneWidget);
     expect(find.text('Все 5'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('home-service-row-youtube')),
@@ -224,7 +227,7 @@ void main() {
     expect(bridge.pins['telegram'], true);
     expect(bridge.routeWrites, 0);
     await _search(tester, '');
-    expect(find.text('Быстрые 5'), findsOneWidget);
+    expect(find.text('Закреплённые 5'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('home-service-row-telegram')),
       findsOneWidget,
@@ -300,6 +303,28 @@ void main() {
     expect(bridge.routeWrites, 2);
     expect(tester.takeException(), isNull);
   });
+
+  for (final (method, caption) in [
+    ('VPN', 'Сейчас: через VPN'),
+    ('Direct (no VPN key)', 'Сейчас: напрямую · VPN недоступен'),
+    ('No route', 'Для сервиса нет подключения'),
+  ]) {
+    testWidgets('service caption describes $method without changing policy', (
+      tester,
+    ) async {
+      final bridge = _ServicesBridge()
+        ..connected = true
+        ..liveMethod = method;
+      await _pump(tester, bridge);
+      await _open(tester);
+      await _tap(tester, 'home-service-row-youtube');
+      expect(find.text(caption), findsOneWidget);
+      expect(bridge.routeWrites, 0);
+      expect(bridge.disconnects, 0);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 
   testWidgets('narrow enlarged text keeps one scroll and no clipped controls', (
     tester,
@@ -436,10 +461,7 @@ void main() {
       expect(bridge.restarts, 1);
       expect(bridge.disconnects, 0);
       expect(bridge.connected, true);
-      expect(
-        find.textContaining('VPN автоматически переподключён'),
-        findsOneWidget,
-      );
+      expect(find.text('Сохранено. VPN переподключён.'), findsOneWidget);
       final readyButton = tester.widget<OutlinedButton>(
         find.descendant(
           of: find.byKey(const ValueKey('service-route-youtube-direct')),
@@ -464,7 +486,7 @@ void main() {
       expect(bridge.policies, {'discord': 'zapret'});
       await _tap(tester, 'service-route-details-discord');
       expect(
-        find.textContaining('Discord Zapret экспериментален'),
+        find.textContaining('Обход Discord экспериментальный'),
         findsOneWidget,
       );
       expect(

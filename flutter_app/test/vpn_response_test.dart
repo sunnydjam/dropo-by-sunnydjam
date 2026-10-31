@@ -267,7 +267,7 @@ void main() {
 
   for (final (state, label, detail) in [
     ('pending', 'Проверяем…', 'Проверка в фоне'),
-    ('failed', 'Нет ответа', 'Только HTTP-проверка'),
+    ('failed', 'Нет ответа', 'Тестовый адрес'),
     ('stale', 'Данные устарели', 'Нужен свежий замер'),
     ('unavailable', 'Нет данных', 'Замер не получен'),
   ]) {
@@ -282,15 +282,17 @@ void main() {
         );
       await _pump(tester, bridge, const Size(1100, 760), 1);
       final metric = find.byKey(const ValueKey('vpn-response-panel'));
-      expect(metric, findsOneWidget);
-      expect(
-        find.descendant(of: metric, matching: find.text(label)),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(of: metric, matching: find.text(detail)),
-        findsOneWidget,
-      );
+      expect(metric, state == 'failed' ? findsOneWidget : findsNothing);
+      if (state == 'failed') {
+        expect(
+          find.descendant(of: metric, matching: find.text(label)),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: metric, matching: find.text(detail)),
+          findsOneWidget,
+        );
+      }
       expect(find.text('999 мс'), findsNothing);
       final power = tester.widget<FilledButton>(
         find.byKey(const ValueKey('home-connect')),
@@ -301,10 +303,24 @@ void main() {
       expect(find.text('Подключаем…'), findsNothing);
       expect(tester.takeException(), isNull);
       await _capture(tester, 'response-state-$state');
-      await tester.tap(metric);
-      await tester.pumpAndSettle();
-      expect(find.textContaining('VPN-движок запущен'), findsOneWidget);
-      expect(find.textContaining('это не доказывает'), findsOneWidget);
+      if (state == 'failed') {
+        await tester.tap(metric);
+        await tester.pumpAndSettle();
+        expect(
+          find.text(
+            'Тестовый адрес не ответил. Это не означает, что интернет не работает.',
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.byKey(const ValueKey('vpn-response-details')));
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining(
+            'подтверждает запуск VPN, но не доступность всех сайтов',
+          ),
+          findsOneWidget,
+        );
+      }
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     });
@@ -346,7 +362,7 @@ void main() {
       await tester.tap(metric);
       await tester.pumpAndSettle();
       expect(find.text('Отклик через VPN'), findsOneWidget);
-      expect(find.textContaining('не пинг конкретной игры'), findsOneWidget);
+      expect(find.textContaining('не игровой пинг'), findsOneWidget);
       expect(tester.takeException(), isNull);
       Navigator.of(tester.element(find.text('Отклик через VPN'))).pop();
       await tester.pumpAndSettle();
@@ -376,6 +392,8 @@ void main() {
     final bridge = _TelemetryBridge()..savedRoutingMode = 'all_traffic';
     await _pump(tester, bridge, const Size(820, 560), 1);
     await tester.tap(find.byKey(const ValueKey('vpn-response-compact')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('vpn-response-details')));
     await tester.pumpAndSettle();
     final explanation = find.byKey(const ValueKey('vpn-response-explanation'));
     expect(

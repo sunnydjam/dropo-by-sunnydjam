@@ -491,6 +491,26 @@ class _HomeRoutingModeButton extends StatelessWidget {
   }
 }
 
+String _homeServiceConnectionCaption(String method) {
+  final value = method.trim().toLowerCase();
+  if (value == 'no route') return 'Для сервиса нет подключения';
+  if (value.contains('no vpn')) {
+    return 'Сейчас: напрямую · VPN недоступен';
+  }
+  if (value == 'vpn' || value.contains('через vpn')) {
+    return 'Сейчас: через VPN';
+  }
+  if (value == 'direct' ||
+      value.contains('напрямую') ||
+      value == 'прямое подключение') {
+    return 'Сейчас: напрямую';
+  }
+  if (value.contains('zapret') || value.contains('обход')) {
+    return 'Сейчас: обход блокировки';
+  }
+  return 'Способ подключения уточняется';
+}
+
 class _HomeRouteServiceRow extends StatelessWidget {
   const _HomeRouteServiceRow({
     required this.service,
@@ -585,12 +605,12 @@ class _HomeRouteServiceRow extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               !statusKnown
-                  ? 'Актуальный маршрут пока неизвестен'
+                  ? 'Текущее подключение уточняется'
                   : !connected
-                  ? 'Сохранённая настройка · подключение выключено'
+                  ? 'Применится при подключении'
                   : allTraffic
                   ? 'Сейчас действует режим «Всё через VPN»'
-                  : 'Маршрут по данным ядра: ${service.method}',
+                  : _homeServiceConnectionCaption(service.method),
               style: const TextStyle(
                 color: _homeMuted,
                 fontSize: 12,
@@ -728,7 +748,7 @@ class _HomeZapretStrategyControls extends StatelessWidget {
           if (experimentalAuto) ...[
             const SizedBox(height: 3),
             const Text(
-              'Discord Zapret экспериментален: web/API могут открыться, но voice/video не гарантируются. Для голосового чата рекомендуется VPN.',
+              'Обход Discord экспериментальный: сайт может работать, а звонки — нет. Для звонков рекомендуем VPN.',
               style: TextStyle(
                 color: Color(0xFFFFC979),
                 fontSize: 13,

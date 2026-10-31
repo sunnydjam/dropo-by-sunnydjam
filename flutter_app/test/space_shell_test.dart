@@ -254,6 +254,11 @@ void main() {
       );
       expect(
         find.byKey(const ValueKey('choose-vpn-node-preview-source')),
+        findsNothing,
+      );
+      expect(find.text('Сервер 1 · единственный сервер'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('choose-vpn-node-second-mobile')),
         findsOneWidget,
       );
       bridge.connected = true;
@@ -381,15 +386,19 @@ void main() {
       await tester.tap(details);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
-      final server = find.byKey(
-        const ValueKey('choose-vpn-node-preview-source'),
-      );
+      final server = find.byKey(const ValueKey('rename-source-preview-source'));
       if (server.hitTestable().evaluate().isEmpty) {
         await tester.ensureVisible(server);
       }
       await tester.pump();
       await _capture(tester, 'source-settings-${size.width.toInt()}-$scale');
       expect(server, findsOneWidget);
+      expect(server.hitTestable(), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('choose-vpn-node-preview-source')),
+        findsNothing,
+      );
+      expect(find.text('Сервер 1 · единственный сервер'), findsOneWidget);
       final add = find.byKey(const ValueKey('add-personal-vpn'));
       expect(add.hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -407,7 +416,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.byKey(const ValueKey('personal-vpn-uri')), findsNothing);
       await _capture(tester, 'sources-empty-${size.width.toInt()}');
-      final personal = find.byKey(const ValueKey('choose-personal-source'));
+      final personal = find.byKey(const ValueKey('add-personal-vpn'));
       await tester.ensureVisible(personal);
       await tester.pump();
       await tester.tap(personal);

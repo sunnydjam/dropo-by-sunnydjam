@@ -78,6 +78,45 @@ func (a *App) SetVPNSourceNode(id string, nodeIndex int) map[string]interface{} 
 	})
 }
 
+// SetVPNSourceNodeByID resolves the user's selection inside the lifecycle
+// transaction, so a stale UI index cannot select a different server.
+func (a *App) SetVPNSourceNodeByID(id, nodeID string) map[string]interface{} {
+	return a.setVPNSourceNodeByID(id, nodeID, vpnSourceReconnectOps{
+		stop: a.stopVPNForReconnect, start: a.startVPNForReconnect, restore: a.restoreVPNSourceProfile,
+	})
+}
+
+func (a *App) setVPNSourceNodeByID(id, nodeID string, ops vpnSourceReconnectOps) map[string]interface{} {
+	if id == "" || len(id) > 128 || id != normalizeVPNSourceID(id) || !validVPNFavoriteNodeID(nodeID) {
+		return map[string]interface{}{"success": false, "error": "Неверный идентификатор сервера. Обновите список."}
+	}
+	missing := func() error {
+		return fmt.Errorf("Выбранный сервер больше недоступен. Обновите список и выберите сервер снова.")
+	}
+	return a.changeVPNSourcesTransactionValidated(func(profile *ProfileData) error {
+		for i := range profile.VPNSources {
+			source := &profile.VPNSources[i]
+			if source.ID != id {
+				continue
+			}
+			for index, candidateID := range source.NodeIDs {
+				if candidateID == nodeID && index < source.NodeCount {
+					source.SelectedNode, source.SelectedNodeID = index, nodeID
+					return nil
+				}
+			}
+		}
+		return missing()
+	}, func(sources []VPNSource) error {
+		for _, source := range sources {
+			if source.ID == id && source.SelectedNodeID == nodeID && source.SelectedNode >= 0 && source.SelectedNode < len(source.NodeIDs) && source.NodeIDs[source.SelectedNode] == nodeID {
+				return nil
+			}
+		}
+		return missing()
+	}, ops)
+}
+
 func (a *App) SetVPNSourceEnabled(id string, enabled bool) map[string]interface{} {
 	return a.changeVPNSources(func(profile *ProfileData) error {
 		id = normalizeVPNSourceID(id)
@@ -153,8 +192,10 @@ func publicVPNSources(sources []VPNSource) []map[string]interface{} {
 			"public_catalog_id": source.PublicCatalogID, "using_cache": source.UsingCache,
 			"disabled": source.Disabled, "selected_node": source.SelectedNode,
 			"selected_node_id": source.SelectedNodeID, "node_count": source.NodeCount,
-			"node_names":   append([]string(nil), source.NodeNames...),
-			"last_updated": source.LastUpdated, "last_error": problem,
+			"node_names":        append([]string(nil), source.NodeNames...),
+			"node_ids":          append([]string{}, source.NodeIDs...),
+			"favorite_node_ids": append([]string{}, source.FavoriteNodeIDs...),
+			"last_updated":      source.LastUpdated, "last_error": problem,
 		})
 	}
 	return result

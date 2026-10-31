@@ -62,7 +62,7 @@ void main() {
       expect(find.byKey(const ValueKey('navigation-rail')), findsOneWidget);
       expect(find.byKey(const ValueKey('atlas-planet')), findsOneWidget);
       expect(find.byKey(const ValueKey('nav-settings')), findsOneWidget);
-      expect(find.text('Подключение'), findsWidgets);
+      expect(find.text('Главная'), findsWidgets);
       expect(find.text('Настроить сервисы'), findsNothing);
       expect(find.byKey(const ValueKey('nav-services')), findsNothing);
       expect(find.byKey(const ValueKey('nav-sources')), findsOneWidget);
@@ -318,7 +318,7 @@ void main() {
     expect(find.text('Повторить (эксп.)'), findsOneWidget);
     expect(find.text('Zapret (эксп.)'), findsOneWidget);
     expect(
-      find.textContaining('Discord Zapret экспериментален'),
+      find.textContaining('Обход Discord экспериментальный'),
       findsOneWidget,
     );
     final autoStrategy = find.byKey(
@@ -484,7 +484,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.textContaining('для стабильного voice/video рекомендуется VPN'),
+        find.textContaining('Для звонков Discord рекомендуем VPN'),
         findsOneWidget,
       );
       expect(
@@ -546,10 +546,13 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.textContaining('для стабильного voice/video рекомендуется VPN'),
+        find.textContaining('Для звонков Discord рекомендуем VPN'),
         findsOneWidget,
       );
-      expect(find.textContaining('Маршрут сохранён'), findsOneWidget);
+      expect(
+        find.textContaining('Сохранено. Применится при подключении.'),
+        findsOneWidget,
+      );
       expect(tester.takeException(), isNull);
     },
   );
@@ -601,7 +604,7 @@ void main() {
         isNotNull,
       );
       expect(
-        find.textContaining('dropo безопасно переподключит VPN автоматически'),
+        find.textContaining('При изменении настроек VPN переподключится'),
         findsOneWidget,
       );
 
@@ -615,7 +618,7 @@ void main() {
 
       expect(bridge.lastMethod, 'vpn');
       expect(
-        find.textContaining('VPN автоматически переподключён'),
+        find.textContaining('Сохранено. VPN переподключён.'),
         findsOneWidget,
       );
       expect(tester.takeException(), isNull);
@@ -741,7 +744,7 @@ void main() {
     expect(notice, findsOneWidget);
     expect(
       find
-          .descendant(of: notice, matching: find.text('Dropo 3.0.4'))
+          .descendant(of: notice, matching: find.text('Обновление · 3.0.4'))
           .hitTestable(),
       findsOneWidget,
       reason: 'the published version must be visible in the compact notice',
@@ -749,7 +752,7 @@ void main() {
     final action = find.byKey(const ValueKey('update-available-action'));
     expect(action.hitTestable(), findsOneWidget);
     expect(
-      find.descendant(of: action, matching: find.text('Обновить')),
+      find.descendant(of: action, matching: find.text('Обновление · 3.0.4')),
       findsOneWidget,
     );
     expect(
@@ -849,7 +852,10 @@ void main() {
 
       expect(find.textContaining('может занять до часа'), findsNothing);
       expect(find.textContaining('попытка 1/4'), findsWidgets);
-      expect(find.textContaining('проверяем voice'), findsOneWidget);
+      expect(find.textContaining('Discord strategy 2'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('route-probe-details')));
+      await tester.pump();
+      expect(find.textContaining('проверяем голосовую связь'), findsOneWidget);
       final discordTop = tester.getTopLeft(find.text('Discord').first).dy;
       final youtubeTop = tester.getTopLeft(find.text('YouTube').first).dy;
       expect(discordTop, lessThan(youtubeTop));
@@ -880,10 +886,45 @@ void main() {
 
       expect(
         find.textContaining('Discord strategy 2 не сработала'),
+        findsNothing,
+      );
+      expect(find.textContaining('попытка 1/4'), findsNothing);
+      expect(find.textContaining('попытка 2/4'), findsWidgets);
+
+      await tester.tap(find.byKey(const ValueKey('dismiss-notice')));
+      await tester.pump();
+      bridge.emit('route-probe-candidate', const {
+        'serviceTag': 'discord',
+        'serviceName': 'Discord',
+        'status': 'checking',
+        'attempt': 3,
+        'attemptTotal': 4,
+      });
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.byKey(const ValueKey('reopen-notice')),
+        findsOneWidget,
+        reason: 'New attempts must not reopen a collapsed progress notice',
+      );
+      bridge.emit('route-probe-start', const {
+        'extendedSearch': true,
+        'serviceCount': 1,
+        'services': [
+          {'tag': 'discord', 'name': 'Discord'},
+        ],
+      });
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.byKey(const ValueKey('route-probe-extended-warning')),
         findsOneWidget,
       );
-      expect(find.textContaining('попытка 1/4'), findsWidgets);
-      expect(find.textContaining('попытка 2/4'), findsWidgets);
+      expect(find.textContaining('может занять до часа'), findsOneWidget);
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const ValueKey('home-connect')))
+            .onPressed,
+        isNotNull,
+      );
 
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();

@@ -39,8 +39,9 @@ class CoreCallExecutionPolicyTest {
     fun shortRouteAndConfigCallsRemainOrderedOnTheCoreLane() {
         for (method in listOf(
             "GetStatus", "GetRoutes", "GetAppConfig", "GetVPNSources",
-            "SetRoutePolicy", "SetRoutingMode", "SetVPNSourceNode",
+            "SetRoutePolicy", "SetRoutingMode", "SetVPNSourceNode", "SetVPNSourceNodeByID",
             "SetVPNSourceEnabled", "MoveVPNSource", "RemoveVPNSource",
+            "RenameVPNSource", "SetVPNSourceNodeFavorite",
             "AndroidServiceState", "AndroidEngineLog", "unknown-method",
         )) {
             assertFalse(method, CoreCallExecutionPolicy.usesNetworkExecutor("call", method))

@@ -481,8 +481,7 @@ class _GuidedHelpPageState extends State<_GuidedHelpPage> {
       return [
         _helpText('Не удалось получить состояние подключения', heading: true),
         _helpText(
-          'Состояние сетевого ядра сейчас неизвестно. Старый статус не считается '
-          'актуальным. Настройки и подключение не изменялись.',
+          'Текущее состояние неизвестно. Откройте диагностику, чтобы узнать больше.',
         ),
         _helpAction('Открыть диагностику', widget.onOpenDiagnostics, 'next'),
       ];
@@ -531,11 +530,11 @@ class _GuidedHelpPageState extends State<_GuidedHelpPage> {
     final actionLabel = checks.isEmpty || allAnswered
         ? serviceScenario
               ? selective
-                    ? 'Посмотреть маршруты сервисов'
+                    ? 'Настроить сервисы'
                     : 'Посмотреть источники'
               : 'Открыть диагностику'
         : serviceScenario && selective
-        ? 'Посмотреть маршруты сервисов'
+        ? 'Настроить сервисы'
         : 'Посмотреть источники';
     return [
       _helpText(title, heading: true),
@@ -544,14 +543,11 @@ class _GuidedHelpPageState extends State<_GuidedHelpPage> {
       _helpText(
         serviceScenario
             ? selective
-                  ? 'В режиме «По сервисам» проверьте, что нужный сервис выбран '
-                        'на главной и какой маршрут для него установлен. '
-                        'Ваш выбор «Напрямую» или «VPN» остаётся главным.'
-                  : 'В режиме «Всё через VPN» отдельные маршруты сервисов не '
-                        'применяются. Можно посмотреть состояние выбранного '
-                        'VPN-источника.'
-            : 'Статус «Подключено» означает, что сетевое ядро запущено, '
-                  'но сам по себе не доказывает доступность интернета.',
+                  ? 'Откройте нужный сервис на главной и проверьте выбранный '
+                        'способ подключения: «Напрямую» или «VPN».'
+                  : 'В режиме «Всё через VPN» настройки отдельных сервисов '
+                        'не применяются. Проверьте выбранный VPN-источник.'
+            : 'Подключение запущено. Проверка поможет понять, отвечают ли тестовые адреса.',
       ),
       if (allAnswered)
         _helpText(
@@ -590,9 +586,7 @@ class _GuidedHelpPageState extends State<_GuidedHelpPage> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Icon(Icons.network_check, size: 20),
-          label: Text(
-            checking ? 'Проверяем адреса…' : 'Проверить ответы адресов',
-          ),
+          label: Text(checking ? 'Проверяем…' : 'Запустить проверку'),
         ),
         if (probeOutstanding && !checking)
           _helpText(

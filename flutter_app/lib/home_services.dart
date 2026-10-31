@@ -121,10 +121,10 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
       if (!mounted) return;
       setState(
         () => feedback = !routeChange
-            ? 'Быстрый список сохранён.'
+            ? 'Список сохранён.'
             : result['restarted'] == true
-            ? 'Маршрут сохранён, VPN автоматически переподключён.'
-            : 'Маршрут сохранён. Настройка применяется ядром при следующем подключении.',
+            ? 'Сохранено. VPN переподключён.'
+            : 'Сохранено. Применится при подключении.',
       );
       await _load();
     } catch (error) {
@@ -281,7 +281,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
             ),
             Row(
               children: [
-                _tab('services-pinned', 'Быстрые $pinnedCount', true),
+                _tab('services-pinned', 'Закреплённые $pinnedCount', true),
                 const SizedBox(width: 12),
                 _tab('services-all', 'Все ${services.length}', false),
               ],
@@ -291,7 +291,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 10),
                 child: Text(
-                  'Управление временно недоступно. Дождитесь связи с ядром и завершения подключения.',
+                  'Настройки временно недоступны. Проверьте состояние подключения.',
                   style: TextStyle(
                     color: _atlasMuted,
                     fontSize: 12,
@@ -325,7 +325,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                 padding: const EdgeInsets.symmetric(vertical: 20),
                 child: Text(
                   search.text.trim().isEmpty && pinnedOnly
-                      ? 'В быстром списке пока нет сервисов. Откройте «Все», чтобы добавить их.'
+                      ? 'Нет закреплённых сервисов. Откройте «Все», чтобы добавить их.'
                       : 'Сервисы не найдены. Измените поиск или предложите новый сервис.',
                   style: const TextStyle(color: _atlasMuted, height: 1.4),
                 ),
@@ -336,7 +336,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
               const Padding(
                 padding: EdgeInsets.only(top: 12),
                 child: Text(
-                  'Для изменения маршрутов отключите VPN',
+                  'Отключите VPN, чтобы изменить настройки сервисов.',
                   key: ValueKey('home-services-read-only'),
                   style: TextStyle(
                     color: _atlasMuted,
@@ -349,7 +349,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
               const Padding(
                 padding: EdgeInsets.only(top: 12),
                 child: Text(
-                  'При смене маршрута dropo безопасно переподключит VPN автоматически. Связь может кратковременно прерваться.',
+                  'При изменении настроек VPN переподключится. Связь ненадолго прервётся.',
                   key: ValueKey('home-services-reconnect-note'),
                   style: TextStyle(
                     color: _atlasMuted,
@@ -528,8 +528,8 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                     tooltip: primary
                         ? 'Основной сервис'
                         : _pinned(service)
-                        ? 'Убрать из быстрого списка'
-                        : 'Добавить в быстрый список',
+                        ? 'Открепить сервис'
+                        : 'Закрепить сервис',
                     onPressed: available && !primary
                         ? () => unawaited(
                             _change(
@@ -568,7 +568,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                   const Padding(
                     padding: EdgeInsets.only(top: 6),
                     child: Text(
-                      'Discord: для стабильного voice/video рекомендуется VPN. Zapret — экспериментальный метод, работа голоса не гарантируется.',
+                      'Для звонков Discord рекомендуем VPN. Обход работает в экспериментальном режиме.',
                       style: TextStyle(
                         color: _atlasMuted,
                         fontSize: 12,

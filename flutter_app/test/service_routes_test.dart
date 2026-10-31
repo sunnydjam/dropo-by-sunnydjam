@@ -423,14 +423,13 @@ void main() {
       );
       expect(find.textContaining('Подключён сейчас'), findsOneWidget);
       await _tap(tester, 'add-personal-vpn');
-      await _tap(tester, 'choose-personal-source');
-      expect(find.text('Скрыть форму'), findsOneWidget);
+      expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
       final sources = await bridge.vpnSources();
       update(
         () => snapshot = VpnSourcesSnapshot(sources: sources, running: true),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Скрыть форму'), findsOneWidget);
+      expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
       update(() => enabled = false);
       await tester.pumpAndSettle();
       expect(find.textContaining('Подключён сейчас'), findsNothing);
@@ -471,8 +470,25 @@ void main() {
           expect(bridge.policies['discord'], 'vpn');
           await _tap(tester, 'nav-sources');
           await _tap(tester, 'add-personal-vpn');
-          await _tap(tester, 'choose-personal-source');
-          expect(find.text('Скрыть форму'), findsOneWidget);
+          // The new form scroll begins from a post-frame callback.
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('personal-vpn-uri')).hitTestable(),
+            findsOneWidget,
+          );
+          await _tap(tester, 'source-optional-name');
+          expect(
+            find.byKey(const ValueKey('personal-vpn-name')),
+            findsOneWidget,
+          );
+          await tester.ensureVisible(
+            find.byKey(const ValueKey('submit-personal-vpn')),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('submit-personal-vpn')).hitTestable(),
+            findsOneWidget,
+          );
           expect(tester.takeException(), isNull);
         },
       );

@@ -40,7 +40,7 @@ class _AtlasDesktopShell extends StatefulWidget {
 
 class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   static const _items = <(String, String, IconData)>[
-    ('home', 'Подключение', Icons.home_rounded),
+    ('home', 'Главная', Icons.home_rounded),
     ('sources', 'Источники VPN', Icons.dns_outlined),
     ('logs', 'Диагностика', Icons.monitor_heart_outlined),
     ('settings', 'Настройки', Icons.settings_outlined),
@@ -326,7 +326,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
             .where((item) => item.$1 == widget.activeSection)
             .firstOrNull
             ?.$2 ??
-        'Подключение';
+        'Главная';
     return Theme(
       data: theme.copyWith(
         brightness: Brightness.dark,

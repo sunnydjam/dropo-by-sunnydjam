@@ -234,6 +234,15 @@ void main() {
     await _tap(tester, 'onboarding-free-dropo-free');
     await tester.pump(const Duration(seconds: 4));
     await tester.pump();
+    expect(find.text('Источник не отвечает'), findsNothing);
+    await _tap(tester, 'expand-notice');
+    await tester.tap(
+      find.descendant(
+        of: find.byType(Dialog),
+        matching: _key('connection-error-details'),
+      ),
+    );
+    await tester.pumpAndSettle();
     expect(find.text('Источник не отвечает'), findsOneWidget);
     expect(_key('planet-error'), findsOneWidget);
     expect(bridge.connected, isFalse);

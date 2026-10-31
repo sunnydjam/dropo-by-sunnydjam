@@ -14,6 +14,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'account_session_store.dart';
 
 part 'vpn_sources.dart';
+part 'source_reconnect.dart';
 part 'managed_free_source.dart';
 part 'vpn_onboarding.dart';
 part 'home_dashboard.dart';
@@ -2786,6 +2787,8 @@ class VpnSourceInfo {
     this.publicCatalogId = '',
     this.usingCache = false,
     this.active = false,
+    this.nodeIds = const [],
+    this.favoriteNodeIds = const [],
     this.response = const VpnResponseSnapshot(),
   });
 
@@ -2797,6 +2800,8 @@ class VpnSourceInfo {
   final int selectedNode;
   final int nodeCount;
   final List<String> nodeNames;
+  final List<String> nodeIds;
+  final List<String> favoriteNodeIds;
   final String lastUpdated;
   final String lastError;
   final String publicCatalogId;
@@ -2813,6 +2818,8 @@ class VpnSourceInfo {
       selectedNode: _asInt(json['selected_node']),
       nodeCount: _asInt(json['node_count']),
       nodeNames: _asStringList(json['node_names']),
+      nodeIds: _asStringList(json['node_ids']),
+      favoriteNodeIds: _asStringList(json['favorite_node_ids']),
       lastUpdated: json['last_updated']?.toString() ?? '',
       lastError: json['last_error']?.toString() ?? '',
       publicCatalogId: json['public_catalog_id']?.toString() ?? '',
@@ -3809,6 +3816,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool online = false;
   bool uiBusy = false;
   bool sectionBusy = false;
+  int sourceChangeGeneration = 0;
   bool quitting = false;
   String quitProgressMessage = '';
   int lastEventId = 0;
@@ -3822,6 +3830,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool externalVpnConflictBlocked = false;
   bool connectionHintDanger = false;
   bool routeProbeActive = false;
+  bool routeProbeExtendedSearch = false;
   bool routeProbeFailed = false;
   int routeProbeExpectedCount = 0;
   bool windowVisible = true;
@@ -4526,6 +4535,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         break;
       case 'route-probe-start':
         routeProbeActive = true;
+        routeProbeExtendedSearch = event.payload['extendedSearch'] == true;
         routeProbeFailed = false;
         connectionHintDanger = false;
         routeProbeExpectedCount = _asInt(event.payload['serviceCount']);
@@ -4553,12 +4563,6 @@ class _DropoHomePageState extends State<DropoHomePage>
             : retrying
             ? '$name: стратегия ${attempt > 0 ? attempt : ''}${attemptTotal > 0 ? '/$attemptTotal' : ''} не сработала, пробуем следующую'
             : '$name: рабочая стратегия не найдена';
-        if (!success && retrying && windowVisible) {
-          _showStrategyTransition(
-            '$name: ${method == 'метод' ? 'текущая стратегия' : method} не сработала. '
-            'Пробуем следующую${attempt > 0 ? ' · попытка $attempt${attemptTotal > 0 ? '/$attemptTotal' : ''}' : ''}.',
-          );
-        }
         break;
       case 'route-probe-candidate':
         _updateRouteProbeCandidate(event.payload);
@@ -4870,12 +4874,14 @@ class _DropoHomePageState extends State<DropoHomePage>
       routeProbeActive = true;
       routeProbeFailed = false;
       routeProbeExpectedCount = 0;
+      routeProbeExtendedSearch = false;
       routeProbeProgress = <String, RouteProbeProgress>{};
       routeHint = 'Ожидаем список сервисов для подбора стратегий...';
     } else {
       routeProbeActive = false;
       routeProbeFailed = false;
       routeProbeExpectedCount = 0;
+      routeProbeExtendedSearch = false;
       routeProbeProgress = <String, RouteProbeProgress>{};
       routeHint = '';
     }
@@ -4958,6 +4964,41 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       await _refresh(all: true);
     }, clearConnectionBusy: true);
+  }
+
+  Future<Map<String, dynamic>> _applySourceChange(
+    Future<Map<String, dynamic>> Function() operation,
+  ) async {
+    if (quitting || uiBusy || connectionBusy || !online) {
+      return {
+        'success': false,
+        'userMessage': 'Дождитесь завершения текущего действия.',
+      };
+    }
+    if (!_isAndroidPlatform || !status.connected) return operation();
+    final generation = ++sourceChangeGeneration;
+    setState(() => uiBusy = true);
+    try {
+      return await applyAndroidSourceChange(
+        bridge: widget.bridge,
+        operation: operation,
+        isCurrent: () =>
+            mounted && !quitting && generation == sourceChangeGeneration,
+        onPhase: (message) {
+          if (!mounted || quitting) return;
+          setState(() {
+            statusMessage = message;
+            connectionHint = '';
+            connectionHintDanger = false;
+          });
+        },
+      );
+    } finally {
+      if (mounted && !quitting) {
+        await _refresh(all: true);
+        if (mounted) setState(() => uiBusy = false);
+      }
+    }
   }
 
   Future<bool> _ensureAndroidVpnDisclosure() async {
@@ -5664,6 +5705,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
     setState(() {
       quitting = true;
+      sourceChangeGeneration++;
       quitProgressMessage =
           'Останавливаем VPN, WinDivert и фоновые процессы...';
       statusMessage = 'Закрываем dropo';
@@ -6182,16 +6224,19 @@ class _DropoHomePageState extends State<DropoHomePage>
         statusMessage.toLowerCase().contains('ошибка');
     final showHint =
         normalizedHint.isNotEmpty &&
-        (booting ||
-            uiBusy ||
-            connectionBusy ||
-            quitting ||
-            status.hasError ||
+        !booting &&
+        !quitting &&
+        (status.hasError ||
             connectionHintDanger ||
             !online ||
             externalVpnConflictBlocked ||
             depsProgress.trim().isNotEmpty);
+    final showRouteProbe =
+        (routeProbeActive || routeProbeFailed) && routeProbeProgress.isNotEmpty;
     return _AtlasHomeLayout(
+      noticeLabel: routeProbeActive && routeProbeExtendedSearch && !hintDanger
+          ? 'Поиск до часа'
+          : 'Сообщения',
       telemetry:
           online &&
               status.connected &&
@@ -6219,8 +6264,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       notices:
           !(strategyTransitionNotice.isNotEmpty ||
               showHint ||
-              routeProbeActive ||
-              routeProbeFailed ||
+              showRouteProbe ||
               (legacyTelegramProxy.injected &&
                   legacyTelegramProxy.recommendRemove) ||
               (!booting &&
@@ -6230,7 +6274,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           ? null
           : Column(
               key: ValueKey(
-                '$strategyTransitionNotice/$normalizedHint/$hintDanger/$routeProbeFailed/${updateInfo?.latestVersion}/${legacyTelegramProxy.recommendRemove}/${status.dependencies.ready}',
+                '${hintDanger ? normalizedHint : ''}/$routeProbeFailed/$routeProbeExtendedSearch/${legacyTelegramProxy.recommendRemove}/${status.dependencies.ready}',
               ),
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -6251,14 +6295,24 @@ class _DropoHomePageState extends State<DropoHomePage>
                   ),
                 _ConnectionHint(
                   visible: showHint,
-                  title: _hintTitle(),
-                  message: normalizedHint,
+                  title: !online
+                      ? 'Не удалось запустить Dropo'
+                      : hintDanger
+                      ? 'Не удалось подключиться'
+                      : _hintTitle(),
+                  message: !online
+                      ? 'Нажмите «Повторить». Если ошибка останется, откройте помощь.'
+                      : hintDanger
+                      ? 'Попробуйте ещё раз или выберите другой источник.'
+                      : normalizedHint,
+                  details: hintDanger ? normalizedHint : '',
                   danger: hintDanger,
                 ),
                 _RouteProbePanel(
-                  visible: routeProbeActive || routeProbeFailed,
+                  visible: showRouteProbe,
                   active: routeProbeActive,
                   failed: routeProbeFailed,
+                  extendedSearch: routeProbeExtendedSearch,
                   expectedCount: routeProbeExpectedCount,
                   items: routeProbeProgress.values.toList(growable: false),
                 ),
@@ -6267,7 +6321,7 @@ class _DropoHomePageState extends State<DropoHomePage>
                     key: const ValueKey('home-retry-core'),
                     onPressed: () => unawaited(_bootstrap()),
                     icon: const Icon(Icons.refresh),
-                    label: const Text('Повторить подключение к ядру'),
+                    label: const Text('Повторить'),
                   ),
                 if (hintDanger && !booting && !quitting)
                   TextButton.icon(
@@ -6276,7 +6330,7 @@ class _DropoHomePageState extends State<DropoHomePage>
                         ? null
                         : () => unawaited(_selectMenuSection('guided-help')),
                     icon: const Icon(Icons.help_outline),
-                    label: const Text('Разобраться с подключением'),
+                    label: const Text('Помощь'),
                   ),
                 if (!booting &&
                     status.dependencies.managed &&
@@ -6415,12 +6469,9 @@ class _DropoHomePageState extends State<DropoHomePage>
           bridge: widget.bridge,
           subscription: subscription,
           embedded: true,
-          enabled:
-              online &&
-              !quitting &&
-              !uiBusy &&
-              !connectionBusy &&
-              (!_isMobileShell || !status.connected),
+          connected: status.connected || status.running,
+          enabled: online && !quitting && !uiBusy && !connectionBusy,
+          onApplyChange: _applySourceChange,
           sourceSnapshot: homeSourcesLoaded && online
               ? homeSourceSnapshot
               : null,
@@ -6770,12 +6821,14 @@ class _ConnectionHint extends StatelessWidget {
     required this.title,
     required this.message,
     required this.danger,
+    this.details = '',
   });
 
   final bool visible;
   final String title;
   final String message;
   final bool danger;
+  final String details;
 
   @override
   Widget build(BuildContext context) {
@@ -6821,6 +6874,26 @@ class _ConnectionHint extends StatelessWidget {
                       height: 1.35,
                     ),
                   ),
+                  if (details.isNotEmpty)
+                    TextButton(
+                      key: const ValueKey('connection-error-details'),
+                      onPressed: () => showDialog<void>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('Подробности подключения'),
+                          content: SingleChildScrollView(
+                            child: SelectableText(details),
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context),
+                              child: const Text('Закрыть'),
+                            ),
+                          ],
+                        ),
+                      ),
+                      child: const Text('Подробности'),
+                    ),
                 ],
               ),
             ),
@@ -6895,113 +6968,103 @@ class _StrategySearchBanner extends StatelessWidget {
   }
 }
 
-class _RouteProbePanel extends StatelessWidget {
+class _RouteProbePanel extends StatefulWidget {
   const _RouteProbePanel({
     required this.visible,
     required this.active,
     required this.failed,
     required this.expectedCount,
     required this.items,
+    this.extendedSearch = false,
   });
 
-  final bool visible;
-  final bool active;
-  final bool failed;
+  final bool visible, active, failed, extendedSearch;
   final int expectedCount;
   final List<RouteProbeProgress> items;
 
   @override
-  Widget build(BuildContext context) {
-    if (!visible) {
-      return const SizedBox.shrink();
-    }
-    final doneCount = items.where((item) => item.done).length;
-    final total = expectedCount > 0 ? expectedCount : items.length;
-    final accent = failed
-        ? const Color(0xFFEF4444)
-        : active
-        ? const Color(0xFFF59E0B)
-        : const Color(0xFF36D399);
-    final background = failed
-        ? const Color(0xFF3A1518)
-        : const Color(0xFF111B24);
-    final title = failed
-        ? 'Подбор стратегий требует внимания'
-        : active
-        ? 'Подбор стратегий'
-        : 'Стратегии подобраны';
-    final subtitle = total > 0
-        ? '$doneCount из $total сервисов готовы'
-        : 'Ждём список сервисов от ядра';
-    final sortedItems = List<RouteProbeProgress>.from(items)
-      ..sort((left, right) {
-        if (left.pending != right.pending) {
-          return left.pending ? -1 : 1;
-        }
-        return left.name.compareTo(right.name);
-      });
-    final rows = items.isEmpty
-        ? const <Widget>[
-            _RouteProbeRow(
-              icon: Icons.hourglass_top,
-              name: 'Подготовка',
-              detail: 'Ядро готовит список сервисов для проверки',
-              color: Color(0xFFF59E0B),
-            ),
-          ]
-        : sortedItems.map(_buildRow).toList(growable: false);
+  State<_RouteProbePanel> createState() => _RouteProbePanelState();
+}
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(11),
-      decoration: BoxDecoration(
-        color: background.withValues(alpha: 0.82),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: accent.withValues(alpha: failed ? 0.48 : 0.26),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
+class _RouteProbePanelState extends State<_RouteProbePanel> {
+  bool expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.visible) return const SizedBox.shrink();
+    final sorted = List<RouteProbeProgress>.from(widget.items)
+      ..sort((a, b) {
+        if (a.pending != b.pending) return a.pending ? -1 : 1;
+        return a.name.compareTo(b.name);
+      });
+    final pending = sorted.where((item) => item.pending).firstOrNull;
+    final progress = pending == null
+        ? ''
+        : [
+            if (pending.strategyIndex > 0)
+              'способ ${pending.strategyIndex}${pending.strategyTotal > 0 ? '/${pending.strategyTotal}' : ''}',
+            if (pending.attempt > 0)
+              'попытка ${pending.attempt}${pending.attemptTotal > 0 ? '/${pending.attemptTotal}' : ''}',
+          ].join(' · ');
+    final title = widget.active && widget.extendedSearch
+        ? 'До часа${pending != null ? ' · ${pending.name}' : ''}'
+        : pending != null
+        ? 'Настраиваем ${pending.name}'
+        : widget.failed
+        ? 'Не все сервисы удалось настроить'
+        : 'Настраиваем сервисы';
+    final color = widget.failed ? const Color(0xFFFCA5A5) : _atlasMuted;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextButton(
+          key: const ValueKey('route-probe-details'),
+          onPressed: () => setState(() => expanded = !expanded),
+          style: TextButton.styleFrom(
+            alignment: Alignment.centerLeft,
+            foregroundColor: color,
+            minimumSize: const Size(0, 44),
+          ),
+          child: Row(
             children: [
-              Icon(
-                failed
-                    ? Icons.error_outline
-                    : active
-                    ? Icons.manage_search
-                    : Icons.check_circle,
-                color: accent,
-                size: 16,
-              ),
-              const SizedBox(width: 7),
               Expanded(
                 child: Text(
-                  title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: accent,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w800,
-                  ),
+                  [title, if (progress.isNotEmpty) progress].join(' · '),
+                  style: const TextStyle(fontSize: 12),
                 ),
               ),
+              Icon(expanded ? Icons.expand_less : Icons.expand_more, size: 18),
             ],
           ),
-          const SizedBox(height: 4),
-          Text(
-            subtitle,
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.58),
-              fontSize: 10,
+        ),
+        if (widget.active && widget.extendedSearch)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            child: Text(
+              'Расширенный поиск может занять до часа. Можно продолжать пользоваться приложением.',
+              key: ValueKey('route-probe-extended-warning'),
+              style: TextStyle(color: Color(0xFFFCD34D), fontSize: 12),
             ),
           ),
-          const SizedBox(height: 8),
-          ...rows,
+        if (expanded) ...[
+          if (widget.failed && pending != null)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 10),
+              child: Text(
+                'Часть сервисов требует внимания.',
+                style: TextStyle(color: Color(0xFFFCA5A5), fontSize: 12),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Text(
+              '${widget.items.where((item) => item.done).length} из ${widget.expectedCount > 0 ? widget.expectedCount : widget.items.length} сервисов готовы',
+              style: const TextStyle(color: _atlasMuted, fontSize: 12),
+            ),
+          ),
+          ...sorted.map(_buildRow),
         ],
-      ),
+      ],
     );
   }
 
@@ -7048,7 +7111,7 @@ class _RouteProbePanel extends StatelessWidget {
       return [
         attempt,
         strategy,
-        'проверяем voice',
+        'проверяем голосовую связь',
         method,
       ].where((part) => part.isNotEmpty).join(' · ');
     }
@@ -7176,82 +7239,34 @@ class _DependencyStrip extends StatelessWidget {
 
 class _UpdateStrip extends StatelessWidget {
   const _UpdateStrip({super.key, required this.info, required this.onUpdate});
-
   final UpdateInfo info;
   final VoidCallback? onUpdate;
 
   @override
-  Widget build(BuildContext context) {
-    final actionLabel = info.selfUpdate || _isAndroidPlatform
-        ? 'Обновить'
-        : info.platform.toLowerCase() == 'windows'
-        ? 'Скачать'
-        : 'Скачать APK';
-    final version = Semantics(
-      label: 'Доступна новая версия Dropo ${info.latestVersion}',
-      excludeSemantics: true,
-      child: Text(
-        'Dropo ${info.latestVersion}',
-        maxLines: 1,
+  Widget build(BuildContext context) => Semantics(
+    key: const ValueKey('update-available-notice'),
+    label: 'Доступна новая версия Dropo ${info.latestVersion}',
+    child: TextButton.icon(
+      key: const ValueKey('update-available-action'),
+      onPressed: onUpdate,
+      icon: const Icon(Icons.system_update_alt_rounded, size: 18),
+      label: Text(
+        'Обновление · ${info.latestVersion}',
+        maxLines: 2,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(
-          color: _atlasText,
+      ),
+      style: TextButton.styleFrom(
+        foregroundColor: _atlasMint,
+        minimumSize: const Size(0, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        textStyle: const TextStyle(
           fontFamily: 'Inter',
-          fontSize: 13,
-          fontWeight: FontWeight.w700,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
         ),
       ),
-    );
-    final action = Semantics(
-      label: _isAndroidPlatform
-          ? 'Скачать, проверить APK и открыть установщик после подтверждения'
-          : info.selfUpdate
-          ? 'Обновить и перезапустить Dropo после подтверждения'
-          : info.platform.toLowerCase() == 'windows'
-          ? 'Скачать portable-архив новой версии'
-          : 'Скачать APK новой версии',
-      child: TextButton(
-        key: const ValueKey('update-available-action'),
-        onPressed: onUpdate,
-        style: TextButton.styleFrom(
-          foregroundColor: _atlasMint,
-          minimumSize: const Size(0, 40),
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          textStyle: const TextStyle(
-            fontFamily: 'Inter',
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        child: Text(actionLabel),
-      ),
-    );
-    return Padding(
-      key: const ValueKey('update-available-notice'),
-      padding: const EdgeInsets.only(left: 12, top: 4, bottom: 4),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final compact =
-              constraints.maxWidth <
-              240 * (MediaQuery.textScalerOf(context).scale(13) / 13);
-          // Very small windows with enlarged text keep the action visible;
-          // the exact version is still announced and shown on confirmation.
-          return compact
-              ? Semantics(
-                  label: 'Доступна новая версия Dropo ${info.latestVersion}',
-                  child: Align(alignment: Alignment.centerLeft, child: action),
-                )
-              : Row(
-                  children: [
-                    Expanded(child: version),
-                    const SizedBox(width: 8),
-                    action,
-                  ],
-                );
-        },
-      ),
-    );
-  }
+    ),
+  );
 }
 
 class _MiniStrip extends StatelessWidget {

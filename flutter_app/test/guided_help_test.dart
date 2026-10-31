@@ -379,9 +379,11 @@ void main() {
       bridge: _HelpBridge(),
       mode: 'blocked_only',
       services: () => opened = true,
+      check: () async => _checks(),
     );
     await _choose(tester, 'service_unavailable');
-    expect(find.text('Посмотреть маршруты сервисов'), findsOneWidget);
+    expect(find.text('Настроить сервисы'), findsOneWidget);
+    expect(find.text('Запустить проверку'), findsOneWidget);
     final action = find.byKey(const ValueKey('guided-help-next'));
     await tester.ensureVisible(action);
     await tester.tap(action);
@@ -393,7 +395,7 @@ void main() {
     (tester) async {
       await _pumpHelp(tester, bridge: _HelpBridge(), services: () {});
       await _choose(tester, 'service_unavailable');
-      expect(find.text('Посмотреть маршруты сервисов'), findsNothing);
+      expect(find.text('Настроить сервисы'), findsNothing);
       expect(find.text('Посмотреть источники'), findsOneWidget);
     },
   );

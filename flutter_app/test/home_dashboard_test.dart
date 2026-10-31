@@ -927,7 +927,7 @@ void main() {
       expect(bridge.toggles, 0);
       expect(find.byKey(const ValueKey('full-vpn-onboarding')), findsOneWidget);
       await _tap(tester, 'onboarding-own-source');
-      await _tap(tester, 'choose-personal-source');
+      await _tap(tester, 'add-personal-vpn');
       expect(find.byKey(const ValueKey('personal-vpn-uri')), findsOneWidget);
       await tester.enterText(
         find.byKey(const ValueKey('personal-vpn-uri')),
@@ -963,6 +963,15 @@ void main() {
     tester,
   ) async {
     await _pumpHome(tester, _HomeBridge()..error = true);
+    expect(find.text('Не удалось подключиться к серверу'), findsNothing);
+    await _tap(tester, 'expand-notice');
+    final details = find.descendant(
+      of: find.byType(Dialog),
+      matching: find.byKey(const ValueKey('connection-error-details')),
+    );
+    await tester.ensureVisible(details);
+    await tester.tap(details);
+    await tester.pumpAndSettle();
     expect(find.text('Не удалось подключиться к серверу'), findsOneWidget);
     expect(find.text('Подключено'), findsNothing);
     expect(find.byKey(const ValueKey('nav-settings')), findsOneWidget);
@@ -1807,21 +1816,17 @@ void main() {
     final bridge = _OnboardingBridge();
     await _pumpHome(tester, bridge, size: const Size(320, 568), scale: 2);
     await _tap(tester, 'nav-sources');
-    await _tap(tester, 'choose-personal-source');
+    await _tap(tester, 'add-personal-vpn');
     final uri = find.byKey(const ValueKey('personal-vpn-uri'));
     await tester.ensureVisible(uri);
     await tester.enterText(uri, 'https://example.test/subscription');
     tester.view.viewInsets = const FakeViewPadding(bottom: 280);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    await tester.testTextInput.receiveAction(TextInputAction.next);
-    await tester.pump();
-    final name = find.byKey(const ValueKey('personal-vpn-name'));
-    expect(tester.widget<TextField>(name).focusNode?.hasFocus, isTrue);
-    await tester.enterText(name, 'Мой телефон');
-    await tester.testTextInput.receiveAction(TextInputAction.done);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.byKey(const ValueKey('personal-vpn-name')), findsNothing);
+    // A name is optional. The main action remains reachable while the URL
+    // keyboard is open, even at the largest supported text scale.
+    await _tap(tester, 'submit-personal-vpn');
     expect(bridge.personalTests, 1);
     expect(bridge.personalAdds, 1);
     expect(

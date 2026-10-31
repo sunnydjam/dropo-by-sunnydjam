@@ -348,7 +348,7 @@ func Call(method, argsJSON string) string {
 		return testAndroidVPNConnection(stringArg(args, 0, ""))
 	}
 	switch method {
-	case "AddVPNSource", "AddManagedVPNSource", "RemoveVPNSource", "SetVPNSourceNode", "SetVPNSourceEnabled", "MoveVPNSource", "RefreshVPNSources", "EnableVPNSourceAutoSelect":
+	case "AddVPNSource", "AddManagedVPNSource", "RemoveVPNSource", "SetVPNSourceNode", "SetVPNSourceNodeByID", "SetVPNSourceEnabled", "MoveVPNSource", "RefreshVPNSources", "EnableVPNSourceAutoSelect":
 		return changeAndroidSources(method, args)
 	}
 
@@ -358,6 +358,8 @@ func Call(method, argsJSON string) string {
 	switch method {
 	case "GetVPNSources":
 		return encode(androidSourcesViewLocked())
+	case "RenameVPNSource", "SetVPNSourceNodeFavorite":
+		return changeAndroidSourceMetadataLocked(method, args)
 	case "SetReduceMotion":
 		if len(args) < 1 {
 			return androidSourceError("Не указано состояние анимации.")
@@ -1274,6 +1276,9 @@ func loadLocked() error {
 	normalizeLoadedAppConfigLocked()
 	normalizeLoadedAndroidSubscriptionCountLocked()
 	migrateAndroidSourcesLocked()
+	for i := range current.VPNSources {
+		current.VPNSources[i].FavoriteNodeIDs = normalizeAndroidFavoriteNodeIDs(current.VPNSources[i].FavoriteNodeIDs)
+	}
 	current.sourcesRevision++
 	return nil
 }

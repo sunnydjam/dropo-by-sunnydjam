@@ -19,6 +19,7 @@ type androidVPNSource struct {
 	URI              string        `json:"uri"`
 	Disabled         bool          `json:"disabled"`
 	SelectedNodeID   string        `json:"selected_node_id,omitempty"`
+	FavoriteNodeIDs  []string      `json:"favorite_node_ids,omitempty"`
 	Nodes            []proxyConfig `json:"nodes,omitempty"`
 	UpdatedAt        string        `json:"updated_at,omitempty"`
 	LastRefreshError string        `json:"last_refresh_error,omitempty"`
@@ -88,6 +89,7 @@ func androidSourcesViewLocked() map[string]interface{} {
 	views := make([]map[string]interface{}, 0, len(current.VPNSources))
 	for _, source := range current.VPNSources {
 		names := make([]string, 0, len(source.Nodes))
+		ids := make([]string, 0, len(source.Nodes))
 		for i, node := range source.Nodes {
 			name := strings.TrimSpace(node.Name)
 			// Never display a raw key as a server label.
@@ -95,6 +97,7 @@ func androidSourcesViewLocked() map[string]interface{} {
 				name = fmt.Sprintf("Сервер %d", i+1)
 			}
 			names = append(names, name)
+			ids = append(ids, androidNodeID(node))
 		}
 		kind := "subscription"
 		if isDirectProxyLink(source.URI) {
@@ -119,6 +122,7 @@ func androidSourcesViewLocked() map[string]interface{} {
 			"id":                source.ID, "name": source.Name, "kind": kind, "disabled": source.Disabled,
 			"selected_node": androidSelectedNode(source), "node_count": len(source.Nodes),
 			"node_names": names, "last_updated": source.UpdatedAt, "last_error": problem,
+			"node_ids": ids, "favorite_node_ids": append([]string{}, source.FavoriteNodeIDs...),
 			"active":   current.Connected && current.activeSourceID == source.ID,
 			"response": androidSourceResponseLocked(source.ID),
 		})
@@ -193,7 +197,7 @@ func changeAndroidSources(method string, args []interface{}) string {
 		if name == "" {
 			name = "Мой VPN"
 		}
-		if len([]rune(name)) > 80 || strings.ContainsAny(name, "\r\n") || strings.Contains(name, "://") {
+		if !validAndroidSourceDisplayName(name) {
 			return androidSourceError("Используйте короткое название без ссылок и переносов строк.")
 		}
 		nodes, err := parseAndroidSource(uri)
@@ -244,11 +248,27 @@ func changeAndroidSources(method string, args []interface{}) string {
 		if len(failures) > 0 {
 			return androidSourceError("Не удалось обновить список серверов. Сохранённые источники не изменены.")
 		}
-	case "RemoveVPNSource", "SetVPNSourceEnabled", "SetVPNSourceNode", "MoveVPNSource":
+	case "RemoveVPNSource", "SetVPNSourceEnabled", "SetVPNSourceNode", "SetVPNSourceNodeByID", "MoveVPNSource":
 		if index < 0 {
 			return androidSourceError("Источник не найден. Обновите список.")
 		}
 		switch method {
+		case "SetVPNSourceNodeByID":
+			nodeID := stringArg(args, 1, "")
+			if len(args) != 2 || !validAndroidFavoriteNodeID(nodeID) {
+				return androidSourceError("Неверный идентификатор сервера. Обновите список.")
+			}
+			found := false
+			for _, node := range sources[index].Nodes {
+				if androidNodeID(node) == nodeID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return androidSourceError("Выбранный сервер больше недоступен. Обновите список и выберите сервер снова.")
+			}
+			sources[index].SelectedNodeID = nodeID
 		case "RemoveVPNSource":
 			sources = append(sources[:index], sources[index+1:]...)
 		case "SetVPNSourceEnabled":
@@ -296,6 +316,9 @@ func changeAndroidSources(method string, args []interface{}) string {
 	previous := captureAndroidSubscriptionStateLocked()
 	previousAutoSelect := current.VPNSourceAutoSelect
 	oldSources := current.VPNSources
+	// Network operations snapshot sources before releasing mu. Merge current
+	// display metadata so a rename/star during a download is not overwritten.
+	preserveAndroidSourceMetadata(sources, oldSources)
 	current.VPNSources = sources
 	current.VPNSourceAutoSelect = autoSelect
 	syncAndroidSubscriptionLocked()

@@ -537,15 +537,12 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       final action = find.byKey(const ValueKey('update-available-action'));
-      final notice = find.byKey(const ValueKey('notice-overlay'));
-      expect(action.hitTestable(), findsOneWidget);
-      expect(tester.getRect(notice).contains(tester.getCenter(action)), isTrue);
-      expect(
-        tester.getRect(action).bottom,
-        lessThanOrEqualTo(tester.getRect(notice).bottom),
-      );
-      expect(tester.getRect(notice).overlaps(before), isFalse);
+      final notice = find.byKey(const ValueKey('update-available-notice'));
       expect(tester.getRect(connection), before);
+      expect(tester.getRect(notice).overlaps(before), isFalse);
+      if (viewport.$2 > 1) await tester.ensureVisible(action);
+      expect(action.hitTestable(), findsOneWidget);
+      expect(find.byKey(const ValueKey('notice-overlay')), findsNothing);
       expect(find.textContaining('Setup-x64.exe'), findsNothing);
       expect(find.textContaining('Preview-universal.apk'), findsNothing);
       expect(
@@ -558,17 +555,6 @@ void main() {
         tester,
         'update-notice-${viewport.$1.width.round()}-${viewport.$2}-${viewport.$3 ? 'android' : 'windows'}',
       );
-      await tester.tap(find.byKey(const ValueKey('dismiss-notice')));
-      await tester.pump();
-      expect(tester.getRect(connection), before);
-      final reopen = find.byKey(const ValueKey('reopen-notice'));
-      expect(reopen.hitTestable(), findsOneWidget);
-      await tester.tap(reopen);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-      expect(action.hitTestable(), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      bridge.expectNoInstallOrInterruption();
       await tester.pumpWidget(const SizedBox.shrink());
       semantics.dispose();
     });
@@ -590,16 +576,11 @@ void main() {
           providedBridge: _ManualUpdateBridge()..statusError = true,
         );
         final action = find.byKey(const ValueKey('update-available-action'));
+        if (viewport.$2 > 1) await tester.ensureVisible(action);
         expect(action.hitTestable(), findsOneWidget);
         expect(
-          tester.getRect(action).bottom,
-          lessThanOrEqualTo(
-            tester.getRect(find.byKey(const ValueKey('notice-overlay'))).bottom,
-          ),
-        );
-        expect(
           tester
-              .getRect(find.byKey(const ValueKey('notice-overlay')))
+              .getRect(action)
               .overlaps(
                 tester.getRect(find.byKey(const ValueKey('home-connect'))),
               ),
@@ -612,6 +593,14 @@ void main() {
         await tester.tap(find.byKey(const ValueKey('expand-notice')));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text('Тест: сервер временно недоступен'), findsNothing);
+        await tester.tap(
+          find.descendant(
+            of: find.byType(Dialog),
+            matching: find.byKey(const ValueKey('connection-error-details')),
+          ),
+        );
+        await tester.pumpAndSettle();
         expect(find.text('Тест: сервер временно недоступен'), findsOneWidget);
         expect(tester.takeException(), isNull);
         await _capture(
