@@ -340,11 +340,19 @@ $XrayVersion = $VersionInfo.xray.version
 $XrayArchiveSHA256 = ([string]$VersionInfo.xray.archiveSha256).ToLowerInvariant()
 $XrayExeSHA256 = ([string]$VersionInfo.xray.executableSha256).ToLowerInvariant()
 $UTLSVersion = "1.8.4"
-$SourceRevision = ([string](& git -C $ScriptRoot rev-parse HEAD 2>$null | Select-Object -First 1)).Trim()
-if ($SourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
-    $SourceRevision = "unknown"
+$sourceRevisionOutput = @(& git -C $ScriptRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or $sourceRevisionOutput.Count -ne 1) {
+    throw 'Cannot determine the source commit. Git rev-parse must succeed before building release artifacts.'
 }
-$SourceDirty = @(& git -C $ScriptRoot status --porcelain 2>$null).Count -gt 0
+$SourceRevision = ([string]$sourceRevisionOutput[0]).Trim().ToLowerInvariant()
+if ($SourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
+    throw 'Git HEAD must resolve to a complete source commit SHA before building release artifacts.'
+}
+$sourceStatus = @(& git -C $ScriptRoot status --porcelain 2>$null)
+if ($LASTEXITCODE -ne 0) {
+    throw 'Cannot determine whether the source worktree is clean. Git status must succeed before building release artifacts.'
+}
+$SourceDirty = $sourceStatus.Count -gt 0
 $dirtyBuildAllowed = $AllowDirtySource -or $env:DROPO_ALLOW_DIRTY_BUILD -eq "1"
 $willBuildAndroidBundle = $AndroidBundle -or $All
 $willBuildWindows = $Build -or $Flutter -or $AppOnly -or $All -or (-not $Portable -and -not $Android -and -not $AndroidBundle -and -not $Clean)
@@ -842,7 +850,11 @@ function Build-Application {
     if ($LASTEXITCODE -ne 0) {
         throw "Bundled blocked-list update failed with exit code $LASTEXITCODE"
     }
-    $postCatalogDirty = @(& git -C $ScriptRoot status --porcelain 2>$null).Count -gt 0
+    $postCatalogStatus = @(& git -C $ScriptRoot status --porcelain 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Cannot verify the source worktree after the blocked catalog update. Git status failed.'
+    }
+    $postCatalogDirty = $postCatalogStatus.Count -gt 0
     if ($postCatalogDirty -and -not $dirtyBuildAllowed) {
         throw "The blocked catalog changed during the build. Review and commit the refreshed catalog, then rebuild from that clean commit."
     }

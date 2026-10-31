@@ -3,16 +3,18 @@
 Developer: Indzhiev Ayush. Privacy and support contact:
 [dr.oponevedimka@gmail.com](mailto:dr.oponevedimka@gmail.com).
 
-Last updated: 30 October 2026.
+Last updated: 31 October 2026.
 
 This policy covers Dropo (Dropo Connect Booster) for Windows and Android,
 including the Google Play package `com.dropo.myapp` and the separate Android Preview package
 `in.droponevedimka.dropo.preview`. Dropo provides VPN connections and service-based
 routing. Telegram registration is optional: free VPN and personal subscriptions
-do not require an account.
+do not require sign-in. The app automatically creates a guest installation profile
+when the account service is available; service failure does not block VPN use.
 
 The public policy is available at [dropo.fun/privacy](https://dropo.fun/privacy).
-Account deletion is available at [dropo.fun/account/delete](https://dropo.fun/account/delete).
+Registered-account deletion is available at [dropo.fun/account/delete](https://dropo.fun/account/delete).
+Guest profiles can currently be deleted only inside the app.
 
 ## VPN traffic and local data
 
@@ -39,8 +41,41 @@ Dropo does not automatically upload profiles, credentials, visited URLs or VPN
 logs to the account service, developer or upstream maintainers. Sharing a
 diagnostic report is a user action; remove sensitive data before sending it.
 
-Dropo does not include advertising SDKs, analytics, telemetry or automatic crash
-reporting. It does not redirect traffic to monetize advertising requests.
+Dropo does not include advertising SDKs or automatic crash reporting. Optional
+structured connection diagnostics are described below and are disabled by default.
+It does not redirect traffic to monetize advertising requests.
+
+## Guest profiles and optional connection diagnostics
+
+The app generates a random installation secret and stores it with session tokens
+in protected Android or Windows storage. It sends the secret over HTTPS to create
+or restore the guest profile; the server stores only its cryptographic digest.
+The server also stores random profile and installation IDs, platform, app version,
+creation and last-contact times, and installation/session status. These support
+profile functionality, active-installation counts and API abuse prevention.
+MAC addresses, IMEI, hardware serial numbers and advertising IDs are not collected.
+An installation is not a unique person: clearing app data or reinstalling can
+create a new profile. Signing in to an ordinary account can link the installation
+to that account. The current free VPN subscription remains shared; guest profiles
+do not yet provide individual VPN credentials or per-user traffic limits.
+
+The separate "Help improve connectivity" setting requires explicit consent.
+When enabled, the app sends bounded observations of connection failures,
+successful checks and recoveries, using existing checks while the app can observe
+them. Events contain a random event ID, observation time, catalog service code,
+platform, app version, routing mode, coarse error category, result, duration
+bucket and whether the route was verified. They are linked to the authenticated
+installation/account and are not anonymous. A failed check does not prove a
+service-wide outage. No browsing history, URL, domain, IP address, traffic payload,
+raw error, subscription URL, VPN credential or raw diagnostic log is included.
+
+The encrypted local queue holds at most 16 events / 8 KiB of event data for up to
+seven days. Turning the setting off cancels pending uploads and clears the queue;
+already received events expire after at most 30 days or on account deletion.
+Account changes and deletion clear pending events. The private administrator
+dashboard shows installation/profile counts, reported incidents and separate
+aggregated API security signals. Security counters contain no network addresses
+or credentials, expire after 30 days and do not measure individual VPN traffic.
 
 ## Optional Android work profile
 
@@ -119,6 +154,12 @@ collect payment details.
   local application data.
 - Account profiles remain until confirmed deletion. Active sessions remain until
   expiry or revocation; expired or revoked session rows are removed within 30 days.
+- Guest session tokens expire after one hour. A protected installation credential
+  can restore the same active profile. After guest deletion, only the revoked
+  credential digest remains for up to 30 days to reject delayed registration
+  requests; the profile, its sessions and diagnostic events are deleted.
+- Optional incident events remain locally for at most seven days and on the
+  server for at most 30 days. Account deletion removes related events immediately.
 - A pre-provisioned demonstration login and its protected password hash remain
   until the developer disables test access, so review can be repeated. After
   profile deletion the login no longer references the erased sessions or history.
@@ -144,7 +185,13 @@ not record their tokens, account IDs or Telegram identities.
 
 ## Account deletion and local removal
 
-Request deletion in the Dropo account section or on the
+Delete a guest profile in the Dropo account section. Guest deletion currently has
+no external web form or exportable recovery/deletion code. Delete it before
+uninstalling if you want its server data removed; losing protected credentials
+can prevent proving ownership later. The app suppresses automatic recreation
+after deletion and retries a pending deletion only for the same installation.
+
+For registered accounts, request deletion in the Dropo account section or on the
 [external deletion page](https://dropo.fun/account/delete), even without
 the app installed. Telegram accounts confirm through the same Telegram identity
 used for registration. Password demonstration accounts confirm with their

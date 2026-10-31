@@ -85,7 +85,7 @@ $pubspecPath = Join-Path $ScriptRoot "flutter_app\pubspec.yaml"
 $pubspec = [IO.File]::ReadAllText($pubspecPath, [Text.UTF8Encoding]::new($false, $true))
 $buildNumber = ($parsedVersion.Major * 10000) + ($parsedVersion.Minor * 100) + $parsedVersion.Build
 $replacement = "version: $newVersion+$buildNumber"
-$pubspecVersionPattern = '(?m)^version:\s*[^\r\n]+$'
+$pubspecVersionPattern = '(?m)^version:\s*[^\r\n]+(?=\r?$)'
 $pubspecVersionMatches = [regex]::Matches($pubspec, $pubspecVersionPattern)
 if ($pubspecVersionMatches.Count -ne 1) {
     throw "flutter_app/pubspec.yaml must contain exactly one version field."

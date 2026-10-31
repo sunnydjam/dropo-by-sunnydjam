@@ -49,6 +49,15 @@ The same implemented user functions are used by both authentication methods.
 - Verify both connection modes and background/notification disconnect on a device.
 - Review the Data safety declaration against the current privacy policy: password
   accounts process a username, protected password verifier and real session data.
+- Version 3.0.53 also automatically processes account/installation IDs, platform,
+  version and activity metadata. Optional connection diagnostics require separate
+  consent and are linked to the installation. Update Data safety accordingly;
+  do not reuse a declaration claiming no collection or no diagnostics.
+- Guest deletion is currently offered only inside the app by product decision.
+  Review Google's external account-deletion requirement for this guest lifecycle
+  before submitting to production. The existing web deletion page covers Telegram
+  and password accounts; it must not be described as guest web deletion.
+  [Google account-deletion requirements](https://support.google.com/googleplay/android-developer/answer/13327111?hl=en).
 - Keep test credentials valid and the backend/free source reachable throughout
   review. Disabling an identity revokes its access; do not disable it during review.
 
