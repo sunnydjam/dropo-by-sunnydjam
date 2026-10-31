@@ -1,6 +1,6 @@
 module dropocore
 
-go 1.26.9
+go 1.26.10
 
 tool golang.org/x/mobile/cmd/gobind
 

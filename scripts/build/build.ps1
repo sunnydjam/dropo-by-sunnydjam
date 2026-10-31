@@ -1551,8 +1551,27 @@ function Set-WindowsAdminManifest {
 function Get-AndroidBridgeFingerprint {
     param(
         [string]$BridgeDir,
-        [string]$CoreDir
+        [string]$CoreDir,
+        [Parameter(Mandatory = $true)]
+        [string]$GoWorkingDirectory
     )
+
+    # Resolve Go in the same module context used by gomobile: automatic
+    # toolchain selection can differ from the go.exe first found on PATH.
+    # A security update must invalidate a native AAR even with identical sources.
+    Push-Location -LiteralPath $GoWorkingDirectory
+    try {
+        $goVersionOutput = @(& go env GOVERSION 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $goVersionOutput.Count -ne 1) {
+            throw 'Cannot determine the Android bridge Go toolchain version.'
+        }
+        $goVersion = ([string]$goVersionOutput[0]).Trim()
+        if ($goVersion -cnotmatch '^go\d+\.\d+\.\d+$') {
+            throw 'Android release builds require a stable, identifiable Go toolchain.'
+        }
+    } finally {
+        Pop-Location
+    }
 
     $files = @()
     foreach ($dir in @($BridgeDir, $CoreDir)) {
@@ -1568,6 +1587,8 @@ function Get-AndroidBridgeFingerprint {
     $files += Get-Item -LiteralPath $overlayPreparer
 
     $builder = New-Object System.Text.StringBuilder
+    [void]$builder.AppendLine('androidBridgeFingerprint=2')
+    [void]$builder.AppendLine("goVersion=$goVersion")
     [void]$builder.AppendLine("sing-box=$SingBoxVersion")
     [void]$builder.AppendLine("gomobileTarget=$AndroidGoMobileTarget")
     [void]$builder.AppendLine("tags=$AndroidBridgeTags")
@@ -1629,7 +1650,8 @@ function Build-AndroidBridgeAAR {
     # silently unpatched fallback are permitted.
     $xhttpOverlay = & (Join-Path $ScriptRoot "tools\prepare-android-xhttp-overlay.ps1") `
         -OutputDirectory (Join-Path $ToolchainRoot 'android-xhttp-overlay')
-    $fingerprint = Get-AndroidBridgeFingerprint -BridgeDir $MobileBridgeDir -CoreDir $MobileCoreDir
+    $fingerprint = Get-AndroidBridgeFingerprint -BridgeDir $MobileBridgeDir -CoreDir $MobileCoreDir `
+        -GoWorkingDirectory $xhttpOverlay.BindingDirectory
     if ((Test-Path $AARPath) -and (Test-Path $VersionMarker) -and ((Get-Content $VersionMarker -Raw).Trim() -eq $fingerprint)) {
         $aarMB = [math]::Round((Get-Item $AARPath).Length / 1MB, 2)
         Write-Host "[OK] Reusing Android bridge AAR: $AARPath ($aarMB MB, v$SingBoxVersion)" -ForegroundColor Green

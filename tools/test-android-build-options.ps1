@@ -50,6 +50,10 @@ function Get-BuildFunctionAst([string]$Name) {
 foreach ($name in @('Get-DropoAccountBuildArguments', 'Get-DropoAndroidBundleBuildArguments', 'Get-AndroidBuildNumber', 'Write-DropoAndroidBuildMetadata')) {
     . ([ScriptBlock]::Create((Get-BuildFunctionAst $name).Extent.Text))
 }
+$bridgeBody = (Get-BuildFunctionAst 'Build-AndroidBridgeAAR').Extent.Text
+if (-not $bridgeBody.Contains('-GoWorkingDirectory $xhttpOverlay.BindingDirectory')) {
+    throw 'Android bridge fingerprint must use the actual gomobile binding module toolchain.'
+}
 if (@($buildAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'AndroidBundle' }).Count -ne 1) {
     throw 'Explicit AndroidBundle build option missing.'
 }
@@ -168,7 +172,60 @@ $fixtureDirectory = Join-Path ([IO.Path]::GetTempPath()) ('dropo-build-metadata-
 New-Item -ItemType Directory -Path $fixtureDirectory | Out-Null
 $artifactPath = Join-Path $fixtureDirectory 'dropo-Android-Play-universal.aab'
 $metadataPath = "$artifactPath.build.json"
+$bridgeFixturePath = Join-Path $fixtureDirectory 'cache-fixture.go'
 try {
+    [IO.File]::WriteAllText($bridgeFixturePath, 'package fixture', [Text.UTF8Encoding]::new($false))
+    # Same sources and target, different resolved compiler: never reuse an AAR
+    # built before a Go security update. No real compiler or native build runs.
+    & {
+        . ([ScriptBlock]::Create((Get-BuildFunctionAst 'Get-AndroidBridgeFingerprint').Extent.Text))
+        $ScriptRoot = $repositoryRoot
+        $SingBoxVersion = 'fixture'
+        $AndroidGoMobileTarget = 'android/arm,android/arm64'
+        $AndroidBridgeTags = 'fixture'
+        $fixtureGoExitCode = 0
+        $fixtureGoOutput = 'go1.26.9'
+        function go {
+            if (($args -join ' ') -cne 'env GOVERSION' -or
+                (Get-Location).Path -cne $fixtureDirectory) {
+                throw 'Go version must be resolved in the exact binding directory.'
+            }
+            $global:LASTEXITCODE = $fixtureGoExitCode
+            $fixtureGoOutput
+        }
+        $fingerprintArguments = @{
+            BridgeDir = $fixtureDirectory
+            CoreDir = $fixtureDirectory
+            GoWorkingDirectory = $fixtureDirectory
+        }
+        $older = Get-AndroidBridgeFingerprint @fingerprintArguments
+        if ($older -cne (Get-AndroidBridgeFingerprint @fingerprintArguments)) {
+            throw 'Unchanged Android bridge inputs must have a stable fingerprint.'
+        }
+        $fixtureGoOutput = 'go1.26.10'
+        $updated = Get-AndroidBridgeFingerprint @fingerprintArguments
+        if ($older -ceq $updated) { throw 'A Go toolchain update reused the vulnerable Android AAR fingerprint.' }
+        foreach ($case in @(
+            @{ Output = 'go1.26.10'; ExitCode = 1 },
+            @{ Output = @(); ExitCode = 0 },
+            @{ Output = @('go1.26.10', 'unexpected'); ExitCode = 0 },
+            @{ Output = 'devel go1.27'; ExitCode = 0 },
+            @{ Output = 'go1.27rc1'; ExitCode = 0 }
+        )) {
+            $fixtureGoOutput = $case.Output
+            $fixtureGoExitCode = $case.ExitCode
+            $previousDirectory = (Get-Location).Path
+            $rejected = $false
+            try { $null = Get-AndroidBridgeFingerprint @fingerprintArguments } catch {
+                if ($_.Exception.Message -notmatch 'Cannot determine|stable, identifiable') { throw }
+                $rejected = $true
+            }
+            if (-not $rejected -or (Get-Location).Path -cne $previousDirectory) {
+                throw 'Failed or ambiguous Android Go toolchain detection must fail closed and restore location.'
+            }
+        }
+        $global:LASTEXITCODE = 0
+    }
     Write-DropoAndroidBuildMetadata -ArtifactPath $artifactPath -ArtifactSHA256 ('b' * 64) `
         -Channel 'play' -PackageName 'com.dropo.myapp' -Architecture 'universal'
     $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
@@ -182,6 +239,7 @@ try {
     }
 } finally {
     if (Test-Path -LiteralPath $metadataPath -PathType Leaf) { Remove-Item -LiteralPath $metadataPath -Force }
+    if (Test-Path -LiteralPath $bridgeFixturePath -PathType Leaf) { Remove-Item -LiteralPath $bridgeFixturePath -Force }
     Remove-Item -LiteralPath $fixtureDirectory -Force
 }
-Write-Host 'Android build options passed (APK channel isolation, release AAB, ARM32/ARM64, exact metadata and combined artifact dispatch).'
+Write-Host 'Android build options passed (APK channel isolation, release AAB, ARM32/ARM64, Go toolchain cache invalidation, exact metadata and combined artifact dispatch).'
