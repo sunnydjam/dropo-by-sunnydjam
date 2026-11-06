@@ -77,6 +77,9 @@ jobs:
             # all package scans succeed with the installed intelligence.
             Write-Warning "Using installed Defender intelligence; the mandatory package scans remain authoritative."
           }
+      - name: Test source archive publication on Windows PowerShell
+        shell: powershell
+        run: .\tools\test-runtime-source-publication.ps1
       - name: Build unsigned installer and portable archive
         shell: powershell
         env:

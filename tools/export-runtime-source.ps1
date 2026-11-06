@@ -22,6 +22,16 @@ foreach ($name in @('GOTOOLCHAIN','GOOS','GOARCH','GOAMD64','CGO_ENABLED','GOFLA
     $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 $archive = $null; $stream = $null
+function Publish-CompletedSourceArchive([string]$Temporary, [string]$Final) {
+    # .NET Framework (Windows PowerShell 5.1) lacks File.Move's overwrite
+    # overload. Replace atomically on the same volume; retain the old archive
+    # if its file is locked or publication fails.
+    if ([IO.File]::Exists($Final)) {
+        [IO.File]::Replace($Temporary, $Final, [NullString]::Value)
+    } else {
+        [IO.File]::Move($Temporary, $Final)
+    }
+}
 Push-Location $moduleRoot
 try {
     $env:GOTOOLCHAIN=$lock.toolchain; $env:GOOS='windows'; $env:GOARCH='amd64'; $env:GOAMD64='v1'; $env:CGO_ENABLED='0'
@@ -81,7 +91,7 @@ try {
     try { $writer.Write(($sourceManifest | ConvertTo-Json -Depth 5)) } finally { $writer.Dispose() }
     $archive.Dispose(); $archive=$null; $stream=$null
     # Only a completed, closed archive replaces the previous generated export.
-    [IO.File]::Move($temporary, $final, $true)
+    Publish-CompletedSourceArchive $temporary $final
     $hash=(Get-FileHash $final).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText($final+'.sha256', "$hash  dropo-Runtime-Sources.zip`n", [Text.UTF8Encoding]::new($false))
     Write-Host "[OK] Exported $($modules.Count) verified corresponding source modules."
