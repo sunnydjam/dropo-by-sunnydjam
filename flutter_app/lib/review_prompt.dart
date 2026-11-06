@@ -10,6 +10,8 @@ class AndroidReviewPromptCoordinator {
     required this.confirmPresentation,
     required this.canPresent,
     required this.present,
+    this.prepareNative,
+    this.launchNative,
   });
 
   final Future<Map<String, dynamic>> Function() readStatus;
@@ -18,6 +20,8 @@ class AndroidReviewPromptCoordinator {
   final Future<void> Function(String) confirmPresentation;
   final bool Function() canPresent;
   final Future<void> Function() present;
+  final Future<Map<String, dynamic>> Function()? prepareNative;
+  final Future<Map<String, dynamic>> Function(String)? launchNative;
   bool _busy = false;
   bool _finished = false;
 
@@ -31,6 +35,16 @@ class AndroidReviewPromptCoordinator {
         return;
       }
       if (state['eligible'] != true || !canPresent()) return;
+      if (prepareNative != null) {
+        final preparation = await prepareNative!();
+        if (preparation['prepared'] != true) {
+          // Known pre-launch failure: stay silent, and avoid retrying every UI
+          // refresh. A new app instance may retry; no persistent budget was used.
+          _finished = preparation['retryLater'] != true;
+          return;
+        }
+        if (!canPresent()) return;
+      }
       final reservation = await claim();
       final id = reservation['claimId'];
       if (reservation['claimed'] != true || id is! String || id.isEmpty) return;
@@ -39,6 +53,12 @@ class AndroidReviewPromptCoordinator {
         // disconnect UI. This reservation has never opened a route and is safe
         // to release; a confirmed presentation cannot be released natively.
         await cancelUnpresented(id);
+        return;
+      }
+      if (launchNative != null) {
+        final outcome = await launchNative!(id);
+        _finished =
+            outcome['attempted'] == true || outcome['retryLater'] != true;
         return;
       }
       // showDialog pushes its route synchronously before returning its Future.

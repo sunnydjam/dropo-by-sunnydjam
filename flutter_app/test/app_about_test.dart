@@ -47,6 +47,21 @@ Future<void> _pumpAbout(
 
 void main() {
   testWidgets(
+    'Android manual review opens the Play listing without invoking the review API',
+    (tester) async {
+      debugAndroidPlatformOverride = true;
+      addTearDown(() => debugAndroidPlatformOverride = null);
+      final opened = <String>[];
+      await _pumpAbout(tester, onOpenExternal: (url) async => opened.add(url));
+      await tester.ensureVisible(find.text('Оставить отзыв'));
+      await tester.tap(find.text('Оставить отзыв'));
+      await tester.pumpAndSettle();
+      expect(opened, [
+        'https://play.google.com/store/apps/details?id=com.dropo.myapp',
+      ]);
+    },
+  );
+  testWidgets(
     'About shares honest author, origin and exact core build metadata',
     (tester) async {
       await _pumpAbout(tester, onOpenExternal: (_) async {});

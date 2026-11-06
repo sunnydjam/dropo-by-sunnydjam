@@ -175,6 +175,7 @@ android {
 
 dependencies {
     implementation(files("libs/dropoandroid.aar"))
+    implementation("com.google.android.play:review:2.0.2")
     testImplementation("junit:junit:4.13.2")
 }
 

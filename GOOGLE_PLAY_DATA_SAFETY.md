@@ -240,3 +240,13 @@ IP/MAC и фраза «это мой телефон» не являются до
 [User Data policy](https://support.google.com/googleplay/android-developer/answer/10144311?hl=en).
 Приватные проверочные credentials вводятся только в App access, а не в эту
 публичную памятку; инструкции: [GOOGLE_PLAY_APP_ACCESS.md](GOOGLE_PLAY_APP_ACCESS.md).
+
+## Дополнение: Google Play In-App Review
+
+Play-сборка использует официальный `com.google.android.play:review:2.0.2`.
+Google управляет формой, квотами и отправкой введённых пользователем оценки и
+текста. SDK не передаёт приложению текст, результат отправки или признак
+фактического показа карточки; опубликованные отзывы могут быть видны в Google Play. Локальный флаг однократной попытки не отправляется в backend.
+При следующей отправке в Console сверить актуальные ответы с
+[описанием данных SDK](https://developer.android.com/guide/playcore/in-app-review#data-safety);
+это дополнение к исходникам, а не подтверждение изменения формы Console.

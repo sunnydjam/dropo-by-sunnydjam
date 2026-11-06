@@ -45,6 +45,8 @@ class MainActivity : FlutterActivity() {
     private var pendingConnectResult: MethodChannel.Result? = null
     private val apkUpdater by lazy { AndroidApkUpdater(this) }
     private var destroyed = false
+    private var resumedForReview = false
+    private var playReview: PlayReviewClient? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -115,6 +117,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         destroyed = true
+        playReview?.close()
+        playReview = null
         apkUpdater.close()
         pendingConnectResult = null
         accountSessionChannel?.close()
@@ -131,12 +135,14 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onPause() {
+        resumedForReview = false
         apkUpdater.onPause()
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
+        resumedForReview = true
         apkUpdater.onResume()
     }
 
@@ -180,6 +186,31 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleCoreCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "preparePlayReview" || call.method == "launchPlayReview") {
+            if (!BuildConfig.PLAY_DISTRIBUTION || packageName != PlayReviewClient.PLAY_APPLICATION_ID) {
+                result.success(mapOf("prepared" to false, "attempted" to false))
+                return
+            }
+            try {
+                val client = playReview ?: PlayReviewClient(
+                    this, AndroidReviewPrompt.tracker(this), coreExecutor,
+                    canPresent = {
+                        val state = DropoVpnRuntime.snapshot()
+                        resumedForReview && !destroyed && !isFinishing && hasWindowFocus() &&
+                            state["connecting"] != true && state["disconnecting"] != true &&
+                            state["hasError"] != true
+                    },
+                ).also { playReview = it }
+                if (call.method == "preparePlayReview") {
+                    client.prepare { result.success(it) }
+                } else {
+                    client.launch(stringArg(call, "claimId")) { result.success(it) }
+                }
+            } catch (_: Exception) {
+                result.success(mapOf("prepared" to false, "attempted" to false))
+            }
+            return
+        }
         if (call.method in setOf("getReviewPromptStatus", "claimReviewPrompt",
                 "cancelUnpresentedReviewPrompt", "confirmReviewPrompt")) {
             coreExecutor.execute {
@@ -1030,6 +1061,19 @@ class MainActivity : FlutterActivity() {
 
     private fun openExternalUrl(url: String): String {
         val trimmed = url.trim()
+        if (trimmed == PlayStoreListing.URL) {
+            val opened = PlayStoreListing.open(
+                inStore = {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PlayStoreListing.URL))
+                        .setPackage(PlayStoreListing.STORE_PACKAGE))
+                },
+                inBrowser = {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PlayStoreListing.URL)))
+                },
+                missingHandler = { it is ActivityNotFoundException },
+            )
+            return if (opened) successJson("Google Play opened") else errorJson("Google Play unavailable")
+        }
         if (trimmed.isBlank()) {
             return errorJson("URL is empty")
         }

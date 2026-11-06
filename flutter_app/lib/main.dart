@@ -3945,6 +3945,21 @@ class _DropoHomePageState extends State<DropoHomePage>
           ) ??
           const {},
       canPresent: () => _canPresentReviewPrompt,
+      prepareNative: _isPlayDistribution
+          ? () async =>
+                await reviewChannel.invokeMapMethod<String, dynamic>(
+                  'preparePlayReview',
+                ) ??
+                const {}
+          : null,
+      launchNative: _isPlayDistribution
+          ? (id) async =>
+                await reviewChannel.invokeMapMethod<String, dynamic>(
+                  'launchPlayReview',
+                  {'claimId': id},
+                ) ??
+                const {}
+          : null,
       cancelUnpresented: (id) async {
         await reviewChannel.invokeMethod<void>(
           'cancelUnpresentedReviewPrompt',

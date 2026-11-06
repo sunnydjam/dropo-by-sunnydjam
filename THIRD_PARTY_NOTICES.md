@@ -127,3 +127,11 @@ SOFTWARE.
 Обновление upstream само по себе не обновляет dropo: сначала выполняются
 license/security review, перевод идеи в типизированную модель, unit/fixture/
 Windows VM тесты и release audit.
+
+## Google Play In-App Review
+
+The Android client includes `com.google.android.play:review:2.0.2` from Google's
+Maven repository. It is governed by the
+[Play Core Software Development Kit Terms of Service](https://developer.android.com/guide/playcore/license).
+Production creates `ReviewManagerFactory`; `FakeReviewManager` is used only by
+isolated test instrumentation and is never selected by application settings.

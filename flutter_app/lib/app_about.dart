@@ -92,6 +92,14 @@ class _AboutContent extends StatelessWidget {
           icon: Icons.privacy_tip_outlined,
           onOpenExternal: onOpenExternal,
         ),
+        if (_isAndroidPlatform)
+          _AboutLink(
+            label: 'Оставить отзыв',
+            detail: 'Открыть страницу Dropo в Google Play',
+            url: _playStoreUrl,
+            icon: Icons.rate_review_outlined,
+            onOpenExternal: onOpenExternal,
+          ),
         _AboutLink(
           label: 'Удаление аккаунта',
           detail: 'Удалить аккаунт можно и без установленного приложения',

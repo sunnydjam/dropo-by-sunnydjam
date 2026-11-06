@@ -236,3 +236,12 @@ If Telegram access is lost or deletion fails, contact
 [dr.oponevedimka@gmail.com](mailto:dr.oponevedimka@gmail.com). Ownership verification
 is required to protect other users' accounts. Do not send Telegram passwords,
 login codes, VPN credentials or subscription URLs.
+
+## Optional Google Play reviews
+
+The Google Play edition may request an optional review through Google Play.
+Google controls whether its card appears and processes any rating or text under
+its own terms. The SDK does not return the entered text or a submission result
+to the app; published reviews may be visible in Google Play. The local one-time
+request flag is not sent to the account service.
+A manual review link opens the Google Play listing.

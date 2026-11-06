@@ -4,6 +4,106 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:dropo/main.dart';
 
 void main() {
+  test(
+    'Play build uses native review once without a preliminary dialog or fallback',
+    () async {
+      var shown = false;
+      var prepares = 0;
+      var launches = 0;
+      var dialogs = 0;
+      AndroidReviewPromptCoordinator create() => AndroidReviewPromptCoordinator(
+        readStatus: () async => {'eligible': true, 'shown': shown},
+        prepareNative: () async {
+          prepares++;
+          return {'prepared': true};
+        },
+        claim: () async {
+          shown = true;
+          return {'claimed': true, 'claimId': 'native'};
+        },
+        launchNative: (id) async {
+          expect(id, 'native');
+          launches++;
+          return {'attempted': true};
+        },
+        cancelUnpresented: (_) async {},
+        confirmPresentation: (_) async {
+          fail('native launcher owns confirmation');
+        },
+        canPresent: () => true,
+        present: () async {
+          dialogs++;
+        },
+      );
+      final coordinator = create();
+      await coordinator.check();
+      await coordinator.check();
+      await create().check();
+      expect(prepares, 1);
+      expect(launches, 1);
+      expect(dialogs, 0);
+    },
+  );
+
+  test(
+    'unavailable Play API stays silent and does not retry on every refresh',
+    () async {
+      var prepares = 0;
+      final coordinator = AndroidReviewPromptCoordinator(
+        readStatus: () async => {'eligible': true},
+        prepareNative: () async {
+          prepares++;
+          return {'prepared': false};
+        },
+        claim: () async {
+          fail('no launch info, no reservation');
+        },
+        launchNative: (_) async {
+          fail('must not launch');
+        },
+        cancelUnpresented: (_) async {},
+        confirmPresentation: (_) async {},
+        canPresent: () => true,
+        present: () async {
+          fail('no custom dialog/store fallback');
+        },
+      );
+      await coordinator.check();
+      await coordinator.check();
+      expect(prepares, 1);
+    },
+  );
+
+  test(
+    'backgrounding during Play preparation does not consume the one-time flag',
+    () async {
+      var visible = true;
+      var claims = 0;
+      final coordinator = AndroidReviewPromptCoordinator(
+        readStatus: () async => {'eligible': true},
+        prepareNative: () async {
+          visible = false;
+          return {'prepared': true};
+        },
+        claim: () async {
+          claims++;
+          return {};
+        },
+        launchNative: (_) async {
+          fail('background launch');
+        },
+        cancelUnpresented: (_) async {},
+        confirmPresentation: (_) async {},
+        canPresent: () => visible,
+        present: () async {
+          fail('no preliminary dialog');
+        },
+      );
+      await coordinator.check();
+      expect(claims, 0);
+    },
+  );
+
   test('eligibility, foreground and durable claim are all required', () async {
     var eligible = false;
     var visible = true;

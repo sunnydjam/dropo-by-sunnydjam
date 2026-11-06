@@ -4,6 +4,14 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.4 — 2026-11-06
+
+- Use the official Google Play In-App Review API automatically in the Play build,
+  without a preliminary dialog, forced store fallback or repeat launches. Preserve
+  the existing three-cycle/24-hour thresholds and one-time flag across updates.
+- Add a manual review link in About; open the Google Play app first, with a browser
+  fallback when the store is unavailable. Keep the documented listing URL.
+
 ## 3.1.3 — 2026-11-06
 
 - Ask Android users for a Google Play review once, after three completed successful
