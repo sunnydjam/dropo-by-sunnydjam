@@ -54,6 +54,8 @@ jobs:
           ./tools/test-android-upload-signing.ps1
           ./tools/test-android-xhttp-overlay.ps1
       - name: Verify bundled blocked lists are current
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: ./scripts/filters/update-blocked-lists.ps1 -CheckOnly
 

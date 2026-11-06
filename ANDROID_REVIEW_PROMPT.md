@@ -22,7 +22,10 @@ Native private SharedPreferences contain the bounded cycle count, eligibility
 and `shown` flag. The flag is committed before presentation; a rejected durable
 write does not authorize a prompt. Once claimed, dismissal, Back, decline and
 failed Play Store navigation never enable another automatic request. Native
-claims are synchronized and Flutter refreshes are serialized. A crash in the
+claims are synchronized and Flutter refreshes are serialized. If the screen
+becomes busy before any dialog route is opened, only the owning in-memory claim
+can release its reservation for a later foreground retry. Once presentation is
+confirmed the native tracker rejects release, including stale claim IDs. A crash in the
 small interval after claim can omit the prompt; preventing repeat requests takes
 priority. These preferences survive app restarts, updates, logout and resetting
 traffic statistics, and are independent of account/managed-profile deletion.

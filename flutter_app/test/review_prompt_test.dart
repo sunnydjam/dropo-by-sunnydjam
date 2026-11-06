@@ -13,8 +13,10 @@ void main() {
       readStatus: () async => {'eligible': eligible, 'shown': shown},
       claim: () async {
         shown = true;
-        return {'claimed': true};
+        return {'claimed': true, 'claimId': 'test-claim'};
       },
+      cancelUnpresented: (_) async {},
+      confirmPresentation: (_) async {},
       canPresent: () => visible,
       present: () async {
         expect(shown, isTrue);
@@ -46,8 +48,10 @@ void main() {
         readStatus: () => ready.future,
         claim: () async {
           claims++;
-          return {'claimed': true};
+          return {'claimed': true, 'claimId': 'test-claim'};
         },
+        cancelUnpresented: (_) async {},
+        confirmPresentation: (_) async {},
         canPresent: () => visible,
         present: () async {
           presentations++;
@@ -75,6 +79,8 @@ void main() {
         return {'eligible': true};
       },
       claim: () async => {'claimed': false},
+      cancelUnpresented: (_) async {},
+      confirmPresentation: (_) async {},
       canPresent: () => true,
       present: () async {
         presentations++;
@@ -85,6 +91,38 @@ void main() {
     await coordinator.check();
     expect(presentations, 0);
   });
+
+  test(
+    'busy UI after claim releases only the unpresented reservation',
+    () async {
+      var visible = true;
+      var shown = false;
+      var presentations = 0;
+      var cancelled = 0;
+      final coordinator = AndroidReviewPromptCoordinator(
+        readStatus: () async => {'eligible': true, 'shown': shown},
+        claim: () async {
+          shown = true;
+          visible = false;
+          return {'claimed': true, 'claimId': 'owned-claim'};
+        },
+        cancelUnpresented: (id) async {
+          expect(id, 'owned-claim');
+          cancelled++;
+          shown = false;
+        },
+        confirmPresentation: (_) async {},
+        canPresent: () => visible,
+        present: () async {
+          presentations++;
+        },
+      );
+      await coordinator.check();
+      expect(cancelled, 1);
+      expect(shown, isFalse);
+      expect(presentations, 0);
+    },
+  );
 
   for (final accept in [false, true]) {
     testWidgets(

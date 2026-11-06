@@ -51,7 +51,7 @@ class ReviewPromptTrackerTest {
         assertFalse(tracker.snapshot().eligible)
         now++
         assertTrue(tracker.snapshot().eligible)
-        assertTrue(tracker.claim())
+        assertNotNull(tracker.claim())
         assertTrue(store.state.shown)
     }
 
@@ -101,18 +101,33 @@ class ReviewPromptTrackerTest {
         val tracker = ReviewPromptTracker(store) { 0L }
         val start = CountDownLatch(1)
         val claims = AtomicInteger()
-        val threads = List(8) { Thread { start.await(); if (tracker.claim()) claims.incrementAndGet() } }
+        val threads = List(8) { Thread { start.await(); if (tracker.claim() != null) claims.incrementAndGet() } }
         threads.forEach { it.start() }; start.countDown(); threads.forEach { it.join() }
         assertEquals(1, claims.get())
-        assertFalse(ReviewPromptTracker(store) { 0L }.claim())
+        assertNull(ReviewPromptTracker(store) { 0L }.claim())
     }
 
     @Test fun failedDurableWriteNeverAuthorizesPresentation() {
         val store = MemoryStore().also { it.state = ReviewPromptState(3, true); it.failWrites = true }
         val tracker = ReviewPromptTracker(store) { 0L }
-        assertFalse(tracker.claim())
+        assertNull(tracker.claim())
         assertFalse(store.state.shown)
         store.failWrites = false
-        assertTrue(tracker.claim())
+        assertNotNull(tracker.claim())
     }
+    @Test fun onlyTheOwnerCanReleaseAPromptThatNeverOpened() {
+        val store = MemoryStore().also { it.state = ReviewPromptState(3, true) }
+        val tracker = ReviewPromptTracker(store) { 0L }
+        val first = tracker.claim()!!
+        assertFalse(tracker.cancelUnpresentedClaim("wrong"))
+        assertTrue(tracker.cancelUnpresentedClaim(first))
+        assertFalse(store.state.shown)
+        val second = tracker.claim()!!
+        assertFalse(tracker.cancelUnpresentedClaim(first))
+        assertTrue(tracker.confirmPresentation(second))
+        assertFalse(tracker.cancelUnpresentedClaim(second))
+        assertTrue(store.state.shown)
+        assertNull(ReviewPromptTracker(store) { 0L }.claim())
+    }
+
 }

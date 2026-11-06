@@ -6,12 +6,16 @@ class AndroidReviewPromptCoordinator {
   AndroidReviewPromptCoordinator({
     required this.readStatus,
     required this.claim,
+    required this.cancelUnpresented,
+    required this.confirmPresentation,
     required this.canPresent,
     required this.present,
   });
 
   final Future<Map<String, dynamic>> Function() readStatus;
   final Future<Map<String, dynamic>> Function() claim;
+  final Future<void> Function(String) cancelUnpresented;
+  final Future<void> Function(String) confirmPresentation;
   final bool Function() canPresent;
   final Future<void> Function() present;
   bool _busy = false;
@@ -27,9 +31,22 @@ class AndroidReviewPromptCoordinator {
         return;
       }
       if (state['eligible'] != true || !canPresent()) return;
-      if ((await claim())['claimed'] != true) return;
+      final reservation = await claim();
+      final id = reservation['claimId'];
+      if (reservation['claimed'] != true || id is! String || id.isEmpty) return;
+      if (!canPresent()) {
+        // A terminal service event can arrive before Flutter finishes its own
+        // disconnect UI. This reservation has never opened a route and is safe
+        // to release; a confirmed presentation cannot be released natively.
+        await cancelUnpresented(id);
+        return;
+      }
+      // showDialog pushes its route synchronously before returning its Future.
+      // Do not insert an await/lifecycle gap between the guard and presentation.
+      final presentation = present();
       _finished = true;
-      if (canPresent()) await present();
+      unawaited(confirmPresentation(id).catchError((_) {}));
+      await presentation;
     } catch (_) {
       // Storage, lifecycle and Play Store errors must never affect VPN use.
     } finally {

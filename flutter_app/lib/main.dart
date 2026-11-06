@@ -3945,6 +3945,17 @@ class _DropoHomePageState extends State<DropoHomePage>
           ) ??
           const {},
       canPresent: () => _canPresentReviewPrompt,
+      cancelUnpresented: (id) async {
+        await reviewChannel.invokeMethod<void>(
+          'cancelUnpresentedReviewPrompt',
+          {'claimId': id},
+        );
+      },
+      confirmPresentation: (id) async {
+        await reviewChannel.invokeMethod<void>('confirmReviewPrompt', {
+          'claimId': id,
+        });
+      },
       present: () => showAndroidReviewPrompt(
         context,
         openExternal: widget.bridge.openExternal,

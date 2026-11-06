@@ -1,5 +1,7 @@
 package `in`.droponevedimka.dropo
 
+import java.util.UUID
+
 data class ReviewPromptState(
     val completedCycles: Int = 0,
     val eligible: Boolean = false,
@@ -17,6 +19,7 @@ class ReviewPromptTracker(
     private val elapsedMillis: () -> Long,
 ) {
     private var connectedAt: Long? = null
+    private var unpresentedClaim: String? = null
 
     @Synchronized
     fun connected() {
@@ -48,12 +51,28 @@ class ReviewPromptTracker(
     }
 
     @Synchronized
-    fun claim(): Boolean {
+    fun claim(): String? {
         val state = snapshot()
-        if (!state.eligible || state.shown) return false
+        if (!state.eligible || state.shown) return null
         // Durable before presentation: a restart or concurrent UI request must
         // never display a second prompt, even after dismissal or link failure.
-        return store.write(state.copy(shown = true))
+        if (!store.write(state.copy(shown = true))) return null
+        return UUID.randomUUID().toString().also { unpresentedClaim = it }
+    }
+
+    @Synchronized
+    fun cancelUnpresentedClaim(id: String): Boolean {
+        if (id != unpresentedClaim) return false
+        if (!store.write(store.read().copy(shown = false))) return false
+        unpresentedClaim = null
+        return true
+    }
+
+    @Synchronized
+    fun confirmPresentation(id: String): Boolean {
+        if (id != unpresentedClaim) return false
+        unpresentedClaim = null
+        return true
     }
 
     private fun longSession(start: Long): Boolean {
