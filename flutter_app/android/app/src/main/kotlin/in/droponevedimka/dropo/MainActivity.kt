@@ -180,6 +180,21 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleCoreCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "getReviewPromptStatus" || call.method == "claimReviewPrompt") {
+            coreExecutor.execute {
+                val response = runCatching {
+                    val tracker = AndroidReviewPrompt.tracker(this)
+                    if (call.method == "claimReviewPrompt") {
+                        mapOf("claimed" to tracker.claim())
+                    } else {
+                        val state = tracker.snapshot()
+                        mapOf("eligible" to state.eligible, "shown" to state.shown)
+                    }
+                }.getOrElse { mapOf("eligible" to false, "claimed" to false) }
+                runOnUiThread { result.success(response) }
+            }
+            return
+        }
         if (call.method == "getVpnDisclosureConsent") {
             result.success(mapOf(
                 "accepted" to VpnDisclosureConsent.isAccepted(this),

@@ -172,7 +172,7 @@ class DropoVpnService :
                     START_STICKY
                 } else {
                     DropoVpnRuntime.setDisconnecting("VPN останавливается")
-                    stopVpn(stopSelf = true)
+                    stopVpn(stopSelf = true, userInitiated = true)
                     START_NOT_STICKY
                 }
             }
@@ -308,6 +308,7 @@ class DropoVpnService :
                 DropoVpnRuntime.setConnected("VPN работает")
                 syncCoreServiceState("connected", "VPN работает")
                 coreLog("sing-box $version is active")
+                runCatching { AndroidReviewPrompt.tracker(this).connected() }
                 showForeground("VPN работает")
                 runCatching { server.startSourceSelection() }
                     .onFailure { coreLog("source selection could not start: ${describeError(it)}") }
@@ -322,10 +323,19 @@ class DropoVpnService :
         }
     }
 
-    private fun stopVpn(stopSelf: Boolean, failureMessage: String? = null) {
+    private fun stopVpn(
+        stopSelf: Boolean,
+        failureMessage: String? = null,
+        userInitiated: Boolean = false,
+    ) {
         // This fence must run on the requesting thread, before queued cleanup.
         // A subscription download may still be occupying the engine executor.
         sessionFence.cancel()
+        if (!userInitiated || failureMessage != null) {
+            // A revoke/failure can race with an already queued manual stop.
+            // Invalidate engagement before either cleanup callback can count it.
+            runCatching { AndroidReviewPrompt.tracker(this).disconnected(false) }
+        }
         runCatching { Dropoandroid.cancelPendingSourceWork() }
         runCatching { commandServer?.stopSourceSelection() }
         runCatching { commandServer?.stopXHTTPTransport() }
@@ -351,6 +361,11 @@ class DropoVpnService :
             }
             verboseSingBoxLogs = false
             Dropoandroid.setConnected(false)
+            runCatching {
+                AndroidReviewPrompt.tracker(this).disconnected(
+                    successfully = userInitiated && failureMessage == null,
+                )
+            }
             if (failureMessage == null) {
                 DropoVpnRuntime.setStopped("VPN остановлен")
                 syncCoreServiceState("stopped", "VPN остановлен")

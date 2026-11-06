@@ -4,6 +4,14 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.3 — 2026-11-06
+
+- Ask Android users for a Google Play review once, after three completed successful
+  VPN cycles or one uninterrupted 24-hour session. Failed starts and interrupted
+  sessions do not count; background eligibility waits for the foreground home screen.
+- Persist the one-time decision before showing the optional dialog, including
+  dismissal, Back and unsuccessful store navigation. No account or review SDK is required.
+
 ## 3.0.47 — 2026-10-12
 
 - support VLESS XHTTP and the `splithttp` alias on Android with bundled

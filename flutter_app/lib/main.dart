@@ -42,6 +42,7 @@ part 'guest_web_deletion.dart';
 part 'account_login.dart';
 part 'privacy_links.dart';
 part 'vpn_disclosure.dart';
+part 'review_prompt.dart';
 
 const String _coreEndpoint = String.fromEnvironment(
   'DROPO_CORE_ENDPOINT',
@@ -3865,6 +3866,23 @@ class _DropoHomePageState extends State<DropoHomePage>
   late final _AccountDisplayController _accountDisplay;
   late final GuestIdentityCoordinator _guestIdentity;
   late final IncidentReporter _incidents;
+  late final AndroidReviewPromptCoordinator _reviewPrompt;
+
+  bool get _canPresentReviewPrompt =>
+      mounted &&
+      windowVisible &&
+      (WidgetsBinding.instance.lifecycleState == null ||
+          WidgetsBinding.instance.lifecycleState ==
+              AppLifecycleState.resumed) &&
+      !controlsDisabled &&
+      !connectionBusy &&
+      !status.hasError &&
+      activeMenuSection == 'home' &&
+      ModalRoute.of(context)?.isCurrent == true;
+
+  void _checkAndroidReviewPrompt() {
+    if (_isAndroidPlatform) unawaited(_reviewPrompt.check());
+  }
 
   void _identityChanged() {
     _incidents.synchronizeIdentity();
@@ -3914,6 +3932,24 @@ class _DropoHomePageState extends State<DropoHomePage>
   @override
   void initState() {
     super.initState();
+    const reviewChannel = MethodChannel('dropo/core');
+    _reviewPrompt = AndroidReviewPromptCoordinator(
+      readStatus: () async =>
+          await reviewChannel.invokeMapMethod<String, dynamic>(
+            'getReviewPromptStatus',
+          ) ??
+          const {},
+      claim: () async =>
+          await reviewChannel.invokeMapMethod<String, dynamic>(
+            'claimReviewPrompt',
+          ) ??
+          const {},
+      canPresent: () => _canPresentReviewPrompt,
+      present: () => showAndroidReviewPrompt(
+        context,
+        openExternal: widget.bridge.openExternal,
+      ),
+    );
     _accountDisplay = _AccountDisplayController(
       endpoint: _accountEndpoint,
       available: debugAccountTransport != null || _accountConfigured,
@@ -4098,6 +4134,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         connectionHint = '';
       });
       unawaited(_maybeShowAutoStartPrompt());
+      _checkAndroidReviewPrompt();
     } catch (error) {
       if (!mounted) {
         return;
@@ -4264,6 +4301,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       });
       // Optional presentation data must not delay the connection-ready gate.
       unawaited(_refreshHomeSources(force: all));
+      _checkAndroidReviewPrompt();
     } catch (error) {
       if (!mounted) {
         return;
