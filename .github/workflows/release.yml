@@ -21,8 +21,11 @@ jobs:
   release-record:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_branch == 'Dzhamuha-develop'
     runs-on: windows-latest
+    environment: release
     permissions:
       actions: read
       contents: write
@@ -32,7 +35,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # Publishing scripts must come from the workflow's trusted revision.
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          path: release-source
+          persist-credentials: false
 
       - name: Require CI and package gate for the same commit
         id: readiness
@@ -71,7 +82,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $config = Get-Content version.json -Raw | ConvertFrom-Json
+          $config = Get-Content release-source/version.json -Raw | ConvertFrom-Json
           $version = $config.version
           $channel = [string]$config.build.releaseChannel
           if ($channel -notin @('pilot', 'stable')) {
@@ -92,6 +103,16 @@ jobs:
           } else {
             throw "gh release view failed with exit code $LASTEXITCODE"
           }
+
+      - name: Require public publisher signature for stable releases
+        if: steps.version.outputs.exists == 'false' && steps.version.outputs.draft == 'false'
+        shell: pwsh
+        env:
+          PUBLIC_SIGNER_CERT_SHA256: ${{ vars.DROPO_PUBLIC_SIGNER_CERT_SHA256 }}
+        run: |
+          $installer = @(Get-ChildItem release-assets -Recurse -File -Filter 'dropo-Windows-Setup-x64.exe')
+          if ($installer.Count -ne 1) { throw 'Expected one verified installer.' }
+          ./tools/verify-public-windows-signature.ps1 -Path $installer[0].FullName -ExpectedCertificateSHA256 $env:PUBLIC_SIGNER_CERT_SHA256
 
       - name: Prepare release information
         if: steps.version.outputs.exists == 'false'

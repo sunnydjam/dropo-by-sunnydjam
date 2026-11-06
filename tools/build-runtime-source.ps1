@@ -68,7 +68,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Runtime module cache verification failed.' }
     if (Test-Path -LiteralPath $destination) {
         $existing = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($existing -notin @($entry.executableSha256, $entry.originalExecutableSha256)) {
+        $previous = @($entry.previousExecutableSha256 | Where-Object { $_ })
+        if ($previous.Count -gt 4 -or @($previous | Where-Object { $_ -notmatch '^[a-f0-9]{64}$' }).Count) {
+            throw 'Runtime migration hashes require explicit review.'
+        }
+        if ($existing -notin (@($entry.executableSha256, $entry.originalExecutableSha256) + $previous)) {
             throw 'Unknown runtime bytes are retained; refusing to overwrite them.'
         }
     } else { $existing = '' }

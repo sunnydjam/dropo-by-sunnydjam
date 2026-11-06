@@ -41,6 +41,8 @@ jobs:
       - name: Test release readiness contract
         shell: pwsh
         run: ./tools/test-release-readiness.ps1
+      - name: Reject untrusted privileged publishing triggers
+        run: python3 tools/test_release_workflow_security.py
       - name: Test account endpoint and Android build contracts
         shell: pwsh
         run: |

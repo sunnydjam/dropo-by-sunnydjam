@@ -1,5 +1,5 @@
 {
-  "version": "3.1.1",
+  "version": "3.1.2",
   "name": "dropo",
   "productName": "dropo",
   "description": "Dropo Connect Booster client with two connection modes",
@@ -11,7 +11,7 @@
     "version": "1.14.4",
     "minVersion": "1.12.0",
     "archiveSha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
-    "executableSha256": "b09b3ec9192e29dc21d67e72e0f3ecc3174a7fe266ec3b9a65cd33d615fc1abe",
+    "executableSha256": "a78252fcaa0e7a100efb6edd1330a9aace935b2a5e4b0eb31fff6aa8ccad16df",
     "sourceBuild": true
   },
   "wireguard": {
@@ -37,6 +37,6 @@
   "build": {
     "appId": "in.droponevedimka.dropo",
     "releaseChannel": "pilot",
-    "copyright": "Copyright © 2026 Droponevedimka and contributors"
+    "copyright": "Copyright \u0412\u00a9 2026 Droponevedimka and contributors"
   }
 }
