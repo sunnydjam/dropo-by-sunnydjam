@@ -202,6 +202,15 @@ class _AboutLink extends StatelessWidget {
     title: Text(label),
     subtitle: detail == null ? null : Text(detail!),
     trailing: const Icon(Icons.open_in_new, size: 16),
-    onTap: () => unawaited(onOpenExternal(url)),
+    onTap: () async {
+      try {
+        await onOpenExternal(url);
+      } catch (_) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text('Не удалось открыть ссылку.')),
+        );
+      }
+    },
   );
 }

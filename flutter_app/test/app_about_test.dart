@@ -47,6 +47,24 @@ Future<void> _pumpAbout(
 
 void main() {
   testWidgets(
+    'missing store and browser never leave an unhandled review link error',
+    (tester) async {
+      debugAndroidPlatformOverride = true;
+      addTearDown(() => debugAndroidPlatformOverride = null);
+      await _pumpAbout(
+        tester,
+        onOpenExternal: (_) async {
+          throw StateError('no handler');
+        },
+      );
+      await tester.ensureVisible(find.text('Оставить отзыв'));
+      await tester.tap(find.text('Оставить отзыв'));
+      await tester.pumpAndSettle();
+      expect(find.text('Не удалось открыть ссылку.'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
     'Android manual review opens the Play listing without invoking the review API',
     (tester) async {
       debugAndroidPlatformOverride = true;
