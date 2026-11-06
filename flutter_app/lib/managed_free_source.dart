@@ -35,6 +35,7 @@ class ManagedFreeSourceClient {
       bool consent,
     )
     save,
+    Future<Map<String, dynamic>> Function(String, int)? verifyCatalog,
   }) async {
     if (!consent || id != 'dropo-free') {
       return {
@@ -45,6 +46,21 @@ class ManagedFreeSourceClient {
     if (!available) return _unavailable();
     final api = transport ?? _AccountApi(endpoint);
     try {
+      Map<String, dynamic> capabilities = {};
+      try {
+        capabilities = await api.request('GET', '/v1/capabilities');
+      } catch (error) {
+        debugPrint(
+          'Dropo capability request failed (${_safeAccountFailure(error)})',
+        );
+        /* Older compatible service: retain its shared Free endpoint. */
+      }
+      if (capabilities['individualVPNProfilesAvailable'] == true) {
+        if (verifyCatalog == null) return _unavailable();
+        return await _ownedVPNForEndpoint(
+          endpoint,
+        ).enroll(api, save, verifyCatalog);
+      }
       final response = await api.request('GET', '/v1/vpn/free-source');
       if (response['available'] != true) return _unavailable();
       final provider = _asMap(response['provider']);
@@ -65,7 +81,13 @@ class ManagedFreeSourceClient {
         'error':
             'Не удалось добавить Dropo Free. Источники не изменены; попробуйте позже или добавьте свою подписку.',
       };
-    } catch (_) {
+    } on OwnedVPNOperationFailure catch (error) {
+      // A fixed operation code is safe for local support logs. Never log the
+      // underlying exception, URL, session token or subscription contents.
+      debugPrint('Dropo managed profile unavailable (${error.code})');
+      return _unavailable();
+    } catch (error) {
+      debugPrint('Dropo source request failed (${_safeAccountFailure(error)})');
       return _unavailable();
     } finally {
       if (transport == null) api.close();
@@ -77,6 +99,14 @@ class ManagedFreeSourceClient {
     'error':
         'Dropo Free сейчас недоступен. Можно добавить свою VPN-подписку и использовать оба режима.',
   };
+}
+
+String _safeAccountFailure(Object error) {
+  if (error is AccountApiException) return 'account_http_${error.status}';
+  if (error is HandshakeException) return 'tls_handshake';
+  if (error is SocketException) return 'socket';
+  if (error is TimeoutException) return 'timeout';
+  return 'client_validation';
 }
 
 @visibleForTesting

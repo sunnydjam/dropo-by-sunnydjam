@@ -31,6 +31,7 @@ class _VariantBridge extends MockCoreBridge {
 
 class _DisplayTransport implements AccountTransport {
   String name = 'Джамуха';
+  DateTime? turboUntil;
   int profileReads = 0;
   bool failProfile = false;
   Completer<Map<String, dynamic>>? firstProfile;
@@ -43,6 +44,8 @@ class _DisplayTransport implements AccountTransport {
       'id': 'private-account-identifier',
       'maskedPhone': 'private-phone-value',
       'plan': 'Dropo Free',
+      if (turboUntil != null)
+        'speedBoostUntil': turboUntil!.toUtc().toIso8601String(),
     },
   };
 
@@ -175,6 +178,64 @@ void main() {
     TestWidgetsFlutterBinding.instance.platformDispatcher.views.first
         .resetDevicePixelRatio();
   });
+
+  for (final tier in ['free', 'turbo', 'expired']) {
+    testWidgets('Turbo offer before connection follows $tier entitlement', (
+      tester,
+    ) async {
+      final api = _DisplayTransport();
+      if (tier != 'free') {
+        api.turboUntil = DateTime.now().add(
+          Duration(days: tier == 'turbo' ? 1 : -1),
+        );
+      }
+      debugAccountTransport = api;
+      debugAccountSessionToken = 'fixture-restored-session';
+      await _pump(tester, size: const Size(1200, 820), mode: 'all_traffic');
+      expect(
+        find.byKey(const ValueKey('free-plan-banner')),
+        tier == 'turbo' ? findsNothing : findsOneWidget,
+      );
+      expect(find.text('Отключить'), findsNothing);
+      if (tier != 'turbo') {
+        expect(find.text('Купить Турбо'), findsOneWidget);
+        await _tap(tester, 'free-plan-turbo');
+        expect(find.byKey(const ValueKey('turbo-section')), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final (name, size, mobile, scale) in [
+    ('windows', const Size(1200, 820), false, 1.0),
+    ('compact', const Size(684, 461), false, 1.0),
+    ('android', const Size(390, 844), true, 1.0),
+    ('android-small', const Size(320, 568), true, 1.0),
+    ('android-large-text', const Size(320, 568), true, 2.0),
+  ]) {
+    testWidgets(
+      'bottom Turbo card fits $name and keeps the primary action reachable',
+      (tester) async {
+        await _pump(
+          tester,
+          size: size,
+          mobile: mobile,
+          scale: scale,
+          mode: 'all_traffic',
+        );
+        final offer = find.byKey(const ValueKey('free-plan-banner'));
+        final card = tester.getRect(offer),
+            action = tester.getRect(find.byKey(const ValueKey('home-connect')));
+        expect(card.bottom, lessThanOrEqualTo(size.height));
+        expect(card.bottom, greaterThan(size.height * .6));
+        expect(card.overlaps(action), false);
+        expect(tester.takeException(), isNull);
+        await _capture(tester, 'bottom-turbo-$name');
+        await _tap(tester, 'free-plan-turbo');
+        expect(find.byKey(const ValueKey('account-section')), findsOneWidget);
+      },
+    );
+  }
 
   test(
     'account display strips controls, bounds public name and rejects bad username',

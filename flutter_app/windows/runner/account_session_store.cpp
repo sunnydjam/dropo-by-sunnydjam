@@ -25,7 +25,7 @@ bool RegularFileOrAbsent(const std::wstring& path) {
 }
 }  // namespace
 
-AccountSessionStore::AccountSessionStore(std::wstring directory)
+AccountSessionStore::AccountSessionStore(std::wstring directory, std::wstring filename)
     : directory_(std::move(directory)) {
   if (directory_.empty()) {
     PWSTR local_app_data = nullptr;
@@ -35,7 +35,7 @@ AccountSessionStore::AccountSessionStore(std::wstring directory)
     }
     CoTaskMemFree(local_app_data);
   }
-  if (!directory_.empty()) path_ = directory_ + L"\\account-session.dpapi";
+  if (!directory_.empty() && (filename == L"account-session.dpapi" || filename == L"managed-vpn.dpapi")) path_ = directory_ + L"\\" + filename;
 }
 
 bool AccountSessionStore::ValidToken(const std::string& token) {

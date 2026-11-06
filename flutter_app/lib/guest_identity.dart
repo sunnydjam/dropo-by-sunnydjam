@@ -394,8 +394,9 @@ class GuestIdentityCoordinator extends ChangeNotifier {
           if (_disposed || epoch != _epoch) {
             throw StateError('Identity changed.');
           }
-          record['installationSecret'] = created;
+          record.putIfAbsent('installationSecret', () => created);
         });
+        secret = _record['installationSecret'] as String;
       }
       if (_disposed || epoch != _epoch || suppressed) return;
       final response = await _api.request(
@@ -471,7 +472,9 @@ class GuestIdentityCoordinator extends ChangeNotifier {
     if (!guestAvailable ||
         !persistSession ||
         _account?['demoAccount'] == true ||
-        (_record['installationId'] != null && !force) ||
+        (_record['installationId'] != null &&
+            _record['boundAccountId'] == _account?['id'] &&
+            !force) ||
         _record['accountKind'] != 'registered') {
       return;
     }
@@ -484,9 +487,10 @@ class GuestIdentityCoordinator extends ChangeNotifier {
         ).replaceAll('=', '');
         final created = secret;
         await _save((record) {
-          record['installationSecret'] = created;
+          record.putIfAbsent('installationSecret', () => created);
           record['boundAccountId'] = _account?['id'];
         }, expectedEpoch: epoch);
+        secret = _record['installationSecret'] as String;
       }
       if (_disposed || epoch != _epoch || suppressed) return;
       final response = await _api.request(

@@ -26,14 +26,14 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       # Public origin only; bot tokens and server secrets never enter builds.
-      DROPO_ACCOUNT_ENDPOINT: https://dropo.fun
+      DROPO_ACCOUNT_ENDPOINT: https://api.droponevedimka.ru
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.10"
+          go-version: "1.27.3"
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: "3.47.1"
@@ -145,4 +145,6 @@ jobs:
             release/dropo-*/dropo-Windows-Setup-x64.exe.sha256
             release/dropo-*/dropo-Windows-Portable-x64.zip
             release/dropo-*/dropo-Windows-Portable-x64.zip.sha256
+            release/dropo-*/dropo-Runtime-Sources.zip
+            release/dropo-*/dropo-Runtime-Sources.zip.sha256
           if-no-files-found: error

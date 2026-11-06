@@ -18,8 +18,8 @@ $overlayRoot = Split-Path $resolvedManifest
 $manifest = Get-Content -LiteralPath $resolvedManifest -Raw | ConvertFrom-Json
 if ($manifest.schemaVersion -ne 1 -or
     $manifest.module -cne 'github.com/xtls/xray-core' -or
-    $manifest.moduleVersion -cne 'v1.260327.0' -or
-    $manifest.sourceRevision -cne 'd2758a023cd7f4174a5a5fa4ff66e487d4342ba0' -or
+    $manifest.moduleVersion -cne 'v1.260327.1-0.20261031132019-a4a3dff5b20c' -or
+    $manifest.sourceRevision -cne 'a4a3dff5b20c2faae567b742c172c7b95e75c083' -or
     $manifest.license -cne 'MPL-2.0') {
     throw 'Android XHTTP overlay manifest does not identify the approved pinned source.'
 }
@@ -52,7 +52,7 @@ function Assert-OverlaySHA256 {
 if (-not $ModuleDirectory) {
     Push-Location (Join-Path $repositoryRoot 'app/mobile/dropoandroid')
     try {
-        $moduleOutput = & $GoCommand mod download -json 'github.com/xtls/xray-core@v1.260327.0' 2>$null
+        $moduleOutput = & $GoCommand mod download -json 'github.com/xtls/xray-core@v1.260327.1-0.20261031132019-a4a3dff5b20c' 2>$null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve the pinned Android XHTTP Go module.' }
         $moduleInfo = ($moduleOutput -join "`n") | ConvertFrom-Json
         if ($moduleInfo.Path -cne $manifest.module -or $moduleInfo.Version -cne $manifest.moduleVersion -or
@@ -137,7 +137,9 @@ $sourceRecords = @($sourceFiles | ForEach-Object {
 $sourceDescription = $sourceRecords | ConvertTo-Json -Compress
 $sourceHashBytes = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($sourceDescription))
 $sourceHash = [Convert]::ToHexString($sourceHashBytes).ToLowerInvariant()
-$stagedModule = Join-Path $resolvedOutput ("source-xray-v1.260327.0-$sourceHash")
+# Keep native compiler working directories below Windows MAX_PATH. Every byte
+# is still checked against the full pinned-source manifest below.
+$stagedModule = Join-Path $resolvedOutput ('xray-' + $sourceHash.Substring(0, 16))
 if (-not (Test-Path -LiteralPath $stagedModule -PathType Container)) {
     $pendingSource = Join-Path $resolvedOutput ('pending-xray-source-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $pendingSource | Out-Null
@@ -171,7 +173,7 @@ foreach ($file in $files) {
 }
 
 $manifestHash = (Get-FileHash -LiteralPath $resolvedManifest -Algorithm SHA256).Hash.ToLowerInvariant()
-$overlayPath = Join-Path $resolvedOutput ("xray-stage-v1.260327.0-$manifestHash-$($sourceHash.Substring(0, 16)).json")
+$overlayPath = Join-Path $resolvedOutput ("xray-stage-v1.260327.1-0.20261031132019-a4a3dff5b20c-$manifestHash-$($sourceHash.Substring(0, 16)).json")
 $overlayJSON = ([ordered]@{ Replace = $stagedReplace } | ConvertTo-Json -Depth 4) + "`n"
 if (Test-Path -LiteralPath $overlayPath -PathType Leaf) {
     if ([IO.File]::ReadAllText($overlayPath) -cne $overlayJSON) { throw 'Existing Android XHTTP overlay mapping is not the expected deterministic mapping.' }

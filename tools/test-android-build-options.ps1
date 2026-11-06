@@ -10,6 +10,16 @@ function Read-ScriptAst([string]$RelativePath) {
 }
 $buildAst = Read-ScriptAst 'scripts/build/build.ps1'
 $verifyAst = Read-ScriptAst 'tools/verify-android-apk.ps1'
+$abiAssignments = @($verifyAst.FindAll({ param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$abis'
+}, $true))
+if ($abiAssignments.Count -ne 2) { throw 'APK ABI selection is missing.' }
+foreach ($case in @(@('arm64', @('arm64-v8a')), @('universal', @('arm64-v8a', 'armeabi-v7a')), @('x64', @('x86_64')))) {
+    $Architecture = $case[0]
+    . ([ScriptBlock]::Create($abiAssignments[0].Extent.Text))
+    if ($Architecture -eq 'universal') { . ([ScriptBlock]::Create($abiAssignments[1].Extent.Text)) }
+    if (($abis -join ',') -cne ($case[1] -join ',')) { throw "APK native ABI contract failed: $Architecture" }
+}
 $androidFunction = @($buildAst.FindAll({ param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Build-AndroidApplication'
 }, $true))

@@ -3,6 +3,7 @@ package dropocore
 import (
 	"context"
 	"crypto/sha256"
+	"dropocore/ownedprofile"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -65,7 +66,7 @@ func migrateAndroidSourcesLocked() {
 
 func primaryAndroidSourceLocked() *androidVPNSource {
 	for i := range current.VPNSources {
-		if !current.VPNSources[i].Disabled {
+		if !current.VPNSources[i].Disabled && !ownedAndroidSourceExpired(current.VPNSources[i]) {
 			return &current.VPNSources[i]
 		}
 	}
@@ -105,7 +106,7 @@ func androidSourcesViewLocked() map[string]interface{} {
 		}
 		problem := source.LastRefreshError
 		publicID := source.PublicCatalogID
-		if publicID != androidManagedFreeSourceID || validateAndroidManagedFreeURL(source.URI) != nil {
+		if !ownedprofile.IsProvider(publicID) && (publicID != androidManagedFreeSourceID || validateAndroidManagedFreeURL(source.URI) != nil) {
 			publicID = ""
 		}
 		if isAndroidPublicSource(source.URI) {
@@ -136,6 +137,9 @@ func androidSourcesViewLocked() map[string]interface{} {
 func changeAndroidSources(method string, args []interface{}) string {
 	managedProviderID := ""
 	if method == "AddManagedVPNSource" {
+		if provider := stringArg(args, 0, ""); ownedprofile.IsProvider(provider) {
+			return addOwnedAndroidSource(provider, stringArg(args, 2, ""), boolArg(args, 3, false))
+		}
 		if stringArg(args, 0, "") != androidManagedFreeSourceID || !boolArg(args, 3, false) {
 			return androidSourceError("Подтвердите использование бесплатной подписки Dropo.")
 		}

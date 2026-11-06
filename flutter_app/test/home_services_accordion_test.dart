@@ -374,11 +374,16 @@ void main() {
       size: const Size(320, 568),
       scale: 2,
     );
+    expect(tester.takeException(), isNull, reason: 'Initial accessible layout');
     await _open(tester);
+    expect(tester.takeException(), isNull, reason: 'Expanded service list');
     await _search(tester, 'telegram');
+    expect(tester.takeException(), isNull, reason: 'Filtered service list');
     tester.view.viewInsets = const FakeViewPadding(bottom: 260);
     addTearDown(tester.view.resetViewInsets);
     await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('free-plan-banner')), findsNothing);
+    expect(tester.takeException(), isNull, reason: 'Visible keyboard');
     await _tap(tester, 'home-service-row-telegram');
     await _tap(tester, 'service-route-telegram-vpn');
     expect(tester.takeException(), isNull);

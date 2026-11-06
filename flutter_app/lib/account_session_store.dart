@@ -3,6 +3,23 @@ import 'dart:convert';
 
 import 'package:flutter/services.dart';
 
+/// These two compiled origins address the same account service. Never accept
+/// an origin alias supplied by a capability response or subscription.
+String accountSessionCredentialOrigin(String endpoint) {
+  final uri = Uri.tryParse(endpoint);
+  if (uri != null &&
+      uri.scheme == 'https' &&
+      uri.userInfo.isEmpty &&
+      !uri.hasQuery &&
+      !uri.hasFragment &&
+      (uri.path.isEmpty || uri.path == '/') &&
+      (uri.origin == 'https://dropo.fun' ||
+          uri.origin == 'https://api.droponevedimka.ru')) {
+    return 'https://dropo.fun';
+  }
+  return endpoint;
+}
+
 /// A private-state write belonged to an identity that has already changed.
 /// This is cancellation, not failure of the native protected storage.
 class AccountIdentityChanged implements Exception {
@@ -14,11 +31,18 @@ class AccountIdentityChanged implements Exception {
 /// Missing native support or a protection failure is deliberately surfaced to
 /// the caller. There is no file, preferences, or plaintext fallback here.
 class NativeAccountSessionStore {
-  NativeAccountSessionStore([MethodChannel? channel])
+  NativeAccountSessionStore([MethodChannel? channel, this.scope = 'account'])
     : _channel = channel ?? const MethodChannel('dropo/account_session');
 
   static const int maxTokenBytes = 16 * 1024;
   final MethodChannel _channel;
+  final String scope;
+  Map<String, Object> get _scopeArguments {
+    if (scope != 'account' && scope != 'managed-vpn-v1') {
+      throw const FormatException('Invalid protected storage scope.');
+    }
+    return scope == 'account' ? <String, Object>{} : {'scope': scope};
+  }
 
   static bool _validToken(String token) =>
       token.isNotEmpty &&
@@ -26,7 +50,11 @@ class NativeAccountSessionStore {
       token.codeUnits.every((unit) => unit >= 0x21 && unit <= 0x7e);
 
   Future<String?> read() async {
-    final value = await _channel.invokeMethod<Object?>('read');
+    final args = _scopeArguments;
+    final value = await _channel.invokeMethod<Object?>(
+      'read',
+      args.isEmpty ? null : args,
+    );
     if (value == null) return null;
     if (value is! String || !_validToken(value)) {
       throw const FormatException('Invalid protected account session.');
@@ -40,11 +68,15 @@ class NativeAccountSessionStore {
       throw const FormatException('Invalid account session token.');
     }
     await _channel.invokeMethod<void>('write', <String, Object>{
+      ..._scopeArguments,
       'token': token,
     });
   }
 
-  Future<void> clear() => _channel.invokeMethod<void>('clear');
+  Future<void> clear() {
+    final args = _scopeArguments;
+    return _channel.invokeMethod<void>('clear', args.isEmpty ? null : args);
+  }
 }
 
 /// Atomic, endpoint-bound protected identity plus small private feature state.
@@ -83,7 +115,9 @@ class ProtectedAccountIdentityStore {
     if (raw == null) return <String, dynamic>{};
     final decoded = jsonDecode(raw);
     if (decoded is! Map ||
-        decoded['endpoint'] != endpoint ||
+        decoded['endpoint'] is! String ||
+        accountSessionCredentialOrigin(decoded['endpoint'] as String) !=
+            accountSessionCredentialOrigin(endpoint) ||
         (decoded['version'] != null && decoded['version'] != 2) ||
         (decoded['token'] != null &&
             (decoded['token'] is! String ||
@@ -154,7 +188,7 @@ class ProtectedAccountIdentityStore {
     final record = await _read();
     change(record);
     record['version'] = 2;
-    record['endpoint'] = endpoint;
+    record['endpoint'] = accountSessionCredentialOrigin(endpoint);
     // Native storage rejects oversized envelopes before any persisted write.
     await _native.write(jsonEncode(record));
     return record;

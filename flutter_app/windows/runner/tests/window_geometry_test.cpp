@@ -17,6 +17,11 @@ constexpr bool Equal(Rect a, Rect b) {
 }
 
 static_assert(ScaleForDpi(820, 96) == 820);
+static_assert(dropo::window_geometry::InitialClientWidth(820,1)==1200);
+static_assert(dropo::window_geometry::InitialClientHeight(560,1)==820);
+static_assert(dropo::window_geometry::InitialClientWidth(1500,1)==1500);
+static_assert(dropo::window_geometry::InitialClientWidth(820,2)==820);
+static_assert(dropo::window_geometry::InitialClientHeight(560,2)==560);
 static_assert(ScaleForDpi(820, 120) == 1025);
 static_assert(ScaleForDpi(560, 144) == 840);
 static_assert(ScaleForDpi(560, 192) == 1120);

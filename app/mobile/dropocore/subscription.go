@@ -2,6 +2,7 @@ package dropocore
 
 import (
 	"context"
+	"dropocore/dnspolicy"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -52,7 +53,8 @@ type subscriptionFetcher struct {
 func newSubscriptionFetcher() *subscriptionFetcher {
 	return &subscriptionFetcher{
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Transport: dnspolicy.InfrastructureTransport(),
+			Timeout:   30 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if err := validateSubscriptionURL(req.URL.String()); err != nil {
 					return err

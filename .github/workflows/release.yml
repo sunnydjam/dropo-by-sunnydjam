@@ -71,7 +71,13 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $version = (Get-Content version.json -Raw | ConvertFrom-Json).version
+          $config = Get-Content version.json -Raw | ConvertFrom-Json
+          $version = $config.version
+          $channel = [string]$config.build.releaseChannel
+          if ($channel -notin @('pilot', 'stable')) {
+            throw 'An explicit pilot or stable release channel is required.'
+          }
+          "draft=$($channel -eq 'pilot')".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Append
           $tag = "v$version"
           "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
           "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
@@ -123,9 +129,14 @@ jobs:
           target_commitish: ${{ github.event.workflow_run.head_sha }}
           name: dropo ${{ steps.version.outputs.tag }}
           body_path: release-notes.md
+          # Migration pilots are reviewable drafts and never update clients.
+          draft: ${{ steps.version.outputs.draft == 'true' }}
+          make_latest: ${{ steps.version.outputs.draft != 'true' }}
           fail_on_unmatched_files: true
           files: |
             release-assets/**/dropo-Windows-Setup-x64.exe
             release-assets/**/dropo-Windows-Setup-x64.exe.sha256
             release-assets/**/dropo-Windows-Portable-x64.zip
             release-assets/**/dropo-Windows-Portable-x64.zip.sha256
+            release-assets/**/dropo-Runtime-Sources.zip
+            release-assets/**/dropo-Runtime-Sources.zip.sha256

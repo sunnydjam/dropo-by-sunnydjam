@@ -12,10 +12,12 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'account_session_store.dart';
+import 'pinned_tls.dart';
 
 part 'vpn_sources.dart';
 part 'source_reconnect.dart';
 part 'managed_free_source.dart';
+part 'owned_vpn.dart';
 part 'vpn_onboarding.dart';
 part 'home_dashboard.dart';
 part 'atlas_dashboard.dart';
@@ -854,6 +856,8 @@ class HttpCoreBridge implements CoreBridge {
         args: [providerId, name, uri, accepted],
         timeout: const Duration(minutes: 3),
       ),
+      verifyCatalog: (raw, min) =>
+          callMap('ValidateManagedCatalog', args: [raw, min]),
     );
   }
 
@@ -1586,6 +1590,8 @@ class ChannelCoreBridge implements CoreBridge {
           args: [providerId, name, uri, accepted],
           timeout: const Duration(minutes: 3),
         ),
+        verifyCatalog: (raw, min) =>
+            callMap('ValidateManagedCatalog', args: [raw, min]),
       );
 
   @override
@@ -3835,7 +3841,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   int routeProbeExpectedCount = 0;
   bool windowVisible = true;
   String strategyTransitionNotice = '';
-  String lastPublicSourceNoticeId = '';
+  bool accountTurboRequested = false;
   bool depsFailureDialogShowing = false;
   String lastDepsFailureDialogMessage = '';
   DateTime? lastDepsFailureDialogAt;
@@ -3845,7 +3851,6 @@ class _DropoHomePageState extends State<DropoHomePage>
   final subscriptionController = TextEditingController();
   Timer? refreshTimer;
   Timer? eventsTimer;
-  Timer? strategyTransitionTimer;
   StreamSubscription<BridgeEvent>? pushEventsSubscription;
   bool startupUpdateCheckScheduled = false;
   double? updateProgressPercent;
@@ -3945,13 +3950,27 @@ class _DropoHomePageState extends State<DropoHomePage>
       platform: _isAndroidPlatform ? 'android' : 'windows',
     );
     unawaited(_incidents.initialize());
-    unawaited(_guestIdentity.restore());
+    unawaited(_restoreSharedAccountIdentity());
     WidgetsBinding.instance.addObserver(this);
     pushEventsSubscription = widget.bridge.watchEvents().listen(
       _handlePushEvent,
       onError: (_) {},
     );
     unawaited(_bootstrap());
+  }
+
+  Future<void> _restoreSharedAccountIdentity() async {
+    if (widget.bridge is! MockCoreBridge && _accountConfigured) {
+      try {
+        final epoch = _guestIdentity.identityEpoch;
+        await _ownedVPNClient.prepareAccountIdentity(
+          canWrite: () => mounted && _guestIdentity.identityEpoch == epoch,
+        );
+      } catch (_) {
+        // Preserve both vaults on failure. VPN readiness remains independent.
+      }
+    }
+    if (mounted) await _guestIdentity.restore();
   }
 
   @override
@@ -3964,7 +3983,6 @@ class _DropoHomePageState extends State<DropoHomePage>
     WidgetsBinding.instance.removeObserver(this);
     refreshTimer?.cancel();
     eventsTimer?.cancel();
-    strategyTransitionTimer?.cancel();
     pushEventsSubscription?.cancel();
     subscriptionController.dispose();
     if (!quitting) {
@@ -4061,6 +4079,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     });
     try {
       await widget.bridge.ensureStarted();
+      await _ownedVPNClient.restore(widget.bridge);
       setState(() {
         online = true;
         statusMessage = 'dropo-core запущен';
@@ -4304,21 +4323,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         homeSourcesLoaded = true;
         homeSourcesFailed = false;
         homeSourcesCheckedAt = DateTime.now();
-        final activePublic = requestedConnected
-            ? loaded
-                  .where(
-                    (source) =>
-                        source.active && !source.disabled && source.isPublic,
-                  )
-                  .firstOrNull
-            : null;
-        if (activePublic != null &&
-            activePublic.id != lastPublicSourceNoticeId) {
-          _showStrategyTransition(
-            'Бесплатный публичный источник. Скорость и доступность зависят от оператора и нагрузки.',
-          );
-        }
-        lastPublicSourceNoticeId = activePublic?.id ?? '';
       });
     } catch (_) {
       if (!mounted || quitting || request != homeSourcesRequest) return;
@@ -4848,17 +4852,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         : 'Стратегии обхода подобраны.';
   }
 
-  void _showStrategyTransition(String message) {
-    strategyTransitionTimer?.cancel();
-    strategyTransitionNotice = message;
-    strategyTransitionTimer = Timer(const Duration(seconds: 7), () {
-      if (!mounted) {
-        return;
-      }
-      setState(() => strategyTransitionNotice = '');
-    });
-  }
-
   void _setConnectionPrimed(bool target) {
     busyTasks[target ? 'vpn-connect' : 'vpn-disconnect'] = target
         ? 'Подключаем VPN...'
@@ -4892,6 +4885,31 @@ class _DropoHomePageState extends State<DropoHomePage>
       return;
     }
     final target = !status.connected;
+    if (target && _accountConfigured) {
+      setState(() => preparingFullVpnSource = true);
+      try {
+        if (widget.bridge is! MockCoreBridge &&
+            _guestIdentity.accountKind == 'registered') {
+          await _guestIdentity.restore();
+          final token = _guestIdentity.token;
+          final account = _guestIdentity.account;
+          if (token != null &&
+              account != null &&
+              _guestIdentity.accountKind == 'registered') {
+            await _ownedVPNClient.synchronizeEntitlement(
+              widget.bridge,
+              token,
+              DateTime.tryParse(account['speedBoostUntil']?.toString() ?? ''),
+            );
+          }
+        }
+        await _ownedVPNClient.restore(widget.bridge);
+      } catch (_) {
+        // A failed account refresh keeps the already protected VPN sources.
+      } finally {
+        if (mounted) setState(() => preparingFullVpnSource = false);
+      }
+    }
     if (target && _isAndroidPlatform && !await _ensureAndroidVpnDisclosure()) {
       return;
     }
@@ -5148,10 +5166,24 @@ class _DropoHomePageState extends State<DropoHomePage>
       barrierDismissible: false,
       builder: (dialogContext) {
         return _AppDialog(
-          width: 560,
+          width: 760,
           centered: true,
           title: 'Работает другой VPN или packet-filter',
           icon: Icons.warning_amber_rounded,
+          actions: [
+            _ActionButton(
+              label: 'Отмена',
+              icon: Icons.close,
+              secondary: true,
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+            ),
+            _ActionButton(
+              label: 'Понятно, включить',
+              icon: Icons.power_settings_new,
+              danger: true,
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+            ),
+          ],
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -5172,28 +5204,6 @@ class _DropoHomePageState extends State<DropoHomePage>
                 title: 'Рекомендуем',
                 body:
                     'Нажмите «Отмена», закройте сторонний VPN или packet-filter и затем включите dropo заново. Продолжайте только если понимаете риск конфликта.',
-              ),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: _ActionButton(
-                      label: 'Отмена',
-                      icon: Icons.close,
-                      secondary: true,
-                      onPressed: () => Navigator.of(dialogContext).pop(false),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _ActionButton(
-                      label: 'Понятно, включить',
-                      icon: Icons.power_settings_new,
-                      danger: true,
-                      onPressed: () => Navigator.of(dialogContext).pop(true),
-                    ),
-                  ),
-                ],
               ),
             ],
           ),
@@ -6344,6 +6354,19 @@ class _DropoHomePageState extends State<DropoHomePage>
               ],
             ),
       updateNotice: _buildUpdateNotice(),
+      turboOffer:
+          (_accountDisplay.value?.turboUntil?.isAfter(DateTime.now()) ?? false)
+          ? null
+          : FreePlanBanner(
+              signedIn: _accountDisplay.value?.registered == true,
+              onTurbo: () {
+                setState(
+                  () => accountTurboRequested =
+                      _accountDisplay.value?.registered == true,
+                );
+                unawaited(_selectMenuSection('account'));
+              },
+            ),
       servicesExpanded:
           homeRoutesExpanded && appConfig.routingMode == 'blocked_only',
       servicesVisible: appConfig.routingMode == 'blocked_only',
@@ -6351,7 +6374,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildRouteControls(summaryOnly: true),
-          const SizedBox(height: 12),
+          SizedBox(height: _compactDesktopHome(context) ? 6 : 12),
           _HomeServicesAccordion(
             key: const ValueKey('home-services'),
             bridge: widget.bridge,
@@ -6451,7 +6474,11 @@ class _DropoHomePageState extends State<DropoHomePage>
         );
       case 'account':
         return AccountPage(
-          key: const ValueKey('account-section'),
+          key: ValueKey(
+            accountTurboRequested ? 'turbo-section' : 'account-section',
+          ),
+          showTurbo: accountTurboRequested,
+          onBackToAccount: () => setState(() => accountTurboRequested = false),
           endpoint: _accountEndpoint,
           available: debugAccountTransport != null || _accountConfigured,
           onOpenExternal: widget.bridge.openExternal,
@@ -6462,6 +6489,9 @@ class _DropoHomePageState extends State<DropoHomePage>
           initialToken: debugAccountSessionToken,
           onDisplayChanged: _accountDisplay.publish,
           identity: _guestIdentity,
+          onVPNProfile: (token, consent) =>
+              _ownedVPNClient.linkAccount(widget.bridge, token, consent),
+          onDeleteGuestVPN: () => _ownedVPNClient.deleteGuest(widget.bridge),
         );
       case 'sources':
         return VpnSourcesDialog(
@@ -7422,9 +7452,10 @@ class _AppDialog extends StatelessWidget {
     required this.title,
     required this.icon,
     required this.child,
-    this.width = 460,
+    this.width = 540,
     this.centered = false,
     this.heightFactor = 0.9,
+    this.actions = const [],
   });
 
   final String title;
@@ -7433,6 +7464,7 @@ class _AppDialog extends StatelessWidget {
   final double width;
   final bool centered;
   final double heightFactor;
+  final List<Widget> actions;
 
   @override
   Widget build(BuildContext context) {
@@ -7507,10 +7539,19 @@ class _AppDialog extends StatelessWidget {
                 const SizedBox(height: 14),
                 Flexible(
                   child: Scrollbar(
-                    thumbVisibility: true,
+                    thumbVisibility: false,
                     child: SingleChildScrollView(child: child),
                   ),
                 ),
+                if (actions.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  OverflowBar(
+                    alignment: MainAxisAlignment.end,
+                    spacing: 10,
+                    overflowSpacing: 8,
+                    children: actions,
+                  ),
+                ],
               ],
             ),
           ),

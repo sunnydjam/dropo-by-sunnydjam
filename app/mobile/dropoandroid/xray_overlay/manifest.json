@@ -1,26 +1,26 @@
 {
   "schemaVersion": 1,
   "component": "Xray-core",
-  "upstreamVersion": "26.3.27",
+  "upstreamVersion": "26.10.31",
   "module": "github.com/xtls/xray-core",
-  "moduleVersion": "v1.260327.0",
-  "sourceRevision": "d2758a023cd7f4174a5a5fa4ff66e487d4342ba0",
+  "moduleVersion": "v1.260327.1-0.20261031132019-a4a3dff5b20c",
+  "sourceRevision": "a4a3dff5b20c2faae567b742c172c7b95e75c083",
   "license": "MPL-2.0",
   "files": [
     {
       "upstreamPath": "transport/internet/splithttp/client.go",
       "operation": "replace",
-      "upstreamSha256": "48ac567d42a4cf99bb55206b2bc4789712cb6fddefbddbfc096f255083e45531",
+      "upstreamSha256": "b528c116a72e77cb51e4fb1978a07d0e92d6b0587e0bafb3011d4891a63499dc",
       "replacementPath": "files/client.go.txt",
-      "replacementSha256": "b2dbf966d59d8adc7c0555c7f1c0dd827461d4b355c9c4975b2f1655d67d5603",
+      "replacementSha256": "0b10eccebe446f89a9647810a1b11239df25cd8c530384482a31b8f52bafa4cf",
       "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/client.go.txt"
     },
     {
       "upstreamPath": "transport/internet/splithttp/dialer.go",
       "operation": "replace",
-      "upstreamSha256": "c6d063306f85fcfabaa274e51329d188b4da8db11ef73951c1d660741d9fac1c",
+      "upstreamSha256": "ed4ec0d02b7f4bed517f1326c534186e7648af81fe0c974f601a1e933666d0cd",
       "replacementPath": "files/dialer.go.txt",
-      "replacementSha256": "a52b9c74fbac3d1581472cf17ed5b910214e2e9e47bb18c5dc3996d5a77c63aa",
+      "replacementSha256": "f1b394fffe0482eb85c7081d6e0145121acbfe2f9eb3f3c91c73c876720a7a2d",
       "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/dialer.go.txt"
     },
     {
@@ -28,7 +28,7 @@
       "operation": "add",
       "upstreamSha256": "",
       "replacementPath": "files/managed_session.go.txt",
-      "replacementSha256": "724ebdbc62f346d634f5004aee871150e6a0436304b29e0c4c5c135765c118c2",
+      "replacementSha256": "7e3c1eb04f90bac3c5e71a3faf2ba8a336af6cd7bb1589cd7d3b5875287e48f6",
       "bundledAssetPath": "flutter_app/assets/licenses/xray-core-source/managed_session.go.txt"
     },
     {

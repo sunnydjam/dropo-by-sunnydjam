@@ -30,6 +30,53 @@ void main() {
     });
   });
 
+  test('signed catalog uses the bounded same-origin public GET', () async {
+    server.listen((request) async {
+      expect(request.uri.path, '/public/v1/catalog');
+      expect(request.method, 'GET');
+      expect(request.headers.value(HttpHeaders.authorizationHeader), isNull);
+      request.response.headers.contentType = ContentType.json;
+      request.response.write('{"keyId":"fixture","payload":"signed"}');
+      await request.response.close();
+    });
+    expect(await transport.request('GET', '/public/v1/catalog'), {
+      'keyId': 'fixture',
+      'payload': 'signed',
+    });
+  });
+
+  test(
+    'public exception never permits writes, credentials or other paths',
+    () async {
+      var requests = 0;
+      server.listen((request) async {
+        requests++;
+        await request.response.close();
+      });
+      for (final method in ['POST', 'DELETE']) {
+        await expectLater(
+          transport.request(method, '/public/v1/catalog'),
+          throwsA(isA<AccountApiException>()),
+        );
+      }
+      await expectLater(
+        transport.request('GET', '/public/v1/catalog', token: 'secret'),
+        throwsA(isA<AccountApiException>()),
+      );
+      for (final path in [
+        '/public/v1/other',
+        '/public/v1/catalog?redirect=1',
+        '/public/v1/catalog/../other',
+      ]) {
+        await expectLater(
+          transport.request('GET', path),
+          throwsA(isA<AccountApiException>()),
+        );
+      }
+      expect(requests, 0);
+    },
+  );
+
   test('stalled response body times out instead of hanging loading', () async {
     final responses = <HttpResponse>[];
     server.listen((request) async {

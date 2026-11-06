@@ -229,7 +229,12 @@ if (-not $SingBoxPath -or -not (Test-Path -LiteralPath $SingBoxPath -PathType Le
     throw "sing-box.exe is required to compile and validate bundled filters."
 }
 
-$temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("dropo-filter-update-" + [Guid]::NewGuid().ToString("N"))
+$temporaryBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+$temporaryDirectory = [IO.Path]::GetFullPath((Join-Path $temporaryBase ("dropo-filter-update-" + [Guid]::NewGuid().ToString("N"))))
+if ((Split-Path $temporaryDirectory -Parent) -ne $temporaryBase -or
+    (Split-Path $temporaryDirectory -Leaf) -notmatch '^dropo-filter-update-[a-f0-9]{32}$') {
+    throw 'Unsafe filter update staging directory.'
+}
 New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
 try {
     $assetByName = @{}
@@ -322,5 +327,13 @@ try {
     }
     Write-Host "[FILTERS] Updated bundled blocked lists to $latestTag ($($lists.refilter_domains.Count) domains, $($lists.refilter_ips.Count)/$($rawRefilterIPs.Count) RKN IPs, $($lists.discord_ips.Count)/$($rawDiscordIPs.Count) scoped Discord IPs)." -ForegroundColor Green
 } finally {
-    Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $temporaryDirectory) {
+        $resolved = (Get-Item -LiteralPath $temporaryDirectory -Force)
+        if ($resolved.FullName -ne $temporaryDirectory -or
+            $resolved.Parent.FullName -ne $temporaryBase -or
+            ($resolved.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Refusing cleanup of an unexpected filter staging path.'
+        }
+        Remove-Item -LiteralPath $resolved.FullName -Recurse -Force
+    }
 }

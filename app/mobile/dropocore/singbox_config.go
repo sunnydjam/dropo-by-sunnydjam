@@ -3,6 +3,7 @@ package dropocore
 import (
 	"context"
 	"crypto/sha256"
+	"dropocore/dnspolicy"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -16,7 +17,7 @@ const (
 	androidConfigSchema     = "android-package-routing-v11-xhttp-source-pool"
 )
 
-const androidSingBoxVersion = "1.13.14"
+const androidSingBoxVersion = "1.14.4"
 
 var safeTagChars = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
@@ -34,7 +35,7 @@ func BuildSingBoxConfig() string {
 	defer cancel()
 	migrateAndroidSourcesLocked()
 	for _, source := range current.VPNSources {
-		if !source.Disabled && len(source.Nodes) > 0 {
+		if !source.Disabled && !ownedAndroidSourceExpired(source) && len(source.Nodes) > 0 {
 			mu.Unlock()
 			return buildPreparedAndroidSourcePool(buildCtx)
 		}
@@ -191,11 +192,11 @@ func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, 
 		}
 		outbounds, ruOutbound = appendAndroidProxyOutbounds(outbounds, ruProxies, "ru-proxy")
 	}
-	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags, logLevel, routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies)
+	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags, logLevel, routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies, routePolicies)
 	return config, filtered, err
 }
 
-func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string) (string, error) {
+func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string, adaptivePolicies ...map[string]string) (string, error) {
 	dnsServers := buildAndroidDNSServers(proxyTags)
 	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies)
 	finalOutbound := androidFinalOutbound(routingMode)
@@ -239,6 +240,9 @@ func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, lo
 		},
 	}
 
+	if len(adaptivePolicies) == 1 && routingMode == "all_traffic" {
+		addAndroidAdaptiveGraph(config, adaptivePolicies[0])
+	}
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return "", err
@@ -260,7 +264,7 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 	proxyTags := make([]string, 0, len(sources))
 	candidates := make([]androidSourceCandidate, 0, len(sources))
 	for _, source := range sources {
-		if source.Disabled {
+		if source.Disabled || ownedAndroidSourceExpired(source) {
 			continue
 		}
 		selected := androidSelectedNode(source)
@@ -304,7 +308,7 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 	policies := androidEffectiveRoutePoliciesForMode(androidRoutePoliciesLocked(), true, routingMode)
 	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags,
 		effectiveAndroidLogLevel(current.Config.EnableLogging, current.Config.LogLevel), routingMode,
-		current.Config.HideRuTraffic, ruOutbound, policies)
+		current.Config.HideRuTraffic, ruOutbound, policies, androidRoutePoliciesLocked())
 	if err != nil {
 		return androidSourceError("Не удалось подготовить Android VPN.")
 	}
@@ -548,30 +552,7 @@ func addTransport(out map[string]interface{}, proxy proxyConfig) {
 }
 
 func buildAndroidDNSServers(proxyTags []string) []interface{} {
-	servers := []interface{}{
-		map[string]interface{}{"type": "local", "tag": "dns-local"},
-		map[string]interface{}{
-			"type":        "https",
-			"tag":         "dns-direct",
-			"server":      "8.8.4.4",
-			"server_port": 443,
-			"path":        "/dns-query",
-			"tls":         map[string]interface{}{"server_name": "dns.google"},
-		},
-	}
-	remote := map[string]interface{}{
-		"type":        "https",
-		"tag":         "dns-remote",
-		"server":      "8.8.8.8",
-		"server_port": 443,
-		"path":        "/dns-query",
-		"tls":         map[string]interface{}{"server_name": "dns.google"},
-	}
-	if len(proxyTags) > 0 {
-		remote["detour"] = "proxy"
-	}
-	servers = append(servers, remote)
-	return servers
+	return []interface{}{map[string]interface{}{"type": "local", "tag": "dns-local"}, dnspolicy.Server("dns-direct", false), dnspolicy.Server("dns-remote", len(proxyTags) > 0)}
 }
 
 func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies map[string]string) []interface{} {

@@ -403,12 +403,12 @@ func TestFullVPNGeneratedConfigPassesBundledSingBoxCheck(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("bundled sing-box check uses the Windows binary")
 	}
-	matches, err := filepath.Glob(filepath.Join("..", "dependencies", "sing-box-v1.13.14", "windows-amd64", "sing-box-*", "sing-box.exe"))
+	matches, err := filepath.Glob(filepath.Join("..", "dependencies", "sing-box-v"+SingBoxVersion, "windows-amd64", "sing-box-*", "sing-box.exe"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(matches) == 0 {
-		t.Skip("bundled sing-box 1.13.14 is absent")
+		t.Skip("bundled sing-box is absent")
 	}
 	app := newInitializedSettingsScenarioApp(t)
 	profile, err := app.storage.GetActiveProfile()
@@ -428,7 +428,7 @@ func TestFullVPNGeneratedConfigPassesBundledSingBoxCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	if output, err := newBackgroundCommand(matches[0], "check", "-c", configPath).CombinedOutput(); err != nil {
-		t.Fatalf("sing-box 1.13.14 rejected generated full-VPN config: %v\n%s", err, output)
+		t.Fatalf("bundled sing-box rejected generated full-VPN config: %v\n%s", err, output)
 	}
 }
 

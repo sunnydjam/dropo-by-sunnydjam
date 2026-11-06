@@ -21,9 +21,22 @@ AccountSessionChannel::AccountSessionChannel(flutter::BinaryMessenger* messenger
     : channel_(messenger, "dropo/account_session",
                &flutter::StandardMethodCodec::GetInstance()) {
   channel_.SetMethodCallHandler([this](const auto& call, auto result) {
+    const auto* scope_arguments = call.arguments();
+    const auto* scope_values = scope_arguments == nullptr ? nullptr : std::get_if<flutter::EncodableMap>(scope_arguments);
+    AccountSessionStore* selected_store = &store_;
+    if (scope_values != nullptr) {
+      const auto scope_entry = scope_values->find(flutter::EncodableValue("scope"));
+      if (scope_entry != scope_values->end()) {
+        const auto* scope = std::get_if<std::string>(&scope_entry->second);
+        if (scope == nullptr || (*scope != "account" && *scope != "managed-vpn-v1")) {
+          Complete(AccountSessionError::kInvalid, result.get()); return;
+        }
+        if (*scope == "managed-vpn-v1") selected_store = &managed_store_;
+      }
+    }
     if (call.method_name() == "read") {
       std::optional<std::string> token;
-      const auto error = store_.Read(&token);
+      const auto error = selected_store->Read(&token);
       if (error == AccountSessionError::kNone && token.has_value()) {
         result->Success(flutter::EncodableValue(*token));
         SecureZeroMemory(token->data(), token->size());
@@ -40,9 +53,9 @@ AccountSessionChannel::AccountSessionChannel(flutter::BinaryMessenger* messenger
         if (entry != values->end()) token = std::get_if<std::string>(&entry->second);
       }
       Complete(token == nullptr ? AccountSessionError::kInvalid
-                                : store_.Write(*token), result.get());
+                                : selected_store->Write(*token), result.get());
     } else if (call.method_name() == "clear") {
-      Complete(store_.Clear(), result.get());
+      Complete(selected_store->Clear(), result.get());
     } else {
       result->NotImplemented();
     }

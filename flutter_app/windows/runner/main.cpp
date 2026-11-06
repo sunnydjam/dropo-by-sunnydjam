@@ -28,7 +28,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   Win32Window::Point origin(10, 10);
   // Logical client size, excluding the native title bar and resize borders.
   // A saved user size takes precedence; the runner bounds it to the monitor.
-  Win32Window::Size size(820, 560);
+  Win32Window::Size size(1200, 820);
   if (!window.Create(L"dropo", origin, size)) {
     return EXIT_FAILURE;
   }

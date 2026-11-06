@@ -19,6 +19,7 @@ class _AtlasHomeLayout extends StatelessWidget {
     this.servicesExpanded = false,
     this.servicesVisible = true,
     this.noticeLabel = 'Сообщения',
+    this.turboOffer,
   });
   final Widget connection, routes;
   final Widget? notices;
@@ -27,18 +28,49 @@ class _AtlasHomeLayout extends StatelessWidget {
   final bool servicesExpanded;
   final bool servicesVisible;
   final String noticeLabel;
+  final Widget? turboOffer;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => Column(
+      children: [
+        Expanded(child: _body(context)),
+        if (turboOffer != null &&
+            MediaQuery.viewInsetsOf(context).bottom == 0 &&
+            View.of(context).viewInsets.bottom == 0)
+          SafeArea(
+            top: false,
+            minimum: EdgeInsets.fromLTRB(
+              16,
+              _compactDesktopHome(context) ? 0 : 6,
+              16,
+              _compactDesktopHome(context) ? 6 : 12,
+            ),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 960),
+                child: turboOffer!,
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _body(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) => Stack(
       key: const ValueKey('home'),
       children: [
         Positioned.fill(
           child: SingleChildScrollView(
             key: const ValueKey('home-scroll'),
-            padding: EdgeInsets.symmetric(
-              horizontal: 16,
-              vertical: constraints.maxHeight < 460 ? 4 : 12,
+            padding: EdgeInsets.fromLTRB(
+              16,
+              constraints.maxHeight < 460 ? 4 : 12,
+              16,
+              _compactDesktopHome(context)
+                  ? 0
+                  : (constraints.maxHeight < 460 ? 4 : 12),
             ),
             child: Center(
               child: ConstrainedBox(
@@ -47,10 +79,13 @@ class _AtlasHomeLayout extends StatelessWidget {
                   viewportHeight: math.max(
                     0,
                     constraints.maxHeight -
-                        (constraints.maxHeight < 460 ? 8 : 24),
+                        (constraints.maxHeight < 460 ? 4 : 12) -
+                        (_compactDesktopHome(context)
+                            ? 0
+                            : (constraints.maxHeight < 460 ? 4 : 12)),
                   ),
                   minimumConnectionExtent:
-                      160 *
+                      (_compactDesktopHome(context) ? 156 : 160) *
                       (MediaQuery.textScalerOf(context).scale(17) / 17).clamp(
                         1.0,
                         1.5,
@@ -62,20 +97,22 @@ class _AtlasHomeLayout extends StatelessWidget {
                     children: [
                       routes,
                       const SizedBox(height: 8),
-                      SizedBox(
-                        key: const ValueKey('home-update-slot'),
-                        // Keep the connection scene stable when an update is
-                        // discovered. The manual action has its own space,
-                        // including two lines at larger accessibility scales.
-                        height: math.max(
-                          56,
-                          MediaQuery.textScalerOf(context).scale(14) * 2.6 + 20,
+                      if (!_compactDesktopHome(context))
+                        SizedBox(
+                          key: const ValueKey('home-update-slot'),
+                          // Keep the connection scene stable when an update is
+                          // discovered. The manual action has its own space,
+                          // including two lines at larger accessibility scales.
+                          height: math.max(
+                            56,
+                            MediaQuery.textScalerOf(context).scale(14) * 2.6 +
+                                20,
+                          ),
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: updateNotice ?? const SizedBox.shrink(),
+                          ),
                         ),
-                        child: Align(
-                          alignment: Alignment.centerRight,
-                          child: updateNotice ?? const SizedBox.shrink(),
-                        ),
-                      ),
                     ],
                   ),
                   footerExpanded: servicesExpanded,
@@ -87,6 +124,13 @@ class _AtlasHomeLayout extends StatelessWidget {
             ),
           ),
         ),
+        if (_compactDesktopHome(context) && updateNotice != null)
+          Positioned(
+            top: 64,
+            left: 12,
+            width: math.min(188, constraints.maxWidth * .3),
+            child: updateNotice!,
+          ),
         if (telemetry != null &&
             constraints.maxWidth >= 760 &&
             MediaQuery.textScalerOf(context).scale(12) <= 18)
@@ -103,6 +147,12 @@ class _AtlasHomeLayout extends StatelessWidget {
                   MediaQuery.textScalerOf(context).scale(17) > 23 ||
                       constraints.maxHeight < 460
                   ? 48
+                  : _compactDesktopHome(context)
+                  ? 48
+                  : constraints.maxWidth >= 960 && constraints.maxHeight >= 600
+                  ? math.min(220, constraints.maxHeight * .23)
+                  : constraints.maxHeight < 460
+                  ? 56
                   : 100,
               child: notices!,
             ),

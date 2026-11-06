@@ -11,6 +11,44 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   testWidgets(
+    'restored Telegram session synchronizes this installation with consent',
+    (tester) async {
+      final service = _FakeAccountTransport();
+      final calls = <(String, bool)>[];
+      await _pumpAccount(
+        tester,
+        service,
+        initialToken: 'restored-session',
+        onVPNProfile: (token, consent) async {
+          calls.add((token, consent));
+          return {'success': true};
+        },
+      );
+      expect(calls, [('restored-session', true)]);
+      expect(find.text('Локальный пользователь'), findsOneWidget);
+    },
+  );
+  testWidgets(
+    'fresh Telegram login synchronizes premium without a second link dialog',
+    (tester) async {
+      final service = _FakeAccountTransport()..authApproved = true;
+      final calls = <(String, bool)>[];
+      await _pumpAccount(
+        tester,
+        service,
+        onVPNProfile: (token, consent) async {
+          calls.add((token, consent));
+          return {'success': true};
+        },
+      );
+      await tester.ensureVisible(find.byKey(const ValueKey('account-submit')));
+      await tester.tap(find.byKey(const ValueKey('account-submit')));
+      await tester.pumpAndSettle();
+      expect(calls, [('test-access-token', true)]);
+      expect(find.text('Привязать бесплатный профиль?'), findsNothing);
+    },
+  );
+  testWidgets(
     'unconfigured account makes no requests and preserves credentials',
     (tester) async {
       final service = _FakeAccountTransport();
@@ -89,7 +127,7 @@ void main() {
       expect(find.text('Локальный пользователь'), findsOneWidget);
       expect(find.text('Dropo Free'), findsOneWidget);
       expect(find.text('150'), findsNothing);
-      expect(find.text('Dropo Boost · скоро'), findsOneWidget);
+      expect(find.text('Турбо по приглашению'), findsOneWidget);
       expect(find.text('Telegram подключён'), findsOneWidget);
 
       final purchase = tester.widget<FilledButton>(
@@ -155,7 +193,7 @@ void main() {
   ) async {
     final service = _FakeAccountTransport()..purchasingAvailable = true;
     await _pumpAccount(tester, service, initialToken: 'stored-session');
-    expect(find.text('Dropo Boost · скоро'), findsOneWidget);
+    expect(find.text('Турбо по приглашению'), findsOneWidget);
     expect(
       tester
           .widget<FilledButton>(find.byKey(const ValueKey('account-buy-speed')))
@@ -763,6 +801,7 @@ void main() {
     );
     expect(find.textContaining('не настоящий вход'), findsOneWidget);
     expect(find.text('Проверить локальный вход'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const ValueKey('account-submit')));
     await tester.tap(find.byKey(const ValueKey('account-submit')));
     await tester.pump();
     expect(find.text('Ожидаем локальное подтверждение'), findsOneWidget);
@@ -802,6 +841,7 @@ void main() {
       opened: opened,
       endpoint: 'http://127.0.0.1:18081',
     );
+    await tester.ensureVisible(find.byKey(const ValueKey('account-submit')));
     await tester.tap(find.byKey(const ValueKey('account-submit')));
     await tester.pumpAndSettle();
     expect(find.textContaining('Локальный тестовый аккаунт'), findsOneWidget);
@@ -875,6 +915,7 @@ Future<void> _pumpAccount(
   GlobalKey? captureKey,
   String endpoint = 'https://accounts.example.com',
   Future<void> Function(String)? openExternal,
+  Future<Map<String, dynamic>> Function(String, bool)? onVPNProfile,
 }) async {
   await tester.binding.setSurfaceSize(size);
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -884,6 +925,7 @@ Future<void> _pumpAccount(
     transport: service,
     persistSession: persistSession,
     initialToken: initialToken,
+    onVPNProfile: onVPNProfile,
     onOpenExternal: (url) async {
       opened?.add(url);
       await openExternal?.call(url);

@@ -1,3 +1,3 @@
 module dropo/bootstrap
 
-go 1.26.10
+go 1.27.3

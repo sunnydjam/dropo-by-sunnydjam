@@ -1,5 +1,5 @@
 {
-  "version": "3.0.55",
+  "version": "3.1.1",
   "name": "dropo",
   "productName": "dropo",
   "description": "Dropo Connect Booster client with two connection modes",
@@ -8,10 +8,11 @@
   "homepage": "https://github.com/sunnydjam/dropo-by-sunnydjam",
   "repository": "https://github.com/sunnydjam/dropo-by-sunnydjam",
   "singbox": {
-    "version": "1.13.14",
+    "version": "1.14.4",
     "minVersion": "1.12.0",
-    "archiveSha256": "f580782c6dd10f7691c66cea1d7c421813c5fbf7e305d1ee7ce0c3a40d196341",
-    "executableSha256": "db0d779948214cf761011d154c3a5da36df20394fa01a9fc798f1dc39fe9d183"
+    "archiveSha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
+    "executableSha256": "b09b3ec9192e29dc21d67e72e0f3ecc3174a7fe266ec3b9a65cd33d615fc1abe",
+    "sourceBuild": true
   },
   "wireguard": {
     "version": "0.5.3",
@@ -28,12 +29,14 @@
     "url": "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip"
   },
   "xray": {
-    "version": "26.3.27",
-    "archiveSha256": "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad",
-    "executableSha256": "15c2d007954ac53ba69b80ec91242786b3c0b71d52649165b4ca1d5cc96ef8f1"
+    "version": "26.10.31",
+    "archiveSha256": "2e04a9995a6f2ad1b28c0bb25c708ecb2695e43a1c9c7889c4b6ac2b48cf7a6a",
+    "executableSha256": "8ee05ead37397defae1f97324087fbad128b0eaf687dd41d233d63fdecbe55df",
+    "sourceBuild": true
   },
   "build": {
     "appId": "in.droponevedimka.dropo",
+    "releaseChannel": "pilot",
     "copyright": "Copyright © 2026 Droponevedimka and contributors"
   }
 }

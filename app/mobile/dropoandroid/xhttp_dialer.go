@@ -2,13 +2,12 @@ package dropoandroid
 
 import (
 	"context"
+	"dropocore/dnspolicy"
 	"errors"
 	"io"
 	"net"
-	"net/netip"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -197,38 +196,28 @@ func (protectedXHTTPDialer) Dial(ctx context.Context, _ xnet.Address, destinatio
 		return session.ctx.Err()
 	}
 	dialer := net.Dialer{Control: control, Timeout: 16 * time.Second, KeepAlive: 45 * time.Second}
+	dialer.SetMultipathTCP(false)
 	if destination.Address.Family().IsDomain() {
-		var dnsAttempt atomic.Uint64
-		dialer.Resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, dnsNetwork, _ string) (net.Conn, error) {
-			if session.dnsServers == nil {
-				return nil, errors.New("Android XHTTP physical DNS is unavailable")
+		resolver := dnspolicy.Resolver{Policy: dnspolicy.Default(), Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			resolverDialer := net.Dialer{Control: control, Timeout: 5 * time.Second}
+			resolverDialer.SetMultipathTCP(false)
+			connection, err := resolverDialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, errors.New("Android protected DNS connection failed")
 			}
-			servers := session.dnsServers()
-			if len(servers) == 0 {
-				return nil, errors.New("Android XHTTP physical DNS is unavailable")
+			tracked := &trackedXHTTPConn{Conn: connection, session: session}
+			if !session.trackPhysical(tracked, generation) {
+				return nil, context.Canceled
 			}
-			start := int(dnsAttempt.Add(1)-1) % len(servers)
-			for i := 0; i < len(servers); i++ {
-				server := servers[(start+i)%len(servers)]
-				ip, err := netip.ParseAddr(server)
-				if err != nil || ip.IsUnspecified() || ip.IsMulticast() {
-					continue
-				}
-				resolverDialer := net.Dialer{Control: control, Timeout: 5 * time.Second}
-				conn, err := resolverDialer.DialContext(ctx, dnsNetwork, net.JoinHostPort(ip.String(), "53"))
-				if err == nil {
-					tracked := &trackedXHTTPConn{Conn: conn, session: session}
-					if !session.trackPhysical(tracked, generation) {
-						return nil, context.Canceled
-					}
-					if packet, ok := conn.(net.PacketConn); ok {
-						return &trackedXHTTPDNSPacketConn{trackedXHTTPConn: tracked, packet: packet}, nil
-					}
-					return tracked, nil
-				}
-			}
-			return nil, errors.New("Android XHTTP physical DNS is unavailable")
+			return tracked, nil
 		}}
+		addresses, err := resolver.Lookup(dialCtx, destination.Address.Domain())
+		if err != nil || len(addresses) == 0 || !session.physicalCurrent(generation) {
+			return nil, errors.New("Android protected DNS unavailable")
+		}
+		// TLS SNI/HTTP Host remain on Xray's request; only the physical dial
+		// address changes. The lookup never uses the physical network's port 53.
+		destination.Address = xnet.IPAddress(net.IP(addresses[0].AsSlice()))
 	}
 	if network == "udp" {
 		var ip net.IP
@@ -256,7 +245,7 @@ func (protectedXHTTPDialer) Dial(ctx context.Context, _ xnet.Address, destinatio
 		}
 		// Preserve Xray's recognized packet wrapper for HTTP/3. Returning a
 		// generic net.Conn would lose UDP peer identity inside its QUIC dialer.
-		return &internet.PacketConnWrapper{PacketConn: tracked, Dest: &net.UDPAddr{IP: ip, Port: int(destination.Port)}}, nil
+		return &xnet.PacketConnWrapper{PacketConn: tracked, Dest: &net.UDPAddr{IP: ip, Port: int(destination.Port)}}, nil
 	}
 	conn, err := dialer.DialContext(dialCtx, network, net.JoinHostPort(destination.Address.String(), strconv.Itoa(int(destination.Port))))
 	if err != nil {

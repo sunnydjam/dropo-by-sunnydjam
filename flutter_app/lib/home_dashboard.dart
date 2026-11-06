@@ -7,6 +7,149 @@ const _homeText = Color(0xFFE8F3EF);
 const _homeMuted = Color(0xFFA8BAB5);
 const _homeAccent = Color(0xFF75E3AD);
 
+bool _compactDesktopHome(BuildContext context) =>
+    MediaQuery.sizeOf(context).width >= 600 &&
+    MediaQuery.sizeOf(context).height < 620 &&
+    MediaQuery.textScalerOf(context).scale(14) < 20;
+
+class FreePlanBanner extends StatelessWidget {
+  const FreePlanBanner({
+    super.key,
+    required this.signedIn,
+    this.turboEntitled = false,
+    this.onTurbo,
+  });
+  final bool signedIn, turboEntitled;
+  final VoidCallback? onTurbo;
+
+  @override
+  Widget build(BuildContext context) {
+    if (turboEntitled) return const SizedBox.shrink();
+    final compact = _compactDesktopHome(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final largeText = MediaQuery.textScalerOf(context).scale(14) > 20;
+        final shortAction = constraints.maxWidth < 520;
+        final actionLabel = signedIn ? 'Купить Турбо' : 'Войти для Турбо';
+        final action = Semantics(
+          label: actionLabel,
+          button: true,
+          enabled: onTurbo != null,
+          onTap: onTurbo,
+          excludeSemantics: true,
+          child: FilledButton(
+            key: const ValueKey('free-plan-turbo'),
+            onPressed: onTurbo,
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFC1F5DD),
+              foregroundColor: const Color(0xFF12281F),
+              minimumSize: const Size(72, 48),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+              textStyle: const TextStyle(
+                fontFamily: 'Inter',
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            child: Text(
+              shortAction ? (signedIn ? 'Турбо' : 'Войти') : actionLabel,
+            ),
+          ),
+        );
+        final details = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Бесплатный тариф',
+              style: TextStyle(
+                color: Color(0xFFE5F2EA),
+                fontFamily: 'Inter',
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                height: 1.25,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              largeText
+                  ? 'Возможны замедления.'
+                  : 'Возможны замедления. Турбо — быстрее.',
+              style: const TextStyle(
+                color: Color(0xFFC3D2CB),
+                fontFamily: 'Inter',
+                fontSize: 12,
+                height: 1.3,
+              ),
+            ),
+          ],
+        );
+        final content = largeText
+            ? details
+            : Row(
+                children: [
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF203F33),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(
+                      Icons.bolt_rounded,
+                      color: Color(0xFF9EEBC7),
+                      size: 23,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(child: details),
+                ],
+              );
+        return Container(
+          key: const ValueKey('free-plan-banner'),
+          width: double.infinity,
+          padding: EdgeInsets.symmetric(
+            horizontal: 12,
+            vertical: compact ? 0 : 10,
+          ),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [Color(0xFF14251F), Color(0xFF101A1C)],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+            ),
+            border: Border.all(color: const Color(0xFF30483D)),
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: .16),
+                blurRadius: 18,
+                offset: const Offset(0, 5),
+              ),
+            ],
+          ),
+          child: largeText
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [content, const SizedBox(height: 10), action],
+                )
+              : Row(
+                  children: [
+                    Expanded(child: content),
+                    const SizedBox(width: 12),
+                    action,
+                  ],
+                ),
+        );
+      },
+    );
+  }
+}
+
 class _HomeBrand extends StatelessWidget {
   const _HomeBrand();
 

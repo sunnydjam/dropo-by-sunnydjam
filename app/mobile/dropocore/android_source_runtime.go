@@ -42,6 +42,7 @@ func CancelPendingSourceWork() {
 	current.sourcesRevision++
 	current.sourceWorkCancelled = true
 	current.sourceSession = 0
+	current.adaptiveActive = nil
 	current.activeSourceID = ""
 	current.sourceResponses = nil
 	if androidBuildCancel != nil {
@@ -57,6 +58,7 @@ func BeginAndroidSourceSession() string {
 		return androidSourceError("VPN-источники ещё не готовы к проверке.")
 	}
 	current.sourceSession = androidSourceGeneration.Add(1)
+	current.adaptiveActive = nil
 	current.activeSourceID = current.preparedSources[0].ID
 	current.sourceResponses = make(map[string]androidSourceResponse, len(current.preparedSources))
 	for _, candidate := range current.preparedSources {
@@ -74,6 +76,7 @@ func EndAndroidSourceSession(generation int64) {
 		return
 	}
 	current.sourceSession = 0
+	current.adaptiveActive = nil
 	current.activeSourceID = ""
 	current.sourceResponses = nil
 }

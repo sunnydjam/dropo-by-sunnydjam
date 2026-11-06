@@ -882,7 +882,7 @@ func TestAndroidGeneratedConfigAcceptedBySingBox(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("local sing-box check uses the bundled Windows binary")
 	}
-	exe := filepath.Clean(`..\..\..\dependencies\sing-box-v1.13.14\windows-amd64\sing-box-1.13.14-windows-amd64\sing-box.exe`)
+	exe := filepath.Clean(`..\..\..\dependencies\sing-box-v1.14.4\windows-amd64\sing-box-1.14.4-windows-amd64\sing-box.exe`)
 	if _, err := os.Stat(exe); err != nil {
 		t.Skipf("sing-box binary is not available: %v", err)
 	}

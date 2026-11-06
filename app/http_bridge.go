@@ -25,6 +25,7 @@ var bridgeCallableMethods = map[string]struct{}{
 	"AddWireGuard":                    {},
 	"AddVPNSource":                    {},
 	"AddManagedVPNSource":             {},
+	"ValidateManagedCatalog":          {},
 	"AddPublicVPNSource":              {},
 	"CaptureDPIFingerprint":           {},
 	"CheckExternalVPNConflicts":       {},

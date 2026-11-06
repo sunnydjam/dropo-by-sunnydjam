@@ -25,7 +25,7 @@ param(
     [switch]$AndroidBundle,
     # Optimized, development-signed phone preview; never a publication artifact.
     [switch]$AndroidPreview,
-    [ValidateSet("arm64", "universal")]
+    [ValidateSet("arm64", "universal", "x64")]
     [string]$AndroidArchitecture = "arm64",
     # Local/offline rebuild aid: reuse an existing Flutter Windows Release
     # output while still rebuilding and signing the Go core and launcher.
@@ -432,13 +432,19 @@ $ForbiddenDepFiles = @("winws.exe", "winws2.exe", "cygwin1.dll", "zapret-lib.lua
 $WindowsInstallerAsset = "dropo-Windows-Setup-x64.exe"
 $WindowsPortableAsset = "dropo-Windows-Portable-x64.zip"
 $AndroidReleaseArch = $AndroidArchitecture
-$AndroidFlutterTargetPlatform = if ($AndroidArchitecture -eq "universal") { "android-arm,android-arm64" } else { "android-arm64" }
-$AndroidGoMobileTarget = if ($willBuildAndroidBundle -or $AndroidArchitecture -eq "universal") { "android/arm,android/arm64" } else { "android/arm64" }
+if ($AndroidArchitecture -eq 'x64' -and (-not $AndroidPreview -or $willBuildAndroidBundle)) { throw 'x64 is restricted to local AndroidPreview emulator builds.' }
+$AndroidFlutterTargetPlatform = if ($AndroidArchitecture -eq 'x64') {'android-x64'} elseif ($AndroidArchitecture -eq "universal") { "android-arm,android-arm64" } else { "android-arm64" }
+$AndroidGoMobileTarget = if ($AndroidArchitecture -eq 'x64') {'android/amd64'} elseif ($willBuildAndroidBundle -or $AndroidArchitecture -eq "universal") { "android/arm,android/arm64" } else { "android/arm64" }
 $AndroidBridgeTags = "with_gvisor,with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0"
 $AndroidAppAsset = "dropo-Android-$AndroidReleaseArch.apk"
 $AndroidBundleAsset = 'dropo-Android-Play-universal.aab'
 
 function Ensure-SingBoxWindowsDependency {
+    if ($VersionInfo.singbox.sourceBuild -eq $true) {
+        & (Join-Path $ScriptRoot 'tools\build-runtime-source.ps1') -Component singbox
+        Assert-FileSHA256 -Path $SingBoxExe -ExpectedSHA256 $SingBoxExeSHA256 -Label 'sing-box source build'
+        return
+    }
     if (Test-Path $SingBoxExe) {
         Assert-FileSHA256 -Path $SingBoxExe -ExpectedSHA256 $SingBoxExeSHA256 -Label "sing-box executable"
         return
@@ -529,6 +535,11 @@ function Assert-FileSHA256 {
 }
 
 function Ensure-XrayWindowsDependency {
+    if ($VersionInfo.xray.sourceBuild -eq $true) {
+        & (Join-Path $ScriptRoot 'tools\build-runtime-source.ps1') -Component xray
+        Assert-FileSHA256 -Path $XrayExe -ExpectedSHA256 $XrayExeSHA256 -Label 'Xray source build'
+        return
+    }
     if (Test-Path -LiteralPath $XrayExe -PathType Leaf) {
         Assert-FileSHA256 -Path $XrayExe -ExpectedSHA256 $XrayExeSHA256 -Label "Xray executable"
         return
@@ -602,7 +613,20 @@ function Ensure-WireGuardWindowsDependency {
                 # ships the same pinned upstream Wintun DLL as a normal file.
                 $sourceFile = Join-Path $XrayDir "wintun.dll"
                 if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
-                    throw "Official Xray archive does not contain the pinned Wintun DLL."
+                    # Source-built Xray does not include the third-party DLL.
+                    # Extract this one pinned auxiliary asset from the reviewed
+                    # official archive; never overwrite the source-built core.
+                    $xrayAuxZip = Join-Path $tmpDir 'xray-auxiliary.zip'
+                    Download-File -Url "https://github.com/XTLS/Xray-core/releases/download/v$XrayVersion/Xray-windows-64.zip" -Destination $xrayAuxZip
+                    Assert-FileSHA256 -Path $xrayAuxZip -ExpectedSHA256 $XrayArchiveSHA256 -Label 'Xray auxiliary archive'
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem
+                    $auxiliary = [IO.Compression.ZipFile]::OpenRead($xrayAuxZip)
+                    try {
+                        $entries = @($auxiliary.Entries | Where-Object { $_.FullName -ceq 'wintun.dll' })
+                        if ($entries.Count -ne 1) { throw 'Expected exactly one pinned Wintun auxiliary entry.' }
+                        $sourceFile = Join-Path $tmpDir 'wintun.dll'
+                        [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $sourceFile)
+                    } finally { $auxiliary.Dispose() }
                 }
             } else {
                 $matches = @(Get-ChildItem -LiteralPath $extractDir -Recurse -File -Filter $entry.Key)
@@ -884,6 +908,9 @@ function Build-Application {
     # release archives are written next to it, inside the container.
     if (-not (Test-Path $VersionDir)) {
         New-Item -ItemType Directory -Path $VersionDir | Out-Null
+    }
+    if ($VersionInfo.singbox.sourceBuild -eq $true -or $VersionInfo.xray.sourceBuild -eq $true) {
+        & (Join-Path $ScriptRoot 'tools\export-runtime-source.ps1') -DestinationDirectory $VersionDir
     }
     $AppFolder = Join-Path $VersionDir "dropo"
     if (-not (Test-Path $AppFolder)) {
@@ -1548,6 +1575,35 @@ function Set-WindowsAdminManifest {
     Write-Host "[OK] Embedded administrator manifest" -ForegroundColor Green
 }
 
+function Reset-AndroidApkOutput {
+    param([string]$FlutterRoot, [ValidateSet('profile', 'release')][string]$Mode)
+    # Android's incremental ZIP writer can retain an unreferenced old libgojni
+    # payload after an AAR rebuild. Remove only the two generated output files
+    # so Gradle packages a fresh APK; retain compilation caches and releases.
+    $outputRoot = [IO.Path]::GetFullPath((Join-Path $FlutterRoot 'build\app\outputs'))
+    if (-not $outputRoot.StartsWith($ScriptRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Android package output escapes the checkout.'
+    }
+    foreach ($relative in @("apk\$Mode\app-$Mode.apk", "flutter-apk\app-$Mode.apk")) {
+        $target = [IO.Path]::GetFullPath((Join-Path $outputRoot $relative))
+        if (-not $target.StartsWith($outputRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Unexpected Android APK output path.'
+        }
+        $cursor = $target
+        while ($cursor.Length -gt $ScriptRoot.Length) {
+            if ((Test-Path -LiteralPath $cursor) -and
+                ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'Android APK output traverses a reparse point.'
+            }
+            $cursor = Split-Path $cursor -Parent
+        }
+        if (Test-Path -LiteralPath $target) {
+            if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'APK output is not a regular file.' }
+            Remove-Item -LiteralPath $target -Force
+        }
+    }
+}
+
 function Get-AndroidBridgeFingerprint {
     param(
         [string]$BridgeDir,
@@ -1779,6 +1835,7 @@ function Build-AndroidApplication {
     try {
         # The same explicit Dart define drives native Gradle distribution.
         $androidBuildMode = if ($AndroidPreview) { "profile" } else { "release" }
+        Reset-AndroidApkOutput -FlutterRoot $FlutterDir -Mode $androidBuildMode
         $androidBuildArguments = @(
             'build', 'apk', "--$androidBuildMode",
             '--target-platform', $AndroidFlutterTargetPlatform,

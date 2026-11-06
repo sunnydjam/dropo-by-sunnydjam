@@ -12,7 +12,7 @@ $manifestPath = Join-Path $repositoryRoot 'app/mobile/dropoandroid/xray_overlay/
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $overlayRoot = Split-Path $manifestPath
 $expectedFiles = @('client.go.txt', 'dialer.go.txt', 'managed_session.go.txt', 'managed_session_test.go.txt')
-if ($manifest.moduleVersion -cne 'v1.260327.0' -or @($manifest.files).Count -ne 4) {
+if ($manifest.moduleVersion -cne 'v1.260327.1-0.20261031132019-a4a3dff5b20c' -or @($manifest.files).Count -ne 4) {
     throw 'Android XHTTP source/test overlay contract is incomplete.'
 }
 foreach ($name in $expectedFiles) {

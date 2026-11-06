@@ -71,6 +71,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+repositories/
 
 # Runtime data
 pids/

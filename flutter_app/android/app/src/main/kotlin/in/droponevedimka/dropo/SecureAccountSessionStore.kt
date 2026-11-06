@@ -14,18 +14,20 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
 /** Non-exportable app-UID Keystore key; ciphertext stays in noBackupFilesDir. */
-internal class SecureAccountSessionStore(context: Context) {
+internal class SecureAccountSessionStore(context: Context, private val purpose: String = "account") {
     private val context = context.applicationContext
+    init { require(purpose == "account" || purpose == "managed-vpn-v1") }
+    private val keyAlias = if (purpose == "account") "dropo.account_session.v1" else "dropo.managed_vpn.v1"
 
     private fun atomicFile(): AtomicFile =
-        AtomicFile(File(context.noBackupFilesDir, "account-session.enc"))
+        AtomicFile(File(context.noBackupFilesDir, if(purpose == "account") "account-session.enc" else "managed-vpn.enc"))
 
     private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply {
         load(null)
     }
 
     private fun existingKey(store: KeyStore): SecretKey? {
-        val entry = store.getEntry(KEY_ALIAS, null) ?: return null
+        val entry = store.getEntry(keyAlias, null) ?: return null
         return (entry as? KeyStore.SecretKeyEntry)?.secretKey
             ?: throw GeneralSecurityException("Unsupported account session key.")
     }
@@ -34,7 +36,7 @@ internal class SecureAccountSessionStore(context: Context) {
         val store = keyStore()
         existingKey(store)?.let { return it }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
-            init(KeyGenParameterSpec.Builder(KEY_ALIAS,
+            init(KeyGenParameterSpec.Builder(keyAlias,
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setKeySize(256)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -86,8 +88,8 @@ internal class SecureAccountSessionStore(context: Context) {
             throw IOException("Protected account session could not be cleared.")
         }
         val store = keyStore()
-        store.deleteEntry(KEY_ALIAS)
-        if (store.containsAlias(KEY_ALIAS)) {
+        store.deleteEntry(keyAlias)
+        if (store.containsAlias(keyAlias)) {
             throw GeneralSecurityException("Account session key could not be cleared.")
         }
     }
@@ -111,7 +113,6 @@ internal class SecureAccountSessionStore(context: Context) {
     }
 
     companion object {
-        private const val KEY_ALIAS = "dropo.account_session.v1"
         // AtomicFile requires explicit locking. Share it across activity/engine
         // recreation so writes and logout cannot race within the app process.
         private val lock = Any()

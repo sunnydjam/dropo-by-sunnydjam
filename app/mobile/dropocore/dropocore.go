@@ -2,6 +2,7 @@ package dropocore
 
 import (
 	"crypto/sha256"
+	"dropocore/catalog"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -47,25 +48,27 @@ type coreState struct {
 	sourceResponses          map[string]androidSourceResponse
 	sourceWorkCancelled      bool
 	runtimeInitialized       bool
-	Config                   appConfig         `json:"config"`
-	Version                  versionInfo       `json:"version"`
-	Events                   []bridgeEvent     `json:"events"`
-	Logs                     []string          `json:"logs"`
-	LastError                string            `json:"lastError"`
-	ServiceState             string            `json:"serviceState"`
-	ServiceMessage           string            `json:"serviceMessage"`
-	ServiceUpdatedAt         string            `json:"serviceUpdatedAt"`
-	WireGuards               []wireGuardConfig `json:"wireguards"`
-	RoutePolicies            map[string]string `json:"routePolicies,omitempty"`
-	HomeRouteServices        []string          `json:"homeRouteServices,omitempty"`
-	NextEventID              int64             `json:"nextEventId"`
-	TotalSessions            int               `json:"totalSessions"`
-	LastDurationMs           int64             `json:"lastDurationMs"`
-	CachedSingBoxConfig      string            `json:"cachedSingBoxConfig,omitempty"`
-	CachedProxyCount         int               `json:"cachedProxyCount,omitempty"`
-	CachedConfigSubscription string            `json:"cachedConfigSubscription,omitempty"`
-	CachedConfigSignature    string            `json:"cachedConfigSignature,omitempty"`
-	CachedConfigUpdatedAt    string            `json:"cachedConfigUpdatedAt,omitempty"`
+	Config                   appConfig                        `json:"config"`
+	Version                  versionInfo                      `json:"version"`
+	Events                   []bridgeEvent                    `json:"events"`
+	Logs                     []string                         `json:"logs"`
+	LastError                string                           `json:"lastError"`
+	ServiceState             string                           `json:"serviceState"`
+	ServiceMessage           string                           `json:"serviceMessage"`
+	ServiceUpdatedAt         string                           `json:"serviceUpdatedAt"`
+	WireGuards               []wireGuardConfig                `json:"wireguards"`
+	RoutePolicies            map[string]string                `json:"routePolicies,omitempty"`
+	HomeRouteServices        []string                         `json:"homeRouteServices,omitempty"`
+	AdaptiveCache            map[string]androidAdaptiveRecord `json:"adaptiveCache,omitempty"`
+	adaptiveActive           map[string]bool
+	NextEventID              int64  `json:"nextEventId"`
+	TotalSessions            int    `json:"totalSessions"`
+	LastDurationMs           int64  `json:"lastDurationMs"`
+	CachedSingBoxConfig      string `json:"cachedSingBoxConfig,omitempty"`
+	CachedProxyCount         int    `json:"cachedProxyCount,omitempty"`
+	CachedConfigSubscription string `json:"cachedConfigSubscription,omitempty"`
+	CachedConfigSignature    string `json:"cachedConfigSignature,omitempty"`
+	CachedConfigUpdatedAt    string `json:"cachedConfigUpdatedAt,omitempty"`
 	testedSubscriptionHash   [sha256.Size]byte
 	testedSubscriptionCount  int
 	testedSubscriptionValid  bool
@@ -242,6 +245,7 @@ func applyServiceStateLocked(state, message, errText string) map[string]interfac
 		current.sourcesRevision++
 	}
 	if state != "connected" {
+		current.adaptiveActive = nil
 		current.sourceSession = 0
 		current.activeSourceID = ""
 		current.sourceResponses = nil
@@ -325,6 +329,20 @@ func normalizeServiceState(state string) string {
 }
 
 func Call(method, argsJSON string) string {
+	if method == "ValidateManagedCatalog" {
+		args := decodeArgs(argsJSON)
+		minimum := int64(0)
+		if len(args) > 1 {
+			if value, ok := args[1].(float64); ok {
+				minimum = int64(value)
+			}
+		}
+		p, err := catalog.Verify([]byte(stringArg(args, 0, "")), minimum, time.Now())
+		if err != nil {
+			return encode(map[string]interface{}{"success": false, "error": "Каталог Dropo не прошёл проверку подписи."})
+		}
+		return encode(map[string]interface{}{"success": true, "revision": p.Revision})
+	}
 	args := decodeArgs(argsJSON)
 	if method == "GetPublicVPNProviders" {
 		return androidPublicProviders()
@@ -1305,6 +1323,8 @@ func normalizeLoadedAndroidSubscriptionCountLocked() {
 }
 
 func normalizeLoadedAppConfigLocked() {
+	current.adaptiveActive = nil
+	sanitizeAndroidAdaptiveCacheLocked()
 	defaults := defaultState().Config
 	if current.Config.Theme != "dark" && current.Config.Theme != "light" && current.Config.Theme != "system" {
 		current.Config.Theme = defaults.Theme
@@ -1345,7 +1365,7 @@ func saveLocked() error {
 	if current.BasePath == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(current, "", "  ")
+	data, err := json.MarshalIndent(stateWithoutOwnedSecrets(current), "", "  ")
 	if err != nil {
 		return recordPersistenceErrorLocked(err)
 	}

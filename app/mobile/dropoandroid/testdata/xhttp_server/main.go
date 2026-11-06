@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	xlog "github.com/xtls/xray-core/common/log"
 
 	_ "github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/dns"
@@ -51,6 +53,7 @@ func run() error {
 	if err := server.Start(); err != nil {
 		return err
 	}
+	if os.Getenv("DROPO_XHTTP_FIXTURE_DEBUG") == "1" { xlog.RegisterHandler(stderrLog{}) }
 	if _, err := io.WriteString(os.Stdout, "READY\n"); err != nil {
 		return err
 	}
@@ -59,8 +62,14 @@ func run() error {
 	return err
 }
 
+type stderrLog struct{}
+func (stderrLog) Handle(m xlog.Message) { fmt.Fprintln(os.Stderr,m) }
+
 func main() {
-	if run() != nil {
+	if err := run(); err != nil {
+		if os.Getenv("DROPO_XHTTP_FIXTURE_DEBUG") == "1" {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		// Configuration and TLS material are synthetic but never echo config
 		// or raw upstream errors into CI output; readiness failure is enough.
 		os.Exit(1)

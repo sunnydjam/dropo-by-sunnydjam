@@ -2,6 +2,7 @@ package dropocore
 
 import (
 	"bytes"
+	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -144,6 +145,7 @@ func proxyToAndroidXrayOutbound(proxy proxyConfig, tag string) map[string]interf
 		}
 		xhttp["extra"] = extra
 	}
+	ownedprofile.ApplyXHTTPBudget(proxy.Server, proxy.ServerPort, proxy.Security, proxy.SNI, proxy.Host, xhttp)
 	stream["xhttpSettings"] = xhttp
 	return map[string]interface{}{
 		"tag": tag, "protocol": "vless", "settings": map[string]interface{}{

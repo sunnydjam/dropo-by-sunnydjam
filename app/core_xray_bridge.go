@@ -2,11 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -29,9 +30,9 @@ type XrayBridgeBuildResult struct {
 }
 
 type XrayBridgeManager struct {
-	exePath    string
-	configPath string
-	logger     func(string)
+	exePath string
+	workDir string
+	logger  func(string)
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -40,9 +41,9 @@ type XrayBridgeManager struct {
 
 func NewXrayBridgeManager(basePath, resourcesPath string, logger func(string)) *XrayBridgeManager {
 	return &XrayBridgeManager{
-		exePath:    filepath.Join(basePath, "bin", XrayExeName),
-		configPath: filepath.Join(resourcesPath, XrayBridgeConfigFileName),
-		logger:     logger,
+		exePath: filepath.Join(basePath, "bin", XrayExeName),
+		workDir: resourcesPath,
+		logger:  logger,
 	}
 }
 
@@ -56,23 +57,16 @@ func (m *XrayBridgeManager) IsInstalled() bool {
 	return fileExists(m.exePath)
 }
 
-func (m *XrayBridgeManager) HasConfig() bool {
-	if m.configPath == "" {
-		return false
-	}
-	info, err := os.Stat(m.configPath)
-	return err == nil && info.Size() > 0
-}
-
-func (m *XrayBridgeManager) Start() error {
+func (m *XrayBridgeManager) Start(config []byte) error {
 	m.mu.Lock()
+	config = append([]byte(nil), config...)
 
 	if m.cmd != nil && m.cmd.Process != nil {
 		m.mu.Unlock()
 		return nil
 	}
 	m.stopping = false
-	if !m.HasConfig() {
+	if len(config) == 0 {
 		m.mu.Unlock()
 		return nil
 	}
@@ -80,18 +74,19 @@ func (m *XrayBridgeManager) Start() error {
 		m.mu.Unlock()
 		return fmt.Errorf("%s not found: %s", XrayExeName, m.exePath)
 	}
-	if err := m.testConfig(); err != nil {
+	if err := m.testConfig(config); err != nil {
 		m.mu.Unlock()
 		return err
 	}
-	ports, err := m.socksPorts()
+	ports, err := m.socksPorts(config)
 	if err != nil {
 		m.mu.Unlock()
 		return err
 	}
 
-	cmd := exec.Command(m.exePath, "run", "-config", m.configPath)
-	cmd.Dir = filepath.Dir(m.configPath)
+	cmd := exec.Command(m.exePath, "run", "-config", "stdin:")
+	cmd.Stdin = bytes.NewReader(config)
+	cmd.Dir = m.workDir
 	configureBackgroundCommand(cmd)
 
 	stdout, _ := cmd.StdoutPipe()
@@ -103,7 +98,7 @@ func (m *XrayBridgeManager) Start() error {
 	attachManagedCmdToJob(cmd, "xray bridge", m.log)
 
 	m.cmd = cmd
-	m.log(fmt.Sprintf("started pid=%d config=%s", cmd.Process.Pid, m.configPath))
+	m.log(fmt.Sprintf("started pid=%d config=stdin", cmd.Process.Pid))
 	go m.logOutput(stdout, "OUT")
 	go m.logOutput(stderr, "ERR")
 	go func() {
@@ -168,21 +163,18 @@ func (m *XrayBridgeManager) logOutput(reader io.Reader, prefix string) {
 	}
 }
 
-func (m *XrayBridgeManager) testConfig() error {
-	cmd := exec.Command(m.exePath, "run", "-test", "-config", m.configPath)
-	cmd.Dir = filepath.Dir(m.configPath)
-	output, err := combinedOutputManagedCommand(cmd, "xray config test", m.log)
+func (m *XrayBridgeManager) testConfig(config []byte) error {
+	cmd := exec.Command(m.exePath, "run", "-test", "-config", "stdin:")
+	cmd.Stdin = bytes.NewReader(config)
+	cmd.Dir = m.workDir
+	_, err := combinedOutputManagedCommand(cmd, "xray config test", m.log)
 	if err != nil {
-		return fmt.Errorf("xray config check failed: %w: %s", err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("xray config check failed: %w", err)
 	}
 	return nil
 }
 
-func (m *XrayBridgeManager) socksPorts() ([]int, error) {
-	data, err := os.ReadFile(m.configPath)
-	if err != nil {
-		return nil, err
-	}
+func (m *XrayBridgeManager) socksPorts(data []byte) ([]int, error) {
 	var config struct {
 		Inbounds []struct {
 			Listen   string `json:"listen"`
@@ -422,6 +414,7 @@ func (p ProxyConfig) ToXrayOutbound(tag string) map[string]interface{} {
 		if extra := parseXrayExtra(p.Extra); extra != nil {
 			xhttpSettings["extra"] = extra
 		}
+		ownedprofile.ApplyXHTTPBudget(p.Server, p.ServerPort, p.Security, p.SNI, p.Host, xhttpSettings)
 		stream["xhttpSettings"] = xhttpSettings
 	}
 	if network == "httpupgrade" {

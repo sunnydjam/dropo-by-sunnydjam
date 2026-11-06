@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"dropocore/dnspolicy"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 
 var publicDNSQueryID atomic.Uint32
 
-// lookupPublicHostWithoutHosts asks the active adapter DNS servers directly.
+// lookupPublicHostWithoutHosts uses protected DoH with a numeric bootstrap.
 // It deliberately bypasses the Windows hosts overlay so a native application's
 // exact fake bootstrap name can still be connected to its real public address
 // by Dropo's in-process relay.
@@ -26,37 +27,11 @@ func lookupPublicHostWithoutHosts(ctx context.Context, host string) ([]netip.Add
 	if host == "" || net.ParseIP(host) != nil {
 		return nil, errors.New("public DNS host is invalid")
 	}
-	servers := systemDNSServers()
-	if len(servers) == 0 {
-		if allowDefaultDNSFallback() {
-			addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-			if err != nil {
-				return nil, err
-			}
-			return uniquePublicAddresses(addresses), nil
-		}
-		return nil, errors.New("no active system DNS server is available")
+	addresses, err := dnspolicy.DefaultLookup(ctx, host)
+	if err != nil {
+		return nil, err
 	}
-	var lastErr error
-	for _, server := range servers {
-		addresses := make([]netip.Addr, 0, 4)
-		for _, queryType := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
-			resolved, err := queryPublicDNS(ctx, server, host, queryType)
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			addresses = append(addresses, resolved...)
-		}
-		addresses = uniquePublicAddresses(addresses)
-		if len(addresses) > 0 {
-			return addresses, nil
-		}
-	}
-	if lastErr == nil {
-		lastErr = errors.New("DNS response contained no public address")
-	}
-	return nil, lastErr
+	return uniquePublicAddresses(addresses), nil
 }
 
 func queryPublicDNS(ctx context.Context, server netip.Addr, host string, queryType dnsmessage.Type) ([]netip.Addr, error) {

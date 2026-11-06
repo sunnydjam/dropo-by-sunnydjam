@@ -206,8 +206,10 @@ bool Win32Window::Create(const std::wstring& title,
     const HMONITOR monitor =
         MonitorFromRect(&normal_bounds, MONITOR_DEFAULTTONEAREST);
     bounds = ClientWindowBounds(saved.normal_bounds.left,
-                                saved.normal_bounds.top, saved.client_width,
-                                saved.client_height, MonitorDpi(monitor));
+                                saved.normal_bounds.top,
+                                geometry::InitialClientWidth(saved.client_width, saved.version),
+                                geometry::InitialClientHeight(saved.client_height, saved.version),
+                                MonitorDpi(monitor));
   }
   bounds = ClampToMonitorWorkArea(bounds);
 

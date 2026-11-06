@@ -2,8 +2,11 @@ part of 'main.dart';
 
 // The home anchor reserves this same collapsed header in both routing modes;
 // hiding services therefore never rescales the Earth or the mode selector.
-double _homeServicesHeaderExtent(BuildContext context) =>
-    math.max(56, MediaQuery.textScalerOf(context).scale(17) * 1.2 + 24);
+double _homeServicesHeaderExtent(BuildContext context) => math.max(
+  _compactDesktopHome(context) ? 48 : 56,
+  MediaQuery.textScalerOf(context).scale(17) * 1.2 +
+      (_compactDesktopHome(context) ? 16 : 24),
+);
 
 /// Home owns the scroll position; neither the catalog nor a service detail
 /// creates a nested scrollable or an independent tinted surface.
@@ -197,7 +200,9 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                     minHeight: _homeServicesHeaderExtent(context),
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    padding: EdgeInsets.symmetric(
+                      vertical: _compactDesktopHome(context) ? 8 : 12,
+                    ),
                     child: Row(
                       children: [
                         const Icon(

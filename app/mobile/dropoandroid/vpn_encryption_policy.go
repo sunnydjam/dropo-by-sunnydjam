@@ -2,10 +2,13 @@ package dropoandroid
 
 import (
 	"bytes"
+	core "dropocore"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
+	"strings"
 	"sync"
 )
 
@@ -134,18 +137,62 @@ func validateEncryptedVPNConfig(content string) error {
 		return errVPNEncryption
 	}
 	for _, selector := range selectors {
+		if tag, _ := selector["tag"].(string); strings.HasPrefix(tag, core.AndroidAdaptiveSelectorPrefix) {
+			if !validAdaptiveSelector(config, selector, tag) {
+				return errVPNEncryption
+			}
+			continue
+		}
 		members, ok := selector["outbounds"].([]any)
 		if !ok || len(members) == 0 {
 			return errVPNEncryption
 		}
 		for _, member := range members {
 			tag, ok := member.(string)
-			if !ok || !tags[tag] || tag == "direct" || tag == selector["tag"] {
+			if !ok || !tags[tag] || tag == "direct" || tag == selector["tag"] || strings.HasPrefix(tag, core.AndroidAdaptiveSelectorPrefix) {
 				return errVPNEncryption
 			}
 		}
 	}
 	return nil
+}
+
+// The sole direct-selector exception is a compiled service's HTTPS/TCP rule.
+// It must bootstrap through the encrypted proxy and cannot be nested under a
+// general VPN selector or referenced by a broad/domainless routing rule.
+func validAdaptiveSelector(config, selector map[string]any, tag string) bool {
+	service := strings.TrimPrefix(tag, core.AndroidAdaptiveSelectorPrefix)
+	var domains []any
+	if json.Unmarshal([]byte(core.AndroidAdaptiveServiceDomains(service)), &domains) != nil || len(domains) == 0 {
+		return false
+	}
+	members, ok := selector["outbounds"].([]any)
+	if !ok || len(selector) != 5 || len(members) != 2 || members[0] != "proxy" || members[1] != "direct" || selector["default"] != "proxy" || selector["interrupt_exist_connections"] != true {
+		return false
+	}
+	route, ok := config["route"].(map[string]any)
+	if !ok || route["final"] != "proxy" {
+		return false
+	}
+	rules, ok := route["rules"].([]any)
+	if !ok {
+		return false
+	}
+	found := 0
+	for _, item := range rules {
+		rule, ok := item.(map[string]any)
+		if !ok {
+			return false
+		}
+		if rule["outbound"] != tag {
+			continue
+		}
+		found++
+		if len(rule) != 7 || rule["network"] != "tcp" || rule["protocol"] != "tls" || rule["port"] != float64(443) || rule["action"] != "route" || rule["tls_record_fragment"] != true || !reflect.DeepEqual(rule["domain_suffix"], domains) {
+			return false
+		}
+	}
+	return found == 1
 }
 
 func verifiedSingBoxTLS(raw any) bool {

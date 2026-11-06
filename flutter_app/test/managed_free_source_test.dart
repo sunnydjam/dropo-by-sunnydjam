@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 class _FreeTransport implements AccountTransport {
   Map<String, dynamic> response = {'available': false};
   int requests = 0;
+  int capabilitiesRequests = 0;
   bool fail = false;
 
   @override
@@ -13,8 +14,12 @@ class _FreeTransport implements AccountTransport {
     String? token,
     Map<String, dynamic>? body,
   }) async {
-    requests++;
     expect(method, 'GET');
+    if (path == '/v1/capabilities') {
+      capabilitiesRequests++;
+      return {'individualVPNProfilesAvailable': false};
+    }
+    requests++;
     expect(path, '/v1/vpn/free-source');
     expect(token, isNull);
     expect(body, isNull);
@@ -57,6 +62,7 @@ void main() {
         isFalse,
       );
       expect(api.requests, 0);
+      expect(api.capabilitiesRequests, 0);
       expect(saves, 0);
     },
   );

@@ -652,6 +652,12 @@ class DropoVpnService :
         sessionFence.commit(engineGeneration) { showForeground(userNotificationText(text)) }
     }
 
+    override fun cancelNotification(identifier: String?, typeID: Int) {
+        // Core notices share our required foreground notification. Keep it
+        // visible and restore neutral status rather than cancelling VpnService.
+        sessionFence.commit(engineGeneration) { showForeground("VPN работает") }
+    }
+
     override fun localDNSTransport(): LocalDNSTransport? = null
 
     override fun serviceStop() {

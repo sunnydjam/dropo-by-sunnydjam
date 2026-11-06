@@ -84,7 +84,7 @@ func hasConfiguredVPNSource(profile *ProfileData) bool {
 		sources = []VPNSource{{ID: "legacy", URI: profile.SubscriptionURL}}
 	}
 	for _, source := range sources {
-		if source.Disabled {
+		if source.Disabled || ownedSourceExpired(source) {
 			continue
 		}
 		uri := strings.TrimSpace(source.URI)

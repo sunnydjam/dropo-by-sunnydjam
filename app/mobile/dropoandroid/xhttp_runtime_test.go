@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/protocol/socks"
 	xnet "github.com/xtls/xray-core/common/net"
+	xlog "github.com/xtls/xray-core/common/log"
 )
 
 const fixtureXHTTPUUID = "11111111-2222-3333-4444-555555555555"
@@ -97,7 +99,10 @@ func startXHTTPFixture(t *testing.T, tlsEnabled bool, physicalDNS ...string) (in
 		"dns": dns,
 		"inbounds": []any{map[string]any{"listen": "127.0.0.1", "port": port, "protocol": "vless",
 			"settings": map[string]any{"decryption": "none", "clients": []any{map[string]any{"id": fixtureXHTTPUUID}}}, "streamSettings": stream}},
-		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"domainStrategy": "UseIP"}}}})
+		// Only this synthetic remote server may reach loopback echo fixtures.
+		// Xray 26.10 blocks private destinations for VLESS by default.
+		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{
+			"finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}, "streamSettings": map[string]any{"sockopt": map[string]any{"domainStrategy": "ForceIPv4"}}}}})
 	startXHTTPFixtureProcess(t, raw)
 	return port, root
 }
@@ -137,6 +142,7 @@ func startXHTTPEcho(t *testing.T) (M.Socksaddr, M.Socksaddr) {
 
 func exchangeXHTTPFixture(t *testing.T, bridge *xhttpBridge, tcp, udp M.Socksaddr) {
 	t.Helper()
+	if os.Getenv("DROPO_XHTTP_FIXTURE_DEBUG") == "1" { xlog.RegisterHandler(fixtureConsoleLog{}) }
 	client := socks.NewClient(&testOutboundDialer{address: bridge.listener.Addr().String()}, M.SocksaddrFromNet(bridge.listener.Addr()), socks.Version5, bridge.username, bridge.password)
 	// The existing testOutboundDialer redirects every call to the TCP port;
 	// use the actual network destination dialer for UDP associations below.
@@ -194,6 +200,7 @@ func TestXHTTPActualTCPUDPAndReconnect(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer first.close()
 			exchangeXHTTPFixture(t, first, tcp, udp)
 			first.close()
 			old := protections.Load()
@@ -311,39 +318,18 @@ func startXHTTPDNSFixture(t *testing.T, listenIP, domain string) {
 	t.Cleanup(func() { server.Shutdown() })
 }
 
-func TestXHTTPDomainResolutionUsesProtectedPhysicalDNS(t *testing.T) {
-	packet, err := net.ListenPacket("udp4", "127.0.0.3:53")
-	if err != nil {
-		t.Skip("synthetic physical DNS fixture port unavailable")
-	}
-	mux := dns.NewServeMux()
-	mux.HandleFunc("dropo-dns.test.", func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		for _, q := range r.Question {
-			if q.Qtype == dns.TypeA {
-				reply.Answer = append(reply.Answer, &dns.A{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30}, A: net.IPv4(127, 0, 0, 1)})
-			}
-		}
-		w.WriteMsg(reply)
-	})
-	server := &dns.Server{PacketConn: packet, Handler: mux}
-	go server.ActivateAndServe()
-	defer server.Shutdown()
-	tcp, _ := startXHTTPEcho(t)
+func TestXHTTPDomainResolutionRequiresProtectedDoHAndDoesNotReadPhysicalDNS(t *testing.T) {
 	var controls atomic.Int32
-	session := newXHTTPSocketSession(func(int32) error { controls.Add(1); return nil }, func() []string { return []string{"127.0.0.3"} })
+	var rawDNSReads atomic.Int32
+	session := newXHTTPSocketSession(func(int32) error { controls.Add(1); return errors.New("fixture protect refused") }, func() []string { rawDNSReads.Add(1); return []string{"127.0.0.3"} })
 	defer session.close()
-	connection, err := (protectedXHTTPDialer{}).Dial(session.ctx, nil, xnet.TCPDestination(xnet.DomainAddress("dropo-dns.test"), xnet.Port(tcp.Port)), nil)
-	if err != nil {
-		t.Fatal("physical protected DNS lookup failed")
+	connection, err := (protectedXHTTPDialer{}).Dial(session.ctx, nil, xnet.TCPDestination(xnet.DomainAddress("dropo-dns.test"), 443), nil)
+	if connection != nil {
+		connection.Close()
+		t.Fatal("unprotected socket was returned")
 	}
-	defer connection.Close()
-	connection.SetDeadline(time.Now().Add(2 * time.Second))
-	connection.Write([]byte("dns-protected"))
-	data := make([]byte, 13)
-	if _, err = io.ReadFull(connection, data); err != nil || string(data) != "dns-protected" || controls.Load() < 2 {
-		t.Fatal("DNS or destination socket bypassed Android protection")
+	if err == nil || controls.Load() == 0 || rawDNSReads.Load() != 0 {
+		t.Fatal("protected DNS failed open or consulted physical raw DNS")
 	}
 }
 

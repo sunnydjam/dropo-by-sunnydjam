@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dropocore/dnspolicy"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -51,6 +52,7 @@ type SubscriptionFetcher struct {
 // NewSubscriptionFetcher creates a new fetcher with default timeout.
 func NewSubscriptionFetcher() *SubscriptionFetcher {
 	client := *HTTPClient
+	client.Transport = dnspolicy.InfrastructureTransport()
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if err := validateSubscriptionURL(req.URL.String()); err != nil {
 			return err

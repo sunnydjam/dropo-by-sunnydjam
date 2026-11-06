@@ -1,3 +1,6 @@
 /.githooks/* text eol=lf
 /app/mobile/dropoandroid/xray_overlay/files/*.go.txt text eol=lf
 /flutter_app/assets/licenses/xray-core-source/*.go.txt text eol=lf
+/flutter_app/test/fixtures/tls/*.pem text eol=lf
+/tools/runtime-source/go.mod text eol=lf
+/tools/runtime-source/go.sum text eol=lf

@@ -440,6 +440,9 @@ func androidServiceRoutesLocked(live bool) []routeInfo {
 		selectedPolicy := androidServicePolicy(service, policies)
 		effectivePolicy := effectivePolicies[service.Tag]
 		methodLabel := androidRoutePolicyLabel(effectivePolicy)
+		if current.Connected && current.adaptiveActive[service.Tag] {
+			methodLabel = "TLS напрямую · UDP через VPN"
+		}
 		routes = append(routes, routeInfo{
 			Tag:                  service.Tag,
 			Name:                 service.Name,

@@ -144,7 +144,7 @@ func (s *ManagedSession) getHTTPClient(ctx context.Context, dest net.Destination
 	}
 	actual.xmuxClient.Store(client)
 	// Reserve the stream before another getter can retire this client.
-	client.OpenUsage.Add(1)
+	client.AddRunning()
 	for _, previous := range before {
 		present := false
 		for _, current := range pool.manager.xmuxClients {
@@ -192,7 +192,7 @@ func releaseManagedUsage(client *XmuxClient) {
 	if client == nil {
 		return
 	}
-	client.OpenUsage.Add(-1)
+	client.DoneRunning()
 	if actual, ok := client.XmuxConn.(*DefaultDialerClient); ok {
 		actual.closeManaged(false)
 	}
@@ -259,7 +259,7 @@ func (c *DefaultDialerClient) closeManaged(force bool) {
 		return
 	}
 	xmux := c.xmuxClient.Load()
-	if !force && (!c.retired.Load() || c.activeRequests.Load() != 0 || xmux != nil && xmux.OpenUsage.Load() != 0) {
+	if !force && (!c.retired.Load() || c.activeRequests.Load() != 0 || xmux != nil && xmux.Running.Load() != 0) {
 		return
 	}
 	c.closeOnce.Do(func() {

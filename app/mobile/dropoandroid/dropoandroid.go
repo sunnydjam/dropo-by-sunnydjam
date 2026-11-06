@@ -5,9 +5,11 @@ import (
 	core "dropocore"
 	"encoding/json"
 	"errors"
+	"net"
 	"sync"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
+	"github.com/sagernet/sing-box/protocol/group"
 )
 
 const (
@@ -113,6 +115,12 @@ type CommandServer struct {
 	sourceGeneration     uint64
 	sourceCoreGeneration int64
 	sourceWake           chan struct{}
+	adaptiveWake         chan struct{}
+	adaptiveCycleCancel  context.CancelFunc
+	adaptiveSelectors    map[string]*group.Selector
+	adaptiveSelected     map[string]bool
+	adaptiveNext         map[string]int64
+	adaptiveHealthIndex  map[string]int
 	xhttpMu              sync.Mutex
 	xhttpRuntime         *xhttpRuntime
 	platform             PlatformInterface
@@ -284,6 +292,13 @@ func (a *commandServerHandlerAdapter) WriteDebugMessage(message string) {
 	a.inner.WriteDebugMessage(message)
 }
 
+func (a *commandServerHandlerAdapter) ConnectSSHAgent() (int32, error) {
+	return -1, errors.New("SSH agent is not enabled in Dropo")
+}
+func (a *commandServerHandlerAdapter) TriggerNativeCrash() error {
+	return errors.New("Native crash command is disabled")
+}
+
 type OverrideOptions struct {
 	AutoRedirect   bool
 	IncludePackage StringIterator
@@ -311,6 +326,7 @@ type PlatformInterface interface {
 	SystemCertificates() StringIterator
 	ClearDNSCache()
 	SendNotification(notification *Notification) error
+	CancelNotification(identifier string, typeID int32) error
 }
 
 type platformInterfaceAdapter struct {
@@ -427,6 +443,38 @@ func (a *platformInterfaceAdapter) SendNotification(notification *libbox.Notific
 	})
 }
 
+func (a *platformInterfaceAdapter) CancelNotification(identifier string, typeID int32) error {
+	return a.inner.CancelNotification(identifier, typeID)
+}
+func (a *platformInterfaceAdapter) StartNeighborMonitor(libbox.NeighborUpdateListener) error {
+	return errors.New("Neighbor monitor is not enabled in Dropo")
+}
+func (a *platformInterfaceAdapter) CloseNeighborMonitor(libbox.NeighborUpdateListener) error {
+	return nil
+}
+func (a *platformInterfaceAdapter) RegisterMyInterface(string) {}
+func (a *platformInterfaceAdapter) UsePlatformShell() bool     { return false }
+func (a *platformInterfaceAdapter) CheckPlatformShell() error {
+	return errors.New("Platform shell is disabled")
+}
+func (a *platformInterfaceAdapter) OpenShellSession(*libbox.PlatformUser, string, libbox.StringIterator, string, int32, int32) (libbox.ShellSession, error) {
+	return nil, errors.New("Platform shell is disabled")
+}
+func (a *platformInterfaceAdapter) LookupUser(string) (*libbox.PlatformUser, error) {
+	return nil, errors.New("Platform user lookup is disabled")
+}
+func (a *platformInterfaceAdapter) LookupSFTPServer() (string, error) {
+	return "", errors.New("SFTP is disabled")
+}
+func (a *platformInterfaceAdapter) ReadSystemSSHHostKey() (string, error) {
+	return "", errors.New("SSH host keys are unavailable")
+}
+func (a *platformInterfaceAdapter) TailscaleHostname() string { return "" }
+func (a *platformInterfaceAdapter) UsePlatformBridge() bool   { return false }
+func (a *platformInterfaceAdapter) CreateBridge(*libbox.BridgeOptions) (libbox.BridgeSession, error) {
+	return nil, errors.New("Platform bridges are disabled")
+}
+
 type TunOptions interface {
 	GetInet4Address() RoutePrefixIterator
 	GetInet6Address() RoutePrefixIterator
@@ -466,7 +514,20 @@ func (a *tunOptionsAdapter) GetDNSServerAddress() (*StringBox, error) {
 	if err != nil || value == nil {
 		return nil, err
 	}
-	return &StringBox{Value: value.Value}, nil
+	var first string
+	for value.HasNext() {
+		address := value.Next()
+		if first == "" {
+			first = address
+		}
+		if ip := net.ParseIP(address); ip != nil && ip.To4() != nil {
+			return &StringBox{Value: address}, nil
+		}
+	}
+	if first == "" {
+		return nil, nil
+	}
+	return &StringBox{Value: first}, nil
 }
 
 func (a *tunOptionsAdapter) GetMTU() int32 {

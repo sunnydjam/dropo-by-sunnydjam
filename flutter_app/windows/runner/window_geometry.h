@@ -23,7 +23,17 @@ struct SavedPlacement {
   int client_height;
 };
 
-constexpr uint32_t kPlacementVersion = 1;
+constexpr uint32_t kPlacementVersion = 2;
+
+// Upgrade the previous compact default once. Later user-resized windows keep
+// their chosen dimensions; the native work-area clamp still handles small or
+// disconnected monitors and every DPI scale.
+constexpr int InitialClientWidth(int saved, uint32_t version) {
+  return version < 2 ? std::max(saved, 1200) : saved;
+}
+constexpr int InitialClientHeight(int saved, uint32_t version) {
+  return version < 2 ? std::max(saved, 820) : saved;
+}
 
 constexpr int ScaleForDpi(int value, unsigned int dpi) {
   const int64_t scaled = static_cast<int64_t>(value) * dpi;
@@ -39,7 +49,7 @@ constexpr bool ValidPlacement(const SavedPlacement& saved) {
   const auto bounds = saved.normal_bounds;
   // Reject corrupt/stale records before passing values to the Win32 APIs.
   // Negative coordinates are expected on monitors left/above the primary one.
-  return saved.version == kPlacementVersion &&
+  return (saved.version == 1 || saved.version == kPlacementVersion) &&
          saved.client_width >= 120 && saved.client_width <= 16384 &&
          saved.client_height >= 80 && saved.client_height <= 16384 &&
          bounds.left >= -1000000 && bounds.top >= -1000000 &&

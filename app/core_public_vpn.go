@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dropocore/ownedprofile"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -65,6 +66,14 @@ func publicVPNProviderForURI(uri string) (PublicVPNProvider, bool) {
 func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 	for index := range sources {
 		source := &sources[index]
+		if ownedprofile.IsProvider(source.PublicCatalogID) {
+			if source.URI == "" {
+				continue
+			} // Persisted reference; never a usable credential.
+			if _, err := ownedprofile.Validate(source.PublicCatalogID, source.URI); err == nil {
+				continue
+			}
+		}
 		if source.PublicCatalogID == managedFreeVPNProviderID && validateManagedFreeVPNURL(source.URI) == nil {
 			continue
 		}
@@ -164,6 +173,9 @@ func (a *App) AddPublicVPNSource(providerID string, consent bool) map[string]int
 }
 
 func (a *App) AddManagedVPNSource(providerID, name, uri string, consent bool) map[string]interface{} {
+	if ownedprofile.IsProvider(providerID) {
+		return a.addOwnedVPNSource(providerID, uri, consent)
+	}
 	// Validate before entering a transaction that might reconnect an active VPN.
 	if !consent || providerID != managedFreeVPNProviderID {
 		return map[string]interface{}{"success": false, "error": "подтвердите использование бесплатной подписки Dropo"}

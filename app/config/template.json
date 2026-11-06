@@ -6,14 +6,20 @@
   "dns": {
     "servers": [
       {
-        "type": "udp",
+        "type": "https",
         "tag": "dns-remote",
-        "server": "8.8.8.8"
+        "server": "193.233.88.97",
+        "server_port": 443,
+        "path": "/dns-query",
+        "tls": {"enabled": true, "server_name": "dns.droponevedimka.ru"}
       },
       {
-        "type": "udp",
+        "type": "https",
         "tag": "dns-direct",
-        "server": "77.88.8.8"
+        "server": "193.233.88.97",
+        "server_port": 443,
+        "path": "/dns-query",
+        "tls": {"enabled": true, "server_name": "dns.droponevedimka.ru"}
       },
       {
         "type": "local",

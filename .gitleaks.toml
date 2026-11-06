@@ -1,0 +1,12 @@
+# The sole private-key exception is a published synthetic localhost TLS fixture.
+# It is not a production identity. Path AND the complete matching PEM are bound.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "private-key"
+[[rules.allowlists]]
+condition = "AND"
+paths = ['''^flutter_app/test/fixtures/tls/bootstrap-test-key\.pem$''']
+regexTarget = "secret"
+regexes = ['''(?s)^\x2d\x2d\x2d\x2d\x2dBEGIN\ RSA\ PRIVATE\ KEY\x2d\x2d\x2d\x2d\x2d\r?\nMIIEowIBAAKCAQEAyOcRehdAEgjaiIZxytM4uVCfdb\+X/nt1VPOXgK2iWLJ1ks\+0\r?\nq5XMc7f9v3gmZUaHH68/NF\+YSNmZdBJSUQo4mq6u\+Ab1XVO\+VGWUGufilrut9XQ8\r?\nWSjlVvOHe7zYVAeFXsH97A0XdN6Js3fWaAC1OTarrXbgV11JyPcv0NtKV4djUKVf\r?\nv8Hbrn5z9iDWVNgq9xgWDoA7u\+\+W6q8GFomVrrOxhOl6FyqFoIy6myt/Z7GQQ7yF\r?\nne4e2UifMT03H1cjsaLat6Dglxm8AJeLyPGgPN7uzP81VOUaH/DOUIn3YGKkrOQC\r?\nsDhz5tYJ8EWZyM7PCGeVM/3KEbeYL\+YRQhz2cQIDAQABAoIBABVFWHWHn6opKNDQ\r?\nAfKlFs\+RczNZg\+4W7o8o3q9qSD2W4NmYnJBBjdeUsUzum4tugmD\+7N9j3bDyOmFD\r?\n4qufkZWtuBXHpX6U9BplyjQSaCG9y5x\+NY4vxR8bLWA9rYkxZf695bTH6rteJ9CK\r?\nIs0j12GFjHtoZ4v9yGb65k5OjC\+kaaRDzWEtZZuMiLn9xCu8/mzdc8CISenab54a\r?\n3M90RVNGm7FTcn5jQd2cCqI0DjKTDOo8l98f7m/YvfbEGaRk8/IxtLsLoUh80DU6\r?\nCGxnAbNDpuaUQTk0HdJKgNVdqnU8lqX0z1t5JnFVKgjagrHdrUz/QApBaJAl\+EvH\r?\nFxQrtecCgYEA9/9dwLsfG5s\+dMOT9kizxjhuv0NJ1ABRBOR9qNiq58Nn4Mqlg2x\+\r?\npGeYPrgh83z/qRAnrgBAi6xNnXRcD4yl/X33hHg5OL5KJ1h3uRGLCoGnN54iyyo9\r?\n1NUi2ScG03cSU1kvLwwGopcHlR1hKKv2fV0cwWnpX/moZNpd714XqY8CgYEAz2Kq\r?\nO6U32Jr9SF6HKbfSSVZ/D4DTsqP53X7AD3B8MxEx1\+AIjxGdREGr6TZvVxk3DBD2\r?\nYRxyP1SV5m\+j1AI8po5d\+sEJVKWkSOTRaxDNm2i8FAxtW/0W3HliHl11cmaBSUIE\r?\nbpdRgaC9zCtTPQLIxK3cVcpoVHdJiBz0Ak/xX/8CgYAwFZh0/RMcBC7I7v7qWtBY\r?\nl6qJdR\+Edoc\+/pqKuW/xvgaPJFuRLuEjOV7gkk0q68qaWiKHb08UhdUKuXv8G9Y3\r?\nX0w1qCXYJbU1Ccc03/zojZkBhKzUXZ1dffHiztlY\+RZZiMpIQfmrXsM\+m1KyUx1Y\r?\n00v3CHUSgdKvs1NRTRojawKBgA7iphVh5oBFn6hyIIF\+EDnzW2thc9B\+tJCRaHez\r?\nOzbvJQS5r\+OVABTGIfC7V4KI7MqQ7R5LTGf/SkMgAEJXZsMNtPEqqeDJguE4i0\+E\r?\nBT4CZn2J5s\+TevCYRdKoIqXzdZQsiOTnN5J2VykwcukOKhrz37zIqnRlm4GJknoY\r?\nAttBAoGBAJxW2dQqnT2iIQME2DUkSpOxwotuo5HYTDkyKCCxDdi\+juOBL/YiUTrt\r?\n5A7CwmXpLNMQESTN/HgRu2Zv4mZLKNv06Y0cXyQKGzkH6YFo0bNfxfE8cn9hkSpm\r?\nnu/\+FRxa5/ylaUxppiZEo4ygUjfE2iUtsvdnXuUEfFqK3CIRTnP9\r?\n\x2d\x2d\x2d\x2d\x2dEND\ RSA\ PRIVATE\ KEY\x2d\x2d\x2d\x2d\x2d$''']

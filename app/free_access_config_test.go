@@ -2533,13 +2533,15 @@ func TestTunRouteExcludesProxyAndXrayEndpoints(t *testing.T) {
 
 	for _, cidr := range []string{
 		"198.51.100.10/32",
-		"198.51.100.11/32",
 		"203.0.113.10/32",
-		"203.0.113.11/32",
-		"203.0.113.12/32",
 	} {
 		if !containsTunRouteExcludeAddress(config, cidr) {
 			t.Fatalf("TUN route_exclude_address does not contain %s: %#v", cidr, getTunRouteExcludeAddresses(config))
+		}
+	}
+	for _, cidr := range []string{"198.51.100.11/32", "203.0.113.11/32", "203.0.113.12/32"} {
+		if containsTunRouteExcludeAddress(config, cidr) {
+			t.Fatalf("TLS/HTTP name bypassed the VPN: %s", cidr)
 		}
 	}
 	if containsTunRouteExcludeAddress(config, "127.0.0.1/32") {

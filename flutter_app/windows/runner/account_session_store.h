@@ -13,7 +13,7 @@ enum class AccountSessionError { kNone, kInvalid, kUnavailable };
 // production resolves the current user's LocalAppData known folder.
 class AccountSessionStore {
  public:
-  explicit AccountSessionStore(std::wstring directory = L"");
+  explicit AccountSessionStore(std::wstring directory = L"", std::wstring filename = L"account-session.dpapi");
   static constexpr size_t kMaxTokenBytes = 16 * 1024;
   static constexpr size_t kMaxProtectedBytes = 64 * 1024;
   static bool ValidToken(const std::string& token);

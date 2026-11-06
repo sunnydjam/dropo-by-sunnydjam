@@ -85,9 +85,9 @@ flutter run -d windows --dart-define=BRIDGE=mock `
 и общий HTTPS backend для Windows/Android. Защищённые сессии хранятся через
 Windows DPAPI и Android Keystore; временная ошибка сервера не удаляет аккаунт.
 
-Production origin новых сборок: `https://dropo.fun`, бот
+Production origin новых сборок: `https://api.droponevedimka.ru`, бот
 `@DropoRigistration_bot`. В новых сборках передавайте
-`-AccountEndpoint https://dropo.fun` в `scripts/build/build.ps1` для
+`-AccountEndpoint https://api.droponevedimka.ru` в `scripts/build/build.ps1` для
 Windows и Android. Bot token и серверные секреты никогда не входят в приложение.
 Сам запуск backend не обновляет установленный клиент; для его подключения нужна
 новая сборка с этим HTTPS origin. При отсутствии define вход остаётся недоступен.
@@ -335,7 +335,7 @@ GitHub SHA-256 точного installer asset, выполняет тихое о�
 
 Требования:
 
-- Go 1.26.10;
+- Go 1.27.3;
 - Flutter 3.47.1 stable;
 - Visual Studio Build Tools 2022 с Desktop development with C++;
 - Windows 10/11 SDK;

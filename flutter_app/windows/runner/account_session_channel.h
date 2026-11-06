@@ -15,6 +15,7 @@ class AccountSessionChannel {
 
  private:
   AccountSessionStore store_;
+  AccountSessionStore managed_store_{L"", L"managed-vpn.dpapi"};
   flutter::MethodChannel<flutter::EncodableValue> channel_;
 };
 }  // namespace dropo

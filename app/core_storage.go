@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"dropocore/dnspolicy"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -376,7 +377,7 @@ func (s *Storage) createDefaultProfile() ProfileData {
 // saveInternal saves settings without locking. Writes atomically (temp+rename)
 // so a crash mid-write cannot corrupt settings.json (review.md §3).
 func (s *Storage) saveInternal() error {
-	data, err := json.MarshalIndent(s.data, "", "  ")
+	data, err := json.MarshalIndent(settingsWithoutOwnedSecrets(s.data), "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
@@ -824,34 +825,30 @@ func (s *Storage) GetProfileXrayConfig(id int) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("profile with ID %d not found", id)
 }
 
-// WriteActiveXrayConfigToFile writes the active profile's Xray bridge config.
-func (s *Storage) WriteActiveXrayConfigToFile() (string, bool, error) {
+// ActiveXrayConfig serializes an immutable runtime payload in memory. Managed
+// credentials are restored from the native vault and must not become a second
+// plaintext credential store in a generated Xray configuration file.
+func (s *Storage) ActiveXrayConfig() ([]byte, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	activeID := s.data.App.ActiveProfileID
-	configPath := filepath.Join(s.resourcesPath, XrayBridgeConfigFileName)
-
 	for i := range s.data.Profiles {
 		if s.data.Profiles[i].ID == activeID {
 			config := s.data.Profiles[i].XrayConfig
 			if len(config) == 0 {
-				_ = os.Remove(configPath)
-				return configPath, false, nil
+				return nil, false, nil
 			}
 
 			data, err := json.MarshalIndent(config, "", "  ")
 			if err != nil {
-				return "", false, fmt.Errorf("failed to marshal xray config: %w", err)
+				return nil, false, fmt.Errorf("failed to marshal xray config: %w", err)
 			}
-			if err := os.WriteFile(configPath, data, 0600); err != nil {
-				return "", false, fmt.Errorf("failed to write xray config: %w", err)
-			}
-			return configPath, true, nil
+			return data, true, nil
 		}
 	}
 
-	return "", false, fmt.Errorf("active profile %d not found", activeID)
+	return nil, false, fmt.Errorf("active profile %d not found", activeID)
 }
 
 func (s *Storage) ActiveConfigFilePath() string {
@@ -1065,17 +1062,8 @@ func collectProxyEndpointHosts(config map[string]interface{}) []string {
 			continue
 		}
 		hosts = appendEndpointHost(hosts, outboundMap["server"])
-		if tlsMap, ok := outboundMap["tls"].(map[string]interface{}); ok {
-			hosts = appendEndpointHost(hosts, tlsMap["server_name"])
-		}
-		if transportMap, ok := outboundMap["transport"].(map[string]interface{}); ok {
-			hosts = appendEndpointHost(hosts, transportMap["host"])
-			hosts = appendEndpointHost(hosts, transportMap["hosts"])
-			if headers, ok := transportMap["headers"].(map[string]interface{}); ok {
-				hosts = appendEndpointHost(hosts, headers["Host"])
-				hosts = appendEndpointHost(hosts, headers["host"])
-			}
-		}
+		// SNI and HTTP Host authenticate/route the same physical connection.
+		// Excluding their other shared addresses would bypass the user's VPN.
 	}
 	return uniqueStrings(hosts)
 }
@@ -1097,25 +1085,6 @@ func collectXrayEndpointHosts(xrayConfig map[string]interface{}) []string {
 			server, ok := item.(map[string]interface{})
 			if ok {
 				hosts = appendEndpointHost(hosts, server["address"])
-			}
-		}
-		stream, _ := outboundMap["streamSettings"].(map[string]interface{})
-		if tlsSettings, ok := stream["tlsSettings"].(map[string]interface{}); ok {
-			hosts = appendEndpointHost(hosts, tlsSettings["serverName"])
-		}
-		if realitySettings, ok := stream["realitySettings"].(map[string]interface{}); ok {
-			hosts = appendEndpointHost(hosts, realitySettings["serverName"])
-		}
-		if xhttpSettings, ok := stream["xhttpSettings"].(map[string]interface{}); ok {
-			hosts = appendEndpointHost(hosts, xhttpSettings["host"])
-		}
-		if httpUpgradeSettings, ok := stream["httpupgradeSettings"].(map[string]interface{}); ok {
-			hosts = appendEndpointHost(hosts, httpUpgradeSettings["host"])
-		}
-		if wsSettings, ok := stream["wsSettings"].(map[string]interface{}); ok {
-			if headers, ok := wsSettings["headers"].(map[string]interface{}); ok {
-				hosts = appendEndpointHost(hosts, headers["Host"])
-				hosts = appendEndpointHost(hosts, headers["host"])
 			}
 		}
 	}
@@ -1166,15 +1135,15 @@ func resolveEndpointHostsToCIDRs(hosts []string) []string {
 			cidrs = appendEndpointIPCIDR(cidrs, ip)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
-		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		addrs, err := dnspolicy.DefaultLookup(ctx, host)
 		cancel()
 		if err != nil {
 			fmt.Printf("[TUN] Failed to resolve proxy endpoint %s for route exclusion: %v\n", host, err)
 			continue
 		}
 		for _, addr := range addrs {
-			cidrs = appendEndpointIPCIDR(cidrs, addr.IP)
+			cidrs = appendEndpointIPCIDR(cidrs, net.IP(addr.AsSlice()))
 		}
 	}
 	return uniqueStrings(cidrs)
@@ -1610,7 +1579,7 @@ func (b *ConfigBuilderForStorage) buildConfigForProfileSourcesValidated(profileI
 	sourceErrors := make([]string, 0)
 	for index := range updatedSources {
 		source := &updatedSources[index]
-		if source.Disabled {
+		if source.Disabled || ownedSourceExpired(*source) {
 			continue
 		}
 		enabledSources++
@@ -2491,6 +2460,21 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 		dns = map[string]interface{}{}
 		template["dns"] = dns
 	}
+	// Migrate only exact historical built-ins. Preserve manually extended
+	// server entries and all corporate/private DNS rules.
+	if servers, ok := dns["servers"].([]interface{}); ok {
+		for i, value := range servers {
+			server, ok := value.(map[string]interface{})
+			if !ok || len(server) != 3 || server["type"] != "udp" {
+				continue
+			}
+			tag, _ := server["tag"].(string)
+			address, _ := server["server"].(string)
+			if tag == "dns-direct" && address == "77.88.8.8" || tag == "dns-remote" && address == "8.8.8.8" {
+				servers[i] = dnspolicy.Server(tag, false)
+			}
+		}
+	}
 
 	preserved := preserveCustomDNSRules(dns["rules"])
 	rules := make([]interface{}, 0, len(preserved)+4+len(DefaultFreeAccessServices))
@@ -2512,10 +2496,10 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 					continue
 				}
 				remote["type"] = "https"
-				remote["server"] = "8.8.8.8"
+				remote["server"] = dnspolicy.BootstrapIPv4
 				remote["server_port"] = 443
 				remote["path"] = "/dns-query"
-				remote["tls"] = map[string]interface{}{"server_name": "dns.google"}
+				remote["tls"] = map[string]interface{}{"enabled": true, "server_name": dnspolicy.Hostname}
 				remote["detour"] = "proxy"
 			}
 		}

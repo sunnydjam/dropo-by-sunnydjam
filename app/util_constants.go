@@ -14,7 +14,7 @@ var (
 	// BuildHash is a short hash for identifying builds (set by build script).
 	BuildHash = ""
 	// SingBoxVersion is the bundled sing-box version (set by build script).
-	SingBoxVersion = "1.13.14"
+	SingBoxVersion = "1.14.4"
 )
 
 // GetFullVersion returns version with build hash for display

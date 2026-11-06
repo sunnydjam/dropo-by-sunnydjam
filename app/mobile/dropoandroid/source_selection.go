@@ -72,6 +72,7 @@ func (s *CommandServer) StartSourceSelection() error {
 	s.sourceWake = make(chan struct{}, 1)
 	s.sourceGeneration++
 	generation, wake := s.sourceGeneration, s.sourceWake
+	s.startAdaptiveLocked(ctx, generation, plan.Generation, outbounds)
 	go s.runSourceSelection(ctx, generation, plan.Generation, plan.AutoSelect, plan.Candidates, outbounds, selector, wake)
 	go core.RefreshAndroidSourcesForNextSession(ctx, plan.Generation)
 	return nil
@@ -88,6 +89,9 @@ func (s *CommandServer) StopSourceSelection() {
 
 func (s *CommandServer) stopSourceSelectionLocked() {
 	s.sourceGeneration++
+	s.resetAdaptiveLocked()
+	s.adaptiveWake = nil
+	s.adaptiveSelectors = nil
 	if s.sourceCancel != nil {
 		s.sourceCancel()
 		s.sourceCancel = nil
@@ -110,6 +114,13 @@ func (s *CommandServer) RecheckSourceSelection() {
 	}
 	if s.sourceCycleCancel != nil {
 		s.sourceCycleCancel()
+	}
+	s.resetAdaptiveLocked()
+	if s.adaptiveWake != nil {
+		select {
+		case s.adaptiveWake <- struct{}{}:
+		default:
+		}
 	}
 	core.InvalidateAndroidSourceObservations(s.sourceCoreGeneration)
 	select {

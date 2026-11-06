@@ -275,7 +275,7 @@ func TestManualSubscriptionRuntimeFromEnv(t *testing.T) {
 		t.Fatalf("generated config does not bypass %s process traffic directly", ByeDPIProcessName)
 	}
 
-	xrayConfigPath, hasXrayConfig, err := storage.WriteActiveXrayConfigToFile()
+	xrayConfig, hasXrayConfig, err := storage.ActiveXrayConfig()
 	if err != nil {
 		t.Fatalf("write active xray config failed: %v", err)
 	}
@@ -285,18 +285,20 @@ func TestManualSubscriptionRuntimeFromEnv(t *testing.T) {
 		if !fileExists(xrayPath) {
 			t.Fatalf("xray bridge config was generated, but xray.exe is not bundled: %s", xrayPath)
 		}
-		if output, err := newBackgroundCommand(xrayPath, "run", "-test", "-config", xrayConfigPath).CombinedOutput(); err != nil {
+		testCommand := newBackgroundCommand(xrayPath, "run", "-test", "-config", "stdin:")
+		testCommand.Stdin = bytes.NewReader(xrayConfig)
+		if output, err := testCommand.CombinedOutput(); err != nil {
 			t.Fatalf("xray config check failed: %v\n%s", err, output)
 		}
 		xrayBridge = NewXrayBridgeManager(basePath, storage.GetResourcesPath(), func(msg string) { t.Log(msg) })
-		xrayPorts, err := xrayBridge.socksPorts()
+		xrayPorts, err := xrayBridge.socksPorts(xrayConfig)
 		if err != nil {
 			t.Fatalf("read xray bridge ports failed: %v", err)
 		}
 		if len(xrayPorts) == 0 {
 			t.Fatal("xray bridge config does not expose a local SOCKS port")
 		}
-		if err := xrayBridge.Start(); err != nil {
+		if err := xrayBridge.Start(xrayConfig); err != nil {
 			t.Fatalf("xray bridge start failed: %v", err)
 		}
 		defer xrayBridge.Stop()

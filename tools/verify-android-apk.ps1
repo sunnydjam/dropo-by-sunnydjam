@@ -1,11 +1,12 @@
 param(
     [Parameter(Mandatory = $true)][string]$Path,
     [string]$SdkRoot,
-    [ValidateSet("arm64", "universal")][string]$Architecture = "arm64",
+    [ValidateSet("arm64", "universal", "x64")][string]$Architecture = "arm64",
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ExpectedVersion,
     [switch]$Preview
 )
 $ErrorActionPreference = "Stop"
+if ($Architecture -eq 'x64' -and -not $Preview) { throw 'x64 is restricted to local preview verification.' }
 $apkPath = (Resolve-Path -LiteralPath $Path).Path
 $androidToolsRoot = $env:DROPO_ANDROID_TOOLCHAIN_ROOT
 if (-not $androidToolsRoot) { $androidToolsRoot = [Environment]::GetEnvironmentVariable("DROPO_ANDROID_TOOLCHAIN_ROOT", "User") }
@@ -46,7 +47,16 @@ if ($LASTEXITCODE -ne 0) { throw "APK ZIP alignment failed: $($alignmentOutput |
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($apkPath)
 try {
-    $abis = @("arm64-v8a")
+    # Fresh APKs need only ZIP headers, alignment and signing blocks outside
+    # indexed entry data. A stale incremental APK may otherwise carry tens of
+    # megabytes of replaced native code while signature/ABI checks still pass.
+    [long]$compressedBytes = 0
+    foreach ($entry in $archive.Entries) { $compressedBytes += $entry.CompressedLength }
+    [long]$archiveOverhead = (Get-Item -LiteralPath $apkPath).Length - $compressedBytes
+    if ($archiveOverhead -lt 0 -or $archiveOverhead -gt 16MB) {
+        throw "APK has excessive unindexed ZIP data ($archiveOverhead bytes). Rebuild a fresh Gradle APK output."
+    }
+    $abis = @(if ($Architecture -eq 'x64') {'x86_64'} else {'arm64-v8a'})
     if ($Architecture -eq "universal") { $abis += "armeabi-v7a" }
     foreach ($abi in $abis) {
         foreach ($library in @("libflutter.so", "libapp.so", "libgojni.so")) {
@@ -95,6 +105,7 @@ $apk = Get-Item -LiteralPath $apkPath
     Android = "10+ (API 29), target 36"
     Architecture = $Architecture
     Native16KB = "passed"
+    ArchiveOverheadBytes = $archiveOverhead
     Bytes = $apk.Length
     SHA256 = (Get-FileHash -LiteralPath $apkPath -Algorithm SHA256).Hash.ToLowerInvariant()
 }

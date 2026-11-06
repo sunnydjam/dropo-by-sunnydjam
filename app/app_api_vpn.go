@@ -2365,16 +2365,22 @@ func (a *App) startXrayBridge() error {
 		return nil
 	}
 
-	configPath, hasConfig, err := a.storage.WriteActiveXrayConfigToFile()
+	config, hasConfig, err := a.storage.ActiveXrayConfig()
 	if err != nil {
 		return err
+	}
+	// Remove only the old generated runtime copy. Stored sources, settings and
+	// native protected profiles are preserved; no legacy server is involved.
+	oldRuntime := filepath.Join(a.storage.GetResourcesPath(), XrayBridgeConfigFileName)
+	if err := os.Remove(oldRuntime); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("cannot clear obsolete generated Xray configuration: %w", err)
 	}
 	if !hasConfig {
 		a.writeLog("[Xray] no xhttp bridge config for active profile")
 		return nil
 	}
-	a.writeLog(fmt.Sprintf("[Xray] active xhttp bridge config: %s", configPath))
-	return a.xrayBridge.Start()
+	a.writeLog("[Xray] active xhttp bridge config supplied in memory")
+	return a.xrayBridge.Start(config)
 }
 
 func (a *App) stopXrayBridge() {

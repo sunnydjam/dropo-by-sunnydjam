@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** Independent ordered worker: Keystore/file IO never blocks VPN/status calls. */
 internal class AccountSessionChannel(context: Context, messenger: BinaryMessenger) {
     private val store = SecureAccountSessionStore(context)
+    private val managedStore = SecureAccountSessionStore(context, "managed-vpn-v1")
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val closed = AtomicBoolean(false)
@@ -23,6 +24,12 @@ internal class AccountSessionChannel(context: Context, messenger: BinaryMessenge
                 result.notImplemented()
                 return@setMethodCallHandler
             }
+            val scope = (call.arguments as? Map<*, *>)?.get("scope") ?: "account"
+            if (scope != "account" && scope != "managed-vpn-v1") {
+                result.error("ACCOUNT_SESSION_INVALID", "Invalid protected storage scope.", null)
+                return@setMethodCallHandler
+            }
+            val selectedStore = if (scope == "account") store else managedStore
             val token = if (call.method == "write") {
                 (call.arguments as? Map<*, *>)?.get("token") as? String
             } else null
@@ -36,9 +43,9 @@ internal class AccountSessionChannel(context: Context, messenger: BinaryMessenge
                     if (closed.get()) return@execute
                     try {
                         val response = when (call.method) {
-                            "read" -> store.read()
-                            "write" -> { store.write(token!!); null }
-                            else -> { store.clear(); null }
+                            "read" -> selectedStore.read()
+                            "write" -> { selectedStore.write(token!!); null }
+                            else -> { selectedStore.clear(); null }
                         }
                         mainHandler.post { if (!closed.get()) result.success(response) }
                     } catch (_: Exception) {

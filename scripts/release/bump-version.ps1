@@ -100,5 +100,9 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "  1. Run the source checks and commit the synchronized version." -ForegroundColor White
 Write-Host "  2. Build and validate the clean release commit locally." -ForegroundColor White
-Write-Host "  3. Push main once; GitHub Actions creates the immutable v$newVersion tag after the Windows gate." -ForegroundColor White
-Write-Host "  4. Publish the verified Setup, Portable and Android assets with tools\publish-release-assets.ps1." -ForegroundColor White
+Write-Host "  3. Push Dzhamuha-develop; CI and the Windows gate must pass for that exact commit." -ForegroundColor White
+if ($config.build.releaseChannel -eq 'pilot') {
+    Write-Host "  4. Inspect the draft v$newVersion release. Public publication requires owner approval." -ForegroundColor White
+} else {
+    Write-Host "  4. Verify the configured release channel before publishing Setup, Portable or Android assets." -ForegroundColor White
+}

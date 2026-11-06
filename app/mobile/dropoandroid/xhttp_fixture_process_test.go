@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	xlog "github.com/xtls/xray-core/common/log"
 )
 
 // Only the synthetic remote VLESS/XHTTP server runs in this test helper.
@@ -27,6 +29,7 @@ var xhttpFixtureExecutable struct {
 }
 
 func TestMain(m *testing.M) {
+	if os.Getenv("DROPO_XHTTP_FIXTURE_DEBUG")=="1" {xlog.RegisterHandler(fixtureConsoleLog{})}
 	// Existing transport fixtures exercise Preview/sideload compatibility,
 	// including intentionally plaintext synthetic loopback server transports.
 	if ConfigureDistribution(false) != nil {
@@ -47,6 +50,9 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(code)
 }
+
+type fixtureConsoleLog struct{}
+func (fixtureConsoleLog) Handle(message xlog.Message) {fmt.Fprintln(os.Stderr,message)}
 
 func xhttpFixtureBinary(t *testing.T) string {
 	t.Helper()
@@ -84,6 +90,9 @@ func startXHTTPFixtureProcess(t *testing.T, config []byte) {
 		t.Fatal("synthetic server fixture config is not bounded single-line JSON")
 	}
 	command := exec.Command(xhttpFixtureBinary(t))
+	if os.Getenv("DROPO_XHTTP_FIXTURE_DEBUG") == "1" {
+		command.Stderr = os.Stderr
+	}
 	input, err := command.StdinPipe()
 	if err != nil {
 		t.Fatal("synthetic server fixture input could not open")
@@ -137,6 +146,9 @@ func startXHTTPFixtureProcess(t *testing.T, config []byte) {
 	go func() {
 		reader := bufio.NewReaderSize(output, 128)
 		line, err := reader.ReadSlice('\n')
+		if os.Getenv("DROPO_XHTTP_FIXTURE_DEBUG") == "1" {
+			t.Logf("fixture readiness first line: %q, error=%v", line, err)
+		}
 		ready <- err == nil && string(line) == "READY\n"
 	}()
 	select {

@@ -462,6 +462,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                               ),
                                             ),
                                     ),
+                                    if (!reserveFooter) versionLink(),
                                   ],
                                 ),
                               ),
@@ -501,8 +502,6 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                     ),
                   ),
                 ),
-                if (!reserveFooter && !_open && widget.overlay == null)
-                  Positioned(right: 8, bottom: 0, child: versionLink()),
                 if (showRail && !_open)
                   Positioned(
                     left: 0,
@@ -718,7 +717,7 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
       context: context,
       builder: (context) => Dialog(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
+          constraints: const BoxConstraints(maxWidth: 760),
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -751,7 +750,7 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
   Widget build(BuildContext context) => Align(
     alignment: Alignment.topRight,
     child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 460),
+      constraints: const BoxConstraints(maxWidth: 640),
       child: Material(
         key: const ValueKey('notice-overlay'),
         elevation: 6,

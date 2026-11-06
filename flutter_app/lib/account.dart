@@ -44,6 +44,20 @@ bool accountEndpointAvailable(
       allowLocalDevelopment && local && uri.scheme == 'http';
 }
 
+/// These two deployment origins are owned by the same account service. This
+/// trust is compiled into the client, never accepted from server capabilities.
+@visibleForTesting
+String accountCredentialOrigin(String endpoint) {
+  final uri = Uri.tryParse(endpoint);
+  if (uri == null || !accountEndpointAvailable(endpoint)) return endpoint;
+  final origin = uri.origin;
+  if (origin == 'https://dropo.fun' ||
+      origin == 'https://api.droponevedimka.ru') {
+    return 'https://dropo.fun';
+  }
+  return origin;
+}
+
 // Purchases require a separate, explicit build AND server opt-in. They remain
 // off while no real premium VPN provisioning is available.
 const _accountPurchasesEnabled = bool.fromEnvironment(
@@ -102,6 +116,8 @@ class AccountDisplaySnapshot {
   const AccountDisplaySnapshot({
     required this.displayName,
     this.telegramUsername = '',
+    this.turboUntil,
+    this.registered = true,
   });
 
   factory AccountDisplaySnapshot.fromJson(Map<String, dynamic> json) {
@@ -116,13 +132,17 @@ class AccountDisplaySnapshot {
     final username = json['telegramUsername']?.toString() ?? '';
     return AccountDisplaySnapshot(
       displayName: name.isEmpty ? 'Аккаунт' : name,
+      turboUntil: DateTime.tryParse(json['speedBoostUntil']?.toString() ?? ''),
       telegramUsername: RegExp(r'^[A-Za-z0-9_]{1,32}$').hasMatch(username)
           ? username
           : '',
+      registered: json['authMethod'] != 'guest' && json['guestAccount'] != true,
     );
   }
 
   final String displayName, telegramUsername;
+  final DateTime? turboUntil;
+  final bool registered;
 }
 
 /// A bounded background read of an already stored session, never an automatic
@@ -168,7 +188,10 @@ class _AccountDisplayController extends ValueNotifier<AccountDisplaySnapshot?> {
       }
       // A saved account remains identifiable when the server is offline. The
       // actual public name replaces this neutral label only after validation.
-      value = const AccountDisplaySnapshot(displayName: 'Аккаунт');
+      value = const AccountDisplaySnapshot(
+        displayName: 'Аккаунт',
+        registered: false,
+      );
       final api = transport ?? (_ownedApi = _AccountApi(endpoint));
       final response = await api
           .request('GET', '/v1/me', token: token)
@@ -266,7 +289,22 @@ class _AccountApi implements AccountTransport {
   _AccountApi(
     this.endpoint, {
     this.responseTimeout = const Duration(seconds: 8),
-  });
+  }) {
+    final deployment = Uri.tryParse(endpoint);
+    if (deployment != null &&
+        deployment.hasScheme &&
+        deployment.hasAuthority &&
+        deployment.origin == 'https://api.droponevedimka.ru') {
+      // The custom factory performs both numeric dialing and verified TLS.
+      _client.connectionFactory = (uri, proxyHost, proxyPort) {
+        if (proxyHost != null ||
+            uri.origin != 'https://api.droponevedimka.ru') {
+          throw const AccountApiException('Недоверенный маршрут аккаунта.');
+        }
+        return createPinnedTlsConnection(uri, InternetAddress('193.233.88.97'));
+      };
+    }
+  }
 
   final String endpoint;
   final Duration responseTimeout;
@@ -285,7 +323,10 @@ class _AccountApi implements AccountTransport {
     }
     final base = Uri.parse(endpoint);
     final target = base.resolve(path);
-    if (!path.startsWith('/v1/') || target.origin != base.origin) {
+    final publicCatalog = path == '/public/v1/catalog' && method == 'GET';
+    if ((!path.startsWith('/v1/') && !publicCatalog) ||
+        target.origin != base.origin ||
+        (publicCatalog && (token != null || body != null))) {
       throw const AccountApiException('Некорректный запрос аккаунта.');
     }
     final request = await _client
@@ -311,7 +352,16 @@ class _AccountApi implements AccountTransport {
     }
     Map<String, dynamic> decoded = const {};
     if (raw.trim().isNotEmpty) {
-      final value = jsonDecode(raw);
+      Object? value;
+      try {
+        value = jsonDecode(raw);
+      } on FormatException {
+        throw AccountApiException(
+          'Сервис вернул некорректный ответ.',
+          code: 'invalid_response',
+          status: response.statusCode,
+        );
+      }
       if (value is Map) decoded = Map<String, dynamic>.from(value);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -357,21 +407,25 @@ class _AccountTokenVault {
   final _store = NativeAccountSessionStore();
   String? _memoryFallback;
   bool previousCredentialMayRemain = false;
+  String get _credentialOrigin => accountCredentialOrigin(endpoint);
 
-  Future<String?> read() async {
+  Future<String?> read({bool registeredOnly = false}) async {
     if (!enabled) return _memoryFallback;
-    if (_volatileSessions.containsKey(endpoint)) {
-      return _volatileSessions[endpoint];
+    if (_volatileSessions.containsKey(_credentialOrigin)) {
+      return _volatileSessions[_credentialOrigin];
     }
     try {
       final stored = await _store.read();
       if (stored == null) return _memoryFallback;
       final record = jsonDecode(stored);
       if (record is! Map ||
-          record['endpoint'] != endpoint ||
+          record['endpoint'] is! String ||
+          accountCredentialOrigin(record['endpoint'] as String) !=
+              _credentialOrigin ||
           record['token'] is! String) {
         return _memoryFallback;
       }
+      if (registeredOnly && record['accountKind'] == 'guest') return null;
       final token = record['token'] as String;
       return token.isEmpty ? _memoryFallback : token;
     } catch (_) {
@@ -383,12 +437,14 @@ class _AccountTokenVault {
     previousCredentialMayRemain = false;
     _memoryFallback = token;
     if (!enabled) return true;
-    _volatileSessions[endpoint] = token;
+    _volatileSessions[_credentialOrigin] = token;
     try {
       // Bind a credential to its issuing backend; a differently configured
       // client must never send the previous server's token to a new origin.
-      await _store.write(jsonEncode({'endpoint': endpoint, 'token': token}));
-      _volatileSessions.remove(endpoint);
+      await _store.write(
+        jsonEncode({'endpoint': _credentialOrigin, 'token': token}),
+      );
+      _volatileSessions.remove(_credentialOrigin);
       return true;
     } catch (_) {
       // Never fall back to a plaintext file. Explain the memory-only login.
@@ -406,7 +462,7 @@ class _AccountTokenVault {
     if (!enabled) return true;
     try {
       await _store.clear();
-      _volatileSessions.remove(endpoint);
+      _volatileSessions.remove(_credentialOrigin);
       return true;
     } catch (_) {
       return false;
@@ -425,9 +481,15 @@ class AccountPage extends StatefulWidget {
     this.initialToken,
     this.onDisplayChanged,
     this.identity,
+    this.onVPNProfile,
+    this.onDeleteGuestVPN,
+    this.showTurbo = false,
+    this.onBackToAccount,
   });
 
   final String endpoint;
+  final bool showTurbo;
+  final VoidCallback? onBackToAccount;
   final Future<void> Function(String url) onOpenExternal;
   final bool persistSession;
   final bool available;
@@ -435,6 +497,9 @@ class AccountPage extends StatefulWidget {
   final String? initialToken;
   final ValueChanged<AccountDisplaySnapshot?>? onDisplayChanged;
   final GuestIdentityCoordinator? identity;
+  final Future<Map<String, dynamic>> Function(String token, bool linkConsent)?
+  onVPNProfile;
+  final Future<Map<String, dynamic>> Function()? onDeleteGuestVPN;
 
   @override
   State<AccountPage> createState() => _AccountPageState();
@@ -464,6 +529,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   String _authPurpose = 'login';
   String _message = '';
   bool _busy = false;
+  bool _profileSyncing = false;
   bool _registrationAvailable = false;
   bool _passwordLoginAvailable = false;
   bool _passwordDialogOpen = false;
@@ -602,8 +668,10 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   }
 
   Future<void> _refreshAccount() async {
-    final response = await _api.request('GET', '/v1/me', token: _token);
-    if (!mounted) return;
+    final token = _token;
+    final generation = _authGeneration;
+    final response = await _api.request('GET', '/v1/me', token: token);
+    if (!mounted || generation != _authGeneration || token != _token) return;
     setState(() {
       _account = _AccountRecord.fromJson(_asMap(response['account']));
       _phase = _AccountPhase.signedIn;
@@ -612,6 +680,39 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     widget.onDisplayChanged?.call(
       AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
     );
+    unawaited(_syncOwnedVPN(token, generation));
+  }
+
+  Future<void> _syncOwnedVPN(String? token, int generation) async {
+    final action = widget.onVPNProfile;
+    if (token == null ||
+        action == null ||
+        _development ||
+        _profileSyncing ||
+        _account?.guestAccount == true ||
+        _account?.demoAccount == true) {
+      return;
+    }
+    _profileSyncing = true;
+    try {
+      final result = await action(token, true);
+      if (!mounted || token != _token || generation != _authGeneration) return;
+      if (result['success'] != true) {
+        setState(
+          () => _message =
+              'Вход выполнен. Профиль VPN пока не обновлён; повторите обновление в разделе Турбо. Сохранённый VPN доступен.',
+        );
+      }
+    } catch (_) {
+      if (mounted && token == _token && generation == _authGeneration) {
+        setState(
+          () => _message =
+              'Профиль VPN пока не обновлён. Повторите обновление в разделе Турбо.',
+        );
+      }
+    } finally {
+      _profileSyncing = false;
+    }
   }
 
   void _identityUpdated() {
@@ -996,6 +1097,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       widget.onDisplayChanged?.call(
         AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
       );
+      unawaited(_syncOwnedVPN(token, generation));
     } catch (error) {
       if (!mounted || generation != _authGeneration) return;
       _finishAuthAttempt(_accountError(error));
@@ -1281,7 +1383,10 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         child: _signedOut(),
       ),
       _AccountPhase.pendingAuth => _pendingAuth(),
-      _AccountPhase.signedIn => _signedIn(),
+      _AccountPhase.signedIn =>
+        widget.showTurbo && _account?.guestAccount != true
+            ? _turboPage()
+            : _signedIn(),
       _AccountPhase.offline => _offlineAccount(),
       _AccountPhase.deletionCleanup => _page(
         Column(
@@ -1450,6 +1555,17 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                   const Expanded(flex: 5, child: _TelegramAuthSteps()),
                 ],
               ),
+            if (widget.onDeleteGuestVPN != null && !_development) ...[
+              const SizedBox(height: 24),
+              TextButton.icon(
+                key: const ValueKey('delete-guest-vpn'),
+                onPressed: _busy ? null : _deleteGuestVPN,
+                icon: const Icon(Icons.delete_outline),
+                label: const Text(
+                  'Удалить бесплатный профиль этого устройства',
+                ),
+              ),
+            ],
           ],
         );
       },
@@ -1707,6 +1823,153 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     ),
   );
 
+  Future<void> _deleteGuestVPN() async {
+    if (_busy || widget.onDeleteGuestVPN == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить бесплатный профиль?'),
+        content: const Text(
+          'VPN будет отключён. Гостевой профиль этого устройства и его ключи будут удалены с сервера. Свои подписки сохранятся. Для нового бесплатного подключения потребуется создать новый профиль.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Удалить профиль'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final result = await widget.onDeleteGuestVPN!();
+      if (mounted) {
+        setState(
+          () => _message = result['success'] == true
+              ? 'Бесплатный гостевой профиль удалён.'
+              : result['error']?.toString() ??
+                    'Удаление пока не подтверждено. Повторите позже.',
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _message = 'Удаление пока не подтверждено. Повторите позже.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _refreshOwnedVPN() async {
+    final token = _token;
+    final action = widget.onVPNProfile;
+    if (_busy || token == null || action == null) return;
+    setState(() => _busy = true);
+    try {
+      var result = await action(token, false);
+      if (!mounted) return;
+      if (result['requiresLink'] == true) {
+        final consent = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Привязать бесплатный профиль?'),
+            content: const Text(
+              'Индивидуальный VPN-профиль этого устройства будет связан с текущим аккаунтом Dropo. После привязки для управления профилем потребуется этот аккаунт.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Отмена'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Привязать'),
+              ),
+            ],
+          ),
+        );
+        if (consent != true) return;
+        result = await action(token, true);
+      }
+      if (mounted) {
+        setState(
+          () => _message = result['success'] == true
+              ? 'Профиль VPN обновлён. Free доступен без покупки; Boost применяется при действующей подписке.'
+              : result['error']?.toString() ??
+                    'Профиль пока не готов. Повторите позже.',
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _message =
+              'Не удалось обновить профиль VPN. Сохранённые источники доступны.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _turboPage() => _page(
+    Column(
+      key: const ValueKey('turbo-page'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (widget.onBackToAccount != null)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: widget.onBackToAccount,
+              icon: const Icon(Icons.arrow_back),
+              label: const Text('В аккаунт'),
+            ),
+          ),
+        const Text(
+          'Турбо',
+          style: TextStyle(
+            color: _atlasText,
+            fontSize: 32,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 16),
+        _PlanPanel(account: _account!),
+        const SizedBox(height: 16),
+        _BoostPanel(
+          product: _product,
+          available: _purchasingAvailable,
+          enabled: !_busy,
+          onBuy: _openPurchase,
+          onTerms: () => _showTextDialog(
+            context,
+            'Условия Турбо',
+            'Покупка оплачивается Telegram Stars и привязывается к вашему аккаунту. Срок и статус появятся здесь после подтверждения. Бесплатный VPN остаётся доступен без покупки.',
+          ),
+        ),
+        if (widget.onVPNProfile != null) ...[
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: _busy ? null : _refreshOwnedVPN,
+            icon: const Icon(Icons.sync),
+            label: const Text('Обновить профиль VPN'),
+          ),
+        ],
+        if (_message.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          _AccountNotice(message: _message),
+        ],
+      ],
+    ),
+  );
+
   Widget _signedIn() {
     final account = _account!;
     if (account.guestAccount) return _guestProfile();
@@ -1785,6 +2048,14 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
           if (_message.isNotEmpty) ...[
             const SizedBox(height: 16),
             _AccountNotice(message: _message),
+          ],
+          if (widget.onVPNProfile != null && !_development) ...[
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _refreshOwnedVPN,
+              icon: const Icon(Icons.vpn_key_outlined),
+              label: const Text('Обновить профиль VPN'),
+            ),
           ],
           const SizedBox(height: 26),
           LayoutBuilder(
@@ -2315,7 +2586,7 @@ class _AuthForm extends StatelessWidget {
       ),
       const SizedBox(height: 20),
       const Text(
-        'При входе через Telegram сервер Dropo получает Telegram ID аккаунта и чата, имя и имя пользователя (если указаны). После подтверждения хранит профиль, сессии устройств и события действий с аккаунтом. Эти данные нужны для входа и безопасности. VPN-трафик и личные подписки в сервис аккаунтов не отправляются. Вход необязателен; аккаунт можно удалить.',
+        'При входе через Telegram сервер Dropo получает Telegram ID аккаунта и чата, имя и имя пользователя (если указаны). После подтверждения хранит профиль, сессии устройств и события действий с аккаунтом. Бесплатный профиль этого устройства привяжется к аккаунту; действующий Турбо и подарки применятся при обновлении профиля VPN. Эти данные нужны для входа и безопасности. VPN-трафик и личные подписки в сервис аккаунтов не отправляются. Вход необязателен; аккаунт можно удалить.',
         key: ValueKey('account-auth-disclosure'),
         style: TextStyle(color: _atlasMuted, height: 1.45),
       ),
@@ -2451,7 +2722,9 @@ class _PlanPanel extends StatelessWidget {
         const Text('Текущий тариф', style: TextStyle(color: _atlasMuted)),
         const SizedBox(height: 12),
         Text(
-          account.plan,
+          account.speedBoostUntil?.isAfter(DateTime.now()) == true
+              ? 'Dropo Турбо'
+              : 'Dropo Free',
           style: const TextStyle(
             color: _atlasText,
             fontSize: 26,
@@ -2460,11 +2733,13 @@ class _PlanPanel extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          account.speedBoostUntil == null
+          account.speedBoostUntil?.isAfter(DateTime.now()) != true
               ? 'Бесплатный доступ'
               : 'Активно до ${_dateLabel(account.speedBoostUntil!)}',
           style: TextStyle(
-            color: account.speedBoostUntil == null ? _atlasMuted : _atlasMint,
+            color: account.speedBoostUntil?.isAfter(DateTime.now()) == true
+                ? _atlasMint
+                : _atlasMuted,
             fontSize: 15,
           ),
         ),
@@ -2497,7 +2772,7 @@ class _BoostPanel extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
-          available ? product.name : 'Dropo Boost · скоро',
+          available ? product.name : 'Турбо по приглашению',
           style: const TextStyle(
             color: _atlasText,
             fontSize: 22,
@@ -2508,7 +2783,7 @@ class _BoostPanel extends StatelessWidget {
         Text(
           available
               ? product.description
-              : 'Платный VPN появится позже. Сейчас доступна регистрация для проверки; оплаты и продажи не подключены.',
+              : 'Покупки пока отключены. Турбо по подарочной ссылке или от администратора уже работает и закрепляется за аккаунтом.',
           style: const TextStyle(color: _atlasMuted, height: 1.45),
         ),
         const SizedBox(height: 18),
