@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/subosito/flutter-action",
+  "revision": "1a449444c387b1966244ae4d4f8c696479add0b2",
+  "files": {
+    "action.yaml": "5c0e5a243d010be58a41bded0cbca71687317b712d6876ebf6ab434494adcb75",
+    "setup.sh": "35f0cd9e9c1d7a643448223573b4a03879e63676fdc27872de3d0104d5bf89f9",
+    "LICENSE": "329009b59300a124af69c29c9ad19d38079207d9098c76fe0b51dc79a76a2e9a"
+  },
+  "cache": {
+    "repository": "https://github.com/actions/cache",
+    "upstreamReference": "v5",
+    "revision": "caa296126883cff596d87d8935842f9db880ef25"
+  }
+}

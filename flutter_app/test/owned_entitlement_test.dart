@@ -3,21 +3,28 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:dropo/main.dart';
 import 'package:dropo/account_session_store.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _Vault extends NativeAccountSessionStore {
   _Vault(Map<String, dynamic> record) : super(null, 'managed-vpn-v1') {
     value = base64UrlEncode(utf8.encode(jsonEncode(record)));
   }
-  late String value;
+  _Vault.empty() : super(null, 'managed-vpn-v1');
+  String? value;
   Map<String, dynamic> get record =>
-      jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(value))))
+      jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(value!))))
           as Map<String, dynamic>;
   @override
   Future<String?> read() async => value;
   @override
   Future<void> write(String token) async {
     value = token;
+  }
+
+  @override
+  Future<void> clear() async {
+    value = null;
   }
 }
 
@@ -104,6 +111,60 @@ class _API implements AccountTransport {
       };
     }
     throw StateError('Unexpected API path');
+  }
+
+  @override
+  void close() {}
+}
+
+class _PasswordFreeAPI implements AccountTransport {
+  final calls = <String>[];
+  final guests = <String, String>{};
+  bool deleted = false;
+  @override
+  Future<Map<String, dynamic>> request(
+    String method,
+    String path, {
+    String? token,
+    Map<String, dynamic>? body,
+  }) async {
+    calls.add('$method $path');
+    if (path == '/public/v1/catalog') return {};
+    if (path == '/v1/me') {
+      expect(token, 'shared-password-fixture');
+      return {
+        'account': {'authMethod': 'password', 'demoAccount': true},
+      };
+    }
+    if (path == '/v1/auth/guest') {
+      expect(token, isNull);
+      final secret = body!['installationSecret'] as String;
+      expect(secret, matches(RegExp(r'^[A-Za-z0-9_-]{43}$')));
+      final id = guests.putIfAbsent(
+        secret,
+        () => 'independent-installation-${guests.length + 1}',
+      );
+      return {'sessionToken': 'guest-session-for-$id', 'installationId': id};
+    }
+    final id = guests.values.firstWhere(
+      (value) => token == 'guest-session-for-$value',
+    );
+    if (path == '/v1/vpn/profile') {
+      return {
+        'status': 'ready',
+        'id': id,
+        'freeSubscriptionUrl':
+            'https://app.droponevedimka.ru/managed/v1/subscription/free',
+      };
+    }
+    if (path == '/v1/guest/deletion-key') return {'ready': true};
+    if (path == '/v1/guest/account') {
+      deleted = true;
+      return {'deleted': true};
+    }
+    fail(
+      'A password account must never bind or link a device installation: $path',
+    );
   }
 
   @override
@@ -457,6 +518,145 @@ void main() {
       expect(bridge.added, isEmpty);
       expect(vault.record['freeKey'], 'protected-original-free');
       expect(http.closed, true);
+    },
+  );
+  test(
+    'password-first Free uses separate guests on each device and remains independently deletable',
+    () async {
+      final api = _PasswordFreeAPI();
+      final primaryRecord = {
+        'version': 2,
+        'endpoint': 'https://dropo.fun',
+        'accountKind': 'registered',
+        'token': 'shared-password-fixture',
+      };
+      primary.record = Map<String, dynamic>.from(primaryRecord);
+      const channel = MethodChannel('dropo/account_session');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.method, 'read');
+        return jsonEncode(primary.record);
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final secrets = <String>[];
+      for (var device = 0; device < 2; device++) {
+        final managed = _Vault.empty();
+        final owned = OwnedVPNClient(
+          endpoint: 'https://api.droponevedimka.ru',
+          store: managed,
+          identityStore: identity,
+        );
+        final applied = <String>[];
+        final result = await HttpOverrides.runWithHttpOverrides(
+          () => owned.enroll(api, (id, name, key, consent) async {
+            applied.add(id);
+            return {'success': true};
+          }, (raw, minimum) async => {'success': true, 'revision': 1}),
+          _HTTP(),
+        );
+        expect(result['success'], true);
+        expect(applied, ['dropo-individual-free']);
+        expect(managed.record['standaloneGuest'], true);
+        expect(managed.record['linked'], isNot(true));
+        secrets.add(managed.record['secret'] as String);
+        await owned.prepareAccountIdentity();
+        expect(primary.record, primaryRecord);
+        final preserved = managed.value;
+        expect(
+          (await owned.forgetLocalProfile(
+            bridge,
+            preserveStandaloneGuest: true,
+          ))['independentGuestPreserved'],
+          true,
+        );
+        expect(managed.value, preserved);
+        expect(
+          (await owned.deleteGuest(bridge, transport: api))['success'],
+          true,
+        );
+        expect(managed.value, isNull);
+        expect(primary.record, primaryRecord);
+      }
+      expect(secrets.toSet(), hasLength(2));
+      expect(api.guests, hasLength(2));
+      expect(api.deleted, true);
+      expect(
+        api.calls.any(
+          (path) => path.contains('/bind') || path.contains('/link'),
+        ),
+        false,
+      );
+    },
+  );
+  test(
+    'password sign-in cannot overwrite an existing linked owner profile',
+    () async {
+      final api = _PasswordFreeAPI();
+      primary.record = {
+        'version': 2,
+        'endpoint': 'https://dropo.fun',
+        'accountKind': 'registered',
+        'token': 'shared-password-fixture',
+      };
+      const channel = MethodChannel('dropo/account_session');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        channel,
+        (call) async => jsonEncode(primary.record),
+      );
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final before = vault.value;
+      final result = await client.enroll(
+        api,
+        (id, name, key, consent) async => {'success': true},
+        (raw, minimum) async => {'success': true, 'revision': 1},
+      );
+      expect(result['success'], true);
+      expect(vault.value, before);
+      expect(api.calls, ['GET /public/v1/catalog', 'GET /v1/me']);
+      expect(api.guests, isEmpty);
+    },
+  );
+  test(
+    'a real account preserves independent guest credentials until explicit deletion',
+    () async {
+      vault.value = base64UrlEncode(
+        utf8.encode(
+          jsonEncode({
+            ...vault.record,
+            'standaloneGuest': true,
+            'linked': false,
+            'secret': base64UrlEncode(
+              List<int>.filled(32, 9),
+            ).replaceAll('=', ''),
+          }),
+        ),
+      );
+      final before = vault.value;
+      final result = await client.linkAccount(
+        bridge,
+        'registered-fixture',
+        true,
+        transport: api,
+      );
+      expect(result['success'], false);
+      expect(result['error'], contains('отдельный бесплатный профиль'));
+      expect(vault.value, before);
+      expect(api.calls, isEmpty);
+      primary.record.remove('installationSecret');
+      expect(
+        (await client.linkAccount(
+          bridge,
+          'registered-fixture',
+          true,
+          transport: api,
+        ))['success'],
+        false,
+      );
+      expect(vault.value, before);
+      expect(api.calls, isEmpty);
     },
   );
 }

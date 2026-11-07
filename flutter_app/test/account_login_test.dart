@@ -79,7 +79,7 @@ void main() {
   );
 
   testWidgets(
-    'password sign-in synchronizes real profiles but skips reviewer accounts',
+    'password sign-in never binds an installation to a shared account',
     (tester) async {
       for (final demo in [false, true]) {
         final api = _PasswordTransport()..demoAccount = demo;
@@ -94,8 +94,35 @@ void main() {
           },
         );
         await _login(tester);
-        expect(tokens, demo ? isEmpty : ['password-bearer']);
+        expect(tokens, isEmpty);
       }
+    },
+  );
+  testWidgets(
+    'independent Free deletion is visible without signing out of the password account',
+    (tester) async {
+      final api = _PasswordTransport();
+      var deletions = 0;
+      await _pump(
+        tester,
+        api,
+        initialToken: 'password-bearer',
+        onDeleteGuestVPN: () async {
+          deletions++;
+          return {'success': true};
+        },
+      );
+      await _tap(
+        tester,
+        find.byKey(const ValueKey('delete-standalone-guest-vpn')),
+      );
+      await _tap(tester, find.text('Удалить профиль'));
+      expect(deletions, 1);
+      expect(find.text('Play Review'), findsOneWidget);
+      expect(
+        api.requests.where((request) => request.path == '/v1/sessions/current'),
+        isEmpty,
+      );
     },
   );
 
@@ -214,6 +241,7 @@ Future<void> _pump(
   String? initialToken,
   double textScale = 1,
   Future<Map<String, dynamic>> Function(String, bool)? onVPNProfile,
+  Future<Map<String, dynamic>> Function()? onDeleteGuestVPN,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -230,6 +258,7 @@ Future<void> _pump(
           endpoint: 'https://accounts.example.com',
           transport: api,
           onVPNProfile: onVPNProfile,
+          onDeleteGuestVPN: onDeleteGuestVPN,
           persistSession: persist,
           initialToken: initialToken,
           onOpenExternal: (_) async =>

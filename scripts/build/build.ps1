@@ -31,8 +31,8 @@ param(
     # output while still rebuilding and signing the Go core and launcher.
     [switch]$ReuseFlutterWindowsOutput,
     # Resolve Flutter dependencies exclusively from the configured local pub
-    # cache, then compile with --no-pub. Useful while testing VPN changes that
-    # temporarily make pub.dev unreachable.
+    # cache, enforcing the committed lockfile. Missing exact packages fail
+    # instead of downgrading; all builds compile with --no-pub afterwards.
     [switch]$UseCachedFlutterPackages,
     # Local/offline signing aid. Production CI leaves this disabled and uses
     # the configured RFC3161 timestamp server.
@@ -979,15 +979,8 @@ function Build-Application {
                 "--dart-define", "DROPO_BUILD_HASH=$BuildHash"
             )
             $flutterBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
-            if ($UseCachedFlutterPackages) {
-                Write-Host "Resolving Flutter packages from the local cache..." -ForegroundColor Gray
-                & $FlutterCmd pub get --offline
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "[ERROR] Flutter offline dependency resolution failed." -ForegroundColor Red
-                    exit 1
-                }
-                $flutterBuildArguments += "--no-pub"
-            }
+            Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages
+            $flutterBuildArguments += "--no-pub"
             & $FlutterCmd @flutterBuildArguments
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "[ERROR] Flutter Windows build failed." -ForegroundColor Red
@@ -1453,6 +1446,31 @@ function Get-FlutterCommand {
     return $null
 }
 
+function Restore-FlutterLockedPackages {
+    param(
+        [Parameter(Mandatory = $true)][string]$FlutterCmd,
+        [switch]$Offline
+    )
+    # An unconstrained offline resolution may downgrade an unavailable pinned
+    # package to an older cached version, silently changing the release input.
+    $lockPath = Join-Path (Get-Location).Path 'pubspec.lock'
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+        throw 'A committed Flutter pubspec.lock is required for release builds.'
+    }
+    $lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash
+    $pubArguments = @('pub', 'get', '--enforce-lockfile')
+    if ($Offline) { $pubArguments += '--offline' }
+    Write-Host 'Restoring exact locked Flutter dependencies...' -ForegroundColor Gray
+    & $FlutterCmd @pubArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Locked Flutter dependency resolution failed. Fetch the exact packages online; do not update the lockfile during a release build.'
+    }
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash -cne $lockHash) {
+        throw 'Flutter dependency resolution changed pubspec.lock; refusing to build different release inputs.'
+    }
+}
+
 function Get-GoMobileCommand {
     $gomobile = Get-Command gomobile -ErrorAction SilentlyContinue
     if ($gomobile) {
@@ -1844,12 +1862,8 @@ function Build-AndroidApplication {
             '--dart-define', 'DROPO_PLAY_DISTRIBUTION=false'
         )
         $androidBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
-        if ($UseCachedFlutterPackages) {
-            Write-Host "Resolving Android Flutter packages from the local cache..." -ForegroundColor Gray
-            & $FlutterCmd pub get --offline
-            if ($LASTEXITCODE -ne 0) { throw "Flutter offline Android dependency resolution failed." }
-            $androidBuildArguments += '--no-pub'
-        }
+        Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages
+        $androidBuildArguments += '--no-pub'
         & $FlutterCmd @androidBuildArguments
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[ERROR] Flutter Android build failed. Run 'flutter doctor -v' and check Android SDK/JDK." -ForegroundColor Red
@@ -1917,12 +1931,8 @@ function Build-AndroidAppBundle {
         # on this channel. Never use the Preview/profile signing fallback.
         $androidBundleArguments = @(Get-DropoAndroidBundleBuildArguments `
             -AppVersion $AppVersion -BuildNumber $buildNumber -Endpoint $AccountEndpoint)
-        if ($UseCachedFlutterPackages) {
-            Write-Host 'Resolving Google Play Flutter packages from the local cache...' -ForegroundColor Gray
-            & $FlutterCmd pub get --offline
-            if ($LASTEXITCODE -ne 0) { throw 'Flutter offline Google Play dependency resolution failed.' }
-            $androidBundleArguments += '--no-pub'
-        }
+        Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages
+        $androidBundleArguments += '--no-pub'
         & $FlutterCmd @androidBundleArguments
         if ($LASTEXITCODE -ne 0) { throw 'Flutter Google Play bundle build failed. A production upload key is required.' }
     } finally {

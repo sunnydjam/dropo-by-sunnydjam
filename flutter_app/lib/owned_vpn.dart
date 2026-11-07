@@ -60,6 +60,7 @@ class OwnedVPNClient {
         }
         final source = _record;
         if (source == null ||
+            source['standaloneGuest'] == true ||
             source['deletionPending'] == true ||
             source['secret'] is! String) {
           return;
@@ -196,14 +197,38 @@ class OwnedVPNClient {
     if (valid['success'] != true) {
       throw const OwnedVPNOperationFailure('catalog_signature');
     }
-    _record ??= await _adoptAccountIdentity();
+    var accountToken =
+        registeredToken ??
+        await _AccountTokenVault(endpoint: endpoint).read(registeredOnly: true);
+    var standaloneGuest = false;
+    if (registeredToken == null &&
+        accountToken != null &&
+        accountToken.isNotEmpty) {
+      final response = await api.request('GET', '/v1/me', token: accountToken);
+      final account = _asMap(response['account']);
+      // Password/demo sessions cannot own device installations. Free still
+      // uses the ordinary guest API with a private per-device credential,
+      // never the shared signed-in account's session or installation secret.
+      standaloneGuest =
+          account['demoAccount'] == true || account['authMethod'] == 'password';
+      if (standaloneGuest) {
+        if (_record?['linked'] == true) return _apply(save);
+        accountToken = null;
+      }
+    }
+    _record ??= standaloneGuest
+        ? {
+            'format': 1,
+            'origin': accountCredentialOrigin(endpoint),
+            'secret': _newSecret(),
+            'standaloneGuest': true,
+          }
+        : await _adoptAccountIdentity();
+    if (standaloneGuest) _record!['standaloneGuest'] = true;
     _record!['catalogRevision'] = valid['revision'];
     // Save the installation credential before the first request, so a lost
     // response/restart reuses the same installation rather than creating one.
     await _ownedStep('protected_storage_write', _persist);
-    final accountToken =
-        registeredToken ??
-        await _AccountTokenVault(endpoint: endpoint).read(registeredOnly: true);
     String token = '';
     if (_record!['linked'] == true) {
       token = accountToken ?? '';
@@ -390,10 +415,14 @@ class OwnedVPNClient {
   /// Mark the vault first so a failed native cleanup cannot restore revoked keys
   /// on the next launch. User subscriptions are never part of this cleanup.
   Future<Map<String, dynamic>> forgetLocalProfile(
-    CoreBridge bridge,
-  ) => _serialize(() async {
+    CoreBridge bridge, {
+    bool preserveStandaloneGuest = false,
+  }) => _serialize(() async {
     try {
       await _load();
+      if (preserveStandaloneGuest && _record?['standaloneGuest'] == true) {
+        return {'success': true, 'independentGuestPreserved': true};
+      }
       final view = await bridge.callMap('GetVPNSources');
       final sources = (view['sources'] as List? ?? const [])
           .map(_asMap)
@@ -575,6 +604,13 @@ class OwnedVPNClient {
           identity['accountKind'] != 'registered') {
         throw const AccountIdentityChanged();
       }
+      if (_record?['standaloneGuest'] == true) {
+        return {
+          'success': false,
+          'error':
+              'На устройстве сохранён отдельный бесплатный профиль. Удалите его отдельной кнопкой в аккаунте, затем обновите профиль VPN для привязки и Турбо.',
+        };
+      }
       if (identity['accountKind'] == 'registered' &&
           identity['installationSecret'] is String &&
           _record != null &&
@@ -663,7 +699,7 @@ class OwnedVPNClient {
     final api = transport ?? _AccountApi(endpoint);
     try {
       await _load();
-      if (_record == null) return {'success': true};
+      if (_record == null) return {'success': true, 'unchanged': true};
       if (_record!['linked'] == true) {
         return {
           'success': false,
@@ -671,6 +707,7 @@ class OwnedVPNClient {
               'Профиль привязан к аккаунту. Управляйте им после входа через Telegram.',
         };
       }
+      final independentGuest = _record!['standaloneGuest'] == true;
       final stopped = await bridge.setConnected(false);
       if (stopped['success'] != true) {
         return {
@@ -753,7 +790,7 @@ class OwnedVPNClient {
       }
       await _store.clear();
       _record = null;
-      return {'success': true};
+      return {'success': true, 'independentGuest': independentGuest};
     } catch (_) {
       return {
         'success': false,

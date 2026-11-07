@@ -117,7 +117,8 @@ void main() {
         tester,
         service,
         persistSession: true,
-        onForgetVPNProfile: () async {
+        onForgetVPNProfile: (preserveStandaloneGuest) async {
+          expect(preserveStandaloneGuest, true);
           cleanups++;
           expect(service.consumeRequests, hasLength(1));
           return {'success': !failCleanup};
@@ -413,7 +414,7 @@ Future<void> _pumpAccount(
   List<String>? opened,
   Size size = const Size(1100, 1000),
   double textScale = 1,
-  Future<Map<String, dynamic>> Function()? onForgetVPNProfile,
+  Future<Map<String, dynamic>> Function(bool)? onForgetVPNProfile,
 }) async {
   await tester.binding.setSurfaceSize(size);
   addTearDown(() => tester.binding.setSurfaceSize(null));

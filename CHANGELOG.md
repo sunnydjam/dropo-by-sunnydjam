@@ -10,6 +10,10 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
   probe scheduling; full VPN never acquires adaptive direct exceptions.
 - Bound managed profile downloads, clean managed credentials on account deletion,
   and prevent stale profiles from crossing account/logout transitions.
+- Keep ordinary guest Free available after password sign-in, with separate
+  deletion and no shared-account installation binding or hidden privilege grants.
+- Enforce the exact Flutter lockfile in CI and release builds; pin nested cache
+  actions without weakening the repository SHA requirement.
 - Run the Windows package gate before pull-request merge; preserve the existing
   public-signature requirement and pilot channel until publication prerequisites.
 - Update privacy/release documentation for individual profiles, own DoH and backups;

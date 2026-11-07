@@ -27,15 +27,23 @@
   ошибки. Повтор после потери подтверждения не меняет срок в том же event ID.
 - Политика и памятка Play исправлены под персональные профили, DoH и backups.
 - Windows package gate запускается до слияния PR без пропусков по путям.
+- Вход по тестовому паролю до добавления Free получает обычный отдельный гостевой
+  профиль. Его удаление доступно отдельно, не меняет права общего аккаунта и не
+  теряет секрет при удалении другого профиля.
+- Сборки восстанавливают только зависимости из lockfile; отсутствие точного
+  пакета в кеше больше не приводит к незаметному понижению версии.
 - Списки Re-filter обновлены до 07112026.
 
 ## Проверено локально
 
-- Flutter analyze без замечаний; 607 тестов прошли.
+- Flutter analyze без замечаний; 612 тестов прошли; после последнего усиления
+  запрета неявной привязки отдельно повторены 12 тестов профилей.
+- Android Kotlin: 66 тестов, включая Google Play review и ссылки магазина.
 - Windows Go, Android core и bridge с закреплённым XHTTP overlay: тесты и vet.
 - Backend: 304 теста/подтеста; vet. Controller/agent/DNS: тесты и vet; PostgreSQL
   integration требует Linux CI. Monitoring: 20; доступные Windows hardening: 5.
-- Регрессии доверия publisher: 9; readiness: 24; PowerShell syntax: 40 scripts.
+- Регрессии доверия publisher и вложенных Actions: 13; readiness: 24;
+  PowerShell syntax: 40 scripts.
 - Метаданные участников, UTF-8 и account-origin/build contract.
 
 Подписанные APK/AAB проверяются после сборки. Package Play — `com.dropo.myapp`,
@@ -46,7 +54,8 @@ versionCode — 30105; AAB остаётся в локальном архиве. 
 
 На обоих репозиториях Actions закреплены по полному SHA, default token read-only,
 Actions не одобряют PR. Разрешены GitHub-owned actions; в app дополнительно только
-два реально используемых закреплённых action. Внешние PR публичного app требуют
+закреплённый publisher softprops. Flutter setup сохранён локально с лицензией и
+проверкой происхождения; вложенные cache actions тоже закреплены. Внешние PR публичного app требуют
 approval. В приватном бэке fork workflows и передача secrets/write tokens выключены.
 Dependabot alerts и security updates включены для обоих репозиториев.
 
@@ -64,6 +73,16 @@ Backend: `test`, `infrastructure`. Контексты принадлежат Git
 Private backend rulesets и classic protection возвращают403 с требованием Pro;
 репозиторий не переводился в public. Создание tags доверенным publisher/owner
 ещё не ограничено отдельным правилом. 2FA/recovery не проверены.
+
+После включения Dependabot исправлены пять предупреждений в инструментах
+оператора: cryptography50.0.0, requests2.33.0. Проверены отдельное окружение,
+SSH-ключи, шифрование/расшифровка и отказ при подмене backup. Это не обновление
+установленных на серверах Python-пакетов. Частную рабочую копию партнёра нужно
+синхронизировать с изменённым requirements перед следующим экспортом.
+
+Backend PR#4 на коммите `98dbe3e` прошёл обе Linux CI-проверки, включая
+PostgreSQL integration и backup receiver. Ошибка проверки временного merge-автора
+GitHub устранена без изменения правил авторства реальных коммитов.
 
 ## Что ещё требуется для публичного запуска
 

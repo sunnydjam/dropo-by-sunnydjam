@@ -676,7 +676,8 @@ void main() {
               onOpenExternal: (_) async {},
               transport: api,
               identity: identity,
-              onForgetVPNProfile: () async {
+              onForgetVPNProfile: (preserveStandaloneGuest) async {
+                expect(preserveStandaloneGuest, true);
                 cleanups++;
                 expect(
                   api.calls.where((call) => call.path == '/v1/guest/account'),
@@ -713,6 +714,67 @@ void main() {
         hasLength(1),
       );
       expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'deleting a later primary guest preserves separate Free and keeps its deletion reachable',
+    (tester) async {
+      final vault = MemoryVault();
+      final api = GuestApi(vault);
+      final identity = coordinator(vault, api);
+      addTearDown(identity.dispose);
+      await tester.runAsync(identity.restore);
+      var standaloneSecret = 'retained-separate-free-secret';
+      var independentDeletions = 0;
+      await tester.binding.setSurfaceSize(const Size(1000, 1000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AccountPage(
+              endpoint: endpoint,
+              transport: api,
+              identity: identity,
+              onOpenExternal: (_) async {},
+              onForgetVPNProfile: (preserveStandaloneGuest) async {
+                if (!preserveStandaloneGuest) standaloneSecret = '';
+                return {'success': true};
+              },
+              onDeleteGuestVPN: () async {
+                independentDeletions++;
+                standaloneSecret = '';
+                return {'success': true, 'independentGuest': true};
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('delete-standalone-guest-vpn')),
+        findsOneWidget,
+      );
+      await tester.ensureVisible(find.byKey(const ValueKey('guest-delete')));
+      await tester.tap(find.byKey(const ValueKey('guest-delete')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('guest-delete-confirm')));
+      await tester.pumpAndSettle();
+      expect(identity.suppressed, true);
+      expect(standaloneSecret, 'retained-separate-free-secret');
+      expect(independentDeletions, 0);
+      final deletion = find.byKey(const ValueKey('delete-guest-vpn'));
+      expect(deletion, findsOneWidget);
+      await tester.ensureVisible(deletion);
+      await tester.tap(deletion);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Удалить профиль'));
+      await tester.pumpAndSettle();
+      expect(independentDeletions, 1);
+      expect(standaloneSecret, isEmpty);
+      expect(
+        api.calls.where((call) => call.path == '/v1/guest/account'),
+        hasLength(1),
+      );
     },
   );
 }
