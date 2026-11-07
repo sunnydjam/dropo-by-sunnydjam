@@ -1,8 +1,19 @@
 """Evaluate the actual pre-checkout publishing condition against hostile events."""
-import re,unittest
+import hashlib,json,re,unittest
 from pathlib import Path
 
 WORKFLOW=Path(__file__).resolve().parents[1]/'.github/workflows/release.yml'
+ROOT=WORKFLOW.parents[2]
+
+def action_references(text):
+    return re.findall(r'^\s*(?:-\s*)?uses:\s*[\"\']?([^\s\"\'#]+)',text,re.M)
+
+def require_action_pins(text):
+    for reference in action_references(text):
+        if reference.startswith('./'):
+            continue
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}',reference):
+            raise AssertionError('Action requires a complete commit SHA: '+reference)
 
 def condition():
     text=WORKFLOW.read_text(encoding='utf-8')
@@ -48,5 +59,62 @@ class ReleaseTrust(unittest.TestCase):
     def test_stable_release_requires_public_signature(self):
         text,_=condition();self.assertIn('verify-public-windows-signature.ps1',text)
         self.assertIn("steps.version.outputs.draft == 'false'",text)
+    def test_required_package_gate_runs_before_merge_without_path_skips(self):
+        text=WORKFLOW.with_name('windows-release-gate.yml').read_text(encoding='utf-8')
+        events=text.split('\npermissions:',1)[0]
+        for event in ['push','pull_request']:
+            self.assertRegex(events,rf'(?m)^  {event}:\n(?:    #[^\n]*\n)*    branches: \[Dzhamuha-develop\]')
+        self.assertNotRegex(events,r'(?m)^\s+(paths|paths-ignore):')
+        self.assertNotIn('pull_request_target:',events)
+        self.assertIn('persist-credentials: false',text)
+        self.assertNotIn('contents: write',text)
+
+class FlutterActionPins(unittest.TestCase):
+    def test_floating_nested_cache_is_rejected(self):
+        for reference in ['actions/cache@v5','actions/cache@main','actions/cache@caa2961']:
+            with self.subTest(reference=reference), self.assertRaises(AssertionError):
+                require_action_pins('runs:\n  using: composite\n  steps:\n    - uses: '+reference+'\n')
+        require_action_pins('    - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25\n')
+
+    def test_workflows_and_local_actions_require_full_pins(self):
+        files=list((ROOT/'.github/workflows').glob('*.yml'))
+        files+=list((ROOT/'.github/workflows').glob('*.yaml'))
+        for filename in ['action.yml','action.yaml']:
+            files+=list((ROOT/'.github/actions').rglob(filename))
+        self.assertTrue(files)
+        for path in files:
+            with self.subTest(path=path.relative_to(ROOT)):
+                text=path.read_text(encoding='utf-8')
+                require_action_pins(text)
+                for reference in action_references(text):
+                    if reference.startswith('./'):
+                        target=(ROOT/reference).resolve()
+                        self.assertTrue(target.is_relative_to(ROOT.resolve()))
+                        self.assertTrue(any((target/name).is_file() for name in ['action.yml','action.yaml']))
+
+    def test_flutter_callers_keep_version_and_cache(self):
+        for name in ['ci.yml','windows-release-gate.yml']:
+            with self.subTest(workflow=name):
+                text=WORKFLOW.with_name(name).read_text(encoding='utf-8')
+                self.assertEqual(text.count('uses: ./.github/actions/setup-flutter'),1)
+                self.assertNotIn('uses: subosito/flutter-action@',text)
+                self.assertRegex(text,r'uses: \./\.github/actions/setup-flutter\n\s+with:\n\s+flutter-version: "3\.47\.1"\n\s+channel: stable\n\s+cache: true')
+                self.assertLess(text.index('uses: actions/checkout@'),text.index('uses: ./.github/actions/setup-flutter'))
+
+    def test_vendored_manifest_only_patches_cache_and_preserves_license(self):
+        action=ROOT/'.github/actions/setup-flutter'
+        source=json.loads((action/'provenance.json').read_text(encoding='utf-8'))
+        self.assertEqual(source['repository'],'https://github.com/subosito/flutter-action')
+        self.assertEqual(source['revision'],'1a449444c387b1966244ae4d4f8c696479add0b2')
+        self.assertEqual(source['cache']['repository'],'https://github.com/actions/cache')
+        self.assertRegex(source['cache']['revision'],r'^[0-9a-f]{40}$')
+        manifest=(action/'action.yaml').read_text(encoding='utf-8')
+        pinned='actions/cache@'+source['cache']['revision']
+        self.assertEqual(action_references(manifest),[pinned,pinned])
+        original=manifest.replace(pinned,'actions/cache@'+source['cache']['upstreamReference'])
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),source['files']['action.yaml'])
+        for filename in ['setup.sh','LICENSE']:
+            self.assertEqual(hashlib.sha256((action/filename).read_bytes()).hexdigest(),source['files'][filename])
+        self.assertIn('Copyright (c) 2019 Alif Rachmawadi',(action/'LICENSE').read_text(encoding='utf-8'))
 
 if __name__=='__main__':unittest.main()

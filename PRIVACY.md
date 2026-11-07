@@ -3,7 +3,7 @@
 Developer: Indzhiev Ayush. Privacy and support contact:
 [dr.oponevedimka@gmail.com](mailto:dr.oponevedimka@gmail.com).
 
-Last updated: 31 October 2026.
+Last updated: 7 November 2026.
 
 This policy covers Dropo (Dropo Connect Booster) for Windows and Android,
 including the Google Play package `com.dropo.myapp` and the separate Android Preview package
@@ -56,8 +56,11 @@ profile functionality, active-installation counts and API abuse prevention.
 MAC addresses, IMEI, hardware serial numbers and advertising IDs are not collected.
 An installation is not a unique person: clearing app data or reinstalling can
 create a new profile. Signing in to an ordinary account can link the installation
-to that account. The current free VPN subscription remains shared; guest profiles
-do not yet provide individual VPN credentials or per-user traffic limits.
+to that account. Managed Dropo Free now provisions individual device profiles;
+the service stores device/profile identifiers, credential digests, entitlement,
+expiry/revocation state and configuration revision. Provisioning and revocation
+are synchronized with Dropo's VPN controller. Existing legacy subscriptions and
+user-supplied subscriptions remain separate.
 
 For web deletion, a guest can explicitly create and save a separate random deletion
 code. The app keeps it in protected storage and sends it over HTTPS; the server
@@ -109,16 +112,21 @@ profile handle their own data under their respective privacy policies.
   Personal subscription import and refresh contact the user-supplied URL.
 - Service health checks contact the relevant service domains. Connectivity and
   latency checks also contact Google and Cloudflare test endpoints. The selected
-  DNS service, including system DNS or Google Public DNS, receives domain lookups.
+  DNS service receives domain lookups. Version 3.1.5 uses Dropo's encrypted DoH
+  endpoint, `dns.droponevedimka.ru`; older releases may use Google Public DNS.
+  System DNS can still be involved outside the managed application path.
 - The optional Windows network fingerprint check contacts `ipinfo.io` to obtain
   the public IP country code. This check is not performed on Android.
 - Windows and directly installed APK update checks contact the fork's GitHub
   Releases API. Google Play builds update through Google Play and do not install
   replacement APKs from GitHub.
-- After separate consent to add Dropo Free, the account service supplies the one
-  managed source URL without an account token. Its subscription provider and VPN
-  operator receive requests needed to import and use the source. Public VPN
-  aggregators are not offered.
+- After consent to add Dropo Free, the account service provisions an individual
+  installation profile. The profile is downloaded over authenticated HTTPS and
+  stored in protected device storage. Dropo's account API, VPN controller and VPN
+  nodes process the identifiers, entitlement and credentials required to provide
+  and revoke access. Telegram sign-in is not required for Free. Compatible older
+  services and installations can still use the legacy shared Free source.
+  Public VPN aggregators are not offered.
 
 These requests disclose network metadata, such as IP address and request time,
 to their recipients. External services, including Telegram, Google, Cloudflare,
@@ -126,7 +134,10 @@ GitHub, IPinfo and chosen VPN operators, apply their own policies. The account
 service is not a VPN relay and does not receive VPN traffic, browsing history,
 DNS history or personal subscription URLs.
 
-Android uses Google Public DNS over HTTPS for configured DNS paths. Google's
+The current configured DNS path uses Dropo's own HTTPS resolver. Recursion and
+necessary temporary DNS caches process domain lookups; this is distinct from
+storing browsing history in the account database. Earlier active versions can
+still use Google Public DNS over HTTPS. Google's
 [Public DNS privacy policy](https://developers.google.com/speed/public-dns/privacy)
 describes temporary IP/query logs and statistical records with location derived
 from the network address. These are provider-side processing, not a browsing
@@ -136,7 +147,7 @@ history in the Dropo account database; the app does not collect GPS coordinates.
 
 An explicit sign-in action opens `@DropoRigistration_bot`. Opening the bot's
 sign-in link sends Telegram user and chat IDs and available display name and
-username to the service at `dropo.fun` for the short-lived login
+username to the service at `dropo.fun` / `api.droponevedimka.ru` for the short-lived login
 challenge, before final approval. After approval, the service stores the account
 profile, Dropo account ID, device names and session metadata, one-time confirmation
 requests and account security events. These support login, session management,
@@ -162,8 +173,11 @@ digests, and database access is restricted to the account service. Bot and serve
 secrets are never included in clients. These measures do not eliminate every
 possible risk.
 
-Purchases are disabled until paid infrastructure is available. The app does not
-collect payment details.
+Purchases are currently disabled. Administrators can grant Turbo access or issue
+one-time gift links; the service stores the entitlement, source, dates and
+revocation/audit records needed to apply access. This version does not collect
+payment details in the app. Enabling purchases requires reviewing the payment
+data disclosure before sale.
 
 ## Retention
 
@@ -197,11 +211,18 @@ Maintenance runs on service startup and hourly. If the service is unavailable,
 the next cleanup runs after recovery. Third-party services set their own
 retention periods.
 
-The deployed account service does not archive the account database in backups.
-Deployment rollback copies contain the service binary and configuration, not
-user records, and do not restore deleted accounts. Account API and deletion
-request paths are excluded from reverse-proxy access logs; application logs do
-not record their tokens, account IDs or Telegram identities.
+The infrastructure now creates encrypted off-host backups, including the account
+database and VPN controller state. Daily retention removes archives older than
+30 days while keeping at least seven archives per source. If new backups stop,
+those minimum seven may remain longer; 30 days is not a guaranteed maximum.
+Deletion from live storage does not immediately rewrite existing backup archives.
+Restoring an old database requires separate reconciliation of deletions and
+revocations before reopening access; automatic reconciliation is not implemented.
+Controller revocation tombstones and applied-command identifiers are retained to
+reject replay; automatic expiry for those records is not currently configured.
+Account API and deletion request paths are
+excluded from reverse-proxy access logs; application logs do not record their
+tokens, account IDs or Telegram identities.
 
 ## Account deletion and local removal
 

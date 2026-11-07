@@ -31,10 +31,12 @@ class OwnedVPNClient {
     required this.endpoint,
     NativeAccountSessionStore? store,
     ProtectedAccountIdentityStore? identityStore,
+    this.subscriptionTimeout = const Duration(seconds: 10),
   }) : _store = store ?? NativeAccountSessionStore(null, 'managed-vpn-v1'),
        _identityStore =
            identityStore ?? ProtectedAccountIdentityStore(endpoint: endpoint);
   final String endpoint;
+  final Duration subscriptionTimeout;
   final NativeAccountSessionStore _store;
   final ProtectedAccountIdentityStore _identityStore;
   Future<void> _operations = Future<void>.value();
@@ -58,6 +60,7 @@ class OwnedVPNClient {
         }
         final source = _record;
         if (source == null ||
+            source['standaloneGuest'] == true ||
             source['deletionPending'] == true ||
             source['secret'] is! String) {
           return;
@@ -194,14 +197,38 @@ class OwnedVPNClient {
     if (valid['success'] != true) {
       throw const OwnedVPNOperationFailure('catalog_signature');
     }
-    _record ??= await _adoptAccountIdentity();
+    var accountToken =
+        registeredToken ??
+        await _AccountTokenVault(endpoint: endpoint).read(registeredOnly: true);
+    var standaloneGuest = false;
+    if (registeredToken == null &&
+        accountToken != null &&
+        accountToken.isNotEmpty) {
+      final response = await api.request('GET', '/v1/me', token: accountToken);
+      final account = _asMap(response['account']);
+      // Password/demo sessions cannot own device installations. Free still
+      // uses the ordinary guest API with a private per-device credential,
+      // never the shared signed-in account's session or installation secret.
+      standaloneGuest =
+          account['demoAccount'] == true || account['authMethod'] == 'password';
+      if (standaloneGuest) {
+        if (_record?['linked'] == true) return _apply(save);
+        accountToken = null;
+      }
+    }
+    _record ??= standaloneGuest
+        ? {
+            'format': 1,
+            'origin': accountCredentialOrigin(endpoint),
+            'secret': _newSecret(),
+            'standaloneGuest': true,
+          }
+        : await _adoptAccountIdentity();
+    if (standaloneGuest) _record!['standaloneGuest'] = true;
     _record!['catalogRevision'] = valid['revision'];
     // Save the installation credential before the first request, so a lost
     // response/restart reuses the same installation rather than creating one.
     await _ownedStep('protected_storage_write', _persist);
-    final accountToken =
-        registeredToken ??
-        await _AccountTokenVault(endpoint: endpoint).read(registeredOnly: true);
     String token = '';
     if (_record!['linked'] == true) {
       token = accountToken ?? '';
@@ -299,6 +326,16 @@ class OwnedVPNClient {
         until > DateTime.now().millisecondsSinceEpoch ~/ 1000) {
       boost = await _downloadKey(profile['boostSubscriptionUrl'], until);
     }
+    if (registeredToken != null) {
+      final identity = await _identityStore.read();
+      if (identity['suppressed'] == true ||
+          identity['pendingDeletion'] != null ||
+          identity['token'] != registeredToken ||
+          identity['accountKind'] != 'registered' ||
+          identity['installationSecret'] != _record!['secret']) {
+        throw const AccountIdentityChanged();
+      }
+    }
     _record!['freeKey'] = free;
     _record!['boostKey'] = boost;
     _record!['boostUntil'] = until;
@@ -330,44 +367,100 @@ class OwnedVPNClient {
       return createPinnedTlsConnection(uri, InternetAddress('193.233.88.97'));
     };
     try {
-      final request = await client.getUrl(u);
-      request.followRedirects = false;
-      final response = await request.close().timeout(
-        const Duration(seconds: 10),
-      );
-      if (response.statusCode != 200) {
-        throw const FormatException('Subscription unavailable.');
-      }
-      final bytes = <int>[];
-      await for (final chunk in response) {
-        bytes.addAll(chunk);
-        if (bytes.length > 8192) {
-          throw const FormatException('Subscription exceeds bounds.');
+      return await (() async {
+        final request = await client.getUrl(u);
+        request.followRedirects = false;
+        final response = await request.close().timeout(
+          const Duration(seconds: 10),
+        );
+        if (response.statusCode != 200) {
+          throw const FormatException('Subscription unavailable.');
         }
-      }
-      final text = utf8
-          .decode(base64.decode(base64.normalize(utf8.decode(bytes).trim())))
-          .trim();
-      if (text.contains('\n') || text.length > 4096) {
-        throw const FormatException('Unexpected managed nodes.');
-      }
-      final key = Uri.parse(text);
-      if (key.scheme != 'vless' ||
-          (key.host != 'cdn.droponevedimka.ru' &&
-              key.host != '193.233.88.97') ||
-          key.port != 443) {
-        throw const FormatException('Untrusted ingress.');
-      }
-      return key
-          .replace(
-            host: '193.233.88.97',
-            queryParameters: {...key.queryParameters, 'dropo_expiry': '$until'},
-          )
-          .toString();
+        final bytes = <int>[];
+        await for (final chunk in response) {
+          bytes.addAll(chunk);
+          if (bytes.length > 8192) {
+            throw const FormatException('Subscription exceeds bounds.');
+          }
+        }
+        final text = utf8
+            .decode(base64.decode(base64.normalize(utf8.decode(bytes).trim())))
+            .trim();
+        if (text.contains('\n') || text.length > 4096) {
+          throw const FormatException('Unexpected managed nodes.');
+        }
+        final key = Uri.parse(text);
+        if (key.scheme != 'vless' ||
+            (key.host != 'cdn.droponevedimka.ru' &&
+                key.host != '193.233.88.97') ||
+            key.port != 443) {
+          throw const FormatException('Untrusted ingress.');
+        }
+        return key
+            .replace(
+              host: '193.233.88.97',
+              queryParameters: {
+                ...key.queryParameters,
+                'dropo_expiry': '$until',
+              },
+            )
+            .toString();
+      })().timeout(subscriptionTimeout);
     } finally {
       client.close(force: true);
     }
   }
+
+  /// Forget only Dropo-managed local credentials after an explicit deletion.
+  /// Mark the vault first so a failed native cleanup cannot restore revoked keys
+  /// on the next launch. User subscriptions are never part of this cleanup.
+  Future<Map<String, dynamic>> forgetLocalProfile(
+    CoreBridge bridge, {
+    bool preserveStandaloneGuest = false,
+  }) => _serialize(() async {
+    try {
+      await _load();
+      if (preserveStandaloneGuest && _record?['standaloneGuest'] == true) {
+        return {'success': true, 'independentGuestPreserved': true};
+      }
+      final view = await bridge.callMap('GetVPNSources');
+      final sources = (view['sources'] as List? ?? const [])
+          .map(_asMap)
+          .where(
+            (source) => const {
+              'dropo-individual-free',
+              'dropo-individual-boost',
+            }.contains(source['public_catalog_id']),
+          )
+          .toList();
+      if (_record == null && sources.isEmpty) return {'success': true};
+      if (_record != null) {
+        _record!['deletionPending'] = true;
+        await _persist();
+      }
+      if (sources.isNotEmpty) {
+        final stopped = await bridge.setConnected(false);
+        if (stopped['success'] != true) {
+          throw const FormatException('VPN stop unconfirmed.');
+        }
+        for (final source in sources) {
+          final removed = await bridge.removeVpnSource(source['id'].toString());
+          if (removed['success'] != true) {
+            throw const FormatException('Local cleanup pending.');
+          }
+        }
+      }
+      await _store.clear();
+      _record = null;
+      return {'success': true};
+    } catch (_) {
+      return {
+        'success': false,
+        'error':
+            'Не удалось удалить ключи Dropo с устройства. Повторите очистку; свои подписки сохранятся.',
+      };
+    }
+  });
 
   Future<Map<String, dynamic>> _apply(OwnedVPNSave save) async {
     final free = _record?['freeKey'];
@@ -504,6 +597,29 @@ class OwnedVPNClient {
     final api = transport ?? _AccountApi(endpoint);
     try {
       await _load();
+      final identity = await _identityStore.read();
+      if (identity['suppressed'] == true ||
+          identity['pendingDeletion'] != null ||
+          identity['token'] != token ||
+          identity['accountKind'] != 'registered') {
+        throw const AccountIdentityChanged();
+      }
+      if (_record?['standaloneGuest'] == true) {
+        return {
+          'success': false,
+          'error':
+              'На устройстве сохранён отдельный бесплатный профиль. Удалите его отдельной кнопкой в аккаунте, затем обновите профиль VPN для привязки и Турбо.',
+        };
+      }
+      if (identity['accountKind'] == 'registered' &&
+          identity['installationSecret'] is String &&
+          _record != null &&
+          identity['installationSecret'] != _record!['secret']) {
+        // A new authenticated account has its own installation. Never try to
+        // bind the previous owner's cached installation to the new account.
+        _record = await _adoptAccountIdentity();
+        await _persist();
+      }
       if (_record?['deletionPending'] == true) {
         return {
           'success': false,
@@ -583,7 +699,7 @@ class OwnedVPNClient {
     final api = transport ?? _AccountApi(endpoint);
     try {
       await _load();
-      if (_record == null) return {'success': true};
+      if (_record == null) return {'success': true, 'unchanged': true};
       if (_record!['linked'] == true) {
         return {
           'success': false,
@@ -591,6 +707,7 @@ class OwnedVPNClient {
               'Профиль привязан к аккаунту. Управляйте им после входа через Telegram.',
         };
       }
+      final independentGuest = _record!['standaloneGuest'] == true;
       final stopped = await bridge.setConnected(false);
       if (stopped['success'] != true) {
         return {
@@ -673,7 +790,7 @@ class OwnedVPNClient {
       }
       await _store.clear();
       _record = null;
-      return {'success': true};
+      return {'success': true, 'independentGuest': independentGuest};
     } catch (_) {
       return {
         'success': false,

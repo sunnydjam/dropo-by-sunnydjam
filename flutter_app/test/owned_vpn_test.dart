@@ -185,6 +185,33 @@ void main() {
     expect(protected, isNotNull);
   });
   test(
+    'confirmed account deletion clears managed keys and keeps personal sources',
+    () async {
+      seed({
+        'linked': true,
+        'freeKey': 'cached-free',
+        'boostKey': 'cached-boost',
+      });
+      final bridge = _Bridge();
+      expect((await client().forgetLocalProfile(bridge))['success'], true);
+      expect(bridge.removed, ['free', 'boost']);
+      expect(bridge.stops, 1);
+      expect(protected, isNull);
+    },
+  );
+  test(
+    'failed managed cleanup remains durable and can be retried after restart',
+    () async {
+      seed({'linked': true, 'freeKey': 'cached-free'});
+      final bridge = _Bridge()..failCleanup = true;
+      expect((await client().forgetLocalProfile(bridge))['success'], false);
+      expect(record()['deletionPending'], true);
+      bridge.failCleanup = false;
+      expect((await client().forgetLocalProfile(bridge))['success'], true);
+      expect(protected, isNull);
+    },
+  );
+  test(
     'lost enrollment reply recovers the same installation before deletion',
     () async {
       seed({'enrollmentAttempted': true});

@@ -26,7 +26,7 @@ $androidFunction = @($buildAst.FindAll({ param($node)
 if ($androidFunction.Count -ne 1) { throw 'Android build entry point missing.' }
 $body = $androidFunction[0].Extent.Text
 foreach ($required in @(
-    '$UseCachedFlutterPackages', '& $FlutterCmd pub get --offline',
+    'Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages',
     "`$androidBuildArguments += '--no-pub'", '"-ExpectedVersion", $AppVersion',
     'Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint'
 )) {
@@ -57,6 +57,75 @@ function Get-BuildFunctionAst([string]$Name) {
     if ($functions.Count -ne 1) { throw "Android build function missing: $Name" }
     return $functions[0]
 }
+
+# Execute the release dependency resolver, including its failure path. A cache
+# miss must stop the caller before compilation; a successful command may not
+# silently rewrite the committed lockfile either.
+. ([ScriptBlock]::Create((Get-BuildFunctionAst 'Restore-FlutterLockedPackages').Extent.Text))
+$lockFixtureDirectory = Join-Path ([IO.Path]::GetTempPath()) ('dropo-flutter-lock-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $lockFixtureDirectory | Out-Null
+$lockFixturePath = Join-Path $lockFixtureDirectory 'pubspec.lock'
+$originalLock = "packages:`n  vector_math: 2.4.4`n"
+$script:fixturePubCalls = @()
+$script:fixturePubExit = 0
+$script:fixturePubMutates = $false
+function Invoke-LockedFlutterFixture {
+    $script:fixturePubCalls += ,@($args)
+    if ($script:fixturePubMutates) {
+        [IO.File]::WriteAllText($lockFixturePath, "packages:`n  vector_math: 2.4.2`n", [Text.UTF8Encoding]::new($false))
+    }
+    $global:LASTEXITCODE = $script:fixturePubExit
+}
+Push-Location $lockFixtureDirectory
+try {
+    foreach ($offline in @($false, $true)) {
+        [IO.File]::WriteAllText($lockFixturePath, $originalLock, [Text.UTF8Encoding]::new($false))
+        Restore-FlutterLockedPackages -FlutterCmd 'Invoke-LockedFlutterFixture' -Offline:$offline
+        $expected = @('pub', 'get', '--enforce-lockfile')
+        if ($offline) { $expected += '--offline' }
+        if (($script:fixturePubCalls[-1] -join ',') -cne ($expected -join ',')) {
+            throw 'Online and offline Flutter resolution must enforce the same exact lockfile.'
+        }
+    }
+    foreach ($case in @(
+        @{ ExitCode = 1; Mutates = $false; Missing = $false; ExpectedError = 'Locked Flutter dependency resolution failed' },
+        @{ ExitCode = 0; Mutates = $true; Missing = $false; ExpectedError = 'changed pubspec.lock' },
+        @{ ExitCode = 0; Mutates = $false; Missing = $true; ExpectedError = 'pubspec.lock is required' }
+    )) {
+        [IO.File]::WriteAllText($lockFixturePath, $originalLock, [Text.UTF8Encoding]::new($false))
+        if ($case.Missing) { Remove-Item -LiteralPath $lockFixturePath -Force }
+        $script:fixturePubExit = $case.ExitCode
+        $script:fixturePubMutates = $case.Mutates
+        $compiled = $false
+        $rejected = $false
+        try {
+            Restore-FlutterLockedPackages -FlutterCmd 'Invoke-LockedFlutterFixture' -Offline
+            $compiled = $true
+        } catch {
+            if (-not $_.Exception.Message.Contains($case.ExpectedError)) { throw }
+            $rejected = $true
+        }
+        if (-not $rejected -or $compiled) { throw 'Unreproducible Flutter dependencies reached compilation.' }
+    }
+} finally {
+    Pop-Location
+    if (Test-Path -LiteralPath $lockFixturePath -PathType Leaf) { Remove-Item -LiteralPath $lockFixturePath -Force }
+    Remove-Item -LiteralPath $lockFixtureDirectory -Force
+    $global:LASTEXITCODE = 0
+}
+foreach ($case in @(
+    @{ Name = 'Build-Application'; Arguments = '$flutterBuildArguments' },
+    @{ Name = 'Build-AndroidApplication'; Arguments = '$androidBuildArguments' },
+    @{ Name = 'Build-AndroidAppBundle'; Arguments = '$androidBundleArguments' }
+)) {
+    $entry = (Get-BuildFunctionAst $case.Name).Extent.Text
+    $restore = $entry.IndexOf('Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages')
+    $compile = $entry.IndexOf('& $FlutterCmd @' + $case.Arguments.Substring(1))
+    $noPubPattern = [regex]::Escape($case.Arguments) + '\s*\+=\s*["'']--no-pub["'']'
+    if ($restore -lt 0 -or $compile -le $restore -or $entry -notmatch $noPubPattern) {
+        throw "Every release build must restore locked dependencies before compiling with --no-pub: $($case.Name)"
+    }
+}
 foreach ($name in @('Get-DropoAccountBuildArguments', 'Get-DropoAndroidBundleBuildArguments', 'Get-AndroidBuildNumber', 'Write-DropoAndroidBuildMetadata')) {
     . ([ScriptBlock]::Create((Get-BuildFunctionAst $name).Extent.Text))
 }
@@ -86,8 +155,9 @@ $bundleBody = (Get-BuildFunctionAst 'Build-AndroidAppBundle').Extent.Text
 foreach ($required in @(
     "tools\prepare-android-bundletool.ps1') -Download", 'Build-AndroidBridgeAAR',
     "tools\verify-android-aab.ps1'", "'-BundletoolPath', `$bundletool.Path",
-    'Get-DropoAndroidBundleBuildArguments', '$UseCachedFlutterPackages',
-    '& $FlutterCmd pub get --offline', "`$androidBundleArguments += '--no-pub'",
+    'Get-DropoAndroidBundleBuildArguments',
+    'Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages',
+    "`$androidBundleArguments += '--no-pub'",
     'Write-DropoAndroidBuildMetadata', "-Channel 'play'",
     "-Channel 'play' -PackageName 'com.dropo.myapp'",
     "tools\archive-android-aab.ps1') -ReleaseFolder `$VersionDir", 'if (-not $SourceDirty)',
@@ -252,4 +322,4 @@ try {
     if (Test-Path -LiteralPath $bridgeFixturePath -PathType Leaf) { Remove-Item -LiteralPath $bridgeFixturePath -Force }
     Remove-Item -LiteralPath $fixtureDirectory -Force
 }
-Write-Host 'Android build options passed (APK channel isolation, release AAB, ARM32/ARM64, Go toolchain cache invalidation, exact metadata and combined artifact dispatch).'
+Write-Host 'Android build options passed (locked online/offline Flutter packages, APK channel isolation, release AAB, ARM32/ARM64, Go toolchain cache invalidation, exact metadata and combined artifact dispatch).'

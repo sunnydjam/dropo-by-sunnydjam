@@ -9,6 +9,7 @@ import (
 func TestAdaptiveGraphStartsOnVPNAndScopesTLSOnly(t *testing.T) {
 	resetSourceTest(t)
 	sourceSuccess(t, "AddVPNSource", "One", sourceTestKey)
+	sourceSuccess(t, "SetRoutingMode", "blocked_only")
 	current.RoutePolicies = map[string]string{"meta": "vpn"}
 	var result struct {
 		Config string `json:"config"`
@@ -20,7 +21,7 @@ func TestAdaptiveGraphStartsOnVPNAndScopesTLSOnly(t *testing.T) {
 	}
 	route := cfg["route"].(map[string]interface{})
 	rules := route["rules"].([]interface{})
-	if route["final"] != "proxy" || rules[2].(map[string]interface{})["ip_is_private"] != true {
+	if route["final"] != "direct" || rules[2].(map[string]interface{})["ip_is_private"] != true {
 		t.Fatal("default/private policy changed")
 	}
 	found := 0
@@ -51,8 +52,39 @@ func TestAdaptiveGraphStartsOnVPNAndScopesTLSOnly(t *testing.T) {
 }
 func stringValue(v interface{}) string { s, _ := v.(string); return s }
 
+func TestFullVPNNeverOffersOrCommitsAdaptiveDirectStrategies(t *testing.T) {
+	gen := preparedSourceSession(t)
+	if current.Config.RoutingMode != "all_traffic" {
+		t.Fatal("fixture must use full VPN")
+	}
+	var result struct {
+		Config string `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(BuildSingBoxConfig()), &result); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Config, AndroidAdaptiveSelectorPrefix) || strings.Contains(result.Config, "tls_record_fragment") {
+		t.Fatal("full VPN contains an automatic direct service escape")
+	}
+	var plan struct {
+		Services []androidAdaptiveService `json:"services"`
+	}
+	if err := json.Unmarshal([]byte(AndroidAdaptivePlan()), &plan); err != nil || len(plan.Services) != 0 {
+		t.Fatal("full VPN scheduled direct service probes")
+	}
+	selector := &testSourceSelector{}
+	if CommitAndroidAdaptive(gen, "youtube", 3, selector) || len(selector.selected) != 0 {
+		t.Fatal("full VPN accepted a direct service strategy")
+	}
+	current.Config.RoutingMode = "blocked_only"
+	if err := json.Unmarshal([]byte(AndroidAdaptivePlan()), &plan); err != nil || len(plan.Services) == 0 {
+		t.Fatal("selective mode lost adaptive service selection")
+	}
+}
+
 func TestAdaptiveCommitRequiresThreeAndFencesStoppedSession(t *testing.T) {
 	gen := preparedSourceSession(t)
+	current.Config.RoutingMode = "blocked_only"
 	selector := &testSourceSelector{}
 	for _, n := range []int{1, 2, 4} {
 		if CommitAndroidAdaptive(gen, "youtube", n, selector) {

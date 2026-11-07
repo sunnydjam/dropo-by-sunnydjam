@@ -21,28 +21,46 @@ import (
 
 func TestAdaptiveHealthIsBoundedAndHandoverClearsCooldown(t *testing.T) {
 	server := &CommandServer{adaptiveNext: map[string]int64{}, adaptiveHealthIndex: map[string]int{}, adaptiveSelected: map[string]bool{}}
-	_, _, due := server.adaptiveProbeDue("youtube")
+	_, _, due := server.adaptiveProbeDue(context.Background(), 0, "youtube")
 	if !due {
 		t.Fatal("initial probe skipped")
 	}
-	_, _, due = server.adaptiveProbeDue("youtube")
+	_, _, due = server.adaptiveProbeDue(context.Background(), 0, "youtube")
 	if due {
 		t.Fatal("failed candidates retried continuously")
 	}
 	server.resetAdaptiveLocked()
 	server.adaptiveSelected["youtube"] = true
-	active, index, due := server.adaptiveProbeDue("youtube")
+	active, index, due := server.adaptiveProbeDue(context.Background(), 0, "youtube")
 	if !active || !due || index != 0 {
 		t.Fatal("active health check unavailable")
 	}
-	_, _, due = server.adaptiveProbeDue("youtube")
+	_, _, due = server.adaptiveProbeDue(context.Background(), 0, "youtube")
 	if due {
 		t.Fatal("active health checks unbounded")
 	}
 	server.resetAdaptiveLocked()
-	_, _, due = server.adaptiveProbeDue("youtube")
+	_, _, due = server.adaptiveProbeDue(context.Background(), 0, "youtube")
 	if !due {
 		t.Fatal("handover did not schedule fresh acceptance")
+	}
+}
+
+func TestAdaptiveStaleWorkerCannotPostponeNewSessionProbes(t *testing.T) {
+	server := &CommandServer{sourceGeneration: 2, adaptiveNext: map[string]int64{}, adaptiveHealthIndex: map[string]int{}, adaptiveSelected: map[string]bool{}}
+	if _, _, due := server.adaptiveProbeDue(context.Background(), 1, "youtube"); due {
+		t.Fatal("stale session scheduled a probe")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, due := server.adaptiveProbeDue(cancelled, 2, "youtube"); due {
+		t.Fatal("cancelled network cycle scheduled a probe")
+	}
+	if len(server.adaptiveNext) != 0 || len(server.adaptiveHealthIndex) != 0 {
+		t.Fatal("cancelled work changed the next session's health schedule")
+	}
+	if _, _, due := server.adaptiveProbeDue(context.Background(), 2, "youtube"); !due {
+		t.Fatal("fresh session probe was postponed")
 	}
 }
 
@@ -53,6 +71,9 @@ func TestAdaptiveBuiltGraphPassesPinnedEngineConfigCheck(t *testing.T) {
 	raw := core.Call("AddVPNSource", `["TLS fixture","vless://00000000-0000-0000-0000-000000000001@fixture.invalid:443?security=tls"]`)
 	if json.Unmarshal([]byte(raw), &response) != nil || response["success"] != true {
 		t.Fatal("source fixture failed")
+	}
+	if json.Unmarshal([]byte(core.Call("SetRoutingMode", `["blocked_only"]`)), &response) != nil || response["success"] != true {
+		t.Fatal("selective mode fixture failed")
 	}
 	if json.Unmarshal([]byte(BuildSingBoxConfig()), &response) != nil || response["success"] != true {
 		t.Fatal("adaptive graph rejected")
@@ -134,11 +155,17 @@ func TestAdaptiveEncryptionExceptionCannotBroadenVPNSelector(t *testing.T) {
 	rule := map[string]any{"network": "tcp", "protocol": "tls", "port": 443, "domain_suffix": domains, "action": "route", "outbound": selector["tag"], "tls_record_fragment": true}
 	secure := map[string]any{"type": "vless", "tag": "secure", "tls": verifiedTLSFixture()}
 	proxy := map[string]any{"type": "selector", "tag": "proxy", "outbounds": []any{"secure"}}
-	cfg := map[string]any{"outbounds": []any{secure, proxy, map[string]any{"type": "direct", "tag": "direct"}, selector}, "route": map[string]any{"final": "proxy", "rules": []any{rule}}}
+	route := map[string]any{"final": "direct", "rules": []any{rule}}
+	cfg := map[string]any{"outbounds": []any{secure, proxy, map[string]any{"type": "direct", "tag": "direct"}, selector}, "route": route}
 	encode := func() string { data, _ := json.Marshal(cfg); return string(data) }
 	if err := validateEncryptedVPNConfig(encode()); err != nil {
 		t.Fatal("narrow selector refused", err)
 	}
+	route["final"] = "proxy"
+	if validateEncryptedVPNConfig(encode()) == nil {
+		t.Fatal("full VPN accepted an adaptive direct exception")
+	}
+	route["final"] = "direct"
 	rule["network"] = "udp"
 	if validateEncryptedVPNConfig(encode()) == nil {
 		t.Fatal("UDP exception accepted")

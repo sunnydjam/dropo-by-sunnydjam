@@ -79,6 +79,54 @@ void main() {
   );
 
   testWidgets(
+    'password sign-in never binds an installation to a shared account',
+    (tester) async {
+      for (final demo in [false, true]) {
+        final api = _PasswordTransport()..demoAccount = demo;
+        final tokens = <String>[];
+        await _pump(
+          tester,
+          api,
+          onVPNProfile: (token, consent) async {
+            tokens.add(token);
+            expect(consent, true);
+            return {'success': true};
+          },
+        );
+        await _login(tester);
+        expect(tokens, isEmpty);
+      }
+    },
+  );
+  testWidgets(
+    'independent Free deletion is visible without signing out of the password account',
+    (tester) async {
+      final api = _PasswordTransport();
+      var deletions = 0;
+      await _pump(
+        tester,
+        api,
+        initialToken: 'password-bearer',
+        onDeleteGuestVPN: () async {
+          deletions++;
+          return {'success': true};
+        },
+      );
+      await _tap(
+        tester,
+        find.byKey(const ValueKey('delete-standalone-guest-vpn')),
+      );
+      await _tap(tester, find.text('Удалить профиль'));
+      expect(deletions, 1);
+      expect(find.text('Play Review'), findsOneWidget);
+      expect(
+        api.requests.where((request) => request.path == '/v1/sessions/current'),
+        isEmpty,
+      );
+    },
+  );
+
+  testWidgets(
     'password revoke uses real confirmation/consume and current bearer without Telegram',
     (tester) async {
       final api = _PasswordTransport();
@@ -192,6 +240,8 @@ Future<void> _pump(
   bool persist = false,
   String? initialToken,
   double textScale = 1,
+  Future<Map<String, dynamic>> Function(String, bool)? onVPNProfile,
+  Future<Map<String, dynamic>> Function()? onDeleteGuestVPN,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -207,6 +257,8 @@ Future<void> _pump(
           key: UniqueKey(),
           endpoint: 'https://accounts.example.com',
           transport: api,
+          onVPNProfile: onVPNProfile,
+          onDeleteGuestVPN: onDeleteGuestVPN,
           persistSession: persist,
           initialToken: initialToken,
           onOpenExternal: (_) async =>
@@ -270,6 +322,7 @@ class _PasswordTransport implements AccountTransport {
       rejectLogin = false,
       rejectConfirmation = false;
   bool loseDeleteResponse = false;
+  bool demoAccount = true;
   String action = '';
   Completer<Map<String, dynamic>>? pendingLogin;
   Iterable<_Request> get logins =>
@@ -281,7 +334,7 @@ class _PasswordTransport implements AccountTransport {
     'displayName': 'Play Review',
     'username': 'play.review.1',
     'authMethod': 'password',
-    'demoAccount': true,
+    'demoAccount': demoAccount,
   };
   Map<String, dynamic> get loginResponse => {
     'accessToken': 'password-bearer',

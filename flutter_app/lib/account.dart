@@ -483,6 +483,7 @@ class AccountPage extends StatefulWidget {
     this.identity,
     this.onVPNProfile,
     this.onDeleteGuestVPN,
+    this.onForgetVPNProfile,
     this.showTurbo = false,
     this.onBackToAccount,
   });
@@ -500,6 +501,8 @@ class AccountPage extends StatefulWidget {
   final Future<Map<String, dynamic>> Function(String token, bool linkConsent)?
   onVPNProfile;
   final Future<Map<String, dynamic>> Function()? onDeleteGuestVPN;
+  final Future<Map<String, dynamic>> Function(bool preserveStandaloneGuest)?
+  onForgetVPNProfile;
 
   @override
   State<AccountPage> createState() => _AccountPageState();
@@ -690,6 +693,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         _development ||
         _profileSyncing ||
         _account?.guestAccount == true ||
+        _account?.passwordAccount == true ||
         _account?.demoAccount == true) {
       return;
     }
@@ -700,6 +704,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       if (result['success'] != true) {
         setState(
           () => _message =
+              result['error']?.toString() ??
               'Вход выполнен. Профиль VPN пока не обновлён; повторите обновление в разделе Турбо. Сохранённый VPN доступен.',
         );
       }
@@ -789,6 +794,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       widget.onDisplayChanged?.call(
         AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
       );
+      unawaited(_syncOwnedVPN(token, generation));
     } catch (error) {
       if (mounted && generation == _authGeneration) {
         setState(() => _message = _accountError(error));
@@ -1183,15 +1189,19 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
 
   Future<void> _finishDeletionCleanup() async {
     if (mounted) setState(() => _busy = true);
-    bool cleared;
-    if (widget.identity != null) {
+    var cleared = false;
+    try {
+      final result = await widget.onForgetVPNProfile?.call(true);
+      cleared = result == null || result['success'] == true;
+    } catch (_) {}
+    if (cleared && widget.identity != null) {
       try {
         await widget.identity!.logout(forgetInstallation: true);
         cleared = true;
       } catch (_) {
         cleared = false;
       }
-    } else {
+    } else if (cleared) {
       cleared = await _vault.clear();
     }
     if (!mounted) return;
@@ -1203,7 +1213,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       if (cleared) _token = null;
       _message = cleared
           ? 'Аккаунт удалён, все сессии завершены. Личные VPN-источники и настройки на устройстве сохранены.'
-          : 'Аккаунт на сервере удалён, все сессии завершены. Не удалось удалить сохранённый токен из защищённого хранилища. Повторите очистку на этом устройстве.';
+          : 'Аккаунт на сервере удалён, все сессии завершены. Не удалось очистить все сохранённые данные аккаунта и ключи Dropo. Повторите очистку на этом устройстве.';
     });
   }
 
@@ -1685,7 +1695,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       builder: (context) => AlertDialog(
         title: const Text('Удалить бесплатный профиль?'),
         content: const Text(
-          'Профиль и его сессии будут удалены. Настройки VPN на устройстве сохранятся. Новый профиль не будет создан автоматически.',
+          'Текущий профиль, его сессии и связанные ключи Dropo будут удалены. Свои подписки и настройки сохранятся. Отдельный бесплатный профиль, если он есть, удаляется своей кнопкой. Новый профиль не будет создан автоматически.',
         ),
         actions: [
           TextButton(
@@ -1703,6 +1713,19 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     if (confirmed != true || !mounted) return;
     setState(() => _busy = true);
     try {
+      // The current identity may be a new guest while a separate Free profile
+      // from an earlier password session still belongs to another guest.
+      final cleanup = await widget.onForgetVPNProfile?.call(true);
+      if (cleanup != null && cleanup['success'] != true) {
+        if (mounted) {
+          setState(
+            () => _message =
+                cleanup['error']?.toString() ??
+                'Не удалось удалить ключи Dropo. Повторите удаление.',
+          );
+        }
+        return;
+      }
       await identity.deleteGuest();
       if (!mounted) return;
       setState(() {
@@ -1815,6 +1838,12 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
               onPressed: _busy ? null : _deleteGuestProfile,
               child: const Text('Удалить бесплатный профиль'),
             ),
+            if (widget.onDeleteGuestVPN != null)
+              TextButton(
+                key: const ValueKey('delete-standalone-guest-vpn'),
+                onPressed: _busy ? null : _deleteGuestVPN,
+                child: const Text('Удалить отдельный бесплатный профиль'),
+              ),
           ],
         ),
         const SizedBox(height: 16),
@@ -1848,6 +1877,12 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     setState(() => _busy = true);
     try {
       final result = await widget.onDeleteGuestVPN!();
+      if (result['success'] == true &&
+          result['independentGuest'] != true &&
+          result['unchanged'] != true &&
+          widget.identity?.accountKind != 'registered') {
+        await widget.identity?.logout(forgetInstallation: true);
+      }
       if (mounted) {
         setState(
           () => _message = result['success'] == true
@@ -2055,6 +2090,15 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
               onPressed: _busy ? null : _refreshOwnedVPN,
               icon: const Icon(Icons.vpn_key_outlined),
               label: const Text('Обновить профиль VPN'),
+            ),
+          ],
+          if (widget.onDeleteGuestVPN != null && !_development) ...[
+            const SizedBox(height: 12),
+            TextButton.icon(
+              key: const ValueKey('delete-standalone-guest-vpn'),
+              onPressed: _busy ? null : _deleteGuestVPN,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Удалить отдельный бесплатный профиль'),
             ),
           ],
           const SizedBox(height: 26),

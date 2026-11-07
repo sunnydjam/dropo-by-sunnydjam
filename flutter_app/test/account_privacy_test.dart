@@ -106,6 +106,45 @@ void main() {
     expect(calls, ['read']);
   });
 
+  testWidgets(
+    'server deletion retries managed key cleanup before clearing account vault',
+    (tester) async {
+      final service = _DeletionTransport();
+      final calls = _mockVault(tester);
+      var failCleanup = true;
+      var cleanups = 0;
+      await _pumpAccount(
+        tester,
+        service,
+        persistSession: true,
+        onForgetVPNProfile: (preserveStandaloneGuest) async {
+          expect(preserveStandaloneGuest, true);
+          cleanups++;
+          expect(service.consumeRequests, hasLength(1));
+          return {'success': !failCleanup};
+        },
+      );
+      await _openDelete(tester);
+      await tester.tap(find.byKey(const ValueKey('account-delete-confirm')));
+      await tester.pumpAndSettle();
+      expect(cleanups, 1);
+      expect(calls, ['read']);
+      expect(
+        find.byKey(const ValueKey('account-delete-cleanup-retry')),
+        findsOneWidget,
+      );
+      failCleanup = false;
+      await tester.tap(
+        find.byKey(const ValueKey('account-delete-cleanup-retry')),
+      );
+      await tester.pumpAndSettle();
+      expect(cleanups, 2);
+      expect(calls, ['read', 'clear']);
+      expect(service.consumeRequests, hasLength(1));
+      expect(find.text('Войти в Dropo'), findsOneWidget);
+    },
+  );
+
   testWidgets('offline creation failure preserves account and can retry', (
     tester,
   ) async {
@@ -208,7 +247,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Завершите очистку устройства'), findsOneWidget);
       expect(
-        find.textContaining('Не удалось удалить сохранённый токен'),
+        find.textContaining('Не удалось очистить все сохранённые данные'),
         findsOneWidget,
       );
       expect(find.text('Войти в Dropo'), findsNothing);
@@ -375,6 +414,7 @@ Future<void> _pumpAccount(
   List<String>? opened,
   Size size = const Size(1100, 1000),
   double textScale = 1,
+  Future<Map<String, dynamic>> Function(bool)? onForgetVPNProfile,
 }) async {
   await tester.binding.setSurfaceSize(size);
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -394,6 +434,7 @@ Future<void> _pumpAccount(
           transport: service,
           initialToken: signedIn ? 'stored-session' : null,
           persistSession: persistSession,
+          onForgetVPNProfile: onForgetVPNProfile,
           onOpenExternal: (value) async => opened?.add(value),
         ),
       ),
