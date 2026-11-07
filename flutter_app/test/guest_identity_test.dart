@@ -656,4 +656,63 @@ void main() {
       identity.setForeground(false);
     },
   );
+  testWidgets(
+    'guest deletion cleans managed keys before server erasure and retries cleanup',
+    (tester) async {
+      final vault = MemoryVault();
+      final api = GuestApi(vault);
+      final identity = coordinator(vault, api);
+      addTearDown(identity.dispose);
+      await tester.runAsync(identity.restore);
+      var cleanupFails = true;
+      var cleanups = 0;
+      await tester.binding.setSurfaceSize(const Size(1000, 1000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AccountPage(
+              endpoint: endpoint,
+              onOpenExternal: (_) async {},
+              transport: api,
+              identity: identity,
+              onForgetVPNProfile: () async {
+                cleanups++;
+                expect(
+                  api.calls.where((call) => call.path == '/v1/guest/account'),
+                  isEmpty,
+                );
+                return {'success': !cleanupFails};
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Future<void> confirm() async {
+        await tester.ensureVisible(find.byKey(const ValueKey('guest-delete')));
+        await tester.tap(find.byKey(const ValueKey('guest-delete')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('guest-delete-confirm')));
+        await tester.pumpAndSettle();
+      }
+
+      await confirm();
+      expect(cleanups, 1);
+      expect(identity.accountKind, 'guest');
+      expect(
+        api.calls.where((call) => call.path == '/v1/guest/account'),
+        isEmpty,
+      );
+      cleanupFails = false;
+      await confirm();
+      expect(cleanups, 2);
+      expect(identity.suppressed, true);
+      expect(
+        api.calls.where((call) => call.path == '/v1/guest/account'),
+        hasLength(1),
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

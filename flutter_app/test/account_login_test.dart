@@ -79,6 +79,27 @@ void main() {
   );
 
   testWidgets(
+    'password sign-in synchronizes real profiles but skips reviewer accounts',
+    (tester) async {
+      for (final demo in [false, true]) {
+        final api = _PasswordTransport()..demoAccount = demo;
+        final tokens = <String>[];
+        await _pump(
+          tester,
+          api,
+          onVPNProfile: (token, consent) async {
+            tokens.add(token);
+            expect(consent, true);
+            return {'success': true};
+          },
+        );
+        await _login(tester);
+        expect(tokens, demo ? isEmpty : ['password-bearer']);
+      }
+    },
+  );
+
+  testWidgets(
     'password revoke uses real confirmation/consume and current bearer without Telegram',
     (tester) async {
       final api = _PasswordTransport();
@@ -192,6 +213,7 @@ Future<void> _pump(
   bool persist = false,
   String? initialToken,
   double textScale = 1,
+  Future<Map<String, dynamic>> Function(String, bool)? onVPNProfile,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -207,6 +229,7 @@ Future<void> _pump(
           key: UniqueKey(),
           endpoint: 'https://accounts.example.com',
           transport: api,
+          onVPNProfile: onVPNProfile,
           persistSession: persist,
           initialToken: initialToken,
           onOpenExternal: (_) async =>
@@ -270,6 +293,7 @@ class _PasswordTransport implements AccountTransport {
       rejectLogin = false,
       rejectConfirmation = false;
   bool loseDeleteResponse = false;
+  bool demoAccount = true;
   String action = '';
   Completer<Map<String, dynamic>>? pendingLogin;
   Iterable<_Request> get logins =>
@@ -281,7 +305,7 @@ class _PasswordTransport implements AccountTransport {
     'displayName': 'Play Review',
     'username': 'play.review.1',
     'authMethod': 'password',
-    'demoAccount': true,
+    'demoAccount': demoAccount,
   };
   Map<String, dynamic> get loginResponse => {
     'accessToken': 'password-bearer',

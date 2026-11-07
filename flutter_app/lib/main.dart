@@ -6556,6 +6556,8 @@ class _DropoHomePageState extends State<DropoHomePage>
           onVPNProfile: (token, consent) =>
               _ownedVPNClient.linkAccount(widget.bridge, token, consent),
           onDeleteGuestVPN: () => _ownedVPNClient.deleteGuest(widget.bridge),
+          onForgetVPNProfile: () =>
+              _ownedVPNClient.forgetLocalProfile(widget.bridge),
         );
       case 'sources':
         return VpnSourcesDialog(

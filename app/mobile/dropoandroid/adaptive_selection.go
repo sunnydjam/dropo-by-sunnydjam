@@ -82,9 +82,14 @@ func (s *CommandServer) beginAdaptiveCycle(ctx context.Context, generation uint6
 	s.adaptiveCycleCancel = cancel
 	return cycle, cancel
 }
-func (s *CommandServer) adaptiveProbeDue(tag string) (bool, int, bool) {
+func (s *CommandServer) adaptiveProbeDue(ctx context.Context, generation uint64, tag string) (bool, int, bool) {
 	s.sourceMu.Lock()
 	defer s.sourceMu.Unlock()
+	// A cancelled worker may still be draining its queue while a new session
+	// starts. It must not postpone that session's probes through shared cooldowns.
+	if ctx.Err() != nil || generation != s.sourceGeneration {
+		return false, 0, false
+	}
 	now := time.Now().Unix()
 	if now < s.adaptiveNext[tag] {
 		return false, 0, false
@@ -145,7 +150,7 @@ func (s *CommandServer) runAdaptive(ctx context.Context, generation uint64, core
 			go func() {
 				defer workers.Done()
 				for service := range jobs {
-					active, index, due := s.adaptiveProbeDue(service.Tag)
+					active, index, due := s.adaptiveProbeDue(cycle, generation, service.Tag)
 					if !due {
 						continue
 					}

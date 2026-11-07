@@ -4,6 +4,17 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.5 — 2026-11-07
+
+- Keep Android adaptive direct routing in service mode and fence stale-session
+  probe scheduling; full VPN never acquires adaptive direct exceptions.
+- Bound managed profile downloads, clean managed credentials on account deletion,
+  and prevent stale profiles from crossing account/logout transitions.
+- Run the Windows package gate before pull-request merge; preserve the existing
+  public-signature requirement and pilot channel until publication prerequisites.
+- Update privacy/release documentation for individual profiles, own DoH and backups;
+  refresh bundled blocked catalogs to 07112026.
+
 ## 3.1.4 — 2026-11-06
 
 - Use the official Google Play In-App Review API automatically in the Play build,

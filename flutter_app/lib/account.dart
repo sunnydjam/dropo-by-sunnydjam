@@ -483,6 +483,7 @@ class AccountPage extends StatefulWidget {
     this.identity,
     this.onVPNProfile,
     this.onDeleteGuestVPN,
+    this.onForgetVPNProfile,
     this.showTurbo = false,
     this.onBackToAccount,
   });
@@ -500,6 +501,7 @@ class AccountPage extends StatefulWidget {
   final Future<Map<String, dynamic>> Function(String token, bool linkConsent)?
   onVPNProfile;
   final Future<Map<String, dynamic>> Function()? onDeleteGuestVPN;
+  final Future<Map<String, dynamic>> Function()? onForgetVPNProfile;
 
   @override
   State<AccountPage> createState() => _AccountPageState();
@@ -789,6 +791,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       widget.onDisplayChanged?.call(
         AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
       );
+      unawaited(_syncOwnedVPN(token, generation));
     } catch (error) {
       if (mounted && generation == _authGeneration) {
         setState(() => _message = _accountError(error));
@@ -1183,15 +1186,19 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
 
   Future<void> _finishDeletionCleanup() async {
     if (mounted) setState(() => _busy = true);
-    bool cleared;
-    if (widget.identity != null) {
+    var cleared = false;
+    try {
+      final result = await widget.onForgetVPNProfile?.call();
+      cleared = result == null || result['success'] == true;
+    } catch (_) {}
+    if (cleared && widget.identity != null) {
       try {
         await widget.identity!.logout(forgetInstallation: true);
         cleared = true;
       } catch (_) {
         cleared = false;
       }
-    } else {
+    } else if (cleared) {
       cleared = await _vault.clear();
     }
     if (!mounted) return;
@@ -1203,7 +1210,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       if (cleared) _token = null;
       _message = cleared
           ? 'Аккаунт удалён, все сессии завершены. Личные VPN-источники и настройки на устройстве сохранены.'
-          : 'Аккаунт на сервере удалён, все сессии завершены. Не удалось удалить сохранённый токен из защищённого хранилища. Повторите очистку на этом устройстве.';
+          : 'Аккаунт на сервере удалён, все сессии завершены. Не удалось очистить все сохранённые данные аккаунта и ключи Dropo. Повторите очистку на этом устройстве.';
     });
   }
 
@@ -1685,7 +1692,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       builder: (context) => AlertDialog(
         title: const Text('Удалить бесплатный профиль?'),
         content: const Text(
-          'Профиль и его сессии будут удалены. Настройки VPN на устройстве сохранятся. Новый профиль не будет создан автоматически.',
+          'Профиль, его сессии и ключи Dropo будут удалены. VPN будет отключён; свои подписки и настройки сохранятся. Новый профиль не будет создан автоматически.',
         ),
         actions: [
           TextButton(
@@ -1703,6 +1710,17 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     if (confirmed != true || !mounted) return;
     setState(() => _busy = true);
     try {
+      final cleanup = await widget.onForgetVPNProfile?.call();
+      if (cleanup != null && cleanup['success'] != true) {
+        if (mounted) {
+          setState(
+            () => _message =
+                cleanup['error']?.toString() ??
+                'Не удалось удалить ключи Dropo. Повторите удаление.',
+          );
+        }
+        return;
+      }
       await identity.deleteGuest();
       if (!mounted) return;
       setState(() {
@@ -1848,6 +1866,9 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     setState(() => _busy = true);
     try {
       final result = await widget.onDeleteGuestVPN!();
+      if (result['success'] == true) {
+        await widget.identity?.logout(forgetInstallation: true);
+      }
       if (mounted) {
         setState(
           () => _message = result['success'] == true

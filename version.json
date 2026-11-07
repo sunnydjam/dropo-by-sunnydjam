@@ -1,5 +1,5 @@
 {
-  "version": "3.1.4",
+  "version": "3.1.5",
   "name": "dropo",
   "productName": "dropo",
   "description": "Dropo Connect Booster client with two connection modes",
@@ -37,6 +37,6 @@
   "build": {
     "appId": "in.droponevedimka.dropo",
     "releaseChannel": "pilot",
-    "copyright": "Copyright \u0412\u00a9 2026 Droponevedimka and contributors"
+    "copyright": "Copyright \u00a9 2026 Droponevedimka and contributors"
   }
 }

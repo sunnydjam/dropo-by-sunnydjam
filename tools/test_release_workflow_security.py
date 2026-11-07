@@ -48,5 +48,14 @@ class ReleaseTrust(unittest.TestCase):
     def test_stable_release_requires_public_signature(self):
         text,_=condition();self.assertIn('verify-public-windows-signature.ps1',text)
         self.assertIn("steps.version.outputs.draft == 'false'",text)
+    def test_required_package_gate_runs_before_merge_without_path_skips(self):
+        text=WORKFLOW.with_name('windows-release-gate.yml').read_text(encoding='utf-8')
+        events=text.split('\npermissions:',1)[0]
+        for event in ['push','pull_request']:
+            self.assertRegex(events,rf'(?m)^  {event}:\n(?:    #[^\n]*\n)*    branches: \[Dzhamuha-develop\]')
+        self.assertNotRegex(events,r'(?m)^\s+(paths|paths-ignore):')
+        self.assertNotIn('pull_request_target:',events)
+        self.assertIn('persist-credentials: false',text)
+        self.assertNotIn('contents: write',text)
 
 if __name__=='__main__':unittest.main()

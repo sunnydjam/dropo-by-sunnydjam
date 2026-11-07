@@ -14,7 +14,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v11-xhttp-source-pool"
+	androidConfigSchema     = "android-package-routing-v12-adaptive-service-mode"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -240,7 +240,10 @@ func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, lo
 		},
 	}
 
-	if len(adaptivePolicies) == 1 && routingMode == "all_traffic" {
+	// Full VPN must never acquire an automatic direct route. Adaptive service
+	// strategies are available only in selective mode; new sessions still
+	// bootstrap their selectors on VPN until all targets pass fresh probes.
+	if len(adaptivePolicies) == 1 && routingMode == "blocked_only" {
 		addAndroidAdaptiveGraph(config, adaptivePolicies[0])
 	}
 	data, err := json.MarshalIndent(config, "", "  ")

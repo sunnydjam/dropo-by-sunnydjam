@@ -171,7 +171,9 @@ func validAdaptiveSelector(config, selector map[string]any, tag string) bool {
 		return false
 	}
 	route, ok := config["route"].(map[string]any)
-	if !ok || route["final"] != "proxy" {
+	// Selective mode is direct by default. A full-VPN graph must not contain
+	// adaptive exceptions, even when every listed service probe succeeds.
+	if !ok || route["final"] != "direct" {
 		return false
 	}
 	rules, ok := route["rules"].([]any)

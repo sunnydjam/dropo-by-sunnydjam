@@ -68,7 +68,7 @@ func AndroidAdaptivePlan() string {
 	mu.Lock()
 	defer mu.Unlock()
 	services := []androidAdaptiveService{}
-	if current.Connected && normalizeAndroidRoutingMode(current.Config.RoutingMode) == "all_traffic" {
+	if current.Connected && normalizeAndroidRoutingMode(current.Config.RoutingMode) == "blocked_only" {
 		services = androidAdaptiveServices(androidRoutePoliciesLocked())
 	}
 	return encode(map[string]interface{}{"generation": current.sourceSession, "services": services, "method": "tls_record_fragment", "attempts": 3, "udp": "vpn"})
@@ -80,7 +80,7 @@ func AndroidAdaptivePlan() string {
 func CommitAndroidAdaptive(generation int64, tag string, successes int, selector AndroidSourceSelector) bool {
 	mu.Lock()
 	defer mu.Unlock()
-	if generation <= 0 || current.sourceSession != generation || !current.Connected || current.Config.RoutingMode != "all_traffic" || selector == nil {
+	if generation <= 0 || current.sourceSession != generation || !current.Connected || normalizeAndroidRoutingMode(current.Config.RoutingMode) != "blocked_only" || selector == nil {
 		return false
 	}
 	eligible := false
