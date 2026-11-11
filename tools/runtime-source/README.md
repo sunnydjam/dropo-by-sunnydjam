@@ -2,7 +2,7 @@
 
 The Windows sidecars retain the reviewed sing-box 1.14.4 and Xray 26.10.31
 upstream source releases. This module overrides vulnerable transitive versions
-and builds with Go 1.27.3. It does not modify upstream module-cache source files.
+and builds with Go 1.27.4. It does not modify upstream module-cache source files.
 The sing-box feature tags match the reviewed official Windows binary.
 
 `runtime.lock.json` pins the upstream module checksums, complete go.mod/go.sum

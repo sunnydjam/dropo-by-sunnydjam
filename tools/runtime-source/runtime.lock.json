@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "toolchain": "go1.27.3",
+  "toolchain": "go1.27.4",
   "files": {
-    "go.mod": "f5ffaafd8e68edc14a7de8176e1a8bf9eaa9c43441d3200ddff5c0d5cc9d2212",
+    "go.mod": "639f779ff4b1f29423b9a54edffc0bea4b9003b1b115744c04153d0d5d94da7c",
     "go.sum": "b7e0181152658c74d7fb501f8d426454b8a44290dfcac47e64166bb283bfa02e"
   },
   "components": {
@@ -15,9 +15,10 @@
       "ldflags": "-s -w -buildid= -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=1.14.4",
       "destination": "dependencies/sing-box-v1.14.4/windows-amd64/sing-box-1.14.4-windows-amd64/sing-box.exe",
       "originalExecutableSha256": "8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9",
-      "executableSha256": "a78252fcaa0e7a100efb6edd1330a9aace935b2a5e4b0eb31fff6aa8ccad16df",
+      "executableSha256": "6df82794bb5b7d30a9c5a3e18b7dd6880d58edfc5d4f0a5241febecd1c009445",
       "previousExecutableSha256": [
-        "b09b3ec9192e29dc21d67e72e0f3ecc3174a7fe266ec3b9a65cd33d615fc1abe"
+        "b09b3ec9192e29dc21d67e72e0f3ecc3174a7fe266ec3b9a65cd33d615fc1abe",
+        "a78252fcaa0e7a100efb6edd1330a9aace935b2a5e4b0eb31fff6aa8ccad16df"
       ]
     },
     "xray": {
@@ -29,7 +30,10 @@
       "ldflags": "-s -w -buildid=",
       "destination": "dependencies/xray-v26.10.31/xray.exe",
       "originalExecutableSha256": "d5b558191cccb1e92a5772b68b8cab67717b26f634b0f15153215f65ae982a7e",
-      "executableSha256": "8ee05ead37397defae1f97324087fbad128b0eaf687dd41d233d63fdecbe55df"
+      "executableSha256": "bda6bd5c9c1940a992fc7e8a4ee50978838e5383c93f750054b69de36cd0c8d5",
+      "previousExecutableSha256": [
+        "8ee05ead37397defae1f97324087fbad128b0eaf687dd41d233d63fdecbe55df"
+      ]
     }
   }
 }

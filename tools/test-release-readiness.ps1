@@ -38,3 +38,4 @@ $fork = New-Run $ci.path 10
 $fork.head_repository.full_name = 'someone/fork'
 Assert-Ready @($fork, $package) $false 'fork cannot satisfy release gate'
 Write-Host 'Release readiness fixtures passed (24 cases).'
+& (Join-Path $PSScriptRoot 'test-existing-release.ps1')

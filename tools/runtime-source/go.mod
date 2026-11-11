@@ -1,6 +1,6 @@
 module dropo-runtime-build
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/sagernet/sing-box v1.14.4

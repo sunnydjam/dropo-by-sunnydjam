@@ -9,7 +9,7 @@ $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $moduleRoot = Join-Path $PSScriptRoot 'runtime-source'
 $lock = Get-Content -LiteralPath (Join-Path $moduleRoot 'runtime.lock.json') -Raw | ConvertFrom-Json
 $entry = $lock.components.$Component
-if ($lock.schemaVersion -ne 1 -or -not $entry -or $lock.toolchain -ne 'go1.27.3') {
+if ($lock.schemaVersion -ne 1 -or -not $entry -or $lock.toolchain -ne 'go1.27.4') {
     throw 'Unsupported runtime source lock.'
 }
 function Assert-RuntimeHash([string]$Path, [string]$Expected) {

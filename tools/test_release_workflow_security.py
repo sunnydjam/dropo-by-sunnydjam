@@ -59,6 +59,14 @@ class ReleaseTrust(unittest.TestCase):
     def test_stable_release_requires_public_signature(self):
         text,_=condition();self.assertIn('verify-public-windows-signature.ps1',text)
         self.assertIn("steps.version.outputs.draft == 'false'",text)
+    def test_existing_release_probe_is_fail_closed_and_assets_are_immutable(self):
+        text,_=condition()
+        self.assertIn('./tools/check-existing-release.ps1 -Repository $env:GITHUB_REPOSITORY -Tag $tag',text)
+        self.assertNotIn('gh release view',text)
+        self.assertIn('overwrite_files: false',text)
+        self.assertLess(text.index('./tools/check-existing-release.ps1'),text.index('"tag=$tag"'))
+        readiness=(ROOT/'tools/test-release-readiness.ps1').read_text(encoding='utf-8')
+        self.assertIn("'test-existing-release.ps1'",readiness)
     def test_required_package_gate_runs_before_merge_without_path_skips(self):
         text=WORKFLOW.with_name('windows-release-gate.yml').read_text(encoding='utf-8')
         events=text.split('\npermissions:',1)[0]

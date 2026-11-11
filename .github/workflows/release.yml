@@ -90,19 +90,9 @@ jobs:
           }
           "draft=$($channel -eq 'pilot')".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Append
           $tag = "v$version"
+          ./tools/check-existing-release.ps1 -Repository $env:GITHUB_REPOSITORY -Tag $tag
           "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
           "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
-          $PSNativeCommandUseErrorActionPreference = $false
-          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release $tag already exists; leaving it immutable."
-            "exists=true" | Out-File $env:GITHUB_OUTPUT -Append
-          } elseif ($LASTEXITCODE -eq 1) {
-            "exists=false" | Out-File $env:GITHUB_OUTPUT -Append
-            $global:LASTEXITCODE = 0
-          } else {
-            throw "gh release view failed with exit code $LASTEXITCODE"
-          }
 
       - name: Require public publisher signature for stable releases
         if: steps.version.outputs.exists == 'false' && steps.version.outputs.draft == 'false'
@@ -153,6 +143,8 @@ jobs:
           # Migration pilots are reviewable drafts and never update clients.
           draft: ${{ steps.version.outputs.draft == 'true' }}
           make_latest: ${{ steps.version.outputs.draft != 'true' }}
+          # A concurrent external publisher must not replace an existing asset.
+          overwrite_files: false
           fail_on_unmatched_files: true
           files: |
             release-assets/**/dropo-Windows-Setup-x64.exe

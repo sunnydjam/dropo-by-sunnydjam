@@ -11,7 +11,7 @@
     "version": "1.14.4",
     "minVersion": "1.12.0",
     "archiveSha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
-    "executableSha256": "a78252fcaa0e7a100efb6edd1330a9aace935b2a5e4b0eb31fff6aa8ccad16df",
+    "executableSha256": "6df82794bb5b7d30a9c5a3e18b7dd6880d58edfc5d4f0a5241febecd1c009445",
     "sourceBuild": true
   },
   "wireguard": {
@@ -31,7 +31,7 @@
   "xray": {
     "version": "26.10.31",
     "archiveSha256": "2e04a9995a6f2ad1b28c0bb25c708ecb2695e43a1c9c7889c4b6ac2b48cf7a6a",
-    "executableSha256": "8ee05ead37397defae1f97324087fbad128b0eaf687dd41d233d63fdecbe55df",
+    "executableSha256": "bda6bd5c9c1940a992fc7e8a4ee50978838e5383c93f750054b69de36cd0c8d5",
     "sourceBuild": true
   },
   "build": {
