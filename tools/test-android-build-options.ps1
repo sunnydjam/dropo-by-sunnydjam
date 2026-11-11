@@ -143,6 +143,7 @@ $expectedBundleArguments = @(
     '--build-name', '3.0.47', '--build-number', '30047',
     '--dart-define', 'DROPO_APP_VERSION=3.0.47',
     '--dart-define', 'DROPO_PLAY_DISTRIBUTION=true',
+    '--dart-define', 'DROPO_PURCHASES_ENABLED=false',
     '--dart-define', 'DROPO_ACCOUNT_ENDPOINT=https://accounts.example.com'
 )
 if (($bundleArguments -join "`n") -cne ($expectedBundleArguments -join "`n")) {

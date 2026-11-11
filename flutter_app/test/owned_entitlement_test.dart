@@ -95,6 +95,16 @@ class _API implements AccountTransport {
     if (fail) throw const AccountApiException('offline');
     if (path == '/public/v1/catalog') return {};
     expect(token, 'registered-fixture');
+    if (path == '/v1/me') {
+      return {
+        'account': {
+          'speedBoostUntil': DateTime.fromMillisecondsSinceEpoch(
+            until * 1000,
+            isUtc: true,
+          ).toIso8601String(),
+        },
+      };
+    }
     if (path == '/v1/installations/bind') {
       boundSecrets.add(body!['installationSecret'] as String);
       return {'installationId': 'fixture-installation'};

@@ -60,10 +60,9 @@ String accountCredentialOrigin(String endpoint) {
 
 // Purchases require a separate, explicit build AND server opt-in. They remain
 // off while no real premium VPN provisioning is available.
-const _accountPurchasesEnabled = bool.fromEnvironment(
-  'DROPO_PURCHASES_ENABLED',
-  defaultValue: false,
-);
+const _accountPurchasesEnabled =
+    !_playDistribution &&
+    bool.fromEnvironment('DROPO_PURCHASES_ENABLED', defaultValue: false);
 
 @visibleForTesting
 AccountTransport? debugAccountTransport;
@@ -1220,8 +1219,43 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   Future<void> _openPurchase() async {
     if (!_purchasingAvailable || !_accountPurchasesEnabled) return;
     final token = _token;
-    if (token == null) return;
-    final paid = await showDialog<bool>(
+    final generation = _authGeneration;
+    if (token == null || _busy) return;
+    // Validate this installation before taking payment. An independent Free
+    // profile must never be silently merged or discarded.
+    if (!_development && widget.onVPNProfile != null) {
+      setState(() {
+        _busy = true;
+        _message = 'Проверяем профиль перед оплатой…';
+      });
+      try {
+        final result = await widget.onVPNProfile!(token, true);
+        if (!mounted || token != _token || generation != _authGeneration) {
+          return;
+        }
+        if (result['success'] != true) {
+          setState(
+            () => _message =
+                result['error']?.toString() ??
+                'Обновите профиль VPN перед покупкой.',
+          );
+          return;
+        }
+      } catch (_) {
+        if (mounted) {
+          setState(
+            () => _message =
+                'Не удалось проверить профиль. Повторите перед оплатой.',
+          );
+        }
+        return;
+      } finally {
+        if (mounted) setState(() => _busy = false);
+      }
+    }
+    if (!mounted || token != _token || generation != _authGeneration) return;
+    setState(() => _message = '');
+    await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (_) => _SpeedBoostPurchaseDialog(
@@ -1229,9 +1263,34 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         token: token,
         product: _product,
         onOpenExternal: widget.onOpenExternal,
+        onActivate: () async {
+          if (!mounted || token != _token || generation != _authGeneration) {
+            throw const AccountIdentityChanged();
+          }
+          if (_development) return {'success': true};
+          final apply = widget.onVPNProfile;
+          if (apply == null) {
+            return {
+              'success': false,
+              'error': 'Откройте Dropo на устройстве и обновите профиль VPN.',
+            };
+          }
+          return apply(token, true);
+        },
       ),
     );
-    if (paid == true) await _refreshAccount();
+    if (mounted && token == _token && generation == _authGeneration) {
+      try {
+        await _refreshAccount();
+      } catch (_) {
+        if (mounted) {
+          setState(
+            () => _message =
+                'Статус покупки сохранён на сервере. Обновите аккаунт при восстановлении связи.',
+          );
+        }
+      }
+    }
   }
 
   Future<void> _startRecoveryDialog() async {
@@ -2925,18 +2984,21 @@ class _SpeedBoostPurchaseDialog extends StatefulWidget {
     required this.token,
     required this.product,
     required this.onOpenExternal,
+    required this.onActivate,
   });
   final AccountTransport api;
   final String token;
   final _AccountProduct product;
   final Future<void> Function(String) onOpenExternal;
+  final Future<Map<String, dynamic>> Function() onActivate;
   @override
   State<_SpeedBoostPurchaseDialog> createState() =>
       _SpeedBoostPurchaseDialogState();
 }
 
 class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
-  bool accepted = false, busy = false, pending = false;
+  bool accepted = false, busy = false, pending = false, polling = false;
+  bool paid = false, terminal = false;
   String message = '', orderId = '', invoiceUrl = '';
   Timer? poll;
 
@@ -2969,12 +3031,12 @@ class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
         busy = false;
         pending = true;
       });
-      await widget.onOpenExternal(invoiceUrl);
       poll = Timer.periodic(
-        const Duration(seconds: 2),
+        const Duration(seconds: 3),
         (_) => unawaited(_poll()),
       );
       unawaited(_poll());
+      await widget.onOpenExternal(invoiceUrl);
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -2986,117 +3048,171 @@ class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
   }
 
   Future<void> _poll() async {
-    if (busy || orderId.isEmpty) return;
+    if (!mounted || busy || polling || terminal || orderId.isEmpty) return;
+    polling = true;
     try {
       final response = await widget.api.request(
         'GET',
         '/v1/orders/$orderId',
         token: widget.token,
       );
-      if (response['status']?.toString() == 'paid') {
+      if (!mounted) return;
+      final status = response['status']?.toString();
+      if (status == 'refunded') {
         poll?.cancel();
-        if (mounted) Navigator.pop(context, true);
+        setState(() {
+          terminal = true;
+          paid = false;
+          message =
+              '150 Stars возвращены в Telegram. Остаток этого заказа снят; Free и другие начисления сохранены.';
+        });
+      } else if (status == 'paid') {
+        setState(() {
+          paid = true;
+          message = 'Оплата получена. Готовим премиальный профиль…';
+        });
+        final activation = response['activation']?.toString();
+        if (activation == 'expired') {
+          poll?.cancel();
+          setState(() {
+            terminal = true;
+            message =
+                'Срок этого доступа завершён. Автопродления и повторного списания нет.';
+          });
+          return;
+        }
+        if (activation != 'ready') return;
+        final result = await widget.onActivate();
+        if (!mounted) return;
+        if (result['success'] == true) {
+          poll?.cancel();
+          Navigator.pop(context, true);
+        } else {
+          setState(
+            () => message =
+                'Оплата сохранена. ${result['error'] ?? 'Профиль пока не применён. Повторим автоматически; повторно платить не нужно.'}',
+          );
+        }
       }
     } catch (error) {
       if (mounted) setState(() => message = _accountError(error));
+    } finally {
+      polling = false;
     }
   }
 
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: Text(
-      pending ? 'Ждём подтверждение Telegram' : 'Подтвердите покупку',
+      terminal
+          ? 'Статус покупки'
+          : paid
+          ? 'Активируем Турбо'
+          : pending
+          ? 'Ждём подтверждение Telegram'
+          : 'Подтвердите покупку',
     ),
     content: SizedBox(
       width: 410,
-      child: pending
-          ? Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const SizedBox(
-                  width: 46,
-                  height: 46,
-                  child: CircularProgressIndicator(strokeWidth: 3),
-                ),
-                const SizedBox(height: 22),
-                const Text(
-                  'Не закрывайте это окно. Статус обновится автоматически.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: _atlasMuted, height: 1.45),
-                ),
-                if (message.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    message,
-                    style: const TextStyle(color: Colors.orangeAccent),
+      child: SingleChildScrollView(
+        child: pending
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!terminal)
+                    const SizedBox(
+                      width: 46,
+                      height: 46,
+                      child: CircularProgressIndicator(strokeWidth: 3),
+                    ),
+                  const SizedBox(height: 22),
+                  const Text(
+                    'Статус обновляется автоматически. Покупка сохранится на аккаунте, даже если закрыть окно.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: _atlasMuted, height: 1.45),
                   ),
+                  if (message.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      message,
+                      style: const TextStyle(color: Colors.orangeAccent),
+                    ),
+                  ],
                 ],
-              ],
-            )
-          : Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: _atlasBorder),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        Icons.bolt_rounded,
-                        color: _atlasMint,
-                        size: 30,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              widget.product.name,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            Text(
-                              '${widget.product.durationDays} дней',
-                              style: const TextStyle(color: _atlasMuted),
-                            ),
-                          ],
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: _atlasBorder),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.bolt_rounded,
+                          color: _atlasMint,
+                          size: 30,
                         ),
-                      ),
-                      _StarsAmount(amount: widget.product.stars, fontSize: 18),
-                    ],
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                widget.product.name,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                '${widget.product.durationDays} дней',
+                                style: const TextStyle(color: _atlasMuted),
+                              ),
+                            ],
+                          ),
+                        ),
+                        _StarsAmount(
+                          amount: widget.product.stars,
+                          fontSize: 18,
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 18),
-                const Text(
-                  'Оплата откроется в Telegram-боте. Доступ активируется только после успешного платежа.',
-                  style: TextStyle(color: _atlasMuted, height: 1.45),
-                ),
-                const SizedBox(height: 12),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: accepted,
-                  onChanged: busy
-                      ? null
-                      : (value) => setState(() => accepted = value == true),
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: const Text('Я принимаю условия покупки'),
-                ),
-                if (message.isNotEmpty)
-                  Text(
-                    message,
-                    style: const TextStyle(color: Colors.orangeAccent),
+                  const SizedBox(height: 18),
+                  const Text(
+                    '150 Stars за 30 дней. Разовая оплата через Telegram, без автопродления. После оплаты приложение подготовит и применит премиальный профиль.',
+                    style: TextStyle(color: _atlasMuted, height: 1.45),
                   ),
-              ],
-            ),
+                  const SizedBox(height: 12),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: accepted,
+                    onChanged: busy
+                        ? null
+                        : (value) => setState(() => accepted = value == true),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Я принимаю условия покупки'),
+                  ),
+                  TextButton(
+                    onPressed: () =>
+                        widget.onOpenExternal('https://dropo.fun/terms'),
+                    child: const Text('Условия покупки и возврата'),
+                  ),
+                  if (message.isNotEmpty)
+                    Text(
+                      message,
+                      style: const TextStyle(color: Colors.orangeAccent),
+                    ),
+                ],
+              ),
+      ),
     ),
     actions: [
-      if (pending)
+      if (pending && !paid && !terminal)
         OutlinedButton(
           onPressed: invoiceUrl.isEmpty
               ? null
@@ -3105,7 +3221,7 @@ class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
         ),
       TextButton(
         onPressed: busy ? null : () => Navigator.pop(context, false),
-        child: const Text('Отмена'),
+        child: Text(pending ? 'Закрыть' : 'Отмена'),
       ),
       if (!pending)
         FilledButton(

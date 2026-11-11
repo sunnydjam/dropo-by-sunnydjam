@@ -8,6 +8,21 @@ class OwnedVPNOperationFailure implements Exception {
   final String code;
 }
 
+@visibleForTesting
+bool ownedVPNProfileMatchesEntitlement(
+  Map<String, dynamic> profile,
+  int expectedUntil,
+  int now,
+) {
+  if (profile['status'] != 'ready') return false;
+  final until = (profile['boostUntilUnix'] as num?)?.toInt() ?? 0;
+  return expectedUntil > now
+      ? until >= expectedUntil &&
+            profile['boostSubscriptionUrl'] is String &&
+            (profile['boostSubscriptionUrl'] as String).isNotEmpty
+      : until <= now;
+}
+
 Future<T> _ownedStep<T>(String code, Future<T> Function() operation) async {
   try {
     return await operation();
@@ -299,6 +314,17 @@ class OwnedVPNClient {
     }
 
     if (token.isEmpty) token = await guestLogin();
+    var expectedUntil = 0;
+    if (registeredToken != null) {
+      final me = await api.request('GET', '/v1/me', token: token);
+      final account = _asMap(me['account']);
+      final expiry = DateTime.tryParse(
+        account['speedBoostUntil']?.toString() ?? '',
+      );
+      expectedUntil = expiry == null
+          ? 0
+          : expiry.millisecondsSinceEpoch ~/ 1000;
+    }
     Map<String, dynamic> profile;
     try {
       profile = await api.request('POST', '/v1/vpn/profile', token: token);
@@ -308,13 +334,18 @@ class OwnedVPNClient {
       profile = await api.request('POST', '/v1/vpn/profile', token: token);
     }
     final deadline = DateTime.now().add(const Duration(seconds: 25));
-    while (profile['status'] == 'pending' &&
+    bool delivered() => ownedVPNProfileMatchesEntitlement(
+      profile,
+      expectedUntil,
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    while (!delivered() &&
+        profile['status'] != 'revoked' &&
         DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 800));
       profile = await api.request('GET', '/v1/vpn/profile', token: token);
     }
-    if (profile['status'] != 'ready' ||
-        profile['id'] != _record!['installationId']) {
+    if (!delivered() || profile['id'] != _record!['installationId']) {
       throw const AccountApiException(
         'Профиль ещё готовится. Повторите добавление немного позже.',
       );
@@ -495,7 +526,13 @@ class OwnedVPNClient {
         };
       }
     }
-    return {'success': true, 'individual': true};
+    return {
+      'success': true,
+      'individual': true,
+      'turboReady':
+          boost is String &&
+          until > DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    };
   }
 
   Future<void> restore(CoreBridge bridge) {
@@ -669,7 +706,7 @@ class OwnedVPNClient {
         _record!.remove('guestToken');
         await _persist();
       }
-      return await _enroll(
+      final result = await _enroll(
         api,
         (id, name, key, ok) =>
             bridge.callMap('AddManagedVPNSource', args: [id, name, key, ok]),
@@ -677,6 +714,19 @@ class OwnedVPNClient {
             bridge.callMap('ValidateManagedCatalog', args: [raw, min]),
         registeredToken: token,
       );
+      if (result['success'] == true && _record?['boostKey'] == null) {
+        final view = await bridge.callMap('GetVPNSources');
+        for (final raw in view['sources'] as List? ?? const []) {
+          final source = _asMap(raw);
+          if (source['public_catalog_id'] == 'dropo-individual-boost') {
+            final removed = await bridge.removeVpnSource(
+              source['id'].toString(),
+            );
+            if (removed['success'] != true) return removed;
+          }
+        }
+      }
+      return result;
     } catch (_) {
       return {
         'success': false,

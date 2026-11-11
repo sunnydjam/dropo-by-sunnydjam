@@ -137,7 +137,8 @@ function Get-DropoAndroidBundleBuildArguments {
         '--target-platform', 'android-arm,android-arm64',
         '--build-name', $AppVersion, '--build-number', $BuildNumber,
         '--dart-define', "DROPO_APP_VERSION=$AppVersion",
-        '--dart-define', 'DROPO_PLAY_DISTRIBUTION=true'
+        '--dart-define', 'DROPO_PLAY_DISTRIBUTION=true',
+        '--dart-define', 'DROPO_PURCHASES_ENABLED=false'
     )
     $arguments += @(Get-DropoAccountBuildArguments -Endpoint $Endpoint)
     return $arguments
@@ -979,6 +980,7 @@ function Build-Application {
                 "--dart-define", "DROPO_BUILD_HASH=$BuildHash"
             )
             $flutterBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
+            $flutterBuildArguments += @('--dart-define', 'DROPO_PURCHASES_ENABLED=true')
             Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages
             $flutterBuildArguments += "--no-pub"
             & $FlutterCmd @flutterBuildArguments
@@ -1862,6 +1864,7 @@ function Build-AndroidApplication {
             '--dart-define', 'DROPO_PLAY_DISTRIBUTION=false'
         )
         $androidBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
+        $androidBuildArguments += @('--dart-define', 'DROPO_PURCHASES_ENABLED=true')
         Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages
         $androidBuildArguments += '--no-pub'
         & $FlutterCmd @androidBuildArguments
