@@ -166,7 +166,13 @@ jobs:
           cache-dependency-path: app/go.sum
       - name: Install Linux tray build dependencies
         timeout-minutes: 5
-        run: sudo apt-get update && sudo apt-get install -y libayatana-appindicator3-dev
+        run: |
+          python3 tools/resolve-ci-ubuntu-mirrors.py > "$RUNNER_TEMP/dropo-apt-hosts"
+          if [ -s "$RUNNER_TEMP/dropo-apt-hosts" ]; then
+            sudo tee -a /etc/hosts < "$RUNNER_TEMP/dropo-apt-hosts"
+          fi
+          sudo apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=2 update
+          sudo apt-get install -y libayatana-appindicator3-dev
       - name: Go race detector
         working-directory: app
         run: go test -race ./...
