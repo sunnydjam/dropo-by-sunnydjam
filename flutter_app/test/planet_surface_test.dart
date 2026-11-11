@@ -1,10 +1,10 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:dropo/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 enum _PlanetState { disconnected, connected, error, connecting }
@@ -119,32 +119,63 @@ Future<void> _verifyAndCapture(
 }
 
 void main() {
+  late Uint8List sourceAlpha;
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
     expect(await preloadAtlasPlanetForTesting(), isTrue);
+    final bytes = await rootBundle.load('assets/maps/earth_night_globe.webp');
+    final codec = await ui.instantiateImageCodec(
+      bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+      targetWidth: 768,
+      targetHeight: 768,
+    );
+    final original = (await codec.getNextFrame()).image;
+    try {
+      final data = (await original.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      ))!;
+      final pixels = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      sourceAlpha = Uint8List(original.width * original.height);
+      for (var i = 0; i < sourceAlpha.length; i++) {
+        sourceAlpha[i] = pixels[i * 4 + 3];
+      }
+    } finally {
+      original.dispose();
+      codec.dispose();
+    }
   });
 
   for (final state in _PlanetState.values) {
     test(
-      '${state.name} cached detailed texture colors the whole map',
+      '${state.name} cached detailed Earth colors the whole surface with alpha',
       () async {
         final image = await _texture(state);
         expect(image, isNotNull);
         expect(await _texture(state), same(image));
-        expect(image!.width, 1024);
-        expect(image.height, 512);
+        expect(image!.width, 768);
+        expect(image.height, 768);
         final rgba = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
         expect(rgba, isNotNull);
         final pixels = rgba!.buffer.asUint8List();
         final total = image.width * image.height;
-        var opaque = 0;
+        var nearOpaque = 0;
+        var alphaPreserved = true;
+        var transparent = 0;
         var visible = 0;
         var matched = 0;
         var warm = 0;
         final colors = <int>{};
         for (var i = 0; i < pixels.length; i += 4) {
           final red = pixels[i], green = pixels[i + 1], blue = pixels[i + 2];
-          if (pixels[i + 3] == 255) opaque++;
+          // The approved source artwork peaks at alpha 254 (mostly 252–253).
+          // Keep its real alpha, including soft atmosphere, byte-for-byte.
+          if (pixels[i + 3] >= 250) nearOpaque++;
+          alphaPreserved &= pixels[i + 3] == sourceAlpha[i ~/ 4];
+          if (pixels[i + 3] == 0) transparent++;
+          if (pixels[i + 3] < 200) continue;
           colors.add(red << 16 | green << 8 | blue);
           if (red < 12 && green < 12 && blue < 12) continue;
           visible++;
@@ -156,24 +187,32 @@ void main() {
           }
         }
         expect(
-          opaque,
-          total,
-          reason: 'No transparent gaps on the rotating globe',
+          nearOpaque,
+          greaterThan(total * 0.5),
+          reason: 'The source sphere must remain substantial and near-opaque',
+        );
+        expect(
+          alphaPreserved,
+          isTrue,
+          reason: 'State tinting must preserve source alpha byte-for-byte',
+        );
+        expect(
+          transparent,
+          greaterThan(total * 0.1),
+          reason: 'Genuine transparency must preserve the space backdrop',
         );
         expect(
           colors.length,
           greaterThan(state == _PlanetState.connected ? 256 : 100),
           reason: 'Preserve detailed terrain after state-color mapping',
         );
-        for (var y = 0; y < image.height; y++) {
-          final left = y * image.width * 4;
-          final right = left + (image.width - 1) * 4;
-          expect(
-            pixels.sublist(left, left + 4),
-            pixels.sublist(right, right + 4),
-            reason:
-                '${state.name}: the longitude seam must not flash on rotation',
-          );
+        for (final i in [
+          3,
+          (image.width - 1) * 4 + 3,
+          (total - image.width) * 4 + 3,
+          (total - 1) * 4 + 3,
+        ]) {
+          expect(pixels[i], 0, reason: 'No opaque rectangular texture corners');
         }
         expect(
           visible,
@@ -196,7 +235,8 @@ void main() {
         expect(
           matched / (visible - warm),
           greaterThan(0.93),
-          reason: 'All terrain is state-colored before GPU sphere projection',
+          reason:
+              'All terrain is state-colored before drawing the cached image',
         );
         // The image belongs to the shared cache and must not be disposed here.
       },

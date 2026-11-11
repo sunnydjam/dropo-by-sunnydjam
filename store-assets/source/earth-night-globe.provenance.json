@@ -1,0 +1,16 @@
+{
+  "asset": "earth-night.webp",
+  "kind": "original generated decorative artwork",
+  "not": "satellite data, telemetry, live server map or connection evidence",
+  "generation": "built-in image generation",
+  "referenceConcept": "exec-da6dff0f-ec50-4382-8f6e-6d0272b12e30.png",
+  "prompt": "Asset type: production transparent extraction from this website concept. Use case: background-extraction. The input is the accepted Dropo hero concept. Create ONLY the identical beautiful nighttime Earth shown on the right of that concept as a standalone centered square image with genuine transparent alpha. Preserve the sphere's Europe/Africa/Asia geography, exact dark night-side land, muted clouds, sparse warm golden city lights, thin cyan-emerald atmosphere, realism and lighting. No reinterpretation, do not brighten the land or turn night into daylight. Complete globe fully visible with small transparent margin, no clipping. Remove every UI text, navigation, logo, buttons, border, stars and black background from the output. No new text, grids, network dots or lines, no cast shadow. This is a central asset extraction matching the accepted design, NOT a screenshot crop. 1280x1280 square.",
+  "output": {
+    "width": 1254,
+    "height": 1254,
+    "alpha": true,
+    "webpQuality": 90,
+    "alphaQuality": 100
+  },
+  "notes": "PNG encoded to WebP without cropping, resizing or colour changes. The existing Dropo app icon was reused unchanged."
+}

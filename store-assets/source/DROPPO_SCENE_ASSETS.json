@@ -1,0 +1,22 @@
+{
+  "character": "DrOppo",
+  "kind": "original generated decorative character sprites",
+  "approvedConcept": "exec-e652d2a5-50cb-4db9-9e74-5cecb63f3e8a.png",
+  "reference": "store-assets/source/app-icon-master.png",
+  "generation": "built-in image generation; transparent background",
+  "notes": "Character artwork only; not live telemetry. Skin and coat retain original colors in all connection states. No generated image is used as an executable dependency.",
+  "poses": [
+    {
+      "state": "flying",
+      "prompt": "Use case: background-extraction, identity-preserving production game/app sprite. The reference is the APPROVED DrOppo three-state artwork. Extract/recreate ONLY the exact character from the specified panel as a clean standalone full-body transparent PNG sprite. Preserve his exact face, green skin, TWO round-tip antennae, swept mint hair tuft, brown eyes, ivory doctor coat over emerald suit, stethoscope, dark emerald cape, proportions, 3D rendering and pose. This is a production asset for the approved UI, not a new character design. Truly transparent alpha background, no ground, planet, shadow on floor, orbital ring, stars, text, labels, symbols or props. All parts completely inside canvas with modest even transparent margin (about6%), no clipping. Crisp clean edges without dark halo. Keep green skin and ivorycoat natural; no colored wash from the planet. Center isolated full body with large usable scale. Square canvas around1024px. Extract the MIDDLE character: flying rightwards, arm extended fist to right, legs trailing diagonally down-left, cheerful confident smile, dark emerald cape flowing to upper-left. Preserve approved flight pose. NO planet or glow underneath."
+    },
+    {
+      "state": "waiting",
+      "prompt": "Use case: background-extraction, identity-preserving production game/app sprite. The reference is the APPROVED DrOppo three-state artwork. Extract/recreate ONLY the exact character from the specified panel as a clean standalone full-body transparent PNG sprite. Preserve his exact face, green skin, TWO round-tip antennae, swept mint hair tuft, brown eyes, ivory doctor coat over emerald suit, stethoscope, dark emerald cape, proportions, 3D rendering and pose. This is a production asset for the approved UI, not a new character design. Truly transparent alpha background, no ground, planet, shadow on floor, orbital ring, stars, text, labels, symbols or props. All parts completely inside canvas with modest even transparent margin (about6%), no clipping. Crisp clean edges without dark halo. Keep green skin and ivorycoat natural; no colored wash from the planet. Center isolated full body with large usable scale. Square canvas around1024px. Extract the LEFT character: sitting patiently, knees bent, both legs dangling, hands resting on knees, calm small smile. Ivory coat seated on an INVISIBLE edge, emerald cape rests behind-left. Preserve approved seated pose. NO actual seat, surface, chair, rock or planet: character only, so we can composite onto our planet."
+    },
+    {
+      "state": "puzzled",
+      "prompt": "Use case: background-extraction, identity-preserving production game/app sprite. The reference is the APPROVED DrOppo three-state artwork. Extract/recreate ONLY the exact character from the specified panel as a clean standalone full-body transparent PNG sprite. Preserve his exact face, green skin, TWO round-tip antennae, swept mint hair tuft, brown eyes, ivory doctor coat over emerald suit, stethoscope, dark emerald cape, proportions, 3D rendering and pose. This is a production asset for the approved UI, not a new character design. Truly transparent alpha background, no ground, planet, shadow on floor, orbital ring, stars, text, labels, symbols or props. All parts completely inside canvas with modest even transparent margin (about6%), no clipping. Crisp clean edges without dark halo. Keep green skin and ivorycoat natural; no colored wash from the planet. Center isolated full body with large usable scale. Square canvas around1024px. Extract the RIGHT character: standing upright full body, feet placed as on approved panel, BOTH forearms raised sideways with open palms up in a questioning shrug, head tilted and one eyebrow slightly raised, gentle confused small smile. Dark emerald cape hangs behind. NO question mark, ground, planet or object underneath. Preserve approved standing pose."
+    }
+  ]
+}

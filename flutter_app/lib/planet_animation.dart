@@ -1,7 +1,7 @@
 part of 'main.dart';
 
-// A bundled equirectangular night atlas is projected onto an axial sphere.
-// City lights are decorative; they never report real VPN probes or traffic.
+// Bundled decorative Earth and DrOppo artwork. Neither the city lights nor
+// the mascot are telemetry; connection state remains owned by the home panel.
 class _AtlasAnimatedPlanet extends StatefulWidget {
   const _AtlasAnimatedPlanet({
     required this.connected,
@@ -10,8 +10,10 @@ class _AtlasAnimatedPlanet extends StatefulWidget {
     this.hasError = false,
     this.motionEnabled = true,
     this.textureAvailable = true,
+    this.mascotAvailable = true,
   });
-  final bool connected, busy, hasError, motionEnabled, textureAvailable;
+  final bool connected, busy, hasError, motionEnabled;
+  final bool textureAvailable, mascotAvailable;
   final double size;
 
   @override
@@ -23,7 +25,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
   late final AnimationController _controller;
   final _phase = ValueNotifier<double>(0);
   final _lights = ValueNotifier<double>(0);
-  _AtlasGlobeTexture? _texture;
+  _AtlasSceneAssets? _assets;
   bool _visible = true;
   int _lastFrame = -1;
   double _previousPhase = 0;
@@ -35,34 +37,29 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 60),
+      duration: const Duration(seconds: 70),
     )..addListener(_advance);
     WidgetsBinding.instance.addObserver(this);
     _visible = _isVisible(WidgetsBinding.instance.lifecycleState);
     _lights.value = _lit ? 1 : 0;
-    if (widget.textureAvailable) {
-      _texture = _AtlasGlobeTexture.ready;
-      if (_texture == null) unawaited(_loadTexture());
-    }
+    _assets = _AtlasSceneAssets.ready;
+    if (_assets == null) unawaited(_loadAssets());
   }
 
-  Future<void> _loadTexture() async {
-    final texture = await _AtlasGlobeTexture.load();
-    if (mounted && widget.textureAvailable && texture != null) {
-      setState(() => _texture = texture);
-    }
+  Future<void> _loadAssets() async {
+    final assets = await _AtlasSceneAssets.load();
+    if (mounted) setState(() => _assets = assets);
   }
 
-  // Quantize decorative repaint to 30 fps, independent of monitor refresh.
-  // The home widget and connection button are never rebuilt by this listener.
+  // Decorative painting is capped at 30 fps. It never rebuilds home controls.
   void _advance() {
-    final frame = (_controller.value * 1800).floor();
+    final frame = (_controller.value * 2100).floor();
     if (frame == _lastFrame) return;
     _lastFrame = frame;
     final delta = (_controller.value - _previousPhase) % 1;
     _previousPhase = _controller.value;
     if (_lit && _lights.value < 1) {
-      _lightElapsed += delta * 60;
+      _lightElapsed += delta * 70;
       final progress = (_lightElapsed / 0.6).clamp(0.0, 1.0);
       _lights.value = progress * progress * (3 - 2 * progress);
     }
@@ -89,12 +86,6 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
       _lightElapsed = 0;
       _lights.value = 0;
     }
-    if (oldWidget.textureAvailable != widget.textureAvailable) {
-      _texture = widget.textureAvailable ? _AtlasGlobeTexture.ready : null;
-      if (widget.textureAvailable && _texture == null) {
-        unawaited(_loadTexture());
-      }
-    }
     _updateMotion();
   }
 
@@ -116,8 +107,6 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     } else if (!animate && _controller.isAnimating) {
       _controller.stop(canceled: false);
     }
-    // Hidden/reduced-motion views settle immediately, never resume a stale
-    // transition or require another ticker just to light the cities.
     if (!animate) _lights.value = _lit ? 1 : 0;
   }
 
@@ -137,21 +126,23 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
       busy: widget.busy,
       hasError: widget.hasError,
     );
-    return ExcludeSemantics(
-      child: RepaintBoundary(
-        key: const ValueKey('atlas-planet'),
-        child: SizedBox.square(
-          dimension: widget.size,
-          child: KeyedSubtree(
-            key: ValueKey('planet-${palette.name}'),
-            child: CustomPaint(
-              key: const ValueKey('atlas-planet-motion'),
-              foregroundPainter: _AtlasGlobePainter(
-                phase: _phase,
-                lights: _lights,
-                texture: _texture,
-                palette: palette,
-                connected: widget.connected && !widget.hasError && !widget.busy,
+    return IgnorePointer(
+      child: ExcludeSemantics(
+        child: RepaintBoundary(
+          key: const ValueKey('atlas-planet'),
+          child: SizedBox.square(
+            dimension: widget.size,
+            child: KeyedSubtree(
+              key: ValueKey('planet-${palette.name}'),
+              child: CustomPaint(
+                key: const ValueKey('atlas-planet-motion'),
+                foregroundPainter: _AtlasGlobePainter(
+                  phase: _phase,
+                  lights: _lights,
+                  texture: widget.textureAvailable ? _assets?.textures : null,
+                  mascots: widget.mascotAvailable ? _assets?.mascots : null,
+                  palette: palette,
+                ),
               ),
             ),
           ),
@@ -161,8 +152,8 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
   }
 }
 
-// Surface colors are baked into each raster, not applied as a drawVertices
-// color filter. Both ocean and land must keep their state color on every GPU.
+// State colors are baked once into each cached raster, including its land,
+// ocean and clouds. This avoids renderer-dependent drawVertices tinting.
 enum _AtlasPlanetPalette {
   disconnected(0xFFAAB4B2, 0xFF1A1A1A),
   connected(0xFF5CF0B0, 0xFF03251A),
@@ -187,35 +178,107 @@ enum _AtlasPlanetPalette {
       : disconnected;
 }
 
-class _AtlasGlobeSurface {
-  _AtlasGlobeSurface(this.image)
-    : shader = ImageShader(
-        image,
-        TileMode.repeated,
-        TileMode.clamp,
-        Float64List.fromList([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
-        filterQuality: FilterQuality.low,
-      );
-  final ui.Image image;
-  final ImageShader shader;
+enum _DrOppoPose {
+  flying('assets/mascot/droppo_flying.png'),
+  waiting('assets/mascot/droppo_waiting.png'),
+  puzzled('assets/mascot/droppo_puzzled.png');
+
+  const _DrOppoPose(this.asset);
+  final String asset;
+  static _DrOppoPose forPalette(_AtlasPlanetPalette palette) =>
+      switch (palette) {
+        _AtlasPlanetPalette.connected => flying,
+        _AtlasPlanetPalette.error => puzzled,
+        _ => waiting,
+      };
 }
 
-// Four shared 1024x512 state textures (~8 MiB total), retained for the UI
-// process lifetime. The atlas is decoded once; no rasterization on status changes
-// or animation frames, and switching state does not reset the longitude.
-class _AtlasGlobeTexture {
-  _AtlasGlobeTexture(this.surfaces);
-  final Map<_AtlasPlanetPalette, _AtlasGlobeSurface> surfaces;
-  static Future<_AtlasGlobeTexture?>? _pending;
-  static _AtlasGlobeTexture? ready;
-  static Future<_AtlasGlobeTexture?> load() => _pending ??= _create();
+class _DrOppoSprite {
+  const _DrOppoSprite(this.image, this.source);
+  final ui.Image image;
+  final Rect source;
 
+  static Future<_DrOppoSprite?> load(_DrOppoPose pose) async {
+    ui.Image? image;
+    try {
+      final bytes = await rootBundle.load(pose.asset);
+      final codec = await ui.instantiateImageCodec(
+        bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+        targetWidth: 512,
+      );
+      try {
+        image = (await codec.getNextFrame()).image;
+      } finally {
+        codec.dispose();
+      }
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (data == null) {
+        image.dispose();
+        return null;
+      }
+      final pixels = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      var left = image.width, top = image.height, right = -1, bottom = -1;
+      for (var y = 0; y < image.height; y++) {
+        for (var x = 0; x < image.width; x++) {
+          if (pixels[(y * image.width + x) * 4 + 3] < 12) continue;
+          left = math.min(left, x);
+          right = math.max(right, x);
+          top = math.min(top, y);
+          bottom = math.max(bottom, y);
+        }
+      }
+      if (right < left || bottom < top) {
+        image.dispose();
+        return null;
+      }
+      // Padding preserves soft antialiased edges while avoiding generated
+      // transparent margins affecting the apparent size across poses.
+      final source = Rect.fromLTRB(
+        math.max(0, left - 2).toDouble(),
+        math.max(0, top - 2).toDouble(),
+        math.min(image.width, right + 3).toDouble(),
+        math.min(image.height, bottom + 3).toDouble(),
+      );
+      return _DrOppoSprite(image, source);
+    } catch (_) {
+      image?.dispose();
+      return null;
+    }
+  }
+}
+
+class _AtlasSceneAssets {
+  const _AtlasSceneAssets(this.textures, this.mascots);
+  final Map<_AtlasPlanetPalette, ui.Image> textures;
+  final Map<_DrOppoPose, _DrOppoSprite> mascots;
+  static Future<_AtlasSceneAssets>? _pending;
+  static _AtlasSceneAssets? ready;
+  static Future<_AtlasSceneAssets> load() => _pending ??= _create();
+
+  static Future<_AtlasSceneAssets> _create() async {
+    // Every asset is optional decoration. A missing sprite cannot hide the
+    // Earth or block connection, and there is no runtime network request.
+    final spriteFuture = Future.wait(
+      _DrOppoPose.values.map(_DrOppoSprite.load),
+    );
+    final textures = await _AtlasGlobeTexture.create();
+    final sprites = await spriteFuture;
+    return ready = _AtlasSceneAssets(Map.unmodifiable(textures), {
+      for (final (index, pose) in _DrOppoPose.values.indexed)
+        if (sprites[index] != null) pose: sprites[index]!,
+    });
+  }
+}
+
+class _AtlasGlobeTexture {
+  // Four 768² state images occupy ~9 MiB, plus three small mascot sprites.
+  static const _side = 768;
   static double _luminance(int r, int g, int b) =>
       r * 0.2126 + g * 0.7152 + b * 0.0722;
 
-  // Warm pixels belong to the decorative city emission, not the green terrain.
-  // A continuous mask retains anti-aliased edges without yellow dots in the
-  // disconnected/error textures. Neutral clouds cannot activate this mask.
   static double _emission(int r, int g, int b) =>
       math.min(
         ((r - g * 0.88 - 3) / 20).clamp(0.0, 1.0),
@@ -223,45 +286,38 @@ class _AtlasGlobeTexture {
       ) *
       ((math.max(r, g) - 35) / 35).clamp(0.0, 1.0);
 
-  static double _emissionWithNeighbor(
-    int r,
-    int g,
-    int b,
-    double warmNeighbor,
-  ) {
+  static double _emissionWithNeighbor(int r, int g, int b, double neighbor) {
     final warm = _emission(r, g, b);
     final luminance = _luminance(r, g, b);
-    // Bright city cores can be almost white. Only classify those as emission
-    // when adjacent to a strong warm light; isolated neutral clouds stay intact.
-    if (luminance <= 95 || warmNeighbor <= 0.4) return warm;
-    return math.max(
-      warm,
-      warmNeighbor * ((luminance - 70) / 60).clamp(0.0, 1.0),
-    );
+    if (luminance <= 95 || neighbor <= 0.4) return warm;
+    return math.max(warm, neighbor * ((luminance - 70) / 60).clamp(0.0, 1.0));
   }
 
   static double _emissionAt(Uint8List pixels, int x, int y) {
-    final i = (y * 1024 + x) * 4;
+    final i = (y * _side + x) * 4;
     final r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-    var warmNeighbor = 0.0;
+    var neighbor = 0.0;
     if (_luminance(r, g, b) > 95 && _emission(r, g, b) < 1) {
       for (final distance in const [1, 2]) {
         for (final dy in [-distance, 0, distance]) {
           for (final dx in [-distance, 0, distance]) {
             if (dx == 0 && dy == 0) continue;
-            final n = (((y + dy).clamp(0, 511) * 1024) + (x + dx) % 1024) * 4;
-            warmNeighbor = math.max(
-              warmNeighbor,
+            final n =
+                (((y + dy).clamp(0, _side - 1) * _side) +
+                    (x + dx).clamp(0, _side - 1)) *
+                4;
+            neighbor = math.max(
+              neighbor,
               _emission(pixels[n], pixels[n + 1], pixels[n + 2]),
             );
           }
         }
       }
     }
-    return _emissionWithNeighbor(r, g, b, warmNeighbor);
+    return _emissionWithNeighbor(r, g, b, neighbor);
   }
 
-  static (int, int, int) _mapPixel(
+  static (int, int, int) mapPixel(
     int r,
     int g,
     int b,
@@ -277,11 +333,14 @@ class _AtlasGlobeTexture {
     int channel(double value) => value.round().clamp(0, 255);
     switch (palette) {
       case _AtlasPlanetPalette.connected:
-        // Preserve texture detail and the original warm light color. The broad
-        // surface remains emerald, including the ocean and soft cloud layer.
-        final green = math.max(g.toDouble(), 14 + luminance * 0.80);
-        final red = math.min(r.toDouble(), green * 0.57);
-        final blue = math.min(b.toDouble(), green * 0.72);
+        // Broad emerald terrain retains near-mint cloud relief instead of the
+        // flat dark-green result of the old projected atlas. Gold stays gold.
+        final green = math.min(
+          255.0,
+          math.max(g.toDouble(), 18 + luminance * 1.12),
+        );
+        final red = math.min(r.toDouble(), green * 0.74);
+        final blue = math.min(b.toDouble(), green * 0.82);
         return (
           channel(red * (1 - light) + r * light),
           channel(green * (1 - light) + g * light),
@@ -312,66 +371,51 @@ class _AtlasGlobeTexture {
     int y,
   ) {
     var sum = 0.0, weight = 0.0;
-    // Bounded local estimate replaces emission, not the surrounding landscape.
-    // Longitude wraps; latitude clamps, exactly like the projected atlas.
     for (final dy in const [-4, 0, 4]) {
       for (final dx in const [-4, 0, 4]) {
-        final i = (((y + dy).clamp(0, 511) * 1024) + (x + dx) % 1024) * 4;
-        final r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-        final unlit = 1 - emission[i ~/ 4];
-        sum += _luminance(r, g, b) * unlit;
+        final i =
+            (((y + dy).clamp(0, _side - 1) * _side) +
+                (x + dx).clamp(0, _side - 1)) *
+            4;
+        final unlit = (1 - emission[i ~/ 4]) * pixels[i + 3] / 255;
+        sum += _luminance(pixels[i], pixels[i + 1], pixels[i + 2]) * unlit;
         weight += unlit;
       }
     }
     return weight > 0.2 ? sum / weight : 28;
   }
 
-  static void _closeSeam(Uint8List pixels) {
-    // Blend only an eight-pixel strip at the atlas edges, not the source asset.
-    // Exact matching edge colors prevent a vertical seam during axial rotation.
-    for (var y = 0; y < 512; y++) {
-      final left = y * 1024 * 4, right = left + 1023 * 4;
-      for (var channel = 0; channel < 3; channel++) {
-        final seam = (pixels[left + channel] + pixels[right + channel]) / 2;
-        for (var x = 0; x < 8; x++) {
-          final t = 1 - x / 8;
-          for (final i in [left + x * 4 + channel, right - x * 4 + channel]) {
-            pixels[i] = (pixels[i] * (1 - t) + seam * t).round();
-          }
-        }
-      }
-    }
-  }
-
   static Future<ui.Image> _imageFromPixels(Uint8List pixels) {
     final completer = Completer<ui.Image>();
     ui.decodeImageFromPixels(
       pixels,
-      1024,
-      512,
+      _side,
+      _side,
       ui.PixelFormat.rgba8888,
       completer.complete,
     );
     return completer.future;
   }
 
-  static Future<_AtlasGlobeTexture?> _create() async {
-    final surfaces = <_AtlasPlanetPalette, _AtlasGlobeSurface>{};
+  static Future<Map<_AtlasPlanetPalette, ui.Image>> create() async {
+    final surfaces = <_AtlasPlanetPalette, ui.Image>{};
     try {
-      final source = await rootBundle.load('assets/maps/earth_night_atlas.png');
+      final source = await rootBundle.load(
+        'assets/maps/earth_night_globe.webp',
+      );
       final codec = await ui.instantiateImageCodec(
         source.buffer.asUint8List(source.offsetInBytes, source.lengthInBytes),
-        targetWidth: 1024,
-        targetHeight: 512,
+        targetWidth: _side,
+        targetHeight: _side,
       );
       late final Uint8List pixels;
       try {
         final image = (await codec.getNextFrame()).image;
         try {
           final data = await image.toByteData(
-            format: ui.ImageByteFormat.rawRgba,
+            format: ui.ImageByteFormat.rawStraightRgba,
           );
-          if (data == null) return null;
+          if (data == null) return {};
           pixels = data.buffer.asUint8List(
             data.offsetInBytes,
             data.lengthInBytes,
@@ -382,18 +426,18 @@ class _AtlasGlobeTexture {
       } finally {
         codec.dispose();
       }
-      final emission = Float32List(1024 * 512);
-      for (var y = 0; y < 512; y++) {
-        for (var x = 0; x < 1024; x++) {
-          emission[y * 1024 + x] = _emissionAt(pixels, x, y);
+      final emission = Float32List(_side * _side);
+      for (var y = 0; y < _side; y++) {
+        for (var x = 0; x < _side; x++) {
+          emission[y * _side + x] = _emissionAt(pixels, x, y);
         }
         if (y % 32 == 31) await Future<void>.delayed(Duration.zero);
       }
-      final terrain = Float32List(1024 * 512);
-      for (var y = 0; y < 512; y++) {
-        for (var x = 0; x < 1024; x++) {
-          final i = (y * 1024 + x) * 4;
-          terrain[y * 1024 + x] = emission[i ~/ 4] > 0
+      final terrain = Float32List(_side * _side);
+      for (var y = 0; y < _side; y++) {
+        for (var x = 0; x < _side; x++) {
+          final i = (y * _side + x) * 4;
+          terrain[y * _side + x] = emission[i ~/ 4] > 0
               ? _unlitNeighborhood(pixels, emission, x, y)
               : _luminance(pixels[i], pixels[i + 1], pixels[i + 2]);
         }
@@ -402,7 +446,10 @@ class _AtlasGlobeTexture {
       for (final palette in _AtlasPlanetPalette.values) {
         final mapped = Uint8List(pixels.length);
         for (var i = 0; i < pixels.length; i += 4) {
-          final (r, g, b) = _mapPixel(
+          if (i % 131072 == 131068) await Future<void>.delayed(Duration.zero);
+          final alpha = pixels[i + 3];
+          if (alpha == 0) continue;
+          final (r, g, b) = mapPixel(
             pixels[i],
             pixels[i + 1],
             pixels[i + 2],
@@ -410,25 +457,21 @@ class _AtlasGlobeTexture {
             unlitLuminance: terrain[i ~/ 4],
             emissionAmount: emission[i ~/ 4],
           );
-          mapped[i] = r;
-          mapped[i + 1] = g;
-          mapped[i + 2] = b;
-          mapped[i + 3] = 255;
-          if (i % 131072 == 131068) {
-            await Future<void>.delayed(Duration.zero);
-          }
+          // decodeImageFromPixels expects premultiplied RGBA. Preserve the
+          // artwork's genuine alpha; no rectangular halo on the star field.
+          mapped[i] = (r * alpha / 255).round();
+          mapped[i + 1] = (g * alpha / 255).round();
+          mapped[i + 2] = (b * alpha / 255).round();
+          mapped[i + 3] = alpha;
         }
-        _closeSeam(mapped);
-        surfaces[palette] = _AtlasGlobeSurface(await _imageFromPixels(mapped));
+        surfaces[palette] = await _imageFromPixels(mapped);
       }
-      return ready = _AtlasGlobeTexture(Map.unmodifiable(surfaces));
+      return surfaces;
     } catch (_) {
-      for (final surface in surfaces.values) {
-        surface.shader.dispose();
-        surface.image.dispose();
+      for (final image in surfaces.values) {
+        image.dispose();
       }
-      // Decorative asset failure cannot block the VPN; atmosphere remains.
-      return null;
+      return {};
     }
   }
 }
@@ -438,143 +481,108 @@ class _AtlasGlobePainter extends CustomPainter {
     required this.phase,
     required this.lights,
     required this.texture,
+    required this.mascots,
     required this.palette,
-    required this.connected,
   }) : super(repaint: Listenable.merge([phase, lights]));
 
-  final ValueNotifier<double> phase;
-  final ValueNotifier<double> lights;
-  final _AtlasGlobeTexture? texture;
+  final ValueNotifier<double> phase, lights;
+  final Map<_AtlasPlanetPalette, ui.Image>? texture;
+  final Map<_DrOppoPose, _DrOppoSprite>? mascots;
   final _AtlasPlanetPalette palette;
   Color get tone => palette.tone;
-  final bool connected;
-  static const _columns = 73, _rows = 37;
-  static final _sphere = _createSphere();
-  static final _texCoords = _createTexCoords();
-  static final _triangles = _createTriangles();
-  final _positions = Float32List(_columns * _rows * 2);
-  final _depths = Float32List(_columns * _rows);
-  final _visibleTriangles = Uint16List((_columns - 1) * (_rows - 1) * 6);
+  _DrOppoPose get pose => _DrOppoPose.forPalette(palette);
+  double get tilt => math.sin(phase.value * 2 * math.pi) * math.pi / 180;
+  double _float(Size size) =>
+      math.sin(phase.value * 2 * math.pi) *
+      math.min(3.0, size.shortestSide * 0.006);
+  Rect globeBounds(Size size) => Rect.fromCenter(
+    center: size.center(Offset(0, _float(size))),
+    width: size.shortestSide * 0.85,
+    height: size.shortestSide * 0.85,
+  );
 
-  static (double, double, double) _unit(double latitude, double longitude) {
-    final lat = latitude * math.pi / 180, lon = longitude * math.pi / 180;
-    return (
-      math.cos(lat) * math.sin(lon),
-      math.sin(lat),
-      math.cos(lat) * math.cos(lon),
-    );
-  }
-
-  static Float64List _createSphere() {
-    final vertices = Float64List(_columns * _rows * 3);
-    for (var row = 0; row < _rows; row++) {
-      for (var column = 0; column < _columns; column++) {
-        final (x, y, z) = _unit(90 - row * 5, column * 5 - 180);
-        final i = (row * _columns + column) * 3;
-        vertices[i] = x;
-        vertices[i + 1] = y;
-        vertices[i + 2] = z;
-      }
+  Rect mascotBounds(Size size) {
+    final d = size.shortestSide;
+    final origin = size.center(Offset.zero) - Offset(d / 2, d / 2);
+    final box = switch (pose) {
+      _DrOppoPose.flying => Rect.fromLTWH(
+        d * 0.64,
+        d * 0.025,
+        d * 0.33,
+        d * 0.235,
+      ),
+      _DrOppoPose.waiting => Rect.fromLTWH(
+        d * 0.64,
+        d * 0.035,
+        d * 0.22,
+        d * 0.245,
+      ),
+      _DrOppoPose.puzzled => Rect.fromLTWH(
+        d * 0.675,
+        d * 0.015,
+        d * 0.23,
+        d * 0.235,
+      ),
+    };
+    final source =
+        mascots?[pose]?.source.size ??
+        switch (pose) {
+          _DrOppoPose.flying => const Size(1.55, 1),
+          _DrOppoPose.waiting => const Size(0.80, 1),
+          _DrOppoPose.puzzled => const Size(0.95, 1),
+        };
+    final fitted = applyBoxFit(BoxFit.contain, source, box.size).destination;
+    var rect = Alignment.bottomCenter.inscribe(fitted, box);
+    if (pose != _DrOppoPose.flying) {
+      // Contact points are on the approved alpha-trimmed artwork, not on its
+      // transparent canvas: the sitting hip and the standing boot soles.
+      // The visible sphere is smaller than the image because its atmosphere
+      // has transparent margins. Anchor to that rim so DrOppo does not hover.
+      final anchor = pose == _DrOppoPose.waiting
+          ? const Offset(0.46, 0.805)
+          : const Offset(0.47, 0.99);
+      final contactX = rect.left + rect.width * anchor.dx;
+      final radius = d * 0.367;
+      final dx = contactX - d * 0.5;
+      final rimY =
+          d * 0.504 - math.sqrt(math.max(0.0, radius * radius - dx * dx));
+      rect = rect.shift(Offset(0, rimY - rect.top - rect.height * anchor.dy));
     }
-    return vertices;
-  }
-
-  static Float32List _createTexCoords() {
-    final coordinates = Float32List(_columns * _rows * 2);
-    for (var row = 0; row < _rows; row++) {
-      for (var column = 0; column < _columns; column++) {
-        final i = (row * _columns + column) * 2;
-        coordinates[i] = column / (_columns - 1) * 1024;
-        coordinates[i + 1] = row / (_rows - 1) * 512;
-      }
-    }
-    return coordinates;
-  }
-
-  static Uint16List _createTriangles() {
-    final indices = <int>[];
-    for (var row = 0; row < _rows - 1; row++) {
-      for (var column = 0; column < _columns - 1; column++) {
-        final a = row * _columns + column, b = a + _columns;
-        indices.addAll([a, b, a + 1, a + 1, b, b + 1]);
-      }
-    }
-    return Uint16List.fromList(indices);
-  }
-
-  // Fixed camera tilt and light, rotating longitude of the entire sphere.
-  (double, double, double) project(double x, double y, double z) {
-    final longitude = (20 / 180 + phase.value * 2) * math.pi;
-    final cos = math.cos(longitude), sin = math.sin(longitude);
-    final depth = x * sin + z * cos;
-    return (
-      x * cos - z * sin,
-      y * 0.9612617 - depth * 0.2756374,
-      y * 0.2756374 + depth * 0.9612617,
-    );
+    // Only the flying pose hovers independently. Seated feet and standing
+    // boots remain anchored to the slowly floating planet beneath them.
+    final hover = pose == _DrOppoPose.flying
+        ? math.sin(phase.value * 2 * math.pi * 5) * math.min(2.0, d * 0.004)
+        : 0.0;
+    return rect.shift(origin + Offset(0, _float(size) + hover));
   }
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
-    final radius = math.min(size.width, size.height) * 0.435;
-    final globe = Rect.fromCircle(center: center, radius: radius);
-    final glow = Paint()
-      ..color = tone.withValues(alpha: connected ? 0.17 : 0.09)
-      ..maskFilter = MaskFilter.blur(BlurStyle.normal, radius * 0.025);
-    canvas.drawCircle(center, radius * 1.005, glow);
-    canvas.drawCircle(center, radius, Paint()..color = palette.ocean);
+    final globe = globeBounds(size);
+    final image = texture?[palette];
     canvas.save();
-    canvas.clipPath(Path()..addOval(globe));
-    final imageTexture = texture?.surfaces[palette];
-    if (imageTexture != null) {
-      final longitude = (20 / 180 + phase.value * 2) * math.pi;
-      final cos = math.cos(longitude), sin = math.sin(longitude);
-      for (var i = 0; i < _depths.length; i++) {
-        final x = _sphere[i * 3],
-            y = _sphere[i * 3 + 1],
-            z = _sphere[i * 3 + 2];
-        final depth = x * sin + z * cos;
-        _positions[i * 2] = center.dx + (x * cos - z * sin) * radius;
-        _positions[i * 2 + 1] =
-            center.dy - (y * 0.9612617 - depth * 0.2756374) * radius;
-        _depths[i] = y * 0.2756374 + depth * 0.9612617;
-      }
-      var visible = 0;
-      for (var i = 0; i < _triangles.length; i += 3) {
-        final a = _triangles[i], b = _triangles[i + 1], c = _triangles[i + 2];
-        if (_depths[a] + _depths[b] + _depths[c] <= 0) continue;
-        _visibleTriangles[visible++] = a;
-        _visibleTriangles[visible++] = b;
-        _visibleTriangles[visible++] = c;
-      }
-      final vertices = ui.Vertices.raw(
-        VertexMode.triangles,
-        _positions,
-        textureCoordinates: _texCoords,
-        indices: Uint16List.sublistView(_visibleTriangles, 0, visible),
-      );
-      final surfacePaint = Paint()..shader = imageTexture.shader;
-      if (connected && lights.value < 1) {
-        // Briefly attenuate warm emission in the already-green connected
-        // surface, never blend from a gray state texture. If a renderer ignores
-        // this optional effect the cities simply appear immediately; the baked
-        // whole-surface green state is still correct on that renderer.
+    canvas.translate(center.dx, center.dy + _float(size));
+    canvas.rotate(tilt);
+    canvas.translate(-center.dx, -center.dy - _float(size));
+    if (image != null) {
+      final paint = Paint()..filterQuality = FilterQuality.medium;
+      if (palette == _AtlasPlanetPalette.connected && lights.value < 1) {
         final dim = 1 - lights.value;
-        surfacePaint.colorFilter = ColorFilter.matrix([
-          1 - 0.92 * dim,
+        paint.colorFilter = ColorFilter.matrix([
+          1 - 0.75 * dim,
           0,
           0,
           0,
           0,
-          -0.60 * dim,
+          -0.45 * dim,
           1,
           0,
           0,
-          4 * dim,
           0,
           0,
-          1 - 0.75 * dim,
+          0,
+          1 - 0.60 * dim,
           0,
           0,
           0,
@@ -584,42 +592,35 @@ class _AtlasGlobePainter extends CustomPainter {
           0,
         ]);
       }
-      canvas.drawVertices(vertices, BlendMode.srcOver, surfacePaint);
-      vertices.dispose();
+      canvas.drawImageRect(
+        image,
+        Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+        globe,
+        paint,
+      );
+    } else {
+      // Optional artwork never replaces or blocks the actual connect action.
+      final radius = size.shortestSide * 0.39;
+      canvas.drawCircle(globe.center, radius, Paint()..color = palette.ocean);
+      canvas.drawCircle(
+        globe.center,
+        radius,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1
+          ..color = tone.withValues(alpha: 0.75),
+      );
     }
-    canvas.drawCircle(
-      center,
-      radius,
-      Paint()
-        ..shader = RadialGradient(
-          center: const Alignment(-0.35, -0.45),
-          radius: 1.05,
-          colors: [Colors.transparent, Colors.black.withValues(alpha: 0.30)],
-          stops: const [0.30, 1],
-        ).createShader(globe),
-    );
     canvas.restore();
-    canvas.drawCircle(
-      center,
-      radius,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 0.85
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color.lerp(
-              tone,
-              Colors.white,
-              connected ? 0.30 : 0,
-            )!.withValues(alpha: 0.95),
-            tone.withValues(alpha: 0.55),
-            tone.withValues(alpha: 0.10),
-          ],
-          stops: const [0, 0.4, 1],
-        ).createShader(globe),
-    );
+    final mascot = mascots?[pose];
+    if (mascot != null) {
+      canvas.drawImageRect(
+        mascot.image,
+        mascot.source,
+        mascotBounds(size),
+        Paint()..filterQuality = FilterQuality.medium,
+      );
+    }
   }
 
   @override
@@ -627,8 +628,8 @@ class _AtlasGlobePainter extends CustomPainter {
       oldDelegate.phase != phase ||
       oldDelegate.lights != lights ||
       oldDelegate.texture != texture ||
-      oldDelegate.palette != palette ||
-      oldDelegate.connected != connected;
+      oldDelegate.mascots != mascots ||
+      oldDelegate.palette != palette;
 }
 
 @visibleForTesting
@@ -638,6 +639,7 @@ Widget buildAtlasPlanetForTesting({
   bool hasError = false,
   bool motionEnabled = true,
   bool textureAvailable = true,
+  bool mascotAvailable = true,
   double size = 280,
 }) => _AtlasAnimatedPlanet(
   connected: connected,
@@ -645,12 +647,14 @@ Widget buildAtlasPlanetForTesting({
   hasError: hasError,
   motionEnabled: motionEnabled,
   textureAvailable: textureAvailable,
+  mascotAvailable: mascotAvailable,
   size: size,
 );
 
 @visibleForTesting
 Future<bool> preloadAtlasPlanetForTesting() async =>
-    await _AtlasGlobeTexture.load() != null;
+    (await _AtlasSceneAssets.load()).textures.length ==
+    _AtlasPlanetPalette.values.length;
 
 // Borrowed cached image: test callers must not dispose it.
 @visibleForTesting
@@ -658,13 +662,16 @@ Future<ui.Image?> atlasPlanetTextureForTesting({
   bool connected = false,
   bool busy = false,
   bool hasError = false,
-}) async => (await _AtlasGlobeTexture.load())
-    ?.surfaces[_AtlasPlanetPalette.select(
+}) async =>
+    (await _AtlasSceneAssets.load()).textures[_AtlasPlanetPalette.select(
       connected: connected,
       busy: busy,
       hasError: hasError,
-    )]
-    ?.image;
+    )];
+
+@visibleForTesting
+Future<int> atlasPlanetMascotAssetCountForTesting() async =>
+    (await _AtlasSceneAssets.load()).mascots.length;
 
 @visibleForTesting
 double atlasPlanetPhaseForTesting(CustomPainter painter) =>
@@ -675,6 +682,26 @@ double atlasPlanetLightsForTesting(CustomPainter painter) =>
     (painter as _AtlasGlobePainter).lights.value;
 
 @visibleForTesting
+Color atlasPlanetColorForTesting(CustomPainter painter) =>
+    (painter as _AtlasGlobePainter).tone;
+
+@visibleForTesting
+double atlasPlanetTiltForTesting(CustomPainter painter) =>
+    (painter as _AtlasGlobePainter).tilt;
+
+@visibleForTesting
+Rect atlasPlanetGlobeBoundsForTesting(CustomPainter painter, Size size) =>
+    (painter as _AtlasGlobePainter).globeBounds(size);
+
+@visibleForTesting
+String atlasPlanetMascotPoseForTesting(CustomPainter painter) =>
+    (painter as _AtlasGlobePainter).pose.name;
+
+@visibleForTesting
+Rect atlasPlanetMascotBoundsForTesting(CustomPainter painter, Size size) =>
+    (painter as _AtlasGlobePainter).mascotBounds(size);
+
+@visibleForTesting
 Color atlasPlanetMappedPixelForTesting(
   Color source, {
   bool connected = false,
@@ -683,7 +710,7 @@ Color atlasPlanetMappedPixelForTesting(
   List<Color> neighbors = const [],
 }) {
   final argb = source.toARGB32();
-  final (r, g, b) = _AtlasGlobeTexture._mapPixel(
+  final (r, g, b) = _AtlasGlobeTexture.mapPixel(
     (argb >> 16) & 255,
     (argb >> 8) & 255,
     argb & 255,
@@ -694,7 +721,7 @@ Color atlasPlanetMappedPixelForTesting(
     ),
     emissionAmount: atlasPlanetEmissionForTesting(source, neighbors: neighbors),
   );
-  return Color.fromARGB(255, r, g, b);
+  return Color.fromARGB((argb >> 24) & 255, r, g, b);
 }
 
 @visibleForTesting
@@ -721,18 +748,4 @@ double atlasPlanetEmissionForTesting(
     argb & 255,
     warmNeighbor,
   );
-}
-
-@visibleForTesting
-Color atlasPlanetColorForTesting(CustomPainter painter) =>
-    (painter as _AtlasGlobePainter).tone;
-
-@visibleForTesting
-(double, double, double) atlasPlanetSurfacePointForTesting(
-  CustomPainter painter,
-  double latitude,
-  double longitude,
-) {
-  final (x, y, z) = _AtlasGlobePainter._unit(latitude, longitude);
-  return (painter as _AtlasGlobePainter).project(x, y, z);
 }

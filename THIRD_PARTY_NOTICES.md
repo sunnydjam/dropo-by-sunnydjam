@@ -18,10 +18,15 @@
 Рендерер [flutter_svg](https://pub.dev/packages/flutter_svg) — MIT;
 лицензии Dart/Flutter-зависимостей входят в стандартный Flutter license bundle.
 
-Ночная поверхность анимированной планеты использует оригинальную декоративную
-текстуру `flutter_app/assets/maps/earth_night_atlas.png`, включённую в приложение.
-Её описание и исходный brief находятся в `flutter_app/assets/maps/EARTH_NIGHT_ASSET.md`.
-Это художественное изображение, не спутниковые наблюдения и не карта серверов.
+Ночная планета использует оригинальное декоративное изображение сайта Dropo
+`flutter_app/assets/maps/earth_night_globe.webp`, включённое в приложение.
+Три позы оригинального персонажа DrOppo находятся в `flutter_app/assets/mascot/`.
+Происхождение изображений и исходные brief сохранены в
+`store-assets/source/earth-night-globe.provenance.json` и
+`store-assets/source/DROPPO_SCENE_ASSETS.json`.
+Это художественные изображения, не спутниковые наблюдения и не карта серверов.
+Предыдущий атлас `flutter_app/assets/maps/earth_night_atlas.png` сохранён
+в репозитории, но больше не включается в Flutter asset bundle.
 
 Предыдущая поверхность использовала Natural Earth 1:110m land; исходные данные
 сохранены в репозитории (`flutter_app/assets/maps/ne_110m_land.geojson`),
