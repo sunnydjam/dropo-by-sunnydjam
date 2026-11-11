@@ -152,6 +152,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Flutter analysis failed" }
           flutter test --no-pub
           if ($LASTEXITCODE -ne 0) { throw "Flutter tests failed" }
+          flutter test --no-pub --dart-define=DROPO_PURCHASES_ENABLED=true test/stars_purchase_test.dart
+          if ($LASTEXITCODE -ne 0) { throw "Telegram Stars purchase flow tests failed" }
 
   go-race:
     runs-on: ubuntu-latest
