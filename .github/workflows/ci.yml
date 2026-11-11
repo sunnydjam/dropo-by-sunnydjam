@@ -156,7 +156,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Telegram Stars purchase flow tests failed" }
 
   go-race:
-    runs-on: ubuntu-latest
+    # Keep native GTK package inputs stable across ubuntu-latest migrations.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -164,6 +165,7 @@ jobs:
           go-version: "1.27.4"
           cache-dependency-path: app/go.sum
       - name: Install Linux tray build dependencies
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y libayatana-appindicator3-dev
       - name: Go race detector
         working-directory: app
