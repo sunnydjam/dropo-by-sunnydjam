@@ -9,6 +9,34 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   WidgetController.hitTestWarningShouldBeFatal = true;
 
+  testWidgets(
+    'Boost opens sign-in directly for an existing guest and keeps the purchase destination',
+    (tester) async {
+      final api = _PasswordTransport();
+      await _pump(tester, api, initialToken: 'guest-bearer', showTurbo: true);
+      expect(find.text('Войти в Dropo'), findsOneWidget);
+      expect(find.text('Бесплатный профиль'), findsNothing);
+      await _login(tester);
+      expect(find.byKey(const ValueKey('turbo-page')), findsOneWidget);
+      expect(api.requests.where((r) => r.path == '/v1/orders'), isEmpty);
+    },
+  );
+
+  testWidgets(
+    'Boost destination survives server password sign-in without purchasing',
+    (tester) async {
+      final api = _PasswordTransport();
+      await _pump(tester, api, showTurbo: true);
+      expect(find.byKey(const ValueKey('turbo-page')), findsNothing);
+      await _login(tester);
+      expect(find.byKey(const ValueKey('turbo-page')), findsOneWidget);
+      expect(
+        api.requests.where((r) => r.method == 'POST' && r.path == '/v1/orders'),
+        isEmpty,
+      );
+    },
+  );
+
   testWidgets('password entry requires server support; no local demo remains', (
     tester,
   ) async {
@@ -238,6 +266,7 @@ Future<void> _pump(
   WidgetTester tester,
   _PasswordTransport api, {
   bool persist = false,
+  bool showTurbo = false,
   String? initialToken,
   double textScale = 1,
   Future<Map<String, dynamic>> Function(String, bool)? onVPNProfile,
@@ -257,6 +286,7 @@ Future<void> _pump(
           key: UniqueKey(),
           endpoint: 'https://accounts.example.com',
           transport: api,
+          showTurbo: showTurbo,
           onVPNProfile: onVPNProfile,
           onDeleteGuestVPN: onDeleteGuestVPN,
           persistSession: persist,
@@ -371,7 +401,18 @@ class _PasswordTransport implements AccountTransport {
       }
       return pendingLogin?.future ?? loginResponse;
     }
-    if (path == '/v1/me') return {'account': account};
+    if (path == '/v1/me') {
+      return {
+        'account': token == 'guest-bearer'
+            ? {
+                'id': 'synthetic-guest',
+                'displayName': 'Free profile',
+                'authMethod': 'guest',
+                'guestAccount': true,
+              }
+            : account,
+      };
+    }
     if (path == '/v1/sessions/current') return {};
     if (path == '/v1/sessions') {
       return {

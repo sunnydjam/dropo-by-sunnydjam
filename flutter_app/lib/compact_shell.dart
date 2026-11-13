@@ -13,6 +13,8 @@ class _AtlasDesktopShell extends StatefulWidget {
     required this.version,
     this.accountDisplay,
     this.onAbout,
+    this.onBoost,
+    this.offerBoost = true,
     this.homeTelemetry,
     this.visible = true,
     this.motionEnabled = true,
@@ -24,6 +26,8 @@ class _AtlasDesktopShell extends StatefulWidget {
   final String activeSection, version;
   final AccountDisplaySnapshot? accountDisplay;
   final VoidCallback? onAbout;
+  final VoidCallback? onBoost;
+  final bool offerBoost;
   final Widget? homeTelemetry;
   final bool visible;
   final bool motionEnabled;
@@ -42,6 +46,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   static const _items = <(String, String, IconData)>[
     ('home', 'Главная', Icons.home_rounded),
     ('sources', 'Источники VPN', Icons.dns_outlined),
+    ('android-services', 'Сервисы', Icons.apps_rounded),
     ('logs', 'Диагностика', Icons.monitor_heart_outlined),
     ('settings', 'Настройки', Icons.settings_outlined),
     ('account', 'Аккаунт', Icons.person_outline_rounded),
@@ -94,14 +99,14 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   }
 
   String get _parentSection => switch (widget.activeSection) {
-    'services' || 'service-settings' => 'home',
+    'services' || 'service-settings' || 'android-services' => 'home',
     'profiles' || 'work' || 'dropo_space' || 'technical-settings' => 'advanced',
     'logs' || 'stats' || 'about' || 'guided-help' => 'help',
     _ => 'settings',
   };
 
   String get _selectedPrimary => switch (widget.activeSection) {
-    'services' || 'service-settings' => 'home',
+    'services' || 'service-settings' || 'android-services' => 'home',
     'logs' || 'stats' || 'about' || 'guided-help' => 'help',
     final section when _primarySections.contains(section) => section,
     _ => 'settings',
@@ -190,8 +195,12 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   Widget _account({bool compact = false, bool phone = false}) {
     final profile = widget.accountDisplay;
     final selected = widget.activeSection == 'account';
-    final label = profile?.displayName ?? 'Войти через Telegram';
-    final subtitle = profile == null
+    final label = _isAndroidPlatform && profile?.registered != true
+        ? 'Гость'
+        : profile?.displayName ?? 'Войти через Telegram';
+    final subtitle = _isAndroidPlatform && profile?.registered != true
+        ? 'Бесплатный тариф'
+        : profile == null
         ? phone
               ? 'Telegram'
               : 'Аккаунт Dropo'
@@ -254,7 +263,9 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      phone && profile == null ? 'Войти' : label,
+                      phone && profile == null && !_isAndroidPlatform
+                          ? 'Войти'
+                          : label,
                       key: const ValueKey('account-display-name'),
                       maxLines: phone ? 1 : 2,
                       overflow: TextOverflow.ellipsis,
@@ -297,6 +308,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
         : 0.0;
     final contentWidth = screen.width - railWidth;
     final reserveFooter =
+        _isAndroidPlatform ||
         widget.activeSection != 'home' ||
         contentWidth < 960 ||
         navigationTextScale > 1.3;
@@ -491,7 +503,63 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                                         )
                                       else
                                         const Spacer(),
-                                      versionLink(),
+                                      if (_isAndroidPlatform) ...[
+                                        if (widget.offerBoost)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              left: 5,
+                                              right: 12,
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                const Text(
+                                                  'Купить',
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: _atlasMuted,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                FilledButton(
+                                                  key: const ValueKey(
+                                                    'android-buy-boost',
+                                                  ),
+                                                  onPressed: widget.disabled
+                                                      ? null
+                                                      : widget.onBoost,
+                                                  style: FilledButton.styleFrom(
+                                                    backgroundColor: _atlasMint,
+                                                    foregroundColor:
+                                                        _atlasBackground,
+                                                    minimumSize: const Size(
+                                                      80,
+                                                      44,
+                                                    ),
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 16,
+                                                        ),
+                                                    shape: RoundedRectangleBorder(
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            12,
+                                                          ),
+                                                    ),
+                                                  ),
+                                                  child: const Text(
+                                                    'Boost',
+                                                    style: TextStyle(
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                      ] else
+                                        versionLink(),
                                     ],
                                   ),
                                 ),

@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import 'account_session_store.dart';
 import 'pinned_tls.dart';
 
@@ -24,6 +25,7 @@ part 'atlas_dashboard.dart';
 part 'compact_shell.dart';
 part 'accessible_controls.dart';
 part 'planet_animation.dart';
+part 'android_animated_home.dart';
 part 'space_background.dart';
 part 'update_progress.dart';
 part 'vpn_response.dart';
@@ -3862,6 +3864,9 @@ class _DropoHomePageState extends State<DropoHomePage>
   int updateTotal = 0;
   bool homeRoutesExpanded = false;
   bool preparingFullVpnSource = false;
+  bool _androidCancelPending = false;
+  int _androidConnectionAttempt = 0;
+  DateTime? _androidConnectedAt;
   final List<String> _sectionHistory = [];
   late final _AccountDisplayController _accountDisplay;
   late final GuestIdentityCoordinator _guestIdentity;
@@ -3904,7 +3909,8 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   bool get connectionBusy {
-    return busyTasks.keys.any(isConnectionBlockingBusyTask) ||
+    return _androidCancelPending ||
+        busyTasks.keys.any(isConnectionBlockingBusyTask) ||
         status.connecting ||
         status.disconnecting;
   }
@@ -4289,6 +4295,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           homeSourcesLoading = false;
           homeSourcesRequest++;
         }
+        _observeAndroidSession(loadedStatus);
         status = loadedStatus;
         _incidents.observeConnection(loadedStatus, loadedAppConfig.routingMode);
         logs = loadedLogs;
@@ -4736,6 +4743,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       error: errorText,
       serviceMessage: message,
     );
+    _observeAndroidSession(status);
 
     if (connecting) {
       busyTasks['vpn-connect'] = message.isEmpty
@@ -4949,6 +4957,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       return;
     }
     final target = !status.connected;
+    final androidAttempt = _androidConnectionAttempt;
     if (target && _accountConfigured) {
       setState(() => preparingFullVpnSource = true);
       try {
@@ -5010,6 +5019,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       try {
         result = await widget.bridge.setConnected(target);
       } on TimeoutException catch (error) {
+        if (androidAttempt != _androidConnectionAttempt) return;
         if (target) {
           await widget.bridge
               .setConnected(false)
@@ -5027,7 +5037,11 @@ class _DropoHomePageState extends State<DropoHomePage>
         }
         await _refresh(all: true);
         return;
+      } catch (_) {
+        if (androidAttempt != _androidConnectionAttempt) return;
+        rethrow;
       }
+      if (!mounted || androidAttempt != _androidConnectionAttempt) return;
       final ok = result['success'] != false;
       if (!ok) {
         if (target) {
@@ -5046,6 +5060,96 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       await _refresh(all: true);
     }, clearConnectionBusy: true);
+  }
+
+  Future<void> _cancelAndroidConnection() async {
+    if (!_isAndroidPlatform ||
+        !status.connecting ||
+        status.disconnecting ||
+        _androidCancelPending ||
+        quitting ||
+        preparingFullVpnSource) {
+      return;
+    }
+    ++_androidConnectionAttempt;
+    // Also invalidate a mode/source reconnect that may be waiting for Start.
+    // Its next generation check must finish instead of holding the UI busy.
+    ++sourceChangeGeneration;
+    setState(() => _androidCancelPending = true);
+    try {
+      // Android's session fence invalidates a pending native start on Stop.
+      final result = await widget.bridge.setConnected(false);
+      if (mounted && result['success'] == false) {
+        setState(() {
+          connectionHint =
+              result['error']?.toString() ?? 'Не удалось остановить VPN';
+          connectionHintDanger = true;
+        });
+      }
+      await _refresh(all: true);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          connectionHint = _cleanError(error);
+          connectionHintDanger = true;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _androidCancelPending = false);
+    }
+  }
+
+  void _observeAndroidSession(CoreStatus next) {
+    if (!_isAndroidPlatform) return;
+    if (next.connected) {
+      _androidConnectedAt ??= DateTime.now();
+    } else if (!next.connecting && !next.disconnecting) {
+      _androidConnectedAt = null;
+    }
+  }
+
+  void _openBoost() {
+    // Keep the purchase destination through guest -> registered sign-in.
+    setState(() => accountTurboRequested = true);
+    unawaited(_selectMenuSection('account'));
+  }
+
+  Future<void> _setAndroidSceneRoutingMode(String mode) async {
+    if (!const {'blocked_only', 'all_traffic'}.contains(mode) ||
+        controlsDisabled ||
+        connectionBusy ||
+        mode == appConfig.routingMode) {
+      return;
+    }
+    final androidAttempt = _androidConnectionAttempt;
+    if (!status.connected) return _setHomeRoutingMode(mode);
+    try {
+      final result = await _applySourceChange(
+        () => widget.bridge.setRoutingMode(mode),
+      );
+      if (androidAttempt != _androidConnectionAttempt) return;
+      if (result['success'] == false) {
+        throw StateError(
+          result['userMessage']?.toString() ??
+              result['error']?.toString() ??
+              'Режим не изменён',
+        );
+      }
+      if (mounted) {
+        setState(() {
+          appConfig = appConfig.copyWith(routingMode: mode);
+          liveRoutesConfirmed = false;
+        });
+      }
+    } catch (error) {
+      if (androidAttempt != _androidConnectionAttempt) return;
+      if (mounted) {
+        setState(() {
+          connectionHint = _cleanError(error);
+          connectionHintDanger = true;
+        });
+      }
+    }
   }
 
   Future<Map<String, dynamic>> _applySourceChange(
@@ -6307,6 +6411,81 @@ class _DropoHomePageState extends State<DropoHomePage>
             depsProgress.trim().isNotEmpty);
     final showRouteProbe =
         (routeProbeActive || routeProbeFailed) && routeProbeProgress.isNotEmpty;
+    // Platform views are instantiated only on a real Android runtime. Desktop
+    // and host widget tests retain the native Flutter layout.
+    if (Platform.isAndroid) {
+      final source = homeSources.where((source) => source.active).firstOrNull;
+      return Column(
+        children: [
+          ?_buildUpdateNotice(),
+          Expanded(
+            child: _AndroidAnimatedHome(
+              connected: online && status.connected,
+              connectedAt: _androidConnectedAt,
+              connecting:
+                  preparingFullVpnSource ||
+                  status.connecting ||
+                  busyTasks.containsKey('vpn-connect'),
+              disconnecting:
+                  _androidCancelPending ||
+                  status.disconnecting ||
+                  busyTasks.containsKey('vpn-disconnect'),
+              busy: isBusy || preparingFullVpnSource,
+              enabled: powerEnabled,
+              canCancel:
+                  online &&
+                  status.connecting &&
+                  !status.disconnecting &&
+                  !_androidCancelPending &&
+                  !preparingFullVpnSource &&
+                  !quitting &&
+                  !sectionBusy,
+              motionEnabled: !appConfig.reduceMotion,
+              visible: windowVisible,
+              routingMode: appConfig.routingMode,
+              source: source?.name ?? 'Источник VPN',
+              message: showHint ? normalizedHint : '',
+              error: hintDanger,
+              onToggle: () => unawaited(_toggleConnection()),
+              onCancel: () => unawaited(_cancelAndroidConnection()),
+              onMode: (mode) => unawaited(_setAndroidSceneRoutingMode(mode)),
+              onSources: () => unawaited(_openSubscription()),
+              onServices: () => unawaited(_selectMenuSection('services')),
+              onHelp: () => unawaited(_selectMenuSection('guided-help')),
+              fallback: ListView(
+                children: [
+                  _HomeConnectionPanel(
+                    atlas: true,
+                    status: status,
+                    online: online,
+                    booting: booting,
+                    busy: isBusy,
+                    disconnecting: status.disconnecting,
+                    routingMode: appConfig.routingMode,
+                    enabled: powerEnabled,
+                    onPressed: _toggleConnection,
+                    motionEnabled: false,
+                  ),
+                  if (showHint)
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(normalizedHint),
+                    ),
+                  if (status.connected) _buildRouteControls(summaryOnly: true),
+                ],
+              ),
+            ),
+          ),
+          if (!online && !booting && !quitting)
+            TextButton.icon(
+              key: const ValueKey('home-retry-core'),
+              onPressed: () => unawaited(_bootstrap()),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Повторить запуск Dropo'),
+            ),
+        ],
+      );
+    }
     return _AtlasHomeLayout(
       noticeLabel: routeProbeActive && routeProbeExtendedSearch && !hintDanger
           ? 'Поиск до часа'
@@ -6506,6 +6685,20 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   Widget _buildMenuSectionContent() {
     switch (activeMenuSection) {
+      case 'android-services':
+        return SingleChildScrollView(
+          child: _HomeServicesAccordion(
+            bridge: widget.bridge,
+            routeSnapshot: online ? routes : null,
+            connected: online && status.connected,
+            enabled: !controlsDisabled && !connectionBusy,
+            routingMode: appConfig.routingMode,
+            expanded: true,
+            onExpandedChanged: (_) {},
+            onBusyChanged: _setSectionBusy,
+            onChanged: () => unawaited(_refresh(all: true)),
+          ),
+        );
       case 'settings':
       case 'advanced':
       case 'help':
@@ -6665,7 +6858,12 @@ class _DropoHomePageState extends State<DropoHomePage>
     return _AtlasDesktopShell(
       activeSection: activeMenuSection,
       disabled: quitting || sectionBusy,
-      onSelect: (section) => unawaited(_selectMenuSection(section)),
+      onSelect: (section) {
+        if (_isAndroidPlatform && section == 'account') {
+          setState(() => accountTurboRequested = false);
+        }
+        unawaited(_selectMenuSection(section));
+      },
       onBack: _sectionHistory.isEmpty
           ? null
           : () {
@@ -6678,6 +6876,10 @@ class _DropoHomePageState extends State<DropoHomePage>
       onExit: quitting ? null : _quitApp,
       version: status.version.version,
       accountDisplay: _accountDisplay.value,
+      onBoost: _openBoost,
+      offerBoost:
+          !(_accountDisplay.value?.turboUntil?.isAfter(DateTime.now()) ??
+              false),
       onAbout: quitting ? null : _openAbout,
       visible: windowVisible,
       motionEnabled: !appConfig.reduceMotion,
@@ -6767,7 +6969,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     // Retired routes may remain in history; navigation must never change a
     // saved traffic mode merely to reveal service settings.
     if (section == 'services' || section == 'service-settings') {
-      section = 'home';
+      section = Platform.isAndroid ? 'android-services' : 'home';
       homeRoutesExpanded = true;
     }
     setState(() {

@@ -1453,8 +1453,13 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       ),
       _AccountPhase.pendingAuth => _pendingAuth(),
       _AccountPhase.signedIn =>
-        widget.showTurbo && _account?.guestAccount != true
-            ? _turboPage()
+        widget.showTurbo
+            ? _account?.guestAccount == true
+                  ? TickerMode(
+                      enabled: !_passwordDialogOpen,
+                      child: _signedOut(),
+                    )
+                  : _turboPage()
             : _signedIn(),
       _AccountPhase.offline => _offlineAccount(),
       _AccountPhase.deletionCleanup => _page(
@@ -1567,7 +1572,11 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
             ],
             if (widget.identity?.accountKind == 'guest') ...[
               TextButton(
-                onPressed: _busy ? null : _retryAccount,
+                onPressed: _busy
+                    ? null
+                    : widget.showTurbo
+                    ? widget.onBackToAccount
+                    : _retryAccount,
                 child: const Text('Вернуться к бесплатному профилю'),
               ),
               const SizedBox(height: 12),

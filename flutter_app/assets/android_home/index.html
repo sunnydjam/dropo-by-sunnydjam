@@ -1,0 +1,31 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'"><link rel="stylesheet" href="scene.css"></head><body><div id="dropo-motion-preview"><section class="dp-phone" aria-label="Подключение Dropo"><canvas class="dp-space" aria-hidden="true"></canvas>    <main class="dp-main" data-phase="loading">
+      <div class="dp-status" role="status" aria-live="polite"><span class="dp-status-dot"></span><span class="dp-status-text">Загружаем сцену</span></div>
+      <button class="dp-message" type="button" hidden aria-label="Подробности ошибки подключения"></button>
+      <div class="dp-scene" aria-label="Земля и DrOppo">
+        <canvas class="dp-canvas dp-back" aria-hidden="true"></canvas>
+        <canvas class="dp-canvas dp-globe" aria-hidden="true"></canvas>
+        <canvas class="dp-canvas dp-front" aria-hidden="true"></canvas>
+        <button class="dp-earth-action" type="button" aria-label="Подключить VPN нажатием на Землю" disabled></button>
+        <button class="dp-start" type="button" aria-label="Подключить VPN" disabled>
+          <span class="dp-power"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v10"/><path d="M18.36 5.64a9 9 0 1 1-12.72 0"/></svg></span>
+        </button>
+        <div class="dp-hint" aria-hidden="true"><canvas width="180" height="145"></canvas><span>Подключиться</span></div>
+        <button class="dp-cancel" type="button" hidden>Отменить подключение</button>
+        <section class="dp-details" aria-label="Параметры подключения" hidden inert>
+          <div class="dp-reveal-row dp-mode-row">
+            <div class="dp-mode" role="group" aria-label="Режим VPN">
+              <span class="dp-mode-pill" aria-hidden="true"></span>
+              <button class="dp-mode-service" type="button" aria-pressed="true">По сервисам</button>
+              <button class="dp-mode-all" type="button" aria-pressed="false">Всё через VPN</button>
+            </div>
+            <p class="dp-mode-note">Выбранные сервисы через VPN, остальное — напрямую</p>
+          </div>
+          <button type="button" class="dp-reveal-row dp-source-row" aria-label="Выбрать источник VPN"><span class="dp-detail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11"/><path d="m9 12 2 2 4-4"/></svg></span><span>Источник</span><strong class="dp-source-name">Источник VPN</strong></button>
+          <div class="dp-reveal-row dp-services-row"><button class="dp-services" type="button">Настроить сервисы</button></div>
+          <div class="dp-reveal-row dp-time-row"><span class="dp-detail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4"/></svg></span><span>Время сессии</span><strong class="dp-session-time">00:00</strong></div>
+          <div class="dp-reveal-row dp-disconnect-row"><button class="dp-disconnect" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v10"/><path d="M18.36 5.64a9 9 0 1 1-12.72 0"/></svg><span>Отключить</span></button></div>
+        </section>
+
+      </div>
+    </main>
+</div><script src="art.js"></script><script src="vendor/three-0.160.1.min.js"></script><script src="scene.js"></script></body></html>
