@@ -79,6 +79,7 @@ class _SourceBridge extends MockCoreBridge {
   bool androidSourceCapabilities = false;
   bool failMove = false;
   bool failSnapshot = false;
+  bool failSnapshotAfterAdd = false;
   bool failFavorite = false;
   String favoriteError = 'metadata unavailable';
   int refreshes = 0;
@@ -242,6 +243,7 @@ class _SourceBridge extends MockCoreBridge {
         'node_names': const ['NL 1', 'DE 1', 'FI 1'],
       }),
     ];
+    if (failSnapshotAfterAdd) failSnapshot = true;
     return {'success': true, 'sourceCount': sources.length};
   }
 
@@ -358,6 +360,51 @@ Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  testWidgets(
+    'saved source with failed reload reports partial success and can recover',
+    (tester) async {
+      final bridge = _SourceBridge()
+        ..running = false
+        ..failSnapshotAfterAdd = true;
+      await _pumpEditor(
+        tester,
+        bridge,
+        openPersonal: true,
+        onReadyToConnect: () {},
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('personal-vpn-uri')),
+        'https://subscription.example.test/list',
+      );
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('submit-personal-vpn')),
+      );
+      expect(bridge.personalAdds, 1);
+      expect(find.textContaining('Можно подключаться'), findsNothing);
+      expect(
+        find.text(
+          'Изменения сохранены, но список источников пока не загрузился. Повторите загрузку.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Повторить загрузку источников'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('personal-vpn-uri')),
+        findsNothing,
+        reason: 'A saved source must not be resubmitted accidentally',
+      );
+      bridge.failSnapshot = false;
+      await _tapVisible(tester, find.text('Повторить загрузку источников'));
+      expect(find.text('Повторить загрузку источников'), findsNothing);
+      expect(
+        find.text('Изменения сохранены. Список источников обновлён.'),
+        findsOneWidget,
+      );
+      expect(bridge.personalAdds, 1);
+    },
+  );
+
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
     if (const bool.fromEnvironment('DROPO_UI_CAPTURE')) {

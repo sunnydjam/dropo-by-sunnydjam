@@ -139,6 +139,10 @@ object DropoVpnRuntime {
         status.put("disconnecting", snapshot["disconnecting"] == true)
         status.put("serviceMessage", snapshot["message"]?.toString().orEmpty())
         status.put("serviceUpdatedAt", snapshot["updatedAt"])
+        // These are monotonic elapsed-time values, not wall-clock timestamps.
+        // The Flutter activity may be recreated while this service stays alive.
+        status.put("connectedAt", snapshot["connectedAt"])
+        status.put("uptimeMs", snapshot["uptimeMs"])
         status.put("servicePid", snapshot["pid"])
         status.put("observed", snapshot["observed"] == true)
         status.put("alwaysOn", snapshot["alwaysOn"] == true)

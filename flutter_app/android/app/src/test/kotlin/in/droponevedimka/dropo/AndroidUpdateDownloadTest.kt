@@ -78,7 +78,7 @@ class AndroidUpdateDownloadTest {
         })
         val file = Files.createTempFile("dropo-stream", ".part").toFile()
         try {
-            downloader.download(descriptor, file) { _, _ -> }
+            downloader.download(descriptor, file, "a".repeat(64)) { _, _ -> }
             assertEquals("abc", file.readText())
             assertEquals(2, connections.size)
             assertTrue(connections.all { it.disconnected && !it.instanceFollowRedirects })
@@ -116,7 +116,7 @@ class AndroidUpdateDownloadTest {
         assertEquals("a".repeat(64), checksum.checksum(descriptor))
         val wrong = AndroidUpdateDownload(AtomicBoolean(false), { url -> Connection(url, body = "abc".toByteArray(), length = 4) })
         val file = Files.createTempFile("dropo-length", ".part").toFile()
-        try { rejects { wrong.download(descriptor, file) { _, _ -> } } }
+        try { rejects { wrong.download(descriptor, file, "a".repeat(64)) { _, _ -> } } }
         finally { file.delete() }
     }
 

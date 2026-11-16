@@ -94,6 +94,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   final orderAnchor = GlobalKey();
   String statusText = '';
   String statusKind = '';
+  bool _savedAwaitingSnapshot = false;
   String catalogError = '';
   bool busy = false;
   bool loading = true;
@@ -147,7 +148,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   bool _hasPersonalSource(List<VpnSourceInfo> value) =>
       value.any((source) => !source.isPublic);
 
-  Future<void> _load({bool refreshCatalog = true}) async {
+  Future<bool> _load({bool refreshCatalog = true}) async {
     if (refreshCatalog) {
       // The public catalog is optional. Its network latency must never hold the
       // personal-subscription form or a completed source mutation disabled.
@@ -166,16 +167,25 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           autoSelectSupported = snapshot.autoSelectSupported;
           fallbackSupported = snapshot.fallbackSupported;
           sourcesFresh = true;
+          if (_savedAwaitingSnapshot) {
+            _savedAwaitingSnapshot = false;
+            statusKind = 'success';
+            statusText = 'Изменения сохранены. Список источников обновлён.';
+          }
         });
       }
+      return mounted;
     } catch (error) {
       if (mounted) {
         setState(() {
           statusKind = 'error';
           sourcesFresh = false;
-          statusText = _friendlyVpnSourceError(error);
+          statusText = _savedAwaitingSnapshot
+              ? 'Изменения сохранены, но список источников пока не загрузился. Повторите загрузку.'
+              : _friendlyVpnSourceError(error);
         });
       }
+      return false;
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -274,15 +284,17 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
         });
         return false;
       }
-      await _load(refreshCatalog: false);
+      final snapshotLoaded = await _load(refreshCatalog: false);
       widget.onChanged?.call();
       if (!mounted) return false;
       setState(() {
-        statusKind = 'success';
-        statusText =
-            _applyUserMessage(result, metadataOnly) ??
-            successText?.call(result) ??
-            success;
+        _savedAwaitingSnapshot = !snapshotLoaded;
+        statusKind = snapshotLoaded ? 'success' : 'warning';
+        statusText = snapshotLoaded
+            ? _applyUserMessage(result, metadataOnly) ??
+                  successText?.call(result) ??
+                  success
+            : 'Изменения сохранены, но список источников пока не загрузился. Повторите загрузку.';
       });
       completed = true;
     } catch (error) {
@@ -362,7 +374,9 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       showPersonalForm = false;
       showAddOptions = false;
       showReadyAction =
-          wasFirstPersonalSource && widget.onReadyToConnect != null;
+          sourcesFresh &&
+          wasFirstPersonalSource &&
+          widget.onReadyToConnect != null;
       recentlyAddedId =
           sources
               .where((source) => !previousIds.contains(source.id))

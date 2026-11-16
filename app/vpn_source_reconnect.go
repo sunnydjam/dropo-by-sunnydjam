@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
+
+const vpnSourcePreparationBudget = 45 * time.Second
 
 // vpnSourceReconnectOps keeps the source mutation transaction testable without
 // launching native networking processes. Production always supplies the
@@ -30,11 +34,15 @@ func (a *App) changeVPNSourcesTransactionValidated(change func(*ProfileData) err
 	a.waitForInit()
 	a.settingsPolicyMu.Lock()
 	defer a.settingsPolicyMu.Unlock()
-	// Keep Start/Stop and crash recovery outside the entire config write and
-	// rollback window. This also protects mutations made while VPN is stopped:
-	// a concurrent Start can never read a partially updated profile.
+	// Serialize snapshots and the eventual commit, not subscription downloads.
+	// Public Stop must remain usable while a provider is slow.
 	a.vpnLifecycleMu.Lock()
-	defer a.vpnLifecycleMu.Unlock()
+	lifecycleLocked := true
+	defer func() {
+		if lifecycleLocked {
+			a.vpnLifecycleMu.Unlock()
+		}
+	}()
 
 	result := map[string]interface{}{
 		"success":            false,
@@ -109,6 +117,59 @@ func (a *App) changeVPNSourcesTransactionValidated(change func(*ProfileData) err
 	}
 
 	result["wasRunning"] = wasRunning
+	result["connectionRestored"] = !wasRunning || a.isVPNRunning()
+	// Prepare a complete candidate without touching disk or stopping the session.
+	// One budget covers the whole source list; cancellation cannot use a cached
+	// partial result and cannot later resurrect the user's stopped session.
+	parent := a.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancelPreparation := context.WithTimeout(parent, vpnSourcePreparationBudget)
+	a.vpnIntentMu.Lock()
+	expectedIntent := a.vpnIntentGeneration.Load()
+	a.sourcePrepareCancel = cancelPreparation
+	a.vpnIntentMu.Unlock()
+	defer func() {
+		cancelPreparation()
+		a.vpnIntentMu.Lock()
+		a.sourcePrepareCancel = nil
+		a.vpnIntentMu.Unlock()
+	}()
+	preparer := a.configBuilder.sourcePreparationBuilder()
+	busyID := a.beginBusy("Подготавливаем VPN-источники без отключения...")
+	defer a.endBusy(busyID)
+	a.vpnLifecycleMu.Unlock()
+	lifecycleLocked = false
+	prepared, prepareErr := preparer.prepareConfigForProfileSources(ctx, candidate.ID, candidate.VPNSources, candidate.WireGuardConfigs, validateSources, candidate.VPNSourceSelectionMode == "priority")
+	a.vpnLifecycleMu.Lock()
+	lifecycleLocked = true
+	if ctx.Err() != nil || a.vpnIntentGeneration.Load() != expectedIntent || a.isShuttingDown() {
+		result["cancelled"] = true
+		result["restartCancelled"] = true
+		result["error"] = "Подготовка VPN-источников отменена или превысила время ожидания; прежние настройки сохранены"
+		return result
+	}
+	if prepareErr != nil {
+		result["error"] = "Не удалось подготовить VPN-источники: " + prepareErr.Error()
+		return result
+	}
+	current, currentErr := a.storage.GetActiveProfile()
+	a.mu.Lock()
+	wasRunning, wasStarting = a.isRunning, a.isStarting
+	a.mu.Unlock()
+	if currentErr != nil || current.ID != candidate.ID || wasStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
+		result["error"] = "Состояние VPN изменилось во время подготовки; повторите изменение источников"
+		return result
+	}
+	// Refresh rollback metadata after preparation (renaming/starred flags may
+	// change independently). Source/settings changes are excluded by policyMu.
+	previous, err = cloneVPNSourceProfile(current)
+	if err != nil {
+		result["error"] = err.Error()
+		return result
+	}
+	result["wasRunning"] = wasRunning
 	result["connectionRestored"] = !wasRunning
 	transactionGeneration := uint64(0)
 	if wasRunning {
@@ -146,9 +207,8 @@ func (a *App) changeVPNSourcesTransactionValidated(change func(*ProfileData) err
 		}
 	}
 
-	busyID := a.beginBusy("Обновляем цепочку VPN-источников...")
-	defer a.endBusy(busyID)
-	if err := a.configBuilder.buildConfigForProfileSourcesValidated(candidate.ID, candidate.VPNSources, candidate.WireGuardConfigs, validateSources, candidate.VPNSourceSelectionMode == "priority"); err != nil {
+	a.updateBusy(busyID, "Применяем подготовленные VPN-источники...")
+	if err := a.storage.commitPreparedVPNSourceConfig(candidate.ID, prepared); err != nil {
 		rollbackErr := a.restoreVPNSourceProfileWith(previous, ops.restore)
 		result["rolledBack"] = rollbackErr == nil
 		recovery := rollbackRecoveryMessage(rollbackErr, wasRunning)
@@ -175,8 +235,11 @@ func (a *App) changeVPNSourcesTransactionValidated(change func(*ProfileData) err
 			result["connectionRestored"] = true
 			return a.finishVPNSourceChangeResult(result)
 		}
-		if !apiResultSucceeded(startResult) {
+		if !apiResultSucceeded(startResult) || !a.isVPNRunning() {
 			startError := apiResultMessage(startResult)
+			if apiResultSucceeded(startResult) {
+				startError = "VPN не перешёл в состояние подключено"
+			}
 			rollbackErr := a.restoreVPNSourceProfileWith(previous, ops.restore)
 			result["rolledBack"] = rollbackErr == nil
 			recovery := rollbackRecoveryMessage(rollbackErr, true)
@@ -229,8 +292,12 @@ func (a *App) recoverVPNSourceConnection(wasRunning bool, ops vpnSourceReconnect
 		result["connectionRestored"] = true
 		return ""
 	}
-	if !apiResultSucceeded(recoveryResult) {
-		return "не удалось восстановить прежнее VPN-подключение: " + apiResultMessage(recoveryResult)
+	if !apiResultSucceeded(recoveryResult) || !a.isVPNRunning() {
+		message := apiResultMessage(recoveryResult)
+		if apiResultSucceeded(recoveryResult) {
+			message = "VPN не перешёл в состояние подключено"
+		}
+		return "не удалось восстановить прежнее VPN-подключение: " + message
 	}
 	result["connectionRestored"] = true
 	return "прежнее VPN-подключение восстановлено"
@@ -295,8 +362,8 @@ func cloneVPNSourceProfile(profile *ProfileData) (ProfileData, error) {
 }
 
 // restoreVPNSourceProfile replaces the complete profile in one storage write.
-// ConfigBuilder persists source, Xray and sing-box fields in separate steps, so
-// a failed build must restore all of them rather than only the source slice.
+// Restore source, Xray and sing-box fields together, including after a candidate
+// config was committed successfully but its reconnect failed.
 func (a *App) restoreVPNSourceProfile(snapshot ProfileData) error {
 	if a.storage == nil {
 		return fmt.Errorf("VPN storage is not initialized")

@@ -21,6 +21,7 @@ import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.locks.ReentrantLock
 import java.util.zip.ZipFile
 
 /** User-requested updates only. Download/verification never stop or mutate the VPN session. */
@@ -76,44 +77,66 @@ internal class AndroidApkUpdater(private val activity: Activity) {
                 )
                 AndroidUpdatePolicy.validateDescriptor(descriptor, activity.packageName)
                 request.descriptor = descriptor
-                val directory = File(activity.cacheDir, "updates")
-                require(directory.isDirectory || directory.mkdirs()) { "Не удалось создать папку обновления." }
-                val completed = File(directory, "dropo-update.apk")
-                val partial = File(directory, "dropo-update.part")
-                val checksum = request.download.checksum(descriptor)
-                val reusable = completed.isFile && completed.length() == descriptor.size &&
-                    AndroidUpdatePolicy.sha256(completed, request.download::checkCancelled) == checksum
+                // Activity recreation creates another updater. Serialize the private cache
+                // through verification/rename so a cancelled old worker cannot erase new data.
+                cacheLock.lockInterruptibly()
                 try {
-                    if (!reusable) {
-                        require(directory.usableSpace >= descriptor.size + 16L * 1024 * 1024) {
-                            "Не хватает места для обновления. Освободите минимум ${descriptor.size / 1048576 + 16} МБ."
+                    request.download.checkCancelled()
+                    val directory = File(activity.cacheDir, "updates")
+                    require(directory.isDirectory || directory.mkdirs()) { "Не удалось создать папку обновления." }
+                    val completed = File(directory, "dropo-update.apk")
+                    val partial = File(directory, "dropo-update.part")
+                    val checksum = request.download.checksum(descriptor)
+                    val resume = AndroidUpdateResumeStore(partial, descriptor, checksum)
+                    val reusable = completed.isFile && completed.length() == descriptor.size &&
+                        AndroidUpdatePolicy.sha256(completed, request.download::checkCancelled) == checksum
+                    try {
+                        if (!reusable) {
+                            val saved = resume.prepare().bytes
+                            require(directory.usableSpace >= descriptor.size - saved + 16L * 1024 * 1024) {
+                                "Не хватает места для обновления. Освободите минимум ${descriptor.size / 1048576 + 16} МБ."
+                            }
+                            stage(request, "downloading")
+                            request.download.download(descriptor, partial, checksum) { downloaded, total ->
+                                event(request, "update-progress", mapOf(
+                                    "downloaded" to downloaded, "total" to total,
+                                    "percent" to downloaded.toDouble() * 100 / total,
+                                ))
+                            }
+                            stage(request, "verifying")
+                            try {
+                                require(AndroidUpdatePolicy.sha256(partial, request.download::checkCancelled) == checksum) {
+                                    "SHA-256 APK не совпадает. Файл не будет установлен; повторите загрузку."
+                                }
+                                validateArchive(descriptor, partial)
+                            } catch (error: Throwable) {
+                                if (error !is AndroidUpdateCancelled && error !is AndroidUpdateDownloadFailure) {
+                                    resume.discard()
+                                }
+                                throw error
+                            }
+                            request.download.checkCancelled()
+                            require(!completed.exists() || completed.delete()) { "Не удалось заменить сохранённый APK." }
+                            require(partial.renameTo(completed)) { "Не удалось сохранить проверенное обновление." }
+                            resume.complete()
+                        } else {
+                            resume.discard()
+                            stage(request, "verifying")
+                            validateArchive(descriptor, completed)
                         }
-                        stage(request, "downloading")
-                        request.download.download(descriptor, partial) { downloaded, total ->
-                            event(request, "update-progress", mapOf(
-                                "downloaded" to downloaded, "total" to total,
-                                "percent" to downloaded.toDouble() * 100 / total,
-                            ))
+                    } catch (error: Throwable) {
+                        if (error is IllegalArgumentException || error is IllegalStateException ||
+                            (request.cancelled.get() && !request.download.keepsPartialOnCancellation)) {
+                            resume.discard()
                         }
-                        stage(request, "verifying")
-                        require(AndroidUpdatePolicy.sha256(partial, request.download::checkCancelled) == checksum) {
-                            "SHA-256 APK не совпадает. Файл не будет установлен; повторите загрузку."
-                        }
-                        validateArchive(descriptor, partial)
-                        request.download.checkCancelled()
-                        require(!completed.exists() || completed.delete()) { "Не удалось заменить сохранённый APK." }
-                        require(partial.renameTo(completed)) { "Не удалось сохранить проверенное обновление." }
-                    } else {
-                        stage(request, "verifying")
-                        validateArchive(descriptor, completed)
+                        throw error
                     }
+                    request.download.checkCancelled()
+                    request.verifiedFile = completed
+                    handler.post { if (active(request)) requestInstall(request) }
                 } finally {
-                    // Only our own incomplete cache file, never subscriptions or user files.
-                    partial.delete()
+                    cacheLock.unlock()
                 }
-                request.download.checkCancelled()
-                request.verifiedFile = completed
-                handler.post { if (active(request)) requestInstall(request) }
             } catch (error: Throwable) {
                 handler.post {
                     finish(request, json(false, friendlyError(error), request.cancelled.get()))
@@ -122,9 +145,11 @@ internal class AndroidApkUpdater(private val activity: Activity) {
         }
     }
 
-    fun cancel(): String {
+    fun cancel(): String = cancelPending(keepPartial = false)
+
+    private fun cancelPending(keepPartial: Boolean): String {
         pending?.let { request ->
-            request.download.cancel()
+            request.download.cancel(keepPartial)
             request.task?.cancel(true)
             finish(request, json(false, "Загрузка обновления отменена. VPN продолжает работать.", true))
         }
@@ -147,7 +172,7 @@ internal class AndroidApkUpdater(private val activity: Activity) {
 
     fun close() {
         closed = true
-        cancel()
+        cancelPending(keepPartial = true)
         executor.shutdownNow()
     }
 
@@ -265,26 +290,27 @@ internal class AndroidApkUpdater(private val activity: Activity) {
 
     private fun expire(request: Request) {
         if (pending !== request) return
-        request.download.cancel()
+        request.download.cancel(keepPartial = true)
         request.task?.cancel(true)
         finish(request, json(false,
-            "Время обновления истекло. Нажмите «Обновить» снова; проверенный APK, если он уже загружен, будет использован повторно."))
+            "Время обновления истекло. Нажмите «Обновить» снова — загрузка продолжится с сохранённого места."))
     }
 
     private fun friendlyError(error: Throwable): String = when {
         error is AndroidUpdateCancelled -> error.message.orEmpty()
         error is AndroidUpdateDownloadFailure -> error.message.orEmpty()
-        error is SocketTimeoutException -> "GitHub не отвечает. Проверьте интернет и повторите обновление."
-        error is UnknownHostException -> "Не удалось подключиться к GitHub. Проверьте интернет и DNS."
+        error is SocketTimeoutException -> "GitHub не отвечает. Нажмите «Обновить» снова — загрузка продолжится с сохранённого места."
+        error is UnknownHostException -> "Не удалось подключиться к GitHub. Проверьте интернет и повторите обновление; загруженная часть сохранена."
         error is IllegalArgumentException || error is IllegalStateException ->
             error.message ?: "Проверка APK не пройдена."
-        else -> "Не удалось загрузить обновление. Проверьте интернет и повторите попытку."
+        else -> "Не удалось загрузить обновление. Проверьте интернет и повторите попытку; загруженная часть сохранена."
     }
 
     private fun json(success: Boolean, error: String = "", cancelled: Boolean = false): String =
         JSONObject(mapOf("success" to success, "error" to error, "cancelled" to cancelled)).toString()
 
     companion object {
+        private val cacheLock = ReentrantLock()
         private const val FIRST_INSTALL_PERMISSION_CODE = 4200
         private const val LAST_INSTALL_PERMISSION_CODE = 14200
     }

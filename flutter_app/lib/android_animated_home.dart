@@ -1,5 +1,63 @@
 part of 'main.dart';
 
+/// A page-load event does not mean its scripts or renderer became usable.
+/// Give the scene a bounded foreground startup window, then use native controls.
+@visibleForTesting
+class AndroidSceneLoadGuard {
+  AndroidSceneLoadGuard({
+    required this.onFailure,
+    this.timeout = const Duration(seconds: 8),
+  }) {
+    _arm();
+  }
+
+  final VoidCallback onFailure;
+  final Duration timeout;
+  Timer? _timer;
+  bool _finished = false, _active = true;
+
+  void _arm() {
+    if (_finished || !_active) return;
+    _timer = Timer(timeout, fail);
+  }
+
+  void setActive(bool active) {
+    if (_finished || _active == active) return;
+    _active = active;
+    _timer?.cancel();
+    // Background WebViews may stop loading entirely. Allow a fresh bounded
+    // interval on resume, rather than failing while the app is invisible.
+    _arm();
+  }
+
+  void ready() {
+    _finished = true;
+    _timer?.cancel();
+  }
+
+  void fail() {
+    if (_finished) return;
+    _finished = true;
+    _timer?.cancel();
+    onFailure();
+  }
+
+  void dispose() => ready();
+}
+
+@visibleForTesting
+bool isAndroidSceneCriticalResource(String? url) {
+  final path = Uri.tryParse(url ?? '')?.path ?? '';
+  return const [
+    '/assets/android_home/index.html',
+    '/assets/android_home/bootstrap.js',
+    '/assets/android_home/art.js',
+    '/assets/android_home/scene.js',
+    '/assets/android_home/scene.css',
+    '/assets/android_home/vendor/three-0.160.1.min.js',
+  ].any(path.endsWith);
+}
+
 /// A closed command vocabulary for the bundled scene. It never receives tokens,
 /// subscription URLs, arbitrary native calls or permission to navigate online.
 @visibleForTesting
@@ -73,6 +131,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   static const _asset = 'assets/android_home/index.html';
   static const _url = 'file:///android_asset/flutter_assets/$_asset';
   late final WebViewController _controller;
+  late final AndroidSceneLoadGuard _loadGuard;
   bool _loaded = false, _failed = false, _foreground = true;
   String? _lastPayload;
 
@@ -80,6 +139,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _loadGuard = AndroidSceneLoadGuard(onFailure: _fail);
     _initialize();
   }
 
@@ -105,7 +165,10 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
             _synchronize();
           },
           onWebResourceError: (error) {
-            if (error.isForMainFrame == true) _fail();
+            if (error.isForMainFrame == true ||
+                isAndroidSceneCriticalResource(error.url)) {
+              _fail();
+            }
           },
         ),
       );
@@ -118,6 +181,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   }
 
   void _fail() {
+    _loadGuard.dispose();
     if (mounted && !_failed) setState(() => _failed = true);
   }
 
@@ -129,6 +193,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
     // change a session while another operation owns the core.
     switch (command.action) {
       case 'ready':
+        _loadGuard.ready();
         _loaded = true;
         _lastPayload = null;
         _synchronize();
@@ -150,7 +215,11 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   }
 
   void _synchronize() {
-    if (!_loaded || _failed || !mounted) return;
+    if (_failed || !mounted) return;
+    final active =
+        _foreground && widget.visible && TickerMode.valuesOf(context).enabled;
+    _loadGuard.setActive(active);
+    if (!_loaded) return;
     final payload = jsonEncode({
       'connected': widget.connected,
       'connectedAt': widget.connectedAt?.millisecondsSinceEpoch,
@@ -160,8 +229,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
       'enabled': widget.enabled,
       'canCancel': widget.canCancel,
       'motion': widget.motionEnabled,
-      'active':
-          _foreground && widget.visible && TickerMode.valuesOf(context).enabled,
+      'active': active,
       'mode': widget.routingMode,
       'source': widget.source,
       'message': widget.message,
@@ -192,6 +260,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
 
   @override
   void dispose() {
+    _loadGuard.dispose();
     WidgetsBinding.instance.removeObserver(this);
     // Android destroys the platform view with its widget. Stop its animation
     // immediately as well, including navigation away to the account page.

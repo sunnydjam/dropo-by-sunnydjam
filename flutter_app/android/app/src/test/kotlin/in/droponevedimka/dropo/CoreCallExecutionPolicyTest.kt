@@ -52,7 +52,7 @@ class CoreCallExecutionPolicyTest {
 
     @Test
     fun aBlockedProbeDoesNotQueueStatusEventsOrShutdownBehindIt() {
-        for (probe in listOf("RunClientQuickCheckReadOnly", "RunClientQuickCheck")) {
+        for (probe in listOf("RunClientQuickCheckReadOnly", "RunClientQuickCheck", "CheckForUpdates")) {
             val coreExecutor = Executors.newSingleThreadExecutor()
             val networkExecutor = Executors.newSingleThreadExecutor()
             val entered = CountDownLatch(1)

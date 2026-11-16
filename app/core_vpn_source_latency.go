@@ -78,12 +78,12 @@ func (a *App) selectInitialVPNSource(ctx context.Context, generation uint64) {
 				if !valid {
 					continue
 				}
-				delay, err := a.testProxyDelayContext(probeCtx, tag)
+				delay, target, err := a.testProxyDelayWithTargetContext(probeCtx, tag)
 				if probeCtx.Err() != nil {
 					return // A cancelled sample is not evidence of source failure.
 				}
 				healthy := err == nil && delay > 0
-				if !a.recordVPNSourceObservation(probeCtx, generation, tag, binding, delay, healthy, time.Now()) {
+				if !a.recordVPNSourceObservation(probeCtx, generation, tag, binding, delay, healthy, time.Now(), target) {
 					continue
 				}
 				a.recordVPNSourceHealthForMonitor(generation, tag, healthy, time.Now())

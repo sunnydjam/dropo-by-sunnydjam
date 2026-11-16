@@ -1540,7 +1540,38 @@ func (b *ConfigBuilderForStorage) BuildConfigForProfileSources(profileID int, so
 	return b.buildConfigForProfileSourcesValidated(profileID, sources, wireGuardConfigs, nil, manualPriority...)
 }
 
+// preparedVPNSourceConfig has no persistence side effects. Download and validate
+// it before interrupting a working session, then commit all profile fields once.
+type preparedVPNSourceConfig struct {
+	sources          []VPNSource
+	wireGuardConfigs []UserWireGuardConfig
+	singboxConfig    map[string]interface{}
+	xrayConfig       map[string]interface{}
+	manualPriority   []bool
+}
+
 func (b *ConfigBuilderForStorage) buildConfigForProfileSourcesValidated(profileID int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig, validateSources func([]VPNSource) error, manualPriority ...bool) error {
+	prepared, err := b.prepareConfigForProfileSources(context.Background(), profileID, sources, wireGuardConfigs, validateSources, manualPriority...)
+	if err != nil {
+		return err
+	}
+	return b.storage.commitPreparedVPNSourceConfig(profileID, prepared)
+}
+
+// The caller holds lifecycle/settings locks while taking this immutable builder
+// snapshot. Preparation may then run concurrently with an ordinary Start/Stop.
+func (b *ConfigBuilderForStorage) sourcePreparationBuilder() *ConfigBuilderForStorage {
+	b.templateOnce.Do(func() { b.templateData, b.templateErr = os.ReadFile(b.storage.templatePath) })
+	clone := &ConfigBuilderForStorage{
+		storage: b.storage, fetcher: b.fetcher, routingMode: b.routingMode,
+		filterManager: b.filterManager, clashAPI: b.clashAPI,
+		templateData: b.templateData, templateErr: b.templateErr,
+	}
+	clone.templateOnce.Do(func() {})
+	return clone
+}
+
+func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Context, profileID int, sources []VPNSource, wireGuardConfigs []UserWireGuardConfig, validateSources func([]VPNSource) error, manualPriority ...bool) (*preparedVPNSourceConfig, error) {
 	normalized := ProfileData{VPNSources: append([]VPNSource(nil), sources...)}
 	normalizeProfileVPNSources(&normalized)
 	sources = normalized.VPNSources
@@ -1555,12 +1586,12 @@ func (b *ConfigBuilderForStorage) buildConfigForProfileSourcesValidated(profileI
 	})
 	if b.templateErr != nil {
 		err := b.templateErr
-		return fmt.Errorf("не удалось загрузить template.json: %w", err)
+		return nil, fmt.Errorf("не удалось загрузить template.json: %w", err)
 	}
 
 	var template map[string]interface{}
 	if err := json.Unmarshal(b.templateData, &template); err != nil {
-		return fmt.Errorf("ошибка парсинга template.json: %w", err)
+		return nil, fmt.Errorf("ошибка парсинга template.json: %w", err)
 	}
 
 	// Disable strict_route when WireGuard is used to allow system routes to work
@@ -1583,7 +1614,14 @@ func (b *ConfigBuilderForStorage) buildConfigForProfileSourcesValidated(profileI
 			continue
 		}
 		enabledSources++
-		nodes, fetchErr := b.fetchVPNSourceNodes(*source)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		nodes, fetchErr := b.fetchVPNSourceNodesContext(ctx, *source)
+		// Cancellation must never turn into a partial-success cache fallback.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		usingCache := false
 		if fetchErr != nil && len(source.CachedNodes) > 0 {
 			nodes, fetchErr = b.parseCachedVPNNodes(source.CachedNodes)
@@ -1621,21 +1659,18 @@ func (b *ConfigBuilderForStorage) buildConfigForProfileSourcesValidated(profileI
 	}
 	if validateSources != nil {
 		if err := validateSources(updatedSources); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if enabledSources > 0 && len(proxies)+len(xrayCandidates) == 0 {
-		return fmt.Errorf("no VPN source is usable: %s", strings.Join(sourceErrors, "; "))
+		return nil, fmt.Errorf("no VPN source is usable: %s", strings.Join(sourceErrors, "; "))
 	}
 	xrayBridge := BuildXrayBridgeConfig(xrayCandidates)
 	proxies = append(proxies, xrayBridge.SingBoxProxies...)
 	if NormalizeRoutingMode(b.routingMode) == RoutingModeAllTraffic && len(proxies) == 0 {
-		return fmt.Errorf("для режима «Всё через VPN» выберите и включите поддерживаемый VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
+		return nil, fmt.Errorf("для режима «Всё через VPN» выберите и включите поддерживаемый VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
 	}
 	orderVPNSourceProxies(proxies, updatedSources)
-	if err := b.storage.UpdateProfileXrayConfig(profileID, xrayBridge.XrayConfig); err != nil {
-		return err
-	}
 
 	// Generate outbounds
 	outbounds := b.generateOutbounds(template, proxies)
@@ -1664,26 +1699,59 @@ func (b *ConfigBuilderForStorage) buildConfigForProfileSourcesValidated(profileI
 
 	// Add experimental section
 	if err := b.addExperimentalAPI(template); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Remove template fields
 	delete(template, "outbounds_template")
 	delete(template, "_comment_outbounds")
 
-	// Update profile in storage
-	if err := b.storage.UpdateProfileVPNSources(profileID, updatedSources, wireGuardConfigs, manualPriority...); err != nil {
-		return err
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+	return &preparedVPNSourceConfig{
+		sources: updatedSources, wireGuardConfigs: wireGuardConfigs,
+		singboxConfig: template, xrayConfig: xrayBridge.XrayConfig,
+		manualPriority: append([]bool(nil), manualPriority...),
+	}, nil
+}
 
-	if err := b.storage.UpdateProfileConfig(profileID, template); err != nil {
-		return err
+func (s *Storage) commitPreparedVPNSourceConfig(profileID int, prepared *preparedVPNSourceConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.data.Profiles {
+		if s.data.Profiles[i].ID != profileID {
+			continue
+		}
+		previous := s.data.Profiles[i]
+		next := previous
+		next.VPNSources = append([]VPNSource(nil), prepared.sources...)
+		preserveVPNSourceMetadata(next.VPNSources, previous.VPNSources)
+		next.SubscriptionURL = ""
+		next.WireGuardConfigs = prepared.wireGuardConfigs
+		if len(prepared.manualPriority) > 0 {
+			next.VPNSourceSelectionMode = "latency"
+			if prepared.manualPriority[0] {
+				next.VPNSourceSelectionMode = "priority"
+			}
+		}
+		normalizeProfileVPNSources(&next)
+		next.SingboxConfig, next.XrayConfig, next.XrayConfigReady = prepared.singboxConfig, prepared.xrayConfig, true
+		s.data.Profiles[i] = next
+		if err := s.saveInternal(); err != nil {
+			s.data.Profiles[i] = previous
+			return err
+		}
+		return nil
 	}
-
-	return nil
+	return fmt.Errorf("profile with ID %d not found", profileID)
 }
 
 func (b *ConfigBuilderForStorage) fetchVPNSourceNodes(source VPNSource) ([]ProxyConfig, error) {
+	return b.fetchVPNSourceNodesContext(context.Background(), source)
+}
+
+func (b *ConfigBuilderForStorage) fetchVPNSourceNodesContext(ctx context.Context, source VPNSource) ([]ProxyConfig, error) {
 	if source.Kind == VPNSourceDirect || isDirectProxyLink(source.URI) {
 		nodes, err := b.fetcher.ParseSubscription(source.URI)
 		if err != nil {
@@ -1694,7 +1762,7 @@ func (b *ConfigBuilderForStorage) fetchVPNSourceNodes(source VPNSource) ([]Proxy
 		}
 		return nodes, nil
 	}
-	nodes, err := b.fetcher.FetchAndParse(source.URI)
+	nodes, err := b.fetcher.FetchAndParseContext(ctx, source.URI)
 	if err != nil && source.PublicCatalogID == managedFreeVPNProviderID {
 		// net/http errors can contain the private subscription URI. Keep those
 		// out of the shared native API, stored display errors and caller logs.

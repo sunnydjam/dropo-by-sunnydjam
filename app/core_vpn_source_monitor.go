@@ -37,6 +37,7 @@ type vpnSourceObservation struct {
 	CheckedAt time.Time
 	LatencyMS int // zero is absence, never an observed 0 ms
 	Success   bool
+	Target    string
 }
 
 // vpnResponse is presentation-only telemetry from existing source-health
@@ -105,7 +106,7 @@ func (a *App) vpnSourceProbeBinding(tag string) (vpnSourceProbeBinding, bool) {
 	return vpnSourceProbeBinding{}, false
 }
 
-func (a *App) recordVPNSourceObservation(ctx context.Context, generation uint64, tag string, binding vpnSourceProbeBinding, delay int, success bool, checkedAt time.Time) bool {
+func (a *App) recordVPNSourceObservation(ctx context.Context, generation uint64, tag string, binding vpnSourceProbeBinding, delay int, success bool, checkedAt time.Time, targets ...string) bool {
 	current, ok := a.vpnSourceProbeBinding(tag)
 	if !ok || current != binding || ctx.Err() != nil {
 		return false
@@ -121,8 +122,12 @@ func (a *App) recordVPNSourceObservation(ctx context.Context, generation uint64,
 	if !success || delay <= 0 {
 		delay, success = 0, false
 	}
+	target := vpnResponseProbeTarget
+	if len(targets) > 0 {
+		target = targets[0]
+	}
 	a.vpnSourceObservations[tag] = vpnSourceObservation{
-		Binding: binding, CheckedAt: checkedAt, LatencyMS: delay, Success: success,
+		Binding: binding, CheckedAt: checkedAt, LatencyMS: delay, Success: success, Target: target,
 	}
 	return true
 }
@@ -183,6 +188,9 @@ func (a *App) vpnSourceResponseSnapshot(sourceTag string, running bool, now time
 	// A clock jump must not make a future sample appear newly measured.
 	if age < 0 {
 		return result
+	}
+	if observation.Target != "" {
+		result.Target = observation.Target
 	}
 	seconds := int64(age / time.Second)
 	result.CheckedAt, result.AgeSeconds = observation.CheckedAt.UTC().Format(time.RFC3339), &seconds
@@ -271,13 +279,13 @@ func (a *App) vpnSourceHealthy(ctx context.Context, generation uint64, tag strin
 		if !a.vpnSourceMonitorCurrent(ctx, generation) {
 			return false, false
 		}
-		delay, err := a.testProxyDelayContext(ctx, tag)
+		delay, target, err := a.testProxyDelayWithTargetContext(ctx, tag)
 		if !a.vpnSourceMonitorCurrent(ctx, generation) {
 			return false, false
 		}
 		if err == nil && delay > 0 {
 			if hasBinding {
-				a.recordVPNSourceObservation(ctx, generation, tag, binding, delay, true, time.Now())
+				a.recordVPNSourceObservation(ctx, generation, tag, binding, delay, true, time.Now(), target)
 			}
 			return true, true
 		}

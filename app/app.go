@@ -48,6 +48,7 @@ type App struct {
 	settingsPolicyMu       sync.Mutex               // Serializes transactional service-policy changes and reconnects.
 	vpnLifecycleMu         sync.Mutex               // Serializes Start/Stop and internal reconnect transactions.
 	vpnIntentMu            sync.Mutex               // Serializes publication and coalescing of public Start/Stop commands.
+	sourcePrepareCancel    context.CancelFunc       // Guarded by vpnIntentMu; cancels pre-commit subscription work.
 	activeStartIntent      uint64                   // Public Start generation currently waiting or running; guarded by vpnIntentMu.
 	desiredConnected       atomic.Bool              // User intent; internal reconnects must never clear it.
 	vpnIntentGeneration    atomic.Uint64            // Makes the newest public Start/Stop authoritative.

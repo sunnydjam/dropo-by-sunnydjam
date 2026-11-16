@@ -49,17 +49,17 @@ func TestVPNSourceNodeByIDSurvivesReorderBeforeAndDuringTransaction(t *testing.T
 	}
 }
 
-func TestVPNSourceNodeByIDDisappearingDuringReconnectRestoresOldProfile(t *testing.T) {
+func TestVPNSourceNodeByIDDisappearingDuringPreparationKeepsWorkingProfile(t *testing.T) {
 	app, body, source := nodeIDSelectionScenario(t)
 	before, _ := app.storage.GetActiveProfile()
 	snapshot, _ := cloneVPNSourceProfile(before)
 	setVPNSourceTestRunning(app, true)
 	stopCalls, startCalls := 0, 0
+	body.Store(testVPNSourceOld) // Preparation must reject a vanished selection before Stop.
 	result := app.setVPNSourceNodeByID(source.ID, source.NodeIDs[1], vpnSourceReconnectOps{
 		stop: func() map[string]interface{} {
 			stopCalls++
 			setVPNSourceTestRunning(app, false)
-			body.Store(testVPNSourceOld)
 			return map[string]interface{}{"success": true}
 		},
 		start: func() map[string]interface{} {
@@ -72,11 +72,11 @@ func TestVPNSourceNodeByIDDisappearingDuringReconnectRestoresOldProfile(t *testi
 			return map[string]interface{}{"success": true}
 		},
 	})
-	if result["success"] != false || result["rolledBack"] != true || result["connectionRestored"] != true || stopCalls != 1 || startCalls != 1 {
+	if result["success"] != false || result["rolledBack"] != false || result["connectionRestored"] != true || stopCalls != 0 || startCalls != 0 {
 		t.Fatalf("disappearing manual choice was not safely rejected/recovered: %+v", result)
 	}
 	after, _ := app.storage.GetActiveProfile()
-	if !reflect.DeepEqual(*after, snapshot) || !app.isVPNRunning() {
+	if !sameVPNSourceProfile(after, snapshot) || !app.isVPNRunning() {
 		t.Fatal("disappearing choice changed the saved profile or failed to restore the session")
 	}
 }

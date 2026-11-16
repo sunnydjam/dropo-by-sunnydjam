@@ -3,14 +3,14 @@
 #dropo-motion-preview .dp-phone { --dp-mint:#7de9b8; --dp-muted:#91a49c; position:relative; isolation:isolate; width:min(100%,390px); height:760px; overflow:hidden; border-radius:32px; background:#050b08; color:#edf5f0; font:400 14px/1.45 Inter,system-ui,-apple-system,"Segoe UI",sans-serif; box-shadow:0 0 0 1px #314039,0 22px 65px #00000028; }
 #dropo-motion-preview .dp-phone::before { content:""; position:absolute; top:0; right:0; bottom:0; left:0; inset:0; z-index:-1; opacity:.6; background-image:radial-gradient(circle at 22px 33px,#a8d6c266 0 .7px,transparent 1px),radial-gradient(circle at 71px 94px,#96bca344 0 .6px,transparent 1px),radial-gradient(circle at 48px 52px,#73988355 0 .6px,transparent 1px); background-size:113px 137px,171px 193px,227px 211px; }
 #dropo-motion-preview .dp-phone *,#dropo-motion-preview .dp-phone *::before,#dropo-motion-preview .dp-phone *::after { box-sizing:border-box; }
-#dropo-motion-preview .dp-phone button { font:inherit; color:inherit; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
+#dropo-motion-preview .dp-phone button { font:inherit; color:inherit; cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
 #dropo-motion-preview .dp-phone button:focus-visible { outline:2px solid #aaf6d3; outline-offset:5px; }
 #dropo-motion-preview .dp-phone button:disabled { cursor:default; }
 #dropo-motion-preview .dp-main { position:relative; height:610px; }
 #dropo-motion-preview .dp-status { position:absolute; z-index:9; top:10px; left:0; right:0; display:flex; justify-content:center; align-items:center; gap:8px; font-size:13px; color:#a3b4ab; transition:color .6s; pointer-events:none; }
 #dropo-motion-preview .dp-status-dot { width:5px; height:5px; border-radius:50%; background:#788980; box-shadow:0 0 0 4px #9aada00a; transition:background .6s,box-shadow .6s; }
-#dropo-motion-preview .dp-main[data-phase="connected"] .dp-status { color:var(--dp-mint); }
-#dropo-motion-preview .dp-main[data-phase="connected"] .dp-status-dot { background:var(--dp-mint); box-shadow:0 0 14px #6ce4ab66; }
+#dropo-motion-preview .dp-main[data-state="connected"] .dp-status { color:var(--dp-mint); }
+#dropo-motion-preview .dp-main[data-state="connected"] .dp-status-dot { background:var(--dp-mint); box-shadow:0 0 14px #6ce4ab66; }
 #dropo-motion-preview .dp-main[data-busy="true"] .dp-status-dot { background:#d7e5bb; }
 #dropo-motion-preview .dp-scene { position:absolute; top:0; right:0; bottom:0; left:0; inset:0; overflow:hidden; }
 #dropo-motion-preview .dp-canvas { position:absolute; top:0; right:0; bottom:0; left:0; inset:0; width:100%; height:100%; pointer-events:none; }
@@ -82,6 +82,16 @@ html,body { margin:0; width:100%; height:100%; background:#030908; overscroll-be
 #dropo-motion-preview .dp-mode button:disabled { opacity:.65; }
 #dropo-motion-preview .dp-disconnect-row { padding-top:10px; }
 #dropo-motion-preview .dp-details { z-index:8; }
+
+/* Connection controls follow native state immediately, independently of flight. */
+#dropo-motion-preview .dp-main[data-state="error"] .dp-status { color:#ffa6ab; }
+#dropo-motion-preview .dp-main[data-state="error"] .dp-status-dot { background:#ff7885; box-shadow:0 0 14px #f45c6966; }
+#dropo-motion-preview .dp-main[data-state="error"] .dp-start { border-color:#ff9ba899; color:#ffd9df; background:#ff566c0b; }
+#dropo-motion-preview .dp-main[data-state="error"] .dp-hint { width:240px; height:auto; text-align:center; }
+#dropo-motion-preview .dp-main[data-state="error"] .dp-hint canvas { display:none; }
+#dropo-motion-preview .dp-main[data-state="error"] .dp-hint span { position:static; display:block; transform:none; font-size:27px; color:#ffd6db; }
+#dropo-motion-preview .dp-main[data-state="error"] .dp-message { top:auto; bottom:16px; border-color:#f17c8966; background:#271318ef; color:#ffd6db; }
+#dropo-motion-preview .dp-source-name { max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* Android 10/11 system WebViews predate the inset shorthand and flex gap. */
 #dropo-motion-preview .dp-status { gap:0; }

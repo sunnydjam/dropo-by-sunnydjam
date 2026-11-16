@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"dropocore/dnspolicy"
 	"encoding/base64"
 	"encoding/json"
@@ -69,11 +70,20 @@ func NewSubscriptionFetcher() *SubscriptionFetcher {
 
 // FetchAndParse fetches subscription URL and parses proxy configs.
 func (f *SubscriptionFetcher) FetchAndParse(subscriptionURL string) ([]ProxyConfig, error) {
+	return f.FetchAndParseContext(context.Background(), subscriptionURL)
+}
+
+// FetchAndParseContext cancels a pending subscription download with its caller.
+func (f *SubscriptionFetcher) FetchAndParseContext(ctx context.Context, subscriptionURL string) ([]ProxyConfig, error) {
 	if err := validateSubscriptionURL(subscriptionURL); err != nil {
 		return nil, err
 	}
 	// Fetch subscription
-	resp, err := f.client.Get(subscriptionURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, subscriptionURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := f.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch subscription: %w", err)
 	}

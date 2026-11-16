@@ -155,6 +155,21 @@ jobs:
           flutter test --no-pub --dart-define=DROPO_PURCHASES_ENABLED=true test/stars_purchase_test.dart
           if ($LASTEXITCODE -ne 0) { throw "Telegram Stars purchase flow tests failed" }
 
+  android-policy-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test Android production policies on the JVM
+        working-directory: flutter_app/android
+        shell: pwsh
+        run: |
+          $env:JAVA_HOME = $env:JAVA_HOME_17_X64
+          if (-not $env:JAVA_HOME -or -not (Test-Path "$env:JAVA_HOME/bin/java.exe")) {
+            throw "The hosted runner must provide JDK 17"
+          }
+          ./gradlew.bat -p jvm-tests test --no-daemon
+          if ($LASTEXITCODE -ne 0) { throw "Android policy tests failed" }
+
   go-race:
     # Keep native GTK package inputs stable across ubuntu-latest migrations.
     runs-on: ubuntu-24.04
@@ -196,6 +211,26 @@ jobs:
             $env:GOFLAGS = $originalAndroidGoFlags
             Pop-Location
           }
+
+  android-scene-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/android-scene-tests/package-lock.json
+      - name: Install locked browser test dependencies
+        working-directory: tools/android-scene-tests
+        run: npm ci --ignore-scripts
+      - name: Install Chromium
+        working-directory: tools/android-scene-tests
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Test actual Android scene assets and failure recovery
+        working-directory: tools/android-scene-tests
+        run: npm test
 
   platform-compile:
     runs-on: windows-latest

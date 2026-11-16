@@ -10,6 +10,12 @@ import 'package:flutter_test/flutter_test.dart';
 class _StarsAPI implements AccountTransport {
   String status = 'pending', activation = 'provisioning';
   int orders = 0, polls = 0;
+  int price = 150, days = 30;
+  int? invoicePrice;
+  int? invoiceDays;
+  String invoiceProductId = 'speed_30d';
+  bool includeInvoiceProduct = true;
+  bool failCatalog = false;
   Completer<Map<String, dynamic>>? heldPoll;
   final until = DateTime.now()
       .add(const Duration(days: 30))
@@ -32,13 +38,14 @@ class _StarsAPI implements AccountTransport {
       };
     }
     if (path == '/v1/products') {
+      if (failCatalog) throw StateError('Catalog unavailable');
       return {
         'products': [
           {
             'id': 'speed_30d',
-            'name': 'Dropo Турбо — 30 дней',
-            'stars': 150,
-            'durationDays': 30,
+            'name': 'Dropo Турбо — $days дней',
+            'stars': price,
+            'durationDays': days,
           },
         ],
       };
@@ -61,7 +68,13 @@ class _StarsAPI implements AccountTransport {
       return {
         'orderId': 'fixture',
         'invoiceUrl': 'https://t.me/\$stars-fixture',
-        'amountStars': 150,
+        'amountStars': invoicePrice ?? price,
+        if (includeInvoiceProduct)
+          'product': {
+            'id': invoiceProductId,
+            'stars': invoicePrice ?? price,
+            'durationDays': invoiceDays ?? days,
+          },
         'status': 'pending',
       };
     }
@@ -152,6 +165,132 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
   }
+
+  testWidgets(
+    'purchase consent and refund use catalog and saved order amounts',
+    (tester) async {
+      final api = _StarsAPI()
+        ..price = 250
+        ..days = 60;
+      final opened = <String>[];
+      await pumpPage(tester, api, (_, _) async => {'success': true}, opened);
+      await openPurchase(tester);
+      expect(find.textContaining('250 Stars за 60 дней.'), findsOneWidget);
+      expect(find.textContaining('150 Stars за 30 дней.'), findsNothing);
+      await pay(tester);
+      expect(opened, hasLength(1));
+      api.price =
+          400; // Later catalog changes must not change this order's refund.
+      api.status = 'refunded';
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('250 Stars возвращены'), findsOneWidget);
+      expect(find.textContaining('400 Stars возвращены'), findsNothing);
+    },
+    skip: !enabled,
+  );
+
+  testWidgets('unavailable catalog does not offer an invented purchase price', (
+    tester,
+  ) async {
+    final api = _StarsAPI()..failCatalog = true;
+    await pumpPage(tester, api, (_, _) async => {'success': true}, []);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const ValueKey('account-buy-speed')))
+          .onPressed,
+      isNull,
+    );
+    expect(find.textContaining('150 Stars'), findsNothing);
+    expect(api.orders, 0);
+  }, skip: !enabled);
+
+  testWidgets(
+    'a changed invoice price requires new consent before opening Telegram',
+    (tester) async {
+      final api = _StarsAPI()..invoicePrice = 250;
+      final opened = <String>[];
+      await pumpPage(tester, api, (_, _) async => {'success': true}, opened);
+      await openPurchase(tester);
+      await pay(tester);
+      expect(opened, isEmpty);
+      expect(find.textContaining('Цена изменилась.'), findsOneWidget);
+      expect(api.polls, 0);
+    },
+    skip: !enabled,
+  );
+
+  for (final changed in ['duration', 'product', 'missing quote']) {
+    testWidgets(
+      'changed or unconfirmed invoice $changed cannot reuse old consent',
+      (tester) async {
+        final api = _StarsAPI();
+        if (changed == 'duration') api.invoiceDays = 10;
+        if (changed == 'product') api.invoiceProductId = 'different-product';
+        if (changed == 'missing quote') api.includeInvoiceProduct = false;
+        final opened = <String>[];
+        await pumpPage(tester, api, (_, _) async => {'success': true}, opened);
+        await openPurchase(tester);
+        await pay(tester);
+        expect(opened, isEmpty);
+        expect(
+          find.textContaining('Условия тарифа изменились или не подтверждены.'),
+          findsOneWidget,
+        );
+        expect(api.polls, 0);
+      },
+      skip: !enabled,
+    );
+  }
+
+  testWidgets('reopening a changed quote reloads terms before new consent', (
+    tester,
+  ) async {
+    final api = _StarsAPI()..invoicePrice = 250;
+    final opened = <String>[];
+    await pumpPage(tester, api, (_, _) async => {'success': true}, opened);
+    await openPurchase(tester);
+    await pay(tester);
+    expect(opened, isEmpty);
+    await tester.tap(find.text('Отмена'));
+    await tester.pumpAndSettle();
+    api
+      ..price = 250
+      ..days = 60
+      ..invoicePrice = null;
+    await openPurchase(tester);
+    expect(find.textContaining('250 Stars за 60 дней.'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const ValueKey('purchase-confirm')))
+          .onPressed,
+      isNull,
+    );
+    await pay(tester);
+    expect(opened, hasLength(1));
+    expect(api.orders, 2);
+  }, skip: !enabled);
+
+  testWidgets('catalog refresh failure can retry without taking payment', (
+    tester,
+  ) async {
+    final api = _StarsAPI();
+    final opened = <String>[];
+    await pumpPage(tester, api, (_, _) async => {'success': true}, opened);
+    api.failCatalog = true;
+    await tester.tap(find.byKey(const ValueKey('account-buy-speed')));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.textContaining('Не удалось обновить тариф.'), findsOneWidget);
+    expect(api.orders, 0);
+    api
+      ..failCatalog = false
+      ..price = 250;
+    await openPurchase(tester);
+    expect(find.textContaining('250 Stars за 30 дней.'), findsOneWidget);
+    expect(api.orders, 0);
+    expect(opened, isEmpty);
+  }, skip: !enabled);
 
   testWidgets(
     '150 Stars waits for backend delivery and native application without another charge',

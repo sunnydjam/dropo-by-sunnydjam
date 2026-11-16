@@ -242,7 +242,7 @@ func TestFullVPNUnreadyWriteFailurePreservesModeAndProfile(t *testing.T) {
 	}
 }
 
-func TestFullVPNActiveLastSourceRemovalRollsBackAndRecovers(t *testing.T) {
+func TestFullVPNActiveLastSourceRemovalRejectedBeforeDisconnect(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
 	requireAPISuccess(t, app.AddVPNSource("Own", testVPNSourceOld))
 	requireAPISuccess(t, app.SetRoutingMode(string(RoutingModeAllTraffic)))
@@ -258,6 +258,7 @@ func TestFullVPNActiveLastSourceRemovalRollsBackAndRecovers(t *testing.T) {
 		return nil
 	}, vpnSourceReconnectOps{
 		stop: func() map[string]interface{} {
+			t.Error("invalid empty chain interrupted the working VPN")
 			setVPNSourceTestRunning(app, false)
 			return map[string]interface{}{"success": true}
 		},
@@ -267,11 +268,11 @@ func TestFullVPNActiveLastSourceRemovalRollsBackAndRecovers(t *testing.T) {
 			return map[string]interface{}{"success": true}
 		},
 	})
-	if result["success"] != false || result["rolledBack"] != true || result["connectionRestored"] != true || starts != 1 {
+	if result["success"] != false || result["rolledBack"] != false || result["connectionRestored"] != true || starts != 0 {
 		t.Fatalf("active empty-chain transaction = %v, recovery starts = %d", result, starts)
 	}
 	after, _ := app.storage.GetActiveProfile()
-	if !reflect.DeepEqual(snapshot, *after) {
+	if !sameVPNSourceProfile(after, snapshot) {
 		t.Fatal("active full VPN lost its previous source/config")
 	}
 }

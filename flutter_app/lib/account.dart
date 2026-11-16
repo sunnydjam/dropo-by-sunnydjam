@@ -216,6 +216,11 @@ class _AccountDisplayController extends ValueNotifier<AccountDisplaySnapshot?> {
   }
 }
 
+int? _positiveStarsAmount(Object? value) =>
+    value is num && value.isFinite && value > 0 && value == value.toInt()
+    ? value.toInt()
+    : null;
+
 class _AccountProduct {
   const _AccountProduct({
     required this.id,
@@ -225,16 +230,31 @@ class _AccountProduct {
     required this.durationDays,
   });
 
-  factory _AccountProduct.fromJson(Map<String, dynamic> json) =>
-      _AccountProduct(
-        id: json['id']?.toString() ?? 'speed_30d',
-        name: json['name']?.toString() ?? 'Ускорение VPN',
-        description:
-            json['description']?.toString() ??
-            'Приоритетные быстрые маршруты Dropo на 30 дней.',
-        stars: (json['stars'] as num?)?.toInt() ?? 150,
-        durationDays: (json['durationDays'] as num?)?.toInt() ?? 30,
-      );
+  factory _AccountProduct.fromJson(Map<String, dynamic> json) {
+    final id = json['id']?.toString() ?? '';
+    final stars = json['stars'];
+    final days = json['durationDays'];
+    if (id.isEmpty ||
+        stars is! num ||
+        days is! num ||
+        !stars.isFinite ||
+        !days.isFinite ||
+        stars <= 0 ||
+        days <= 0 ||
+        stars != stars.toInt() ||
+        days != days.toInt()) {
+      throw const FormatException('Unavailable purchase terms');
+    }
+    return _AccountProduct(
+      id: id,
+      name: json['name']?.toString() ?? 'Ускорение VPN',
+      description:
+          json['description']?.toString() ??
+          'Приоритетные быстрые маршруты Dropo на ${days.toInt()} дней.',
+      stars: stars.toInt(),
+      durationDays: days.toInt(),
+    );
+  }
 
   final String id, name, description;
   final int stars, durationDays;
@@ -521,11 +541,11 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   _AccountPhase _phase = _AccountPhase.loading;
   _AccountRecord? _account;
   _AccountProduct _product = const _AccountProduct(
-    id: 'speed_30d',
+    id: '',
     name: 'Ускорение VPN',
-    description: 'Приоритетные быстрые маршруты Dropo на 30 дней.',
-    stars: 150,
-    durationDays: 30,
+    description: 'Приоритетные быстрые маршруты Dropo.',
+    stars: 0,
+    durationDays: 0,
   );
   String? _token, _challengeToken, _telegramUrl;
   String _authPurpose = 'login';
@@ -655,17 +675,23 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<_AccountProduct> _fetchProduct() async {
+    final response = await _api.request('GET', '/v1/products');
+    final products = response['products'];
+    if (products is! List || products.isEmpty || products.first is! Map) {
+      throw const FormatException('Unavailable purchase terms');
+    }
+    return _AccountProduct.fromJson(
+      Map<String, dynamic>.from(products.first as Map),
+    );
+  }
+
   Future<void> _loadProduct() async {
     try {
-      final response = await _api.request('GET', '/v1/products');
-      final products = response['products'];
-      if (products is List && products.isNotEmpty && products.first is Map) {
-        _product = _AccountProduct.fromJson(
-          Map<String, dynamic>.from(products.first as Map),
-        );
-      }
+      _product = await _fetchProduct();
     } catch (_) {
-      // The catalog has a safe built-in rendering fallback while offline.
+      // Do not request consent to an invented price while the catalog is offline.
+      _purchasingAvailable = false;
     }
   }
 
@@ -1254,6 +1280,26 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       }
     }
     if (!mounted || token != _token || generation != _authGeneration) return;
+    setState(() => _busy = true);
+    try {
+      // Each reopened dialog gets fresh terms, including after an invoice
+      // changed while the previous consent was open.
+      final product = await _fetchProduct();
+      if (!mounted || token != _token || generation != _authGeneration) return;
+      _product = product;
+    } catch (_) {
+      if (mounted && token == _token && generation == _authGeneration) {
+        setState(
+          () =>
+              _message = 'Не удалось обновить тариф. Повторите перед оплатой.',
+        );
+      }
+      return;
+    } finally {
+      if (mounted && token == _token && generation == _authGeneration) {
+        setState(() => _busy = false);
+      }
+    }
     setState(() => _message = '');
     await showDialog<bool>(
       context: context,
@@ -3009,6 +3055,7 @@ class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
   bool accepted = false, busy = false, pending = false, polling = false;
   bool paid = false, terminal = false;
   String message = '', orderId = '', invoiceUrl = '';
+  int? orderAmountStars;
   Timer? poll;
 
   @override
@@ -3030,10 +3077,27 @@ class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
         token: widget.token,
         body: {'productId': widget.product.id, 'termsAccepted': true},
       );
+      orderAmountStars = _positiveStarsAmount(response['amountStars']);
       orderId = response['orderId']?.toString() ?? '';
       invoiceUrl = response['invoiceUrl']?.toString() ?? '';
-      if (orderId.isEmpty || invoiceUrl.isEmpty) {
-        throw const AccountApiException('Счёт Telegram не создан.');
+      if (orderId.isEmpty || invoiceUrl.isEmpty || orderAmountStars == null) {
+        throw const AccountApiException(
+          'Не удалось подтвердить сумму счёта Telegram.',
+        );
+      }
+      if (orderAmountStars != widget.product.stars) {
+        throw const AccountApiException(
+          'Цена изменилась. Закройте окно и обновите тариф перед оплатой.',
+        );
+      }
+      final quotedProduct = response['product'];
+      if (quotedProduct is! Map ||
+          quotedProduct['id'] != widget.product.id ||
+          quotedProduct['durationDays'] != widget.product.durationDays ||
+          quotedProduct['stars'] != widget.product.stars) {
+        throw const AccountApiException(
+          'Условия тарифа изменились или не подтверждены. Закройте окно и обновите тариф перед оплатой.',
+        );
       }
       if (!mounted) return;
       setState(() {
@@ -3067,13 +3131,15 @@ class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
       );
       if (!mounted) return;
       final status = response['status']?.toString();
+      final amount = _positiveStarsAmount(response['amountStars']);
+      if (amount != null) orderAmountStars = amount;
       if (status == 'refunded') {
         poll?.cancel();
         setState(() {
           terminal = true;
           paid = false;
           message =
-              '150 Stars возвращены в Telegram. Остаток этого заказа снят; Free и другие начисления сохранены.';
+              '${orderAmountStars == null ? 'Оплата возвращена' : '$orderAmountStars Stars возвращены'} в Telegram. Остаток этого заказа снят; Free и другие начисления сохранены.';
         });
       } else if (status == 'paid') {
         setState(() {
@@ -3192,9 +3258,9 @@ class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
                     ),
                   ),
                   const SizedBox(height: 18),
-                  const Text(
-                    '150 Stars за 30 дней. Разовая оплата через Telegram, без автопродления. После оплаты приложение подготовит и применит премиальный профиль.',
-                    style: TextStyle(color: _atlasMuted, height: 1.45),
+                  Text(
+                    '${widget.product.stars} Stars за ${widget.product.durationDays} дней. Разовая оплата через Telegram, без автопродления. После оплаты приложение подготовит и применит премиальный профиль.',
+                    style: const TextStyle(color: _atlasMuted, height: 1.45),
                   ),
                   const SizedBox(height: 12),
                   CheckboxListTile(

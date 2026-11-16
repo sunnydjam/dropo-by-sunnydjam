@@ -162,6 +162,9 @@ func (a *App) Start() map[string]interface{} {
 			}
 		}
 	}
+	if a.sourcePrepareCancel != nil {
+		a.sourcePrepareCancel()
+	}
 	intentGeneration := a.vpnIntentGeneration.Add(1)
 	a.desiredConnected.Store(true)
 	a.activeStartIntent = intentGeneration
@@ -1350,11 +1353,12 @@ func (a *App) ensureActiveConfigForStart() error {
 			a.writeLog("Active config referenced a previous dependency runtime; updated local rule-set paths before start")
 		}
 		if !needsRebuild && subscriptionURL != "" {
-			if path := a.storage.ActiveConfigFilePath(); path != "" {
-				if hasVPN, verr := configHasVPNProbeCandidates(path); verr == nil && !hasVPN {
-					a.writeLog("Active config has no VPN candidates but a subscription is configured; rebuilding so the VPN fallback works")
-					needsRebuild = true
-				}
+			// The runtime file still describes the previous session until start
+			// writes this profile. Inspect the newly committed config, otherwise
+			// adding a first source would fetch it again after disconnecting.
+			if len(collectVPNProbeCandidateSpecs(config)) == 0 {
+				a.writeLog("Active config has no VPN candidates but a subscription is configured; rebuilding so the VPN fallback works")
+				needsRebuild = true
 			}
 		}
 		if needsRebuild {
@@ -1714,6 +1718,11 @@ func (a *App) autoUpdateSubscriptionBeforeStart(busyID string) error {
 	if a.storage == nil || a.configBuilder == nil {
 		return nil
 	}
+	// Transactions have already prepared their config before stopping. Their
+	// restart and rollback must use that exact snapshot without another fetch.
+	if a.vpnTransactionalReconnectActive() {
+		return nil
+	}
 
 	settings := a.storage.GetAppSettings()
 	if !settings.AutoUpdateSub {
@@ -1816,6 +1825,9 @@ func (a *App) Stop() map[string]interface{} {
 		return map[string]interface{}{"success": true, "running": false}
 	}
 	a.vpnIntentMu.Lock()
+	if a.sourcePrepareCancel != nil {
+		a.sourcePrepareCancel()
+	}
 	intentGeneration := a.vpnIntentGeneration.Add(1)
 	a.desiredConnected.Store(false)
 	a.vpnIntentMu.Unlock()

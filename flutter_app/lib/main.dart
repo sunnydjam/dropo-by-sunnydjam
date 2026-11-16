@@ -2590,6 +2590,7 @@ class BridgeEvent {
 class CoreStatus {
   const CoreStatus({
     this.vpnResponse = const VpnResponseSnapshot(),
+    this.vpnUptimeMs,
     required this.connected,
     required this.running,
     required this.connecting,
@@ -2608,6 +2609,9 @@ class CoreStatus {
   });
 
   final bool connected;
+
+  /// Elapsed native VPN session time, not a Unix timestamp.
+  final int? vpnUptimeMs;
   final VpnResponseSnapshot vpnResponse;
   final bool running;
   final bool connecting;
@@ -2640,6 +2644,12 @@ class CoreStatus {
         json['disconnecting'] == true || state == 'disconnecting';
     return CoreStatus(
       connected: connected,
+      vpnUptimeMs:
+          json['uptimeMs'] is num &&
+              (json['uptimeMs'] as num).isFinite &&
+              (json['uptimeMs'] as num) >= 0
+          ? (json['uptimeMs'] as num).toInt()
+          : null,
       running: json['running'] == true || connected,
       connecting: connecting,
       disconnecting: disconnecting,
@@ -2663,6 +2673,8 @@ class CoreStatus {
 
   CoreStatus copyWith({
     VpnResponseSnapshot? vpnResponse,
+    int? vpnUptimeMs,
+    bool clearVpnUptime = false,
     bool? connected,
     bool? running,
     bool? connecting,
@@ -2674,6 +2686,9 @@ class CoreStatus {
   }) {
     return CoreStatus(
       connected: connected ?? this.connected,
+      vpnUptimeMs: (connected ?? this.connected) && !clearVpnUptime
+          ? vpnUptimeMs ?? this.vpnUptimeMs
+          : null,
       running: running ?? this.running,
       connecting: connecting ?? this.connecting,
       disconnecting: disconnecting ?? this.disconnecting,
@@ -2691,6 +2706,24 @@ class CoreStatus {
       vpnResponse: vpnResponse ?? this.vpnResponse,
     );
   }
+}
+
+/// Convert native elapsed session time to the scene's wall-clock anchor. Never
+/// interpret Android elapsedRealtime connectedAt as a Unix timestamp.
+@visibleForTesting
+DateTime? androidSessionStartedAt(
+  CoreStatus status, {
+  DateTime? previous,
+  DateTime? now,
+}) {
+  if (status.connected) {
+    final observedAt = now ?? DateTime.now();
+    final uptime = status.vpnUptimeMs;
+    return uptime != null
+        ? observedAt.subtract(Duration(milliseconds: uptime))
+        : previous ?? observedAt;
+  }
+  return status.connecting || status.disconnecting ? previous : null;
 }
 
 class DepsStatus {
@@ -3826,6 +3859,10 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool uiBusy = false;
   bool sectionBusy = false;
   int sourceChangeGeneration = 0;
+  int _refreshRequest = 0, _metadataRequest = 0;
+  int _routeSnapshotRequest = 0, _logSnapshotRequest = 0;
+  int? _statusInFlight, _routesInFlight, _logsInFlight;
+  int _bootstrapRequest = 0;
   bool quitting = false;
   String quitProgressMessage = '';
   int lastEventId = 0;
@@ -4139,6 +4176,8 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _bootstrap() async {
+    final request = ++_bootstrapRequest;
+    _invalidateCoreSnapshots();
     setState(() {
       booting = true;
       statusMessage = 'Запускаем dropo-core...';
@@ -4148,6 +4187,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     try {
       await widget.bridge.ensureStarted();
       await _ownedVPNClient.restore(widget.bridge);
+      if (!mounted || quitting || request != _bootstrapRequest) return;
       setState(() {
         online = true;
         statusMessage = 'dropo-core запущен';
@@ -4158,17 +4198,22 @@ class _DropoHomePageState extends State<DropoHomePage>
 
       await _refresh(all: true);
       _scheduleStartupUpdateCheck();
-      if (!mounted) {
+      if (!mounted || quitting || request != _bootstrapRequest) {
         return;
       }
       setState(() {
         booting = false;
-        connectionHint = '';
+        if (status.hasError && status.error.trim().isNotEmpty) {
+          connectionHint = status.error.trim();
+          connectionHintDanger = true;
+        } else if (!connectionHintDanger) {
+          connectionHint = '';
+        }
       });
       unawaited(_maybeShowAutoStartPrompt());
       _checkAndroidReviewPrompt();
     } catch (error) {
-      if (!mounted) {
+      if (!mounted || quitting || request != _bootstrapRequest) {
         return;
       }
       setState(() {
@@ -4229,59 +4274,34 @@ class _DropoHomePageState extends State<DropoHomePage>
     });
   }
 
+  // Native events and new user intent revoke every earlier snapshot, including
+  // requests that have not returned status yet. Optional metadata has its own
+  // sequence so routine polls cannot starve a slower settings refresh.
+  void _invalidateCoreSnapshots({bool metadata = true}) {
+    _refreshRequest++;
+    _statusInFlight = null;
+    if (metadata) _metadataRequest++;
+    _invalidateOptionalSnapshots();
+  }
+
+  void _invalidateOptionalSnapshots() {
+    _routeSnapshotRequest++;
+    _logSnapshotRequest++;
+    _routesInFlight = null;
+    _logsInFlight = null;
+  }
+
   Future<void> _refresh({bool all = false}) async {
+    if (!mounted || quitting || (!all && _statusInFlight != null)) return;
+    final request = ++_refreshRequest;
+    _statusInFlight = request;
+    if (all) _invalidateOptionalSnapshots();
     try {
       final loadedStatus = await widget.bridge.status();
-      List<String> loadedLogs = logs;
-      if (all || activeMenuSection == 'logs' || !_usesPushEvents) {
-        try {
-          loadedLogs = await widget.bridge.logs();
-        } catch (_) {
-          // Status is the authoritative health signal; keep the last log snapshot
-          // if the optional log request is slow during startup or shutdown.
-        }
-      }
-      SubscriptionInfo loadedSubscription = subscription;
-      List<RouteService> loadedRoutes = routes;
-      var loadedRoutesConfirmed = liveRoutesConfirmed;
-      if (loadedStatus.connected != status.connected ||
-          !loadedStatus.connected) {
-        loadedRoutesConfirmed = false;
-      }
-      AppConfig loadedAppConfig = appConfig;
-      List<WireGuardInfo> loadedWireGuards = wireGuards;
-      List<ProfileInfo> loadedProfiles = profiles;
-      TelegramExitInfo loadedLegacyTelegramProxy = legacyTelegramProxy;
-      if (all || loadedStatus.connected) {
-        // A previous snapshot must not stay "confirmed" after the live API
-        // becomes unavailable. Keep its rows only as stale UI data while the
-        // diagnostics panel explicitly waits for a new core confirmation.
-        loadedRoutesConfirmed = false;
-        try {
-          loadedRoutes = await widget.bridge.routes(
-            live: loadedStatus.connected,
-          );
-          loadedRoutesConfirmed =
-              loadedStatus.connected && loadedRoutes.isNotEmpty;
-        } catch (_) {}
-      }
-      if (all) {
-        try {
-          loadedSubscription = await widget.bridge.subscription();
-          loadedAppConfig = AppConfig.fromJson(await widget.bridge.appConfig());
-          _dropoThemeMode.value = themeModeFromSetting(loadedAppConfig.theme);
-          loadedWireGuards = await widget.bridge.wireGuards();
-          loadedProfiles = (await widget.bridge.profiles()).profiles;
-          loadedLegacyTelegramProxy = await widget.bridge.telegramProxyStatus();
-        } catch (error) {
-          if (!booting) {
-            routeHint = 'Настройки ещё загружаются: ${_cleanError(error)}';
-          }
-        }
-      }
-      if (!mounted) {
-        return;
-      }
+      if (_statusInFlight == request) _statusInFlight = null;
+      if (!mounted || quitting || request != _refreshRequest) return;
+      // Apply the authoritative status before any optional logs/routes/config
+      // request. A slow diagnostic request must not hold the old green state.
       setState(() {
         if ((status.hasError && !loadedStatus.hasError) || !online) {
           connectionHint = '';
@@ -4295,23 +4315,17 @@ class _DropoHomePageState extends State<DropoHomePage>
           homeSourcesLoading = false;
           homeSourcesRequest++;
         }
+        if (status.connected != loadedStatus.connected ||
+            status.connecting != loadedStatus.connecting ||
+            status.disconnecting != loadedStatus.disconnecting ||
+            status.vpnState != loadedStatus.vpnState) {
+          _invalidateOptionalSnapshots();
+          liveRoutesConfirmed = false;
+        }
+        if (!loadedStatus.connected) liveRoutesConfirmed = false;
         _observeAndroidSession(loadedStatus);
         status = loadedStatus;
-        _incidents.observeConnection(loadedStatus, loadedAppConfig.routingMode);
-        logs = loadedLogs;
-        subscription = loadedSubscription;
-        routes = loadedRoutes.isEmpty ? fallbackRoutes : loadedRoutes;
-        liveRoutesConfirmed = loadedRoutesConfirmed;
-        appConfig = loadedAppConfig;
-        wireGuards = loadedWireGuards;
-        profiles = loadedProfiles;
-        legacyTelegramProxy = loadedLegacyTelegramProxy;
-        if (all && !connectionBusy && !uiBusy) {
-          routeHint = '';
-        }
-        if (all) {
-          subscriptionController.text = loadedSubscription.url;
-        }
+        _incidents.observeConnection(loadedStatus, appConfig.routingMode);
         if (externalVpnConflictBlocked &&
             !loadedStatus.connected &&
             !connectionBusy &&
@@ -4332,17 +4346,26 @@ class _DropoHomePageState extends State<DropoHomePage>
           }
         }
       });
-      // Optional presentation data must not delay the connection-ready gate.
       unawaited(_refreshHomeSources(force: all));
       _checkAndroidReviewPrompt();
+      final metadataRequest = all ? ++_metadataRequest : null;
+      await Future.wait([
+        if (all || activeMenuSection == 'logs' || !_usesPushEvents)
+          _refreshLogs(),
+        if (all || loadedStatus.connected)
+          _refreshRoutes(loadedStatus.connected),
+        if (metadataRequest != null) _refreshMetadata(metadataRequest),
+      ]);
     } catch (error) {
-      if (!mounted) {
+      if (_statusInFlight == request) _statusInFlight = null;
+      if (!mounted || quitting || request != _refreshRequest) {
         return;
       }
       final transient = booting || connectionBusy || uiBusy || quitting;
       final message = _cleanError(error);
       setState(() {
         refreshFailureCount += 1;
+        _invalidateOptionalSnapshots();
         // A failed status read revokes the previous live snapshot
         // immediately. We may still show the last rows elsewhere, but never
         // label them as current core state while the core is unreachable.
@@ -4358,6 +4381,70 @@ class _DropoHomePageState extends State<DropoHomePage>
         connectionHint = message;
         connectionHintDanger = true;
       });
+    }
+  }
+
+  Future<void> _refreshLogs() async {
+    if (_logsInFlight != null) return;
+    final request = ++_logSnapshotRequest;
+    _logsInFlight = request;
+    try {
+      final loaded = await widget.bridge.logs();
+      if (!mounted || quitting || request != _logSnapshotRequest) return;
+      setState(() => logs = loaded);
+    } catch (_) {
+      // Logs are optional; they never mark a healthy core offline.
+    } finally {
+      if (_logsInFlight == request) _logsInFlight = null;
+    }
+  }
+
+  Future<void> _refreshRoutes(bool connected) async {
+    // Coalesce slow reads within one observed session. A normal status poll
+    // must not starve a routes request that takes longer than the poll period.
+    if (_routesInFlight != null) return;
+    final request = ++_routeSnapshotRequest;
+    _routesInFlight = request;
+    try {
+      final loaded = await widget.bridge.routes(live: connected);
+      if (!mounted || quitting || request != _routeSnapshotRequest) return;
+      setState(() {
+        routes = loaded.isEmpty ? fallbackRoutes : loaded;
+        liveRoutesConfirmed = connected && loaded.isNotEmpty;
+      });
+    } catch (_) {
+      if (!mounted || quitting || request != _routeSnapshotRequest) return;
+      setState(() => liveRoutesConfirmed = false);
+    } finally {
+      if (_routesInFlight == request) _routesInFlight = null;
+    }
+  }
+
+  Future<void> _refreshMetadata(int request) async {
+    try {
+      final loadedSubscription = await widget.bridge.subscription();
+      final loadedConfig = AppConfig.fromJson(await widget.bridge.appConfig());
+      final loadedWireGuards = await widget.bridge.wireGuards();
+      final loadedProfiles = (await widget.bridge.profiles()).profiles;
+      final loadedLegacyProxy = await widget.bridge.telegramProxyStatus();
+      if (!mounted || quitting || request != _metadataRequest) return;
+      setState(() {
+        subscription = loadedSubscription;
+        appConfig = loadedConfig;
+        _dropoThemeMode.value = themeModeFromSetting(loadedConfig.theme);
+        wireGuards = loadedWireGuards;
+        profiles = loadedProfiles;
+        legacyTelegramProxy = loadedLegacyProxy;
+        subscriptionController.text = loadedSubscription.url;
+        if (!connectionBusy && !uiBusy) routeHint = '';
+      });
+    } catch (error) {
+      if (!mounted || quitting || request != _metadataRequest || booting) {
+        return;
+      }
+      setState(
+        () => routeHint = 'Настройки ещё загружаются: ${_cleanError(error)}',
+      );
     }
   }
 
@@ -4713,6 +4800,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   void _applyServiceStatePayload(Map<String, dynamic> payload) {
+    _invalidateCoreSnapshots(metadata: false);
     final state =
         payload['vpnState']?.toString() ??
         payload['state']?.toString() ??
@@ -4742,6 +4830,16 @@ class _DropoHomePageState extends State<DropoHomePage>
       hasError: hasError,
       error: errorText,
       serviceMessage: message,
+      clearVpnUptime:
+          payload['uptimeMs'] is! num ||
+          !(payload['uptimeMs'] as num).isFinite ||
+          (payload['uptimeMs'] as num) < 0,
+      vpnUptimeMs:
+          payload['uptimeMs'] is num &&
+              (payload['uptimeMs'] as num).isFinite &&
+              (payload['uptimeMs'] as num) >= 0
+          ? (payload['uptimeMs'] as num).toInt()
+          : null,
     );
     _observeAndroidSession(status);
 
@@ -4925,6 +5023,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   void _setConnectionPrimed(bool target) {
+    _invalidateCoreSnapshots();
     busyTasks[target ? 'vpn-connect' : 'vpn-disconnect'] = target
         ? 'Подключаем VPN...'
         : 'Останавливаем VPN...';
@@ -5072,6 +5171,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       return;
     }
     ++_androidConnectionAttempt;
+    _invalidateCoreSnapshots();
     // Also invalidate a mode/source reconnect that may be waiting for Start.
     // Its next generation check must finish instead of holding the UI busy.
     ++sourceChangeGeneration;
@@ -5101,11 +5201,10 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   void _observeAndroidSession(CoreStatus next) {
     if (!_isAndroidPlatform) return;
-    if (next.connected) {
-      _androidConnectedAt ??= DateTime.now();
-    } else if (!next.connecting && !next.disconnecting) {
-      _androidConnectedAt = null;
-    }
+    _androidConnectedAt = androidSessionStartedAt(
+      next,
+      previous: _androidConnectedAt,
+    );
   }
 
   void _openBoost() {
@@ -5161,6 +5260,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         'userMessage': 'Дождитесь завершения текущего действия.',
       };
     }
+    _invalidateCoreSnapshots();
     if (!_isAndroidPlatform || !status.connected) return operation();
     final generation = ++sourceChangeGeneration;
     setState(() => uiBusy = true);
@@ -5883,6 +5983,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
     setState(() {
       quitting = true;
+      _invalidateCoreSnapshots();
       sourceChangeGeneration++;
       quitProgressMessage =
           'Останавливаем VPN, WinDivert и фоновые процессы...';

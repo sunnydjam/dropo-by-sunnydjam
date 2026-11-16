@@ -228,3 +228,55 @@ func TestVPNResponsePendingAndFailedBootstrapHaveNoInventedActiveSource(t *testi
 		t.Fatalf("failed bootstrap = %+v", snapshot)
 	}
 }
+
+func TestVPNResponseFallsBackThroughSameSourceAndReportsActualTarget(t *testing.T) {
+	var requests atomic.Int32
+	app, ctx, generation := newVPNResponseTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path != "/proxies/vpn-source-alpha/delay" {
+			t.Errorf("changed source: %s", r.URL.Path)
+		}
+		switch r.URL.Query().Get("url") {
+		case vpnResponseProbeTarget:
+			http.Error(w, "primary target unavailable", 503)
+		case vpnResponseFallbackProbeTarget:
+			fmt.Fprint(w, `{"delay":67}`)
+		default:
+			t.Errorf("unexpected target: %s", r.URL)
+		}
+	})
+	if healthy, current := app.vpnSourceHealthy(ctx, generation, "vpn-source-alpha"); !healthy || !current {
+		t.Fatal("healthy fallback was rejected")
+	}
+	snapshot := app.vpnResponseSnapshot(true, time.Now())
+	if snapshot.Target != vpnResponseFallbackProbeTarget || snapshot.LatencyMS == nil || *snapshot.LatencyMS != 67 || requests.Load() != 2 {
+		t.Fatalf("fallback observation: %+v; requests=%d", snapshot, requests.Load())
+	}
+}
+
+func TestVPNResponseCancellationDoesNotLaunchFallback(t *testing.T) {
+	entered := make(chan struct{})
+	var requests atomic.Int32
+	app, _, _ := newVPNResponseTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			close(entered)
+		}
+		<-r.Context().Done()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := app.testProxyDelayContext(ctx, "vpn-source-alpha"); done <- err }()
+	<-entered
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled probe succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("probe ignored cancellation")
+	}
+	if requests.Load() != 1 {
+		t.Fatal("cancelled probe launched a fallback request")
+	}
+}

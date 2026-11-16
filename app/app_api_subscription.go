@@ -74,7 +74,7 @@ func (a *App) TestSubscription(url string) map[string]interface{} {
 
 // GenerateAndSaveConfig generates config from settings and saves it
 func (a *App) GenerateAndSaveConfig() map[string]interface{} {
-	result := a.changeVPNSubscriptionTransaction(nil, false, "Генерируем конфиг...", a.subscriptionReconnectOps())
+	result := a.changePreparedVPNSubscription(nil, false)
 	if !apiResultSucceeded(result) {
 		return result
 	}
@@ -90,7 +90,7 @@ func (a *App) GenerateAndSaveConfig() map[string]interface{} {
 
 // UpdateSubscriptions fetches all subscriptions and regenerates config
 func (a *App) UpdateSubscriptions() map[string]interface{} {
-	return a.changeVPNSubscriptionTransaction(nil, false, "Обновляем подписки...", a.subscriptionReconnectOps())
+	return a.changePreparedVPNSubscription(nil, false)
 }
 
 // ==================== Subscription Management (New API) ====================
@@ -165,18 +165,50 @@ func (a *App) TestVPNConnection(url string) map[string]interface{} {
 // SetVPNSubscription устанавливает подписку и генерирует конфиг
 func (a *App) SetVPNSubscription(url string) map[string]interface{} {
 	url = strings.TrimSpace(url)
-	return a.changeVPNSubscriptionTransaction(&url, false, "Сохраняем VPN-подписку...", a.subscriptionReconnectOps())
+	return a.changePreparedVPNSubscription(&url, false)
 }
 
 // RemoveVPNSubscription удаляет подписку и генерирует конфиг без прокси
 func (a *App) RemoveVPNSubscription() map[string]interface{} {
 	empty := ""
-	return a.changeVPNSubscriptionTransaction(&empty, false, "Удаляем VPN-подписку...", a.subscriptionReconnectOps())
+	return a.changePreparedVPNSubscription(&empty, false)
 }
 
 // RefreshVPNSubscription обновляет текущую подписку
 func (a *App) RefreshVPNSubscription() map[string]interface{} {
-	return a.changeVPNSubscriptionTransaction(nil, true, "Обновляем VPN-подписку...", a.subscriptionReconnectOps())
+	return a.changePreparedVPNSubscription(nil, true)
+}
+
+// Legacy subscription APIs share the staged source coordinator. This preserves
+// their response shape without retaining a second download-during-disconnect path.
+func (a *App) changePreparedVPNSubscription(requestedURL *string, requireSubscription bool) map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": false, "error": "VPN application is not initialized"}
+	}
+	result := a.changeVPNSourcesTransaction(func(profile *ProfileData) error {
+		target := strings.TrimSpace(profile.SubscriptionURL)
+		if requestedURL != nil {
+			target = strings.TrimSpace(*requestedURL)
+		}
+		if requireSubscription && target == "" {
+			return fmt.Errorf("Нет сохранённой подписки")
+		}
+		if target != strings.TrimSpace(profile.SubscriptionURL) || (len(profile.VPNSources) == 0 && target != "") {
+			profile.VPNSources = nil
+			if target != "" {
+				source, err := newVPNSource("source-1", "Primary", target)
+				if err != nil {
+					return err
+				}
+				profile.VPNSources = []VPNSource{source}
+			}
+		}
+		return nil
+	}, vpnSourceReconnectOps{stop: a.stopVPNForReconnect, start: a.startVPNForReconnect, restore: a.restoreVPNSourceProfile})
+	if apiResultSucceeded(result) {
+		return a.finishSubscriptionMutationResult(result)
+	}
+	return result
 }
 
 func (a *App) subscriptionReconnectOps() subscriptionReconnectOps {

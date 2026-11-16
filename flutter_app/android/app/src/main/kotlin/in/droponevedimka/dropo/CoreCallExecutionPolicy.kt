@@ -10,6 +10,7 @@ internal object CoreCallExecutionPolicy {
         "RefreshVPNSources",
         "RunClientQuickCheck",
         "RunClientQuickCheckReadOnly",
+        "CheckForUpdates",
     )
 
     fun usesNetworkExecutor(channelMethod: String, coreMethod: String?): Boolean =

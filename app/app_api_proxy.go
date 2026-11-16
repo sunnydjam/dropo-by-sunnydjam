@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"runtime"
 	"time"
 )
@@ -102,6 +103,8 @@ func (a *App) GetProxiesWithDelay() map[string]interface{} {
 }
 
 const vpnResponseProbeTarget = "http://www.gstatic.com/generate_204"
+const vpnResponseFallbackProbeTarget = "https://cp.cloudflare.com/generate_204"
+const vpnResponseProbeBudget = 9 * time.Second
 
 // TestProxyDelay measures an HTTP URL-test through a specific outbound, not
 // ICMP or the latency of every service using that outbound.
@@ -114,14 +117,44 @@ func (a *App) TestProxyDelay(proxyName string) map[string]interface{} {
 }
 
 // The monitor supplies its session context so Stop cancels the in-flight HTTP
-// request as well as rejecting a late result. This never starts another probe.
+// request as well as rejecting a late result. A cancelled check cannot start the
+// fallback probe.
 func (a *App) testProxyDelayContext(ctx context.Context, proxyName string) (int, error) {
-	if !a.isVPNRunning() {
-		return 0, fmt.Errorf("VPN не запущен")
-	}
+	delay, _, err := a.testProxyDelayWithTargetContext(ctx, proxyName)
+	return delay, err
+}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	path := clashProxyAPIPath(proxyName) + "/delay?timeout=5000&url=" + vpnResponseProbeTarget
+// A single target outage is not proof that the VPN source failed. Both requests
+// use the same explicit outbound and a shared budget; no selector is changed.
+func (a *App) testProxyDelayWithTargetContext(ctx context.Context, proxyName string) (int, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, vpnResponseProbeBudget)
+	defer cancel()
+	var lastErr error
+	for index, target := range []string{vpnResponseProbeTarget, vpnResponseFallbackProbeTarget} {
+		if err := ctx.Err(); err != nil {
+			return 0, "", err
+		}
+		if !a.isVPNRunning() {
+			return 0, "", fmt.Errorf("VPN не запущен")
+		}
+		apiTimeout, requestTimeout := 5000, 6*time.Second
+		if index > 0 {
+			apiTimeout, requestTimeout = 2500, 3*time.Second
+		}
+		probeCtx, cancelProbe := context.WithTimeout(ctx, requestTimeout)
+		delay, err := a.testProxyDelayTarget(probeCtx, proxyName, target, apiTimeout)
+		cancelProbe()
+		if err == nil {
+			return delay, target, nil
+		}
+		lastErr = err
+	}
+	return 0, "", lastErr
+}
+
+func (a *App) testProxyDelayTarget(ctx context.Context, proxyName, target string, timeoutMS int) (int, error) {
+	client := &http.Client{Timeout: 6 * time.Second}
+	path := clashProxyAPIPath(proxyName) + fmt.Sprintf("/delay?timeout=%d&url=%s", timeoutMS, url.QueryEscape(target))
 	req, err := a.newClashAPIRequest(http.MethodGet, path, nil)
 	if err != nil {
 		return 0, err
@@ -134,25 +167,20 @@ func (a *App) testProxyDelayContext(ctx context.Context, proxyName string) (int,
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, fmt.Errorf("VPN response check returned HTTP %d", resp.StatusCode)
 	}
-
 	body, err := readHTTPBodyLimited(resp.Body, defaultMaxHTTPResponseBytes)
 	if err != nil {
 		return 0, err
 	}
-
-	var delayResp struct {
-		Delay   int    `json:"delay"`
-		Message string `json:"message"`
+	var response struct {
+		Delay int `json:"delay"`
 	}
-
-	if err := json.Unmarshal(body, &delayResp); err != nil {
+	if err := json.Unmarshal(body, &response); err != nil {
 		return 0, fmt.Errorf("VPN response check returned an invalid result")
 	}
-
-	if delayResp.Delay <= 0 {
+	if response.Delay <= 0 {
 		return 0, fmt.Errorf("VPN response check returned no measured response time")
 	}
-	return delayResp.Delay, nil
+	return response.Delay, nil
 }
 
 // TestAllProxiesDelay tests delay of all proxies in parallel
