@@ -195,12 +195,16 @@ class _Client implements HttpClient {
   @override
   set connectionTimeout(Duration? value) {}
   @override
+  set findProxy(String Function(Uri)? value) {}
+  @override
   set connectionFactory(
     Future<ConnectionTask<Socket>> Function(Uri, String?, int?)? value,
   ) {}
   @override
   Future<HttpClientRequest> getUrl(Uri url) async =>
       _Request(url.pathSegments.last, owner.body);
+  @override
+  Future<HttpClientRequest> openUrl(String method, Uri url) => getUrl(url);
   @override
   void close({bool force = false}) {
     owner.closed = true;

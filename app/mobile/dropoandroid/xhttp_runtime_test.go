@@ -24,8 +24,8 @@ import (
 
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/protocol/socks"
-	xnet "github.com/xtls/xray-core/common/net"
 	xlog "github.com/xtls/xray-core/common/log"
+	xnet "github.com/xtls/xray-core/common/net"
 )
 
 const fixtureXHTTPUUID = "11111111-2222-3333-4444-555555555555"
@@ -142,7 +142,9 @@ func startXHTTPEcho(t *testing.T) (M.Socksaddr, M.Socksaddr) {
 
 func exchangeXHTTPFixture(t *testing.T, bridge *xhttpBridge, tcp, udp M.Socksaddr) {
 	t.Helper()
-	if os.Getenv("DROPO_XHTTP_FIXTURE_DEBUG") == "1" { xlog.RegisterHandler(fixtureConsoleLog{}) }
+	if os.Getenv("DROPO_XHTTP_FIXTURE_DEBUG") == "1" {
+		xlog.RegisterHandler(fixtureConsoleLog{})
+	}
 	client := socks.NewClient(&testOutboundDialer{address: bridge.listener.Addr().String()}, M.SocksaddrFromNet(bridge.listener.Addr()), socks.Version5, bridge.username, bridge.password)
 	// The existing testOutboundDialer redirects every call to the TCP port;
 	// use the actual network destination dialer for UDP associations below.
@@ -239,6 +241,7 @@ func TestXHTTPActualMultiDestinationUDPAfterDNSAndPayloadBounds(t *testing.T) {
 		t.Skip("synthetic loopback DNS port is unavailable")
 	}
 	defer dns.Close()
+	var echoedDNS atomic.Int32
 	go func() {
 		data := make([]byte, 8192)
 		for {
@@ -246,7 +249,9 @@ func TestXHTTPActualMultiDestinationUDPAfterDNSAndPayloadBounds(t *testing.T) {
 			if err != nil {
 				return
 			}
-			dns.WriteTo(data[:n], peer)
+			if _, err := dns.WriteTo(data[:n], peer); err == nil {
+				echoedDNS.Add(1)
+			}
 		}
 	}()
 	built, err := buildXHTTPConfig(encodeXHTTPFixture(t, fixtureXHTTPOutbound(port, true)), []string{root})
@@ -273,7 +278,7 @@ func TestXHTTPActualMultiDestinationUDPAfterDNSAndPayloadBounds(t *testing.T) {
 		data := make([]byte, 8192)
 		n, source, err := packet.ReadFrom(data)
 		if err != nil || string(data[:n]) != string(payload) || source.String() != destination.String() {
-			t.Fatal("UDP target changed after first DNS destination or payload was truncated")
+			t.Fatalf("UDP fixture datagram=%d bytes=%d want=%d source=%v target=%v readError=%v DNS echoes=%d", i, n, len(payload), source, destination, err, echoedDNS.Load())
 		}
 	}
 	remote, err := newXHTTPUDPConn(bridge.session.ctx, bridge.instance)

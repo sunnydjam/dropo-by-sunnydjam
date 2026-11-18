@@ -17,7 +17,7 @@ class CoreCallExecutionPolicyTest {
     fun sourceDownloadCallsKeepTheirExistingNetworkLane() {
         for (method in listOf(
             "TestVPNConnection", "AddVPNSource", "AddPublicVPNSource",
-            "AddManagedVPNSource", "RefreshVPNSources",
+            "AddManagedVPNSource", "RestoreManagedVPNSource", "RefreshVPNSources",
         )) {
             assertTrue(method, CoreCallExecutionPolicy.usesNetworkExecutor("call", method))
         }

@@ -159,7 +159,21 @@ class _SourceBridge extends MockCoreBridge {
   @override
   Future<Map<String, dynamic>> removeVpnSource(String id) async {
     removals++;
-    sources = sources.where((source) => source.id != id).toList();
+    final selected = sources.firstWhere((source) => source.id == id);
+    String family(String value) => value.replaceFirst(RegExp(r'-reserve$'), '');
+    final owned = [
+      'dropo-individual-free',
+      'dropo-individual-boost',
+    ].contains(family(selected.publicCatalogId));
+    sources = sources
+        .where(
+          (source) =>
+              source.id != id &&
+              (!owned ||
+                  family(source.publicCatalogId) !=
+                      family(selected.publicCatalogId)),
+        )
+        .toList();
     return {'success': true};
   }
 
@@ -1035,6 +1049,53 @@ void main() {
     expect(bridge.removals, 1);
     expect(bridge.sources, isEmpty);
   });
+
+  testWidgets(
+    'managed reserve deletion explains that both family entries are removed',
+    (tester) async {
+      VpnSourceInfo owned(String id, String provider) =>
+          VpnSourceInfo.fromJson({
+            'id': id,
+            'name': id == 'reserve' ? 'Dropo Free · резерв' : 'Dropo Free',
+            'kind': 'direct',
+            'public_catalog_id': provider,
+            'node_count': 1,
+            'node_names': ['Free'],
+            'node_ids': ['$id-node'],
+            'selected_node': 0,
+          });
+      final bridge = _SourceBridge()
+        ..running = false
+        ..sources = [
+          owned('free', 'dropo-individual-free'),
+          owned('reserve', 'dropo-individual-free-reserve'),
+          _source('personal'),
+        ];
+      await _pumpEditor(tester, bridge);
+      await _tapVisible(
+        tester,
+        find.byKey(const PageStorageKey('source-details-reserve')),
+      );
+      await _tapVisible(
+        tester,
+        find.byKey(const ValueKey('remove-source-reserve')),
+      );
+      expect(
+        find.text('Удалить Dropo Free и резервное подключение?'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Основное и резервное подключения Dropo Free'),
+        findsOneWidget,
+      );
+      await _tapVisible(
+        tester,
+        find.widgetWithText(TextButton, 'Удалить').last,
+      );
+      expect(bridge.removals, 1);
+      expect(bridge.sources.map((s) => s.id), ['personal']);
+    },
+  );
 
   testWidgets('reserve reordering stays separate from favorite servers', (
     tester,

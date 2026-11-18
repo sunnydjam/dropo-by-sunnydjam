@@ -6,6 +6,7 @@ import (
 	"dropocore/dnspolicy"
 	"encoding/json"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strings"
@@ -14,7 +15,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v12-adaptive-service-mode"
+	androidConfigSchema     = "android-package-routing-v13-tunneled-public-dns"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -446,6 +447,11 @@ func proxyToSingBoxOutbound(proxy proxyConfig) map[string]interface{} {
 		"server":      proxy.Server,
 		"server_port": proxy.ServerPort,
 	}
+	if net.ParseIP(proxy.Server) == nil {
+		// Resolving the VPN endpoint through that same VPN would recurse before
+		// it can connect. Keep endpoint bootstrap separate from application DNS.
+		out["domain_resolver"] = map[string]interface{}{"server": "dns-bootstrap", "strategy": "ipv4_only"}
+	}
 	switch proxy.Type {
 	case "vless":
 		out["uuid"] = proxy.UUID
@@ -555,7 +561,16 @@ func addTransport(out map[string]interface{}, proxy proxyConfig) {
 }
 
 func buildAndroidDNSServers(proxyTags []string) []interface{} {
-	return []interface{}{map[string]interface{}{"type": "local", "tag": "dns-local"}, dnspolicy.Server("dns-direct", false), dnspolicy.Server("dns-remote", len(proxyTags) > 0)}
+	// "direct" describes the application's traffic route, not the transport
+	// used to reach our encrypted resolver. A reachable VPN must also carry DNS
+	// for unselected domains when the resolver's public address is blocked.
+	throughVPN := len(proxyTags) > 0
+	return []interface{}{
+		map[string]interface{}{"type": "local", "tag": "dns-local"},
+		dnspolicy.Server("dns-bootstrap", false),
+		dnspolicy.Server("dns-direct", throughVPN),
+		dnspolicy.Server("dns-remote", throughVPN),
+	}
 }
 
 func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies map[string]string) []interface{} {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dropocore/ownedprofile"
 	"fmt"
 	"time"
 )
@@ -48,7 +49,11 @@ func (a *App) RemoveVPNSource(id string) map[string]interface{} {
 		id = normalizeVPNSourceID(id)
 		for index, source := range profile.VPNSources {
 			if source.ID == id {
-				profile.VPNSources = append(profile.VPNSources[:index], profile.VPNSources[index+1:]...)
+				if ownedprofile.IsProvider(source.PublicCatalogID) {
+					profile.VPNSources = removeOwnedVPNFamily(profile.VPNSources, source.PublicCatalogID)
+				} else {
+					profile.VPNSources = append(profile.VPNSources[:index], profile.VPNSources[index+1:]...)
+				}
 				return nil
 			}
 		}
@@ -123,6 +128,13 @@ func (a *App) SetVPNSourceEnabled(id string, enabled bool) map[string]interface{
 		for index := range profile.VPNSources {
 			if profile.VPNSources[index].ID == id {
 				profile.VPNSources[index].Disabled = !enabled
+				if provider := profile.VPNSources[index].PublicCatalogID; ownedprofile.IsPrimary(provider) {
+					for i := range profile.VPNSources {
+						if ownedprofile.SameFamily(provider, profile.VPNSources[i].PublicCatalogID) {
+							profile.VPNSources[i].Disabled = !enabled
+						}
+					}
+				}
 				return nil
 			}
 		}

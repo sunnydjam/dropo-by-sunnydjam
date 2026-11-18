@@ -329,10 +329,17 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
         : null;
   }
 
-  bool _removesLastEnabled(VpnSourceInfo source) =>
-      _isAndroidPlatform &&
-      !source.disabled &&
-      sources.where((item) => !item.disabled).length == 1;
+  bool _removesLastEnabled(VpnSourceInfo source, {bool entireFamily = false}) {
+    final family = _ownedSourceFamily(source.publicCatalogId);
+    bool affected(VpnSourceInfo item) =>
+        item.id == source.id ||
+        entireFamily &&
+            family != null &&
+            _ownedSourceFamily(item.publicCatalogId) == family;
+    return _isAndroidPlatform &&
+        sources.any((item) => !item.disabled && affected(item)) &&
+        !sources.any((item) => !item.disabled && !affected(item));
+  }
 
   Future<void> _addPersonal() async {
     final uri = controller.text.trim();
@@ -441,12 +448,22 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   }
 
   Future<void> _remove(VpnSourceInfo source) async {
+    final family = _ownedSourceFamily(source.publicCatalogId);
+    final product = family == 'dropo-individual-boost'
+        ? 'Dropo Boost'
+        : 'Dropo Free';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Удалить «${source.name}»?'),
-        content: const Text(
-          'Источник исчезнет из этого профиля. Остальные источники и маршруты сохранятся.',
+        title: Text(
+          family == null
+              ? 'Удалить «${source.name}»?'
+              : 'Удалить $product и резервное подключение?',
+        ),
+        content: Text(
+          family == null
+              ? 'Источник исчезнет из этого профиля. Остальные источники и маршруты сохранятся.'
+              : 'Основное и резервное подключения $product исчезнут из этого профиля. Остальные источники и маршруты сохранятся.',
         ),
         actions: [
           TextButton(
@@ -464,7 +481,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
     await _changeSource(
       () => widget.bridge.removeVpnSource(source.id),
       'Удаляем источник…',
-      leavesDisconnected: _removesLastEnabled(source),
+      leavesDisconnected: _removesLastEnabled(source, entireFamily: true),
     );
   }
 
@@ -780,7 +797,14 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             onEnabled: (value) => _changeSource(
               () => widget.bridge.setVpnSourceEnabled(source.id, value),
               'Сохраняем подписку…',
-              leavesDisconnected: !value && _removesLastEnabled(source),
+              leavesDisconnected:
+                  !value &&
+                  _removesLastEnabled(
+                    source,
+                    entireFamily:
+                        _ownedSourceFamily(source.publicCatalogId) ==
+                        source.publicCatalogId,
+                  ),
             ),
             onNode: (node) => _selectNode(source, node),
             onSelect: () => _changeSource(

@@ -13,7 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'account_session_store.dart';
-import 'pinned_tls.dart';
+import 'owned_http_transport.dart';
 
 part 'vpn_sources.dart';
 part 'source_reconnect.dart';

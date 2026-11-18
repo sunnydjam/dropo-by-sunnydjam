@@ -8,7 +8,9 @@ import "strings"
 func ApplyXHTTPBudget(server string, port int, security, sni, host string, settings map[string]interface{}) bool {
 	path, _ := settings["path"].(string)
 	path = strings.TrimSuffix(path, "/")
-	if (server != "193.233.88.97" && server != "cdn.droponevedimka.ru") || port != 443 || security != "tls" || sni != "cdn.droponevedimka.ru" || host != "cdn.droponevedimka.ru" || (path != "/managed/v1/free" && path != "/managed/v1/boost") {
+	primary := (server == "193.233.88.97" || server == "cdn.droponevedimka.ru") && sni == "cdn.droponevedimka.ru" && host == "cdn.droponevedimka.ru"
+	reserve := server == ReserveIPv4 && sni == ReserveHostname && host == ReserveHostname
+	if (!primary && !reserve) || port != 443 || security != "tls" || (path != "/managed/v1/free" && path != "/managed/v1/boost") {
 		return false
 	}
 	extra, _ := settings["extra"].(map[string]interface{})

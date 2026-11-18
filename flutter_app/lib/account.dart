@@ -302,33 +302,25 @@ abstract class AccountTransport {
 AccountTransport createAccountTransportForTesting(
   String endpoint, {
   Duration responseTimeout = const Duration(seconds: 8),
-}) => _AccountApi(endpoint, responseTimeout: responseTimeout);
+  OwnedHttpTransport? connectionTransport,
+}) => _AccountApi(
+  endpoint,
+  responseTimeout: responseTimeout,
+  connectionTransport: connectionTransport,
+);
 
 class _AccountApi implements AccountTransport {
   _AccountApi(
     this.endpoint, {
     this.responseTimeout = const Duration(seconds: 8),
-  }) {
-    final deployment = Uri.tryParse(endpoint);
-    if (deployment != null &&
-        deployment.hasScheme &&
-        deployment.hasAuthority &&
-        deployment.origin == 'https://api.droponevedimka.ru') {
-      // The custom factory performs both numeric dialing and verified TLS.
-      _client.connectionFactory = (uri, proxyHost, proxyPort) {
-        if (proxyHost != null ||
-            uri.origin != 'https://api.droponevedimka.ru') {
-          throw const AccountApiException('Недоверенный маршрут аккаунта.');
-        }
-        return createPinnedTlsConnection(uri, InternetAddress('193.233.88.97'));
-      };
-    }
-  }
+    OwnedHttpTransport? connectionTransport,
+  }) : _transport =
+           connectionTransport ??
+           OwnedHttpTransport(resource: OwnedHttpResource.account);
 
   final String endpoint;
   final Duration responseTimeout;
-  final HttpClient _client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 4);
+  final OwnedHttpTransport _transport;
 
   @override
   Future<Map<String, dynamic>> request(
@@ -345,53 +337,58 @@ class _AccountApi implements AccountTransport {
     final publicCatalog = path == '/public/v1/catalog' && method == 'GET';
     if ((!path.startsWith('/v1/') && !publicCatalog) ||
         target.origin != base.origin ||
+        (!target.path.startsWith('/v1/') && !publicCatalog) ||
         (publicCatalog && (token != null || body != null))) {
       throw const AccountApiException('Некорректный запрос аккаунта.');
     }
-    final request = await _client
-        .openUrl(method, target)
-        .timeout(const Duration(seconds: 6));
-    request.followRedirects = false;
-    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-    if (token != null && token.isNotEmpty) {
-      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
-    }
-    if (body != null) {
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode(body));
-    }
-    late final HttpClientResponse response;
-    late final String raw;
+    final acquired = await _transport.open(method, target);
+    final request = acquired.request;
     try {
-      response = await request.close().timeout(responseTimeout);
-      raw = await _readBody(response).timeout(responseTimeout);
-    } catch (_) {
-      request.abort();
-      rethrow;
-    }
-    Map<String, dynamic> decoded = const {};
-    if (raw.trim().isNotEmpty) {
-      Object? value;
+      request.followRedirects = false;
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      if (token != null && token.isNotEmpty) {
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      }
+      if (body != null) {
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode(body));
+      }
+      late final HttpClientResponse response;
+      late final String raw;
       try {
-        value = jsonDecode(raw);
-      } on FormatException {
+        response = await request.close().timeout(responseTimeout);
+        raw = await _readBody(response).timeout(responseTimeout);
+      } catch (_) {
+        request.abort();
+        rethrow;
+      }
+      Map<String, dynamic> decoded = const {};
+      if (raw.trim().isNotEmpty) {
+        Object? value;
+        try {
+          value = jsonDecode(raw);
+        } on FormatException {
+          throw AccountApiException(
+            'Сервис вернул некорректный ответ.',
+            code: 'invalid_response',
+            status: response.statusCode,
+          );
+        }
+        if (value is Map) decoded = Map<String, dynamic>.from(value);
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final error = _asMap(decoded['error']);
         throw AccountApiException(
-          'Сервис вернул некорректный ответ.',
-          code: 'invalid_response',
+          error['message']?.toString() ??
+              'Сервис аккаунтов временно недоступен.',
+          code: error['code']?.toString() ?? '',
           status: response.statusCode,
         );
       }
-      if (value is Map) decoded = Map<String, dynamic>.from(value);
+      return decoded;
+    } finally {
+      acquired.close();
     }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final error = _asMap(decoded['error']);
-      throw AccountApiException(
-        error['message']?.toString() ?? 'Сервис аккаунтов временно недоступен.',
-        code: error['code']?.toString() ?? '',
-        status: response.statusCode,
-      );
-    }
-    return decoded;
   }
 
   Future<String> _readBody(HttpClientResponse response) async {
@@ -410,7 +407,7 @@ class _AccountApi implements AccountTransport {
   }
 
   @override
-  void close() => _client.close(force: true);
+  void close() => _transport.close();
 }
 
 class _AccountTokenVault {

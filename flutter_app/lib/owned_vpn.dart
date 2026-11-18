@@ -3,6 +3,32 @@ part of 'main.dart';
 typedef OwnedVPNSave =
     Future<Map<String, dynamic>> Function(String, String, String, bool);
 
+String? _ownedSourceFamily(Object? provider) {
+  for (final pool in ['free', 'boost']) {
+    final id = 'dropo-individual-$pool';
+    if (provider == id || provider == '$id-reserve') return id;
+  }
+  return null;
+}
+
+/// Native removal of either member removes its entire managed source family.
+/// Deduplicate before cleanup so a removed reserve is not deleted a second time.
+Iterable<Map<String, dynamic>> _ownedFamilyRepresentatives(
+  Iterable<dynamic> values, {
+  String? family,
+}) sync* {
+  final seen = <String>{};
+  for (final raw in values) {
+    final source = _asMap(raw);
+    final owner = _ownedSourceFamily(source['public_catalog_id']);
+    if (owner != null &&
+        (family == null || family == owner) &&
+        seen.add(owner)) {
+      yield source;
+    }
+  }
+}
+
 class OwnedVPNOperationFailure implements Exception {
   const OwnedVPNOperationFailure(this.code);
   final String code;
@@ -388,57 +414,58 @@ class OwnedVPNClient {
         !u.path.startsWith('/managed/v1/subscription/')) {
       throw const FormatException('Untrusted subscription origin.');
     }
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
-    client.connectionFactory = (uri, proxyHost, proxyPort) {
-      if (uri.host != 'app.droponevedimka.ru' ||
-          uri.port != 443 ||
-          proxyHost != null) {
-        throw const FormatException('Untrusted profile transport.');
-      }
-      return createPinnedTlsConnection(uri, InternetAddress('193.233.88.97'));
-    };
+    final transport = OwnedHttpTransport(
+      resource: OwnedHttpResource.subscription,
+    );
     try {
       return await (() async {
-        final request = await client.getUrl(u);
-        request.followRedirects = false;
-        final response = await request.close().timeout(
-          const Duration(seconds: 10),
-        );
-        if (response.statusCode != 200) {
-          throw const FormatException('Subscription unavailable.');
-        }
-        final bytes = <int>[];
-        await for (final chunk in response) {
-          bytes.addAll(chunk);
-          if (bytes.length > 8192) {
-            throw const FormatException('Subscription exceeds bounds.');
+        final acquired = await transport.open('GET', u);
+        final request = acquired.request;
+        try {
+          request.followRedirects = false;
+          final response = await request.close().timeout(
+            const Duration(seconds: 10),
+          );
+          if (response.statusCode != 200) {
+            throw const FormatException('Subscription unavailable.');
           }
+          final bytes = <int>[];
+          await for (final chunk in response) {
+            bytes.addAll(chunk);
+            if (bytes.length > 8192) {
+              throw const FormatException('Subscription exceeds bounds.');
+            }
+          }
+          final text = utf8
+              .decode(
+                base64.decode(base64.normalize(utf8.decode(bytes).trim())),
+              )
+              .trim();
+          if (text.contains('\n') || text.length > 4096) {
+            throw const FormatException('Unexpected managed nodes.');
+          }
+          final key = Uri.parse(text);
+          if (key.scheme != 'vless' ||
+              (key.host != 'cdn.droponevedimka.ru' &&
+                  key.host != '193.233.88.97') ||
+              key.port != 443) {
+            throw const FormatException('Untrusted ingress.');
+          }
+          return key
+              .replace(
+                host: '193.233.88.97',
+                queryParameters: {
+                  ...key.queryParameters,
+                  'dropo_expiry': '$until',
+                },
+              )
+              .toString();
+        } finally {
+          acquired.close();
         }
-        final text = utf8
-            .decode(base64.decode(base64.normalize(utf8.decode(bytes).trim())))
-            .trim();
-        if (text.contains('\n') || text.length > 4096) {
-          throw const FormatException('Unexpected managed nodes.');
-        }
-        final key = Uri.parse(text);
-        if (key.scheme != 'vless' ||
-            (key.host != 'cdn.droponevedimka.ru' &&
-                key.host != '193.233.88.97') ||
-            key.port != 443) {
-          throw const FormatException('Untrusted ingress.');
-        }
-        return key
-            .replace(
-              host: '193.233.88.97',
-              queryParameters: {
-                ...key.queryParameters,
-                'dropo_expiry': '$until',
-              },
-            )
-            .toString();
       })().timeout(subscriptionTimeout);
     } finally {
-      client.close(force: true);
+      transport.close();
     }
   }
 
@@ -455,15 +482,9 @@ class OwnedVPNClient {
         return {'success': true, 'independentGuestPreserved': true};
       }
       final view = await bridge.callMap('GetVPNSources');
-      final sources = (view['sources'] as List? ?? const [])
-          .map(_asMap)
-          .where(
-            (source) => const {
-              'dropo-individual-free',
-              'dropo-individual-boost',
-            }.contains(source['public_catalog_id']),
-          )
-          .toList();
+      final sources = _ownedFamilyRepresentatives(
+        view['sources'] as List? ?? const [],
+      ).toList();
       if (_record == null && sources.isEmpty) return {'success': true};
       if (_record != null) {
         _record!['deletionPending'] = true;
@@ -506,7 +527,7 @@ class OwnedVPNClient {
       return {
         'success': false,
         'error':
-            'Профиль сохранён защищённо. Отключите VPN и повторите подключение для применения.',
+            'Профиль сохранён защищённо. Отключите VPN и повторите обновление профиля для применения.',
       };
     }
     final boost = _record?['boostKey'];
@@ -522,7 +543,8 @@ class OwnedVPNClient {
       if (result['success'] != true) {
         return {
           'success': false,
-          'error': 'Free готов; отключите VPN для применения Boost.',
+          'error':
+              'Free готов. Отключите VPN и повторите обновление профиля для применения Boost.',
         };
       }
     }
@@ -549,23 +571,39 @@ class OwnedVPNClient {
       if (_record?['deletionPending'] == true) return;
       if (_record?['freeKey'] is! String) return;
       final view = await bridge.callMap('GetVPNSources');
-      final references = <Object?>{};
-      for (final value in (view['sources'] as List? ?? const [])) {
-        final s = _asMap(value);
-        references.add(s['public_catalog_id']);
-      }
+      final references = (view['sources'] as List? ?? const [])
+          .map(_asMap)
+          .toList();
       for (final pool in ['free', 'boost']) {
         final id = 'dropo-individual-$pool';
         final key = _record?['${pool}Key'];
-        if (!references.contains(id) || key is! String) continue;
+        final reference = references
+            .where(
+              (source) => _ownedSourceFamily(source['public_catalog_id']) == id,
+            )
+            .firstOrNull;
+        final sourceID = reference?['id'];
+        if (sourceID is! String || sourceID.isEmpty || key is! String) {
+          continue;
+        }
+        final nodeIDs = _asStringList(reference?['node_ids']);
+        final selectedNode = _asInt(reference?['selected_node']);
+        if (nodeIDs.isNotEmpty &&
+            (selectedNode < 0 || selectedNode >= nodeIDs.length)) {
+          continue;
+        }
+        final expectedNodeID = nodeIDs.isEmpty ? '' : nodeIDs[selectedNode];
         if (pool == 'boost' &&
             ((_record?['boostUntil'] as num?)?.toInt() ?? 0) <=
                 DateTime.now().millisecondsSinceEpoch ~/ 1000) {
           continue;
         }
+        // Native rechecks this exact family reference inside the mutation.
+        // A deletion or replacement after the snapshot must win over restore;
+        // only explicit enrollment may add a family that no longer exists.
         await bridge.callMap(
-          'AddManagedVPNSource',
-          args: [id, pool == 'free' ? 'Dropo Free' : 'Dropo Boost', key, true],
+          'RestoreManagedVPNSource',
+          args: [id, key, sourceID, expectedNodeID],
           timeout: const Duration(seconds: 8),
         );
       }
@@ -613,9 +651,10 @@ class OwnedVPNClient {
       return _linkAccount(bridge, token, false, transport: transport);
     }
     final view = await bridge.callMap('GetVPNSources');
-    for (final raw in view['sources'] as List? ?? const []) {
-      final source = _asMap(raw);
-      if (source['public_catalog_id'] != 'dropo-individual-boost') continue;
+    for (final source in _ownedFamilyRepresentatives(
+      view['sources'] as List? ?? const [],
+      family: 'dropo-individual-boost',
+    )) {
       final result = await bridge.removeVpnSource(source['id'].toString());
       if (result['success'] != true) return result;
     }
@@ -716,14 +755,12 @@ class OwnedVPNClient {
       );
       if (result['success'] == true && _record?['boostKey'] == null) {
         final view = await bridge.callMap('GetVPNSources');
-        for (final raw in view['sources'] as List? ?? const []) {
-          final source = _asMap(raw);
-          if (source['public_catalog_id'] == 'dropo-individual-boost') {
-            final removed = await bridge.removeVpnSource(
-              source['id'].toString(),
-            );
-            if (removed['success'] != true) return removed;
-          }
+        for (final source in _ownedFamilyRepresentatives(
+          view['sources'] as List? ?? const [],
+          family: 'dropo-individual-boost',
+        )) {
+          final removed = await bridge.removeVpnSource(source['id'].toString());
+          if (removed['success'] != true) return removed;
         }
       }
       return result;
@@ -825,14 +862,9 @@ class OwnedVPNClient {
       _record!['deletionPending'] = true;
       await _persist();
       final sources = await bridge.callMap('GetVPNSources');
-      for (final value in (sources['sources'] as List? ?? const [])) {
-        final source = _asMap(value);
-        if (![
-          'dropo-individual-free',
-          'dropo-individual-boost',
-        ].contains(source['public_catalog_id'])) {
-          continue;
-        }
+      for (final source in _ownedFamilyRepresentatives(
+        sources['sources'] as List? ?? const [],
+      )) {
         final removed = await bridge.removeVpnSource(source['id'].toString());
         if (removed['success'] != true) {
           throw const FormatException('Local cleanup pending.');

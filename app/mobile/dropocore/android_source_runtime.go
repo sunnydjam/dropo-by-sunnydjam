@@ -103,7 +103,7 @@ func InvalidateAndroidSourceObservations(generation int64) {
 // superseded session, a different node or an unprepared source cannot commit.
 func CommitAndroidSourceProbeBatch(generation int64, observationsJSON, selectedID string, selector AndroidSourceSelector) bool {
 	var observations []androidSourceResponse
-	if json.Unmarshal([]byte(observationsJSON), &observations) != nil || len(observations) > maxAndroidVPNSources {
+	if json.Unmarshal([]byte(observationsJSON), &observations) != nil || len(observations) > maxAndroidSourceCandidates {
 		return false
 	}
 	mu.Lock()

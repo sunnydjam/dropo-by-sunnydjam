@@ -30,6 +30,20 @@ type androidVPNSource struct {
 
 const maxAndroidVPNSources = 16
 
+// Two derived owned reserves have dedicated slots and cannot evict a user's
+// existing subscriptions when an older 16-source profile is restored.
+const maxAndroidSourceCandidates = maxAndroidVPNSources + 2
+
+func androidLogicalSourceCount(sources []androidVPNSource) int {
+	count := 0
+	for _, source := range sources {
+		if !ownedprofile.IsReserve(source.PublicCatalogID) {
+			count++
+		}
+	}
+	return count
+}
+
 // Tests may inject a parser. Production uses the context-aware built-in parser.
 var androidSourceParser func(string) ([]proxyConfig, error)
 
@@ -135,6 +149,12 @@ func androidSourcesViewLocked() map[string]interface{} {
 // Mutations are transactional and allowed only while stopped. Network parsing
 // is deliberately outside mu so a slow provider cannot block status or Stop.
 func changeAndroidSources(method string, args []interface{}) string {
+	if method == "RestoreManagedVPNSource" {
+		if len(args) != 4 {
+			return androidSourceError("Некорректный запрос восстановления профиля Dropo.")
+		}
+		return restoreOwnedAndroidSource(stringArg(args, 0, ""), stringArg(args, 1, ""), stringArg(args, 2, ""), stringArg(args, 3, ""))
+	}
 	managedProviderID := ""
 	if method == "AddManagedVPNSource" {
 		if provider := stringArg(args, 0, ""); ownedprofile.IsProvider(provider) {
@@ -182,7 +202,7 @@ func changeAndroidSources(method string, args []interface{}) string {
 			autoSelect = value
 		}
 	case "AddVPNSource":
-		if len(sources) >= maxAndroidVPNSources {
+		if androidLogicalSourceCount(sources) >= maxAndroidVPNSources || len(sources) >= maxAndroidSourceCandidates {
 			return androidSourceError("Можно сохранить не более 16 источников.")
 		}
 		uri := strings.TrimSpace(stringArg(args, 1, ""))
@@ -274,7 +294,17 @@ func changeAndroidSources(method string, args []interface{}) string {
 			}
 			sources[index].SelectedNodeID = nodeID
 		case "RemoveVPNSource":
-			sources = append(sources[:index], sources[index+1:]...)
+			if provider := sources[index].PublicCatalogID; ownedprofile.IsProvider(provider) {
+				remaining := make([]androidVPNSource, 0, len(sources))
+				for _, source := range sources {
+					if !ownedprofile.SameFamily(provider, source.PublicCatalogID) {
+						remaining = append(remaining, source)
+					}
+				}
+				sources = remaining
+			} else {
+				sources = append(sources[:index], sources[index+1:]...)
+			}
 		case "SetVPNSourceEnabled":
 			if len(args) < 2 {
 				return androidSourceError("Не указано состояние источника.")
@@ -284,6 +314,13 @@ func changeAndroidSources(method string, args []interface{}) string {
 				return androidSourceError("Неверное состояние источника.")
 			}
 			sources[index].Disabled = !enabled
+			if provider := sources[index].PublicCatalogID; ownedprofile.IsPrimary(provider) {
+				for i := range sources {
+					if ownedprofile.SameFamily(provider, sources[i].PublicCatalogID) {
+						sources[i].Disabled = !enabled
+					}
+				}
+			}
 		case "SetVPNSourceNode", "MoveVPNSource":
 			if len(args) < 2 {
 				return androidSourceError("Не указан номер элемента.")

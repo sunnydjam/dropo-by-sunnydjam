@@ -366,7 +366,7 @@ func Call(method, argsJSON string) string {
 		return testAndroidVPNConnection(stringArg(args, 0, ""))
 	}
 	switch method {
-	case "AddVPNSource", "AddManagedVPNSource", "RemoveVPNSource", "SetVPNSourceNode", "SetVPNSourceNodeByID", "SetVPNSourceEnabled", "MoveVPNSource", "RefreshVPNSources", "EnableVPNSourceAutoSelect":
+	case "AddVPNSource", "AddManagedVPNSource", "RestoreManagedVPNSource", "RemoveVPNSource", "SetVPNSourceNode", "SetVPNSourceNodeByID", "SetVPNSourceEnabled", "MoveVPNSource", "RefreshVPNSources", "EnableVPNSourceAutoSelect":
 		return changeAndroidSources(method, args)
 	}
 

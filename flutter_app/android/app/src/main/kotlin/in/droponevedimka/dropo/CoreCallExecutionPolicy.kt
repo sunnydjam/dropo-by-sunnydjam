@@ -7,6 +7,7 @@ internal object CoreCallExecutionPolicy {
         "AddVPNSource",
         "AddPublicVPNSource",
         "AddManagedVPNSource",
+        "RestoreManagedVPNSource",
         "RefreshVPNSources",
         "RunClientQuickCheck",
         "RunClientQuickCheckReadOnly",

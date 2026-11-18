@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _Bridge extends MockCoreBridge {
   final removed = <String>[];
+  List<Map<String, dynamic>>? references;
   bool failCleanup = false;
   int stops = 0;
   @override
@@ -23,12 +24,22 @@ class _Bridge extends MockCoreBridge {
   }) async {
     expect(method, 'GetVPNSources');
     return {
-      'sources': [
-        {'id': 'manual', 'public_catalog_id': ''},
-        {'id': 'free', 'public_catalog_id': 'dropo-individual-free'},
-        {'id': 'boost', 'public_catalog_id': 'dropo-individual-boost'},
-        {'id': 'legacy', 'public_catalog_id': 'dropo-free'},
-      ],
+      'sources':
+          references ??
+          [
+            {'id': 'manual', 'public_catalog_id': ''},
+            {'id': 'free', 'public_catalog_id': 'dropo-individual-free'},
+            {
+              'id': 'free-reserve',
+              'public_catalog_id': 'dropo-individual-free-reserve',
+            },
+            {'id': 'boost', 'public_catalog_id': 'dropo-individual-boost'},
+            {
+              'id': 'boost-reserve',
+              'public_catalog_id': 'dropo-individual-boost-reserve',
+            },
+            {'id': 'legacy', 'public_catalog_id': 'dropo-free'},
+          ],
     };
   }
 
@@ -37,6 +48,55 @@ class _Bridge extends MockCoreBridge {
     removed.add(id);
     return {'success': !failCleanup};
   }
+}
+
+class _RestoreBridge implements CoreBridge {
+  _RestoreBridge(this.references);
+  final List<Map<String, dynamic>> references;
+  final added = <String>[];
+  final restoreReferences = <String>[];
+  final restoreNodeIDs = <String>[];
+  bool deleteAfterSnapshot = false;
+  bool replaceNodeAfterSnapshot = false;
+  @override
+  Future<Map<String, dynamic>> callMap(
+    String method, {
+    List<dynamic> args = const [],
+    Duration? timeout,
+  }) async {
+    if (method == 'GetVPNSources') {
+      final snapshot = references.map((source) => {...source}).toList();
+      if (deleteAfterSnapshot) references.clear();
+      if (replaceNodeAfterSnapshot) {
+        references.first['node_ids'] = ['new-primary'];
+        references.first['selected_node'] = 0;
+      }
+      return {'sources': snapshot};
+    }
+    if (method == 'RestoreManagedVPNSource') {
+      expect(args, hasLength(4));
+      restoreReferences.add(args[2] as String);
+      restoreNodeIDs.add(args[3] as String);
+      final current = references
+          .where((source) => source['id'] == args[2])
+          .firstOrNull;
+      if (current == null) {
+        return {'success': false, 'error': 'Expected reference was removed'};
+      }
+      final nodes = current['node_ids'] as List? ?? const [];
+      final index = (current['selected_node'] as num?)?.toInt() ?? 0;
+      final selectedID = nodes.isEmpty ? '' : nodes[index];
+      if (selectedID != args[3]) {
+        return {'success': false, 'error': 'Expected reference was replaced'};
+      }
+      added.add(args.first as String);
+      return {'success': true};
+    }
+    throw StateError('Unexpected restore method');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _API implements AccountTransport {
@@ -130,6 +190,105 @@ void main() {
       expect(api.deleted, true);
       expect(bridge.removed, ['free', 'boost']);
       expect(protected, isNull);
+    },
+  );
+  test(
+    'orphan reserve references are cleaned once per managed family',
+    () async {
+      final bridge = _Bridge()
+        ..references = [
+          {'id': 'manual', 'public_catalog_id': ''},
+          {
+            'id': 'free-reserve',
+            'public_catalog_id': 'dropo-individual-free-reserve',
+          },
+          {
+            'id': 'boost-reserve',
+            'public_catalog_id': 'dropo-individual-boost-reserve',
+          },
+        ];
+      expect((await client().forgetLocalProfile(bridge))['success'], true);
+      expect(bridge.removed, ['free-reserve', 'boost-reserve']);
+    },
+  );
+  test(
+    'offline restore expands a retained reserve reference through its primary key',
+    () async {
+      seed({
+        'freeKey': 'cached-free',
+        'boostKey': 'cached-boost',
+        'boostUntil': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 86400,
+      });
+      final bridge = _RestoreBridge([
+        {
+          'id': 'free-reserve',
+          'public_catalog_id': 'dropo-individual-free-reserve',
+          'disabled': true,
+        },
+        {'id': 'boost', 'public_catalog_id': 'dropo-individual-boost'},
+        {
+          'id': 'boost-reserve',
+          'public_catalog_id': 'dropo-individual-boost-reserve',
+        },
+      ]);
+      await client().restore(bridge);
+      expect(bridge.added, ['dropo-individual-free', 'dropo-individual-boost']);
+      expect(bridge.restoreNodeIDs, ['', '']);
+    },
+  );
+  test(
+    'offline restore never recreates a removed family or pending deletion',
+    () async {
+      seed({
+        'freeKey': 'cached-free',
+        'boostKey': 'cached-boost',
+        'boostUntil': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 86400,
+      });
+      final removed = _RestoreBridge([
+        {'id': 'personal', 'public_catalog_id': ''},
+      ]);
+      await client().restore(removed);
+      expect(removed.added, isEmpty);
+      seed({'freeKey': 'cached-free', 'deletionPending': true});
+      final pending = _RestoreBridge([
+        {
+          'id': 'free-reserve',
+          'public_catalog_id': 'dropo-individual-free-reserve',
+        },
+      ]);
+      await client().restore(pending);
+      expect(pending.added, isEmpty);
+    },
+  );
+  test(
+    'deletion between source snapshot and restore never falls back to explicit add',
+    () async {
+      seed({'freeKey': 'cached-free'});
+      final bridge = _RestoreBridge([
+        {'id': 'existing-free', 'public_catalog_id': 'dropo-individual-free'},
+      ])..deleteAfterSnapshot = true;
+      await client().restore(bridge);
+      expect(bridge.restoreReferences, ['existing-free']);
+      expect(bridge.references, isEmpty);
+      expect(bridge.added, isEmpty);
+    },
+  );
+  test(
+    'restore pins the selected fingerprint and rejects a newer reference',
+    () async {
+      seed({'freeKey': 'cached-free'});
+      final bridge = _RestoreBridge([
+        {
+          'id': 'existing-free',
+          'public_catalog_id': 'dropo-individual-free',
+          'node_ids': ['other-node', 'old-primary'],
+          'selected_node': 1,
+        },
+      ])..replaceNodeAfterSnapshot = true;
+      await client().restore(bridge);
+      expect(bridge.restoreReferences, ['existing-free']);
+      expect(bridge.restoreNodeIDs, ['old-primary']);
+      expect(bridge.added, isEmpty);
     },
   );
   test(

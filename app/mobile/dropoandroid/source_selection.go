@@ -73,7 +73,11 @@ func (s *CommandServer) StartSourceSelection() error {
 	s.sourceGeneration++
 	generation, wake := s.sourceGeneration, s.sourceWake
 	s.startAdaptiveLocked(ctx, generation, plan.Generation, outbounds)
-	go s.runSourceSelection(ctx, generation, plan.Generation, plan.AutoSelect, plan.Candidates, outbounds, selector, wake)
+	var flows sourceFlowTable
+	if manager := instance.TrafficManager(); manager != nil {
+		flows = manager
+	}
+	go s.runSourceSelection(ctx, generation, plan.Generation, plan.AutoSelect, plan.Candidates, outbounds, selector, flows, wake)
 	go core.RefreshAndroidSourcesForNextSession(ctx, plan.Generation)
 	return nil
 }
@@ -134,6 +138,10 @@ type sourceSelector struct{ selector *group.Selector }
 func (s sourceSelector) SelectSourceTag(tag string) bool { return s.selector.SelectOutbound(tag) }
 
 func (s *CommandServer) commitSourceResults(ctx context.Context, generation uint64, coreGeneration int64, results []sourceObservation, selectedID string, selector *group.Selector) bool {
+	return s.commitSourceResultsWithOutage(ctx, generation, coreGeneration, results, selectedID, selector, "", nil)
+}
+
+func (s *CommandServer) commitSourceResultsWithOutage(ctx context.Context, generation uint64, coreGeneration int64, results []sourceObservation, selectedID string, selector *group.Selector, failedTag string, flows sourceFlowTable) bool {
 	s.sourceMu.Lock()
 	defer s.sourceMu.Unlock()
 	if ctx.Err() != nil || s.sourceGeneration != generation {
@@ -143,10 +151,18 @@ func (s *CommandServer) commitSourceResults(ctx context.Context, generation uint
 	if err != nil {
 		return false
 	}
-	return core.CommitAndroidSourceProbeBatch(coreGeneration, string(encoded), selectedID, sourceSelector{selector})
+	// Keep the old instance and source generation fenced through cleanup. Stop,
+	// reload and physical-network rechecks cannot transfer this work to a new
+	// session; core cancellation is checked again before each individual close.
+	current := func() bool {
+		return ctx.Err() == nil && s.sourceGeneration == generation && core.AndroidSourceSessionCurrent(coreGeneration)
+	}
+	return commitSourceAndCleanup(current, func() bool {
+		return core.CommitAndroidSourceProbeBatch(coreGeneration, string(encoded), selectedID, sourceSelector{selector})
+	}, flows, failedTag)
 }
 
-func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint64, coreGeneration int64, automatic bool, candidates []sourceCandidate, outbounds adapter.OutboundManager, selector *group.Selector, wake <-chan struct{}) {
+func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint64, coreGeneration int64, automatic bool, candidates []sourceCandidate, outbounds adapter.OutboundManager, selector *group.Selector, flows sourceFlowTable, wake <-chan struct{}) {
 	probe := func(ctx context.Context, candidate sourceCandidate) sourceObservation {
 		outbound, ok := outbounds.Outbound(candidate.Tag)
 		if !ok {
@@ -171,6 +187,7 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 		}
 		cycleCtx, cancel := s.beginSourceCycle(ctx, generation)
 		var results []sourceObservation
+		var confirmedFailed sourceCandidate
 		chosen := ""
 		if initial {
 			results = probeSourceCandidates(cycleCtx, candidates, probe)
@@ -190,6 +207,7 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 			}
 			results = []sourceObservation{result}
 			if result.State != "ok" && cycleCtx.Err() == nil {
+				confirmedFailed = active
 				results = probeSourceCandidates(cycleCtx, candidates, probe)
 				chosen = chooseSourceCandidate(candidates, results, false)
 			}
@@ -201,7 +219,8 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 			}
 			continue
 		}
-		committed := s.commitSourceResults(cycleCtx, generation, coreGeneration, results, chosen, selector)
+		failedTag := confirmedOutageSourceTag(confirmedFailed, candidates, results, chosen)
+		committed := s.commitSourceResultsWithOutage(cycleCtx, generation, coreGeneration, results, chosen, selector, failedTag, flows)
 		cancel()
 		if !committed {
 			if ctx.Err() != nil || !core.AndroidSourceSessionCurrent(coreGeneration) {
