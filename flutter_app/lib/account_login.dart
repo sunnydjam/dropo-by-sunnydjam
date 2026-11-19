@@ -33,9 +33,16 @@ class _PasswordSignInDialogState extends State<_PasswordSignInDialog> {
     final username = _username.text.trim();
     final password = _password.text;
     if (username.isEmpty || password.isEmpty) {
-      setState(() => _message = 'Введите логин и пароль аккаунта Dropo.');
+      setState(
+        () => _message = _tr(
+          context,
+          'Введите логин и пароль аккаунта Dropo.',
+          'Enter your Dropo username and password.',
+        ),
+      );
       return;
     }
+    _androidHaptic();
     final generation = ++_generation;
     setState(() {
       _working = true;
@@ -87,7 +94,13 @@ class _PasswordSignInDialogState extends State<_PasswordSignInDialog> {
   Widget build(BuildContext context) => PopScope(
     canPop: !_working,
     child: AlertDialog(
-      title: const Text('Вход по логину и паролю'),
+      title: Text(
+        _tr(
+          context,
+          'Вход по логину и паролю',
+          'Sign in with username and password',
+        ),
+      ),
       scrollable: true,
       content: SizedBox(
         width: 440,
@@ -95,10 +108,14 @@ class _PasswordSignInDialogState extends State<_PasswordSignInDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Введите выданные данные аккаунта Dropo. Это вход на сервер; '
-              'пароль Telegram не нужен. Бесплатное подключение доступно без аккаунта.',
-              style: TextStyle(height: 1.45),
+            Text(
+              _tr(
+                context,
+                'Введите выданные данные аккаунта Dropo. Это вход на сервер; '
+                    'пароль Telegram не нужен. Бесплатное подключение доступно без аккаунта.',
+                'Enter the username and password issued for your Dropo account. Free VPN is available without an account.',
+              ),
+              style: const TextStyle(height: 1.45),
             ),
             const SizedBox(height: 16),
             TextField(
@@ -110,7 +127,9 @@ class _PasswordSignInDialogState extends State<_PasswordSignInDialog> {
               enableSuggestions: false,
               enableIMEPersonalizedLearning: false,
               textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(labelText: 'Логин / Username'),
+              decoration: InputDecoration(
+                labelText: _tr(context, 'Логин', 'Username'),
+              ),
             ),
             _AccountPasswordField(
               fieldKey: const ValueKey('account-password-value'),
@@ -119,12 +138,16 @@ class _PasswordSignInDialogState extends State<_PasswordSignInDialog> {
               onSubmitted: _submit,
             ),
             const SizedBox(height: 12),
-            const Text(
-              'Сервер проверит пароль и создаст сессию устройства. '
-              'На устройстве сохраняется защищённый токен сессии, а не пароль. '
-              'Данные аккаунта можно удалить в его настройках.',
-              key: ValueKey('account-password-disclosure'),
-              style: TextStyle(color: _atlasMuted, height: 1.45),
+            Text(
+              _tr(
+                context,
+                'Сервер проверит пароль и создаст сессию устройства. '
+                    'На устройстве сохраняется защищённый токен сессии, а не пароль. '
+                    'Данные аккаунта можно удалить в его настройках.',
+                'The server verifies your password and starts a session. Dropo stores an encrypted session token on this device. You can delete your account data in account settings.',
+              ),
+              key: const ValueKey('account-password-disclosure'),
+              style: const TextStyle(color: _atlasMuted, height: 1.45),
             ),
             if (_message.isNotEmpty) ...[
               const SizedBox(height: 12),
@@ -137,7 +160,7 @@ class _PasswordSignInDialogState extends State<_PasswordSignInDialog> {
               const SizedBox(height: 16),
               const LinearProgressIndicator(),
               const SizedBox(height: 8),
-              const Text('Выполняем вход…'),
+              Text(_tr(context, 'Выполняем вход…', 'Signing in…')),
             ],
           ],
         ),
@@ -146,12 +169,12 @@ class _PasswordSignInDialogState extends State<_PasswordSignInDialog> {
         TextButton(
           key: const ValueKey('account-password-cancel'),
           onPressed: _working ? null : () => Navigator.pop(context),
-          child: const Text('Отмена'),
+          child: Text(_tr(context, 'Отмена', 'Cancel')),
         ),
         FilledButton(
           key: const ValueKey('account-password-submit'),
           onPressed: _working ? null : _submit,
-          child: const Text('Войти / Sign in'),
+          child: Text(_tr(context, 'Войти', 'Sign in')),
         ),
       ],
     ),
@@ -218,9 +241,11 @@ class _AccountPasswordFieldState extends State<_AccountPasswordField> {
     textInputAction: TextInputAction.done,
     onSubmitted: (_) => widget.enabled ? widget.onSubmitted?.call() : null,
     decoration: InputDecoration(
-      labelText: 'Пароль Dropo / Password',
+      labelText: _tr(context, 'Пароль Dropo', 'Dropo password'),
       suffixIcon: Semantics(
-        label: _visible ? 'Скрыть пароль' : 'Показать пароль',
+        label: _visible
+            ? _tr(context, 'Скрыть пароль', 'Hide password')
+            : _tr(context, 'Показать пароль', 'Show password'),
         child: IconButton(
           onPressed: widget.enabled
               ? () => setState(() => _visible = !_visible)

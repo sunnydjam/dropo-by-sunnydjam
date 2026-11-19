@@ -208,6 +208,7 @@ class DropoVpnService :
     fun protectFileDescriptor(socket: Int): Boolean = protect(socket)
 
     private fun startVpn() {
+        DropoVpnWidget.observe(this)
         createNotificationChannel()
         if (!VpnDisclosureConsent.isAccepted(this)) {
             showForeground(VpnDisclosurePolicy.REQUIRED_MESSAGE)

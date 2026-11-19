@@ -11,10 +11,15 @@ limited to the bundled entry point and the content security policy disables
 network access. Textures are embedded as data URLs in `art.js` so they can be
 loaded locally under the same restrictive policy in Android WebView.
 
-Native connection state updates the status and routing panel synchronously.
-Controls still respect native `enabled` and `canCancel` gates, but never wait
-for a flight cycle or camera animation. A successful connection interrupts
-takeoff/orbit with a 450 ms visual transition; Stop returns DrOppo to his seat.
+Native connection status updates immediately. The connected controls, source,
+session time and VPN response stay hidden through takeoff and flight. After
+success, the mascot completes the orbit, Earth shrinks and the mascot settles
+before the connected panel appears. Reduced motion shows the settled layout
+directly. Earth accepts a connection request while idle or in the error state.
+Disconnect and cancel have separate buttons.
+
+Moving between sections keeps the Android WebView and its renderer mounted.
+Drawing pauses behind Flutter pages and resumes without reloading the scene.
 
 The mascot uses the exact approved `assets/mascot/droppo_*.png` images, without
 synthetic volume or redrawn transition poses. DrOppo sits above a gray Earth
@@ -26,11 +31,20 @@ Background/lifecycle pauses and reduced motion are supported; changing motion
 preferences never replays a stale transition. A native connection panel remains
 available if WebGL fails.
 
-The native wrapper requires the renderer's explicit `ready` message within
-eight foreground seconds. Loading HTML alone does not complete startup. Missing
-critical assets, uncaught JavaScript errors and WebGL failures trigger the native
-fallback; an ES5 bootstrap can report even a syntax error in the scene bundle.
-Background loading pauses the startup deadline. The error caption sits below
+Flutter covers the WebView with its moving star field while the bundled assets
+and local fonts load. The scene needs native state and two rendered frames at
+the same measured viewport before posting readiness. Android then confirms the
+WebView's visual state. If the viewport has changed, the scene rejects the old
+layout revision and prepares a fresh one. The planet and controls appear only
+after this handshake, with motion following the app and system preferences.
+After eight foreground seconds, missing readiness shows the native fallback.
+The native callback also checks that the Android view size matches the CSS
+viewport. Critical asset, JavaScript and WebGL failures can trigger the fallback
+earlier. If the renderer process exits, Android discards that WebView and the
+Flutter controls take over.
+Background loading pauses the deadline. An ES5 bootstrap reports syntax errors
+in the scene bundle.
+The error caption sits below
 the globe without its decorative arrow so long messages remain readable on
 small screens. Session time accepts corrected native uptime after startup.
 

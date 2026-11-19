@@ -55,6 +55,13 @@ func Name(id string) string {
 	return name
 }
 
+func DisplayName(id, name string) string {
+	if id == Boost && (name == "" || name == Name(Boost)) {
+		return "Dropo Turbo"
+	}
+	return name
+}
+
 // Pair only accepts a canonical owned key. It never promotes a personal source
 // or accepts remote-supplied endpoints. Both entries keep one revocable key and
 // lifetime, but remain independent source candidates (not subscription nodes).

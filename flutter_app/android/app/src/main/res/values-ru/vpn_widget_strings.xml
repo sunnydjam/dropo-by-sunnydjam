@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vpn_widget_on">VPN включён</string>
+    <string name="vpn_widget_off">VPN выключен</string>
+    <string name="vpn_widget_wait">Подождите</string>
+</resources>

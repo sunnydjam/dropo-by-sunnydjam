@@ -67,6 +67,26 @@ final _ownedVPNClient = _ownedVPNForEndpoint(_accountEndpoint);
 
 /// Only the native vault persists installation/session secrets and cached keys.
 /// Restore is local and does not query the account service during connection.
+Future<bool> _stopBeforeRemovingOwnedProfile(CoreBridge bridge) async {
+  bool stopped(CoreStatus status) =>
+      !status.connected &&
+      !status.running &&
+      !status.connecting &&
+      !status.disconnecting;
+  const statusTimeout = Duration(seconds: 5);
+  if (stopped(await bridge.status().timeout(statusTimeout))) return true;
+  final result = await bridge.setConnected(false).timeout(statusTimeout);
+  if (result['success'] != true || result['requiresSystemSettings'] == true) {
+    return false;
+  }
+  final deadline = DateTime.now().add(const Duration(seconds: 12));
+  while (DateTime.now().isBefore(deadline)) {
+    if (stopped(await bridge.status().timeout(statusTimeout))) return true;
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+  }
+  return false;
+}
+
 class OwnedVPNClient {
   OwnedVPNClient({
     required this.endpoint,
@@ -314,6 +334,9 @@ class OwnedVPNClient {
     Future<String> guestLogin() async {
       _record!['enrollmentAttempted'] = true;
       await _persist();
+      final previousIdentity = standaloneGuest
+          ? null
+          : await _identityStore.read();
       final result = await api.request(
         'POST',
         '/v1/auth/guest',
@@ -336,6 +359,23 @@ class OwnedVPNClient {
       _record!['guestToken'] = next;
       _record!['installationId'] = iid;
       await _persist();
+      if (previousIdentity != null) {
+        await _identityStore.update((identity) {
+          if (identity['suppressed'] == true ||
+              identity['pendingDeletion'] != null ||
+              identity['accountKind'] == 'registered' ||
+              identity['installationSecret'] != _record!['secret'] ||
+              identity['token'] != previousIdentity['token'] ||
+              (identity['installationId'] != null &&
+                  identity['installationId'] != iid)) {
+            return;
+          }
+          identity['installationId'] = iid;
+          identity['accountKind'] = 'guest';
+          identity['token'] = next;
+          identity['expiresAt'] = result['expiresAt'];
+        });
+      }
       return next;
     }
 
@@ -491,8 +531,7 @@ class OwnedVPNClient {
         await _persist();
       }
       if (sources.isNotEmpty) {
-        final stopped = await bridge.setConnected(false);
-        if (stopped['success'] != true) {
+        if (!await _stopBeforeRemovingOwnedProfile(bridge)) {
           throw const FormatException('VPN stop unconfirmed.');
         }
         for (final source in sources) {
@@ -795,8 +834,7 @@ class OwnedVPNClient {
         };
       }
       final independentGuest = _record!['standaloneGuest'] == true;
-      final stopped = await bridge.setConnected(false);
-      if (stopped['success'] != true) {
+      if (!await _stopBeforeRemovingOwnedProfile(bridge)) {
         return {
           'success': false,
           'error': 'Сначала отключите VPN и повторите удаление.',

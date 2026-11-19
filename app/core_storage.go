@@ -1605,19 +1605,28 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 	b.addWireGuardDNSNew(template, wireGuardConfigs)
 
 	updatedSources := append([]VPNSource(nil), sources...)
+	plan := ownedprofile.Candidates(ownedSourceInputs(updatedSources), time.Now())
+	order := make([]VPNSource, 0, len(plan))
 	proxies := make([]ProxyConfig, 0, len(updatedSources))
 	xrayCandidates := make([]ProxyConfig, 0)
 	enabledSources := 0
 	sourceErrors := make([]string, 0)
-	for index := range updatedSources {
-		source := &updatedSources[index]
-		if source.Disabled || ownedSourceExpired(*source) {
-			continue
-		}
+	for _, candidate := range plan {
 		enabledSources++
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		order = append(order, VPNSource{ID: candidate.ID})
+		if candidate.Index < 0 {
+			proxy, err := b.fetcher.ParseSingleLink(candidate.URI)
+			if err != nil {
+				return nil, fmt.Errorf("invalid protected direct reserve %s", candidate.ID)
+			}
+			proxy.Tag = "vpn-source-" + candidate.ID
+			proxies = append(proxies, proxy)
+			continue
+		}
+		source := &updatedSources[candidate.Index]
 		nodes, fetchErr := b.fetchVPNSourceNodesContext(ctx, *source)
 		// Cancellation must never turn into a partial-success cache fallback.
 		if err := ctx.Err(); err != nil {
@@ -1668,28 +1677,10 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 	}
 	xrayBridge := BuildXrayBridgeConfig(xrayCandidates)
 	proxies = append(proxies, xrayBridge.SingBoxProxies...)
-	inputs := make([]ownedprofile.Source, len(updatedSources))
-	for i, s := range updatedSources {
-		inputs[i] = ownedprofile.Source{ID: s.ID, Provider: s.PublicCatalogID, URI: s.URI, Disabled: s.Disabled}
-	}
-	directReserves := ownedprofile.ReservePlan(inputs, time.Now())
-	orderedSources := make([]VPNSource, 0, len(updatedSources)+4)
-	for i, source := range updatedSources {
-		orderedSources = append(orderedSources, source)
-		for _, reserve := range directReserves[i] {
-			proxy, err := b.fetcher.ParseSingleLink(reserve.URI)
-			if err != nil {
-				return nil, fmt.Errorf("invalid protected direct reserve %s", reserve.ID)
-			}
-			proxy.Tag = "vpn-source-" + reserve.ID
-			proxies = append(proxies, proxy)
-			orderedSources = append(orderedSources, VPNSource{ID: reserve.ID})
-		}
-	}
 	if NormalizeRoutingMode(b.routingMode) == RoutingModeAllTraffic && len(proxies) == 0 {
 		return nil, fmt.Errorf("для режима «Всё через VPN» выберите и включите поддерживаемый VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
 	}
-	orderVPNSourceProxies(proxies, orderedSources)
+	orderVPNSourceProxies(proxies, order)
 
 	// Generate outbounds
 	outbounds := b.generateOutbounds(template, proxies)

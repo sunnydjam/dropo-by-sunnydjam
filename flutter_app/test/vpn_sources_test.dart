@@ -1051,12 +1051,12 @@ void main() {
   });
 
   testWidgets(
-    'managed reserve deletion explains that both family entries are removed',
+    'managed Free is a single visible connection alongside a personal subscription',
     (tester) async {
       VpnSourceInfo owned(String id, String provider) =>
           VpnSourceInfo.fromJson({
             'id': id,
-            'name': id == 'reserve' ? 'Dropo Free · резерв' : 'Dropo Free',
+            'name': 'Dropo Free',
             'kind': 'direct',
             'public_catalog_id': provider,
             'node_count': 1,
@@ -1068,26 +1068,18 @@ void main() {
         ..running = false
         ..sources = [
           owned('free', 'dropo-individual-free'),
-          owned('reserve', 'dropo-individual-free-reserve'),
           _source('personal'),
         ];
       await _pumpEditor(tester, bridge);
       await _tapVisible(
         tester,
-        find.byKey(const PageStorageKey('source-details-reserve')),
+        find.byKey(const PageStorageKey('source-details-free')),
       );
       await _tapVisible(
         tester,
-        find.byKey(const ValueKey('remove-source-reserve')),
+        find.byKey(const ValueKey('remove-source-free')),
       );
-      expect(
-        find.text('Удалить Dropo Free и резервное подключение?'),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining('Основное и резервное подключения Dropo Free'),
-        findsOneWidget,
-      );
+      expect(find.text('Удалить «Dropo Free»?'), findsOneWidget);
       await _tapVisible(
         tester,
         find.widgetWithText(TextButton, 'Удалить').last,

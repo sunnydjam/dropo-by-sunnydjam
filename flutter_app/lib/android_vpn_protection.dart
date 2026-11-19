@@ -166,12 +166,12 @@ class _AndroidVpnProtectionCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      copy.title,
+                      _uiText(context, copy.title),
                       style: const TextStyle(fontWeight: FontWeight.w800),
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      copy.body,
+                      _uiText(context, copy.body),
                       style: const TextStyle(
                         color: Color(0xFF9CB0AD),
                         height: 1.35,
@@ -186,7 +186,10 @@ class _AndroidVpnProtectionCard extends StatelessWidget {
           SizedBox(
             key: const ValueKey('android-open-vpn-settings'),
             child: _ActionButton(
-              label: openingSettings ? 'Открываем...' : 'Открыть настройки VPN',
+              label: _uiText(
+                context,
+                openingSettings ? 'Открываем...' : 'Открыть настройки VPN',
+              ),
               icon: Icons.open_in_new,
               compact: true,
               onPressed: openingSettings ? null : onOpenSettings,

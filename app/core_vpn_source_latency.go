@@ -29,6 +29,30 @@ func rankVPNSourceLatencies(tags []string, delays map[string]int) []string {
 	return ranked
 }
 
+func rankVPNSourceGroups(tags []string, delays map[string]int, owners map[string]string) []string {
+	var groups []string
+	members := make(map[string][]string, len(tags))
+	firstHealthy := make(map[string]int, len(tags))
+	for _, tag := range tags {
+		owner := owners[tag]
+		if owner == "" {
+			owner = tag
+		}
+		if len(members[owner]) == 0 {
+			groups = append(groups, owner)
+		}
+		members[owner] = append(members[owner], tag)
+		if firstHealthy[owner] == 0 && delays[tag] > 0 {
+			firstHealthy[owner] = delays[tag]
+		}
+	}
+	result := make([]string, 0, len(tags))
+	for _, owner := range rankVPNSourceLatencies(groups, firstHealthy) {
+		result = append(result, members[owner]...)
+	}
+	return result
+}
+
 func (a *App) sessionVPNSourceTags() []string {
 	tags := a.configuredVPNSourceTags()
 	a.vpnSourceMonitorMu.Lock()
@@ -111,7 +135,7 @@ dispatch:
 	for result := range results {
 		delays[result.tag] = result.delay
 	}
-	ranked := rankVPNSourceLatencies(tags, delays)
+	ranked := rankVPNSourceGroups(tags, delays, a.vpnSourceOwners(time.Now()))
 	a.vpnSourceMonitorMu.Lock()
 	if a.vpnSourceMonitorCancel == nil || a.vpnSourceMonitorGeneration != generation || a.vpnSourceManual != "" {
 		a.vpnSourceMonitorMu.Unlock()

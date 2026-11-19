@@ -9,13 +9,13 @@ class _AtlasDesktopShell extends StatefulWidget {
     required this.onSelect,
     this.onBack,
     required this.onWorkNetworks,
-    required this.onExit,
     required this.version,
     this.accountDisplay,
     this.onAbout,
     this.onBoost,
     this.offerBoost = true,
     this.homeTelemetry,
+    this.homeSceneReady = true,
     this.visible = true,
     this.motionEnabled = true,
     required this.child,
@@ -29,12 +29,13 @@ class _AtlasDesktopShell extends StatefulWidget {
   final VoidCallback? onBoost;
   final bool offerBoost;
   final Widget? homeTelemetry;
+  final bool homeSceneReady;
   final bool visible;
   final bool motionEnabled;
   final bool disabled;
   final ValueChanged<String> onSelect;
   final VoidCallback? onBack;
-  final VoidCallback? onWorkNetworks, onExit;
+  final VoidCallback? onWorkNetworks;
   final Widget child;
   final Widget? notice, updateNotice, overlay;
 
@@ -42,7 +43,13 @@ class _AtlasDesktopShell extends StatefulWidget {
   State<_AtlasDesktopShell> createState() => _AtlasDesktopShellState();
 }
 
-class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
+class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
+    with SingleTickerProviderStateMixin {
+  static const _brandStyle = TextStyle(
+    fontSize: 24,
+    fontWeight: FontWeight.w800,
+    letterSpacing: -0.8,
+  );
   static const _items = <(String, String, IconData)>[
     ('home', 'Главная', Icons.home_rounded),
     ('sources', 'Источники VPN', Icons.dns_outlined),
@@ -69,11 +76,29 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     'help',
   };
   bool _open = false;
+  double _edgeDistance = 0;
+  late final AnimationController _drawerAnimation;
+
+  bool get _animateDrawer =>
+      widget.motionEnabled && !MediaQuery.disableAnimationsOf(context);
+
+  bool get _canShowDrawer => widget.homeSceneReady && widget.overlay == null;
   final _toggleFocus = FocusNode(debugLabel: 'navigation-toggle');
   final _drawerFocus = FocusScopeNode(debugLabel: 'navigation-drawer');
 
   @override
+  void initState() {
+    super.initState();
+    _drawerAnimation = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+      reverseDuration: const Duration(milliseconds: 220),
+    );
+  }
+
+  @override
   void dispose() {
+    _drawerAnimation.dispose();
     _toggleFocus.dispose();
     _drawerFocus.dispose();
     super.dispose();
@@ -84,6 +109,13 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     setState(() {
       _open = false;
     });
+    if (_isAndroidPlatform) {
+      if (_animateDrawer) {
+        _drawerAnimation.animateBack(0, curve: Curves.easeOutCubic);
+      } else {
+        _drawerAnimation.value = 0;
+      }
+    }
     if (restoreFocus) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _toggleFocus.requestFocus();
@@ -92,7 +124,16 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   }
 
   void _show() {
+    if (_open || !_canShowDrawer) return;
+    _androidHaptic();
     setState(() => _open = true);
+    if (_isAndroidPlatform) {
+      if (_animateDrawer) {
+        _drawerAnimation.animateTo(1, curve: Curves.easeOutCubic);
+      } else {
+        _drawerAnimation.value = 1;
+      }
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _open) _drawerFocus.requestFocus();
     });
@@ -129,6 +170,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   void _select(String section) {
     if (widget.disabled) return;
     _close();
+    if (section != widget.activeSection) _androidHaptic();
     if (section == 'work') {
       widget.onWorkNetworks?.call();
     } else {
@@ -139,7 +181,9 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
   Widget _toggle({bool close = false}) => _AccessibleIconButton(
     key: ValueKey(close ? 'close-navigation' : 'toggle-navigation'),
     focusNode: close ? null : _toggleFocus,
-    tooltip: close ? 'Закрыть меню' : 'Открыть меню',
+    tooltip: close
+        ? _tr(context, 'Закрыть меню', 'Close menu')
+        : _tr(context, 'Открыть меню', 'Open menu'),
     constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
     icon: Icon(close ? Icons.close : Icons.menu_rounded),
     mouseCursor: SystemMouseCursors.click,
@@ -177,13 +221,16 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
             ),
           ),
           child: compact
-              ? Icon(icon, size: 24, semanticLabel: label)
+              ? Icon(icon, size: 24, semanticLabel: _uiText(context, label))
               : Row(
                   children: [
                     Icon(icon, size: 22),
                     const SizedBox(width: 14),
                     Expanded(
-                      child: Text(label, style: const TextStyle(fontSize: 15)),
+                      child: Text(
+                        _uiText(context, label),
+                        style: const TextStyle(fontSize: 15),
+                      ),
                     ),
                   ],
                 ),
@@ -192,14 +239,23 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     );
   }
 
+  Widget _homeChrome(Widget child) => AnimatedOpacity(
+    opacity: widget.homeSceneReady ? 1 : 0,
+    duration: widget.motionEnabled && !MediaQuery.disableAnimationsOf(context)
+        ? const Duration(milliseconds: 350)
+        : Duration.zero,
+    curve: Curves.easeOutCubic,
+    child: child,
+  );
+
   Widget _account({bool compact = false, bool phone = false}) {
     final profile = widget.accountDisplay;
     final selected = widget.activeSection == 'account';
     final label = _isAndroidPlatform && profile?.registered != true
-        ? 'Гость'
+        ? _uiText(context, 'Гость')
         : profile?.displayName ?? 'Войти через Telegram';
     final subtitle = _isAndroidPlatform && profile?.registered != true
-        ? 'Бесплатный тариф'
+        ? _uiText(context, 'Бесплатный тариф')
         : profile == null
         ? phone
               ? 'Telegram'
@@ -294,13 +350,154 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
     );
   }
 
+  Widget _drawerPanel({required bool android}) {
+    return MouseRegion(
+      child: FocusScope(
+        node: _drawerFocus,
+        autofocus: true,
+        onKeyEvent: (_, event) {
+          if (event is KeyDownEvent &&
+              event.logicalKey == LogicalKeyboardKey.escape) {
+            _close(restoreFocus: true);
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: Material(
+          key: const ValueKey('navigation-drawer'),
+          color: android ? _atlasSurface : Colors.transparent,
+          elevation: 0,
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  _toggle(close: true),
+                  const Expanded(
+                    child: Text(
+                      'Dropo',
+                      style: _brandStyle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.all(12),
+                  children: [
+                    for (final item in _items)
+                      if (_primarySections.contains(item.$1) &&
+                          item.$1 != 'account')
+                        _item(item),
+                    if (!android)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 16),
+                        child: Text(
+                          widget.version,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: _atlasMuted,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (!android) const Divider(height: 1),
+              if (!android)
+                Padding(
+                  key: const ValueKey('account-drawer-footer'),
+                  padding: const EdgeInsets.all(12),
+                  child: _account(),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _androidPageWithDrawer(Widget page, double width) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ExcludeFocus(
+          excluding: _open,
+          child: ExcludeSemantics(excluding: _open, child: page),
+        ),
+        AnimatedBuilder(
+          animation: _drawerAnimation,
+          child: _drawerPanel(android: true),
+          builder: (context, panel) {
+            final progress = _drawerAnimation.value;
+            if (progress == 0 && !_open) return const SizedBox.shrink();
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                ModalBarrier(
+                  key: const ValueKey('navigation-scrim'),
+                  color: Colors.black.withValues(alpha: .44 * progress),
+                  dismissible: _open,
+                  onDismiss: () => _close(restoreFocus: true),
+                  semanticsLabel: _tr(context, 'Закрыть меню', 'Close menu'),
+                ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: FractionalTranslation(
+                    translation: Offset(progress - 1, 0),
+                    child: SizedBox(
+                      width: math.min(280, width - 48),
+                      height: double.infinity,
+                      child: IgnorePointer(
+                        ignoring: !_open,
+                        child: ExcludeSemantics(
+                          excluding: !_open,
+                          child: panel,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+        if (!_open && _canShowDrawer)
+          Positioned(
+            left: 0,
+            top: 48,
+            bottom: 0,
+            width: 20,
+            child: GestureDetector(
+              key: const ValueKey('navigation-edge-swipe'),
+              behavior: HitTestBehavior.translucent,
+              excludeFromSemantics: true,
+              onHorizontalDragStart: (_) => _edgeDistance = 0,
+              onHorizontalDragUpdate: (event) =>
+                  _edgeDistance += event.primaryDelta ?? 0,
+              onHorizontalDragEnd: (event) {
+                if (_edgeDistance >= 42 ||
+                    (_edgeDistance > 8 && (event.primaryVelocity ?? 0) > 320)) {
+                  _show();
+                }
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final screen = MediaQuery.sizeOf(context);
-    final showRail = screen.width >= 520;
+    final android = _isAndroidPlatform;
+    final showRail = !android && screen.width >= 520;
     final navigationTextScale = MediaQuery.textScalerOf(context).scale(15) / 15;
-    final expandedRail = screen.width >= 800 && navigationTextScale <= 1.5;
+    final expandedRail =
+        showRail && screen.width >= 800 && navigationTextScale <= 1.5;
     final railWidth = showRail
         ? (expandedRail
               ? 208.0 + math.max(0.0, navigationTextScale - 1) * 144
@@ -339,6 +536,133 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
             .firstOrNull
             ?.$2 ??
         'Главная';
+    final page = Column(
+      children: [
+        _homeChrome(
+          Container(
+            key: const ValueKey('compact-header'),
+            constraints: const BoxConstraints(minHeight: 48),
+            padding: EdgeInsets.only(left: showRail ? 16 : 0, right: 16),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: _atlasBorder)),
+            ),
+            child: Row(
+              children: [
+                if (!showRail) _toggle(),
+                if (_canNavigateBack)
+                  _AccessibleIconButton(
+                    key: const ValueKey('section-back'),
+                    tooltip: _uiText(context, 'Назад'),
+                    onPressed: widget.disabled ? null : _back,
+                    icon: const Icon(Icons.arrow_back),
+                  ),
+                if (showCompactBrand) const Text('Dropo', style: _brandStyle),
+                if (showCompactBrand &&
+                    screen.width >= 600 &&
+                    MediaQuery.textScalerOf(context).scale(14) <= 20) ...[
+                  const SizedBox(width: 8),
+                  const Text(
+                    'by sunnydjam',
+                    style: TextStyle(fontSize: 12, color: _atlasMuted),
+                  ),
+                ],
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Platform.isAndroid || widget.activeSection == 'home'
+                      ? Align(
+                          alignment: Alignment.centerRight,
+                          child: compactTelemetry ? widget.homeTelemetry : null,
+                        )
+                      : Text(
+                          _uiText(context, title),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.end,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                ),
+                if (!reserveFooter) versionLink(),
+              ],
+            ),
+          ),
+        ),
+        Expanded(
+          child: Platform.isAndroid || widget.activeSection == 'home'
+              ? widget.child
+              : Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(children: [Expanded(child: widget.child)]),
+                ),
+        ),
+      ],
+    );
+    final footer = reserveFooter && !keyboardVisible
+        ? _homeChrome(
+            ColoredBox(
+              color: Colors.transparent,
+              child: Row(
+                children: [
+                  if (!showRail)
+                    Expanded(
+                      child: _open && !android
+                          ? const SizedBox.shrink()
+                          : _account(phone: true),
+                    )
+                  else
+                    const Spacer(),
+                  if (_isAndroidPlatform) ...[
+                    if (widget.offerBoost)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 5, right: 12),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _uiText(context, 'Купить'),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: _atlasMuted,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            FilledButton(
+                              key: const ValueKey('android-buy-boost'),
+                              onPressed:
+                                  widget.disabled || widget.onBoost == null
+                                  ? null
+                                  : () {
+                                      _close();
+                                      widget.onBoost!();
+                                    },
+                              style: FilledButton.styleFrom(
+                                backgroundColor: _atlasMint,
+                                foregroundColor: _atlasBackground,
+                                minimumSize: const Size(80, 44),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              child: const Text(
+                                'Boost',
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ] else
+                    versionLink(),
+                ],
+              ),
+            ),
+          )
+        : const SizedBox.shrink();
     return Theme(
       data: theme.copyWith(
         brightness: Brightness.dark,
@@ -387,182 +711,38 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                     motionEnabled:
                         widget.motionEnabled &&
                         widget.visible &&
-                        !_open &&
+                        (android || !_open) &&
+                        widget.homeSceneReady &&
                         widget.overlay == null,
                   ),
                 ),
                 Opacity(
-                  opacity: _open ? 0 : 1,
+                  opacity: !android && _open ? 0 : 1,
                   child: ExcludeFocus(
-                    excluding: _open || widget.overlay != null,
+                    excluding:
+                        (!android && _open) ||
+                        !widget.homeSceneReady ||
+                        widget.overlay != null,
                     child: ExcludeSemantics(
-                      excluding: _open || widget.overlay != null,
+                      excluding:
+                          (!android && _open) ||
+                          !widget.homeSceneReady ||
+                          widget.overlay != null,
                       child: TickerMode(
                         enabled:
-                            widget.visible && !_open && widget.overlay == null,
+                            widget.visible &&
+                            (android || !_open) &&
+                            widget.overlay == null,
                         child: Padding(
                           padding: EdgeInsets.only(left: railWidth),
                           child: Column(
                             children: [
-                              Container(
-                                key: const ValueKey('compact-header'),
-                                constraints: const BoxConstraints(
-                                  minHeight: 48,
-                                ),
-                                padding: EdgeInsets.only(
-                                  left: showRail ? 16 : 0,
-                                  right: 16,
-                                ),
-                                decoration: const BoxDecoration(
-                                  border: Border(
-                                    bottom: BorderSide(color: _atlasBorder),
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    if (!showRail) _toggle(),
-                                    if (_canNavigateBack)
-                                      _AccessibleIconButton(
-                                        key: const ValueKey('section-back'),
-                                        tooltip: 'Назад',
-                                        onPressed: widget.disabled
-                                            ? null
-                                            : _back,
-                                        icon: const Icon(Icons.arrow_back),
-                                      ),
-                                    if (showCompactBrand)
-                                      const Text(
-                                        'Dropo',
-                                        style: TextStyle(
-                                          fontSize: 24,
-                                          fontWeight: FontWeight.w800,
-                                          letterSpacing: -0.8,
-                                        ),
-                                      ),
-                                    if (showCompactBrand &&
-                                        screen.width >= 600 &&
-                                        MediaQuery.textScalerOf(
-                                              context,
-                                            ).scale(14) <=
-                                            20) ...[
-                                      const SizedBox(width: 8),
-                                      const Text(
-                                        'by sunnydjam',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: _atlasMuted,
-                                        ),
-                                      ),
-                                    ],
-                                    const SizedBox(width: 16),
-                                    Expanded(
-                                      child: widget.activeSection == 'home'
-                                          ? Align(
-                                              alignment: Alignment.centerRight,
-                                              child: compactTelemetry
-                                                  ? widget.homeTelemetry
-                                                  : null,
-                                            )
-                                          : Text(
-                                              title,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              textAlign: TextAlign.end,
-                                              style: const TextStyle(
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                    ),
-                                    if (!reserveFooter) versionLink(),
-                                  ],
-                                ),
-                              ),
                               Expanded(
-                                child: widget.activeSection == 'home'
-                                    ? widget.child
-                                    : Padding(
-                                        padding: const EdgeInsets.all(12),
-                                        child: Column(
-                                          children: [
-                                            Expanded(child: widget.child),
-                                          ],
-                                        ),
-                                      ),
+                                child: android
+                                    ? _androidPageWithDrawer(page, screen.width)
+                                    : page,
                               ),
-                              if (reserveFooter && !keyboardVisible)
-                                ColoredBox(
-                                  color: Colors.transparent,
-                                  child: Row(
-                                    children: [
-                                      if (!showRail)
-                                        Expanded(
-                                          child: _open
-                                              ? const SizedBox.shrink()
-                                              : _account(phone: true),
-                                        )
-                                      else
-                                        const Spacer(),
-                                      if (_isAndroidPlatform) ...[
-                                        if (widget.offerBoost)
-                                          Padding(
-                                            padding: const EdgeInsets.only(
-                                              left: 5,
-                                              right: 12,
-                                            ),
-                                            child: Row(
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                const Text(
-                                                  'Купить',
-                                                  style: TextStyle(
-                                                    fontSize: 12,
-                                                    color: _atlasMuted,
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 8),
-                                                FilledButton(
-                                                  key: const ValueKey(
-                                                    'android-buy-boost',
-                                                  ),
-                                                  onPressed: widget.disabled
-                                                      ? null
-                                                      : widget.onBoost,
-                                                  style: FilledButton.styleFrom(
-                                                    backgroundColor: _atlasMint,
-                                                    foregroundColor:
-                                                        _atlasBackground,
-                                                    minimumSize: const Size(
-                                                      80,
-                                                      44,
-                                                    ),
-                                                    padding:
-                                                        const EdgeInsets.symmetric(
-                                                          horizontal: 16,
-                                                        ),
-                                                    shape: RoundedRectangleBorder(
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                            12,
-                                                          ),
-                                                    ),
-                                                  ),
-                                                  child: const Text(
-                                                    'Boost',
-                                                    style: TextStyle(
-                                                      fontWeight:
-                                                          FontWeight.w600,
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                      ] else
-                                        versionLink(),
-                                    ],
-                                  ),
-                                ),
+                              if (reserveFooter && !keyboardVisible) footer,
                             ],
                           ),
                         ),
@@ -656,7 +836,19 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                       child: widget.notice ?? const SizedBox.shrink(),
                     ),
                   ),
-                if (_open) ...[
+                if (!widget.homeSceneReady)
+                  Positioned.fill(
+                    child: AbsorbPointer(
+                      child: ColoredBox(
+                        key: const ValueKey('android-home-loading-space'),
+                        color: _atlasBackground,
+                        child: _AtlasSpaceBackground(
+                          motionEnabled: widget.motionEnabled && widget.visible,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (!android && _open) ...[
                   Positioned.fill(
                     child: ModalBarrier(
                       key: const ValueKey('navigation-scrim'),
@@ -671,69 +863,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell> {
                     top: 0,
                     bottom: 0,
                     width: math.min(280, screen.width - 48),
-                    child: MouseRegion(
-                      child: FocusScope(
-                        node: _drawerFocus,
-                        autofocus: true,
-                        onKeyEvent: (_, event) {
-                          if (event is KeyDownEvent &&
-                              event.logicalKey == LogicalKeyboardKey.escape) {
-                            _close(restoreFocus: true);
-                            return KeyEventResult.handled;
-                          }
-                          return KeyEventResult.ignored;
-                        },
-                        child: Material(
-                          key: const ValueKey('navigation-drawer'),
-                          color: Colors.transparent,
-                          elevation: 0,
-                          child: Column(
-                            children: [
-                              Row(
-                                children: [
-                                  _toggle(close: true),
-                                  const Text(
-                                    'Dropo',
-                                    style: TextStyle(
-                                      fontSize: 22,
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const Divider(height: 1),
-                              Expanded(
-                                child: ListView(
-                                  padding: const EdgeInsets.all(12),
-                                  children: [
-                                    for (final item in _items)
-                                      if (_primarySections.contains(item.$1) &&
-                                          item.$1 != 'account')
-                                        _item(item),
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 16),
-                                      child: Text(
-                                        widget.version,
-                                        style: const TextStyle(
-                                          fontSize: 12,
-                                          color: _atlasMuted,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              const Divider(height: 1),
-                              Padding(
-                                key: const ValueKey('account-drawer-footer'),
-                                padding: const EdgeInsets.all(12),
-                                child: _account(),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
+                    child: _drawerPanel(android: false),
                   ),
                 ],
                 if (widget.overlay != null)

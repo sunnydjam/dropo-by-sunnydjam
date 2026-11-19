@@ -291,8 +291,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
         _savedAwaitingSnapshot = !snapshotLoaded;
         statusKind = snapshotLoaded ? 'success' : 'warning';
         statusText = snapshotLoaded
-            ? _applyUserMessage(result, metadataOnly) ??
-                  successText?.call(result) ??
+            ? successText?.call(result) ??
+                  _applyUserMessage(result, metadataOnly) ??
                   success
             : 'Изменения сохранены, но список источников пока не загрузился. Повторите загрузку.';
       });
@@ -352,16 +352,15 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       });
       return;
     }
+    _androidHaptic();
     FocusManager.instance.primaryFocus?.unfocus();
     final name = nameController.text.trim();
     final previousIds = sources.map((source) => source.id).toSet();
     final wasFirstPersonalSource = !_hasPersonalSource(sources);
-    var verifiedCount = 0;
     final added = await _changeSource(
       () async {
         final check = await widget.bridge.testSubscription(uri);
         if (check['success'] != true) return check;
-        verifiedCount = _asInt(check['count']);
         return widget.bridge.addVpnSource(
           name.isEmpty
               ? 'Мой VPN ${sources.where((s) => !s.isPublic).length + 1}'
@@ -370,9 +369,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
         );
       },
       'Проверяем и добавляем вашу подписку…',
-      successText: (_) => verifiedCount > 0
-          ? '${_vpnServerCountLabel(verifiedCount)} добавлено. Можно подключаться.'
-          : 'Подписка добавлена. Можно подключаться.',
+      successText: (_) => '',
     );
     if (!mounted || !added) return;
     controller.clear();
@@ -429,6 +426,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       ),
     );
     if (consent != true || !mounted) return;
+    _androidHaptic();
     final added = await _changeSource(
       () => widget.bridge.addPublicVpnSource(provider.id, true),
       'Проверяем доступность Dropo Free…',
@@ -448,23 +446,11 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   }
 
   Future<void> _remove(VpnSourceInfo source) async {
-    final family = _ownedSourceFamily(source.publicCatalogId);
-    final product = family == 'dropo-individual-boost'
-        ? 'Dropo Boost'
-        : 'Dropo Free';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text(
-          family == null
-              ? 'Удалить «${source.name}»?'
-              : 'Удалить $product и резервное подключение?',
-        ),
-        content: Text(
-          family == null
-              ? 'Источник исчезнет из этого профиля. Остальные источники и маршруты сохранятся.'
-              : 'Основное и резервное подключения $product исчезнут из этого профиля. Остальные источники и маршруты сохранятся.',
-        ),
+        title: Text('Удалить «${source.name}»?'),
+        content: const Text('Подключение исчезнет из списка.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -478,6 +464,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       ),
     );
     if (confirmed != true || !mounted) return;
+    _androidHaptic();
     await _changeSource(
       () => widget.bridge.removeVpnSource(source.id),
       'Удаляем источник…',
@@ -589,7 +576,11 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       key: const ValueKey('add-personal-vpn'),
       onPressed: disabled ? null : _toggleAddOptions,
       icon: Icon(showPersonalForm ? Icons.close : Icons.add, size: 18),
-      label: Text(showPersonalForm ? 'Закрыть' : 'Добавить'),
+      label: Text(
+        showPersonalForm
+            ? _uiText(context, 'Закрыть')
+            : _tr(context, 'Добавить', 'Add'),
+      ),
     );
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -613,18 +604,24 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                     setState(() => loading = true);
                     unawaited(_load());
                   },
-            child: const Text('Повторить загрузку источников'),
+            child: Text(
+              _tr(context, 'Повторить загрузку источников', 'Reload sources'),
+            ),
           ),
         if (sources.isEmpty && sourcesFresh && !showPersonalForm) ...[
           const SizedBox(height: 12),
-          const Text(
-            'Добавьте свою подписку',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+          Text(
+            _tr(context, 'Добавьте свою подписку', 'Add your subscription'),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 6),
-          const Text(
-            'Вставьте ссылку от вашего провайдера или используйте Dropo Free.',
-            style: TextStyle(color: _atlasMuted, height: 1.4),
+          Text(
+            _tr(
+              context,
+              'Вставьте ссылку от вашего провайдера или используйте Dropo Free.',
+              'Paste your provider’s link or use Dropo Free.',
+            ),
+            style: const TextStyle(color: _atlasMuted, height: 1.4),
           ),
           const SizedBox(height: 16),
         ],
@@ -635,7 +632,11 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'Ссылка подписки или VPN-ключ',
+                _tr(
+                  context,
+                  'Ссылка подписки или VPN-ключ',
+                  'Subscription link or VPN key',
+                ),
                 key: personalFormAnchor,
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
@@ -655,9 +656,13 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                 },
                 onChanged: (_) => _clearPersonalInputError(),
                 decoration: _fieldDecoration(
-                  hint: 'https://… или VPN-ключ',
+                  hint: _tr(
+                    context,
+                    'https://… или VPN-ключ',
+                    'https://… or VPN key',
+                  ),
                   suffixIcon: _AccessibleIconButton(
-                    tooltip: 'Вставить ссылку',
+                    tooltip: _tr(context, 'Вставить ссылку', 'Paste link'),
                     icon: const Icon(Icons.content_paste),
                     onPressed: controlsDisabled
                         ? null
@@ -688,8 +693,12 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                         ),
                   child: Text(
                     showOptionalName
-                        ? 'Скрыть название'
-                        : 'Название · необязательно',
+                        ? _tr(context, 'Скрыть название', 'Hide name')
+                        : _tr(
+                            context,
+                            'Название · необязательно',
+                            'Name · optional',
+                          ),
                   ),
                 ),
               ),
@@ -705,7 +714,11 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                     if (!controlsDisabled) unawaited(_addPersonal());
                   },
                   decoration: _fieldDecoration(
-                    hint: 'Например, «Моя подписка»',
+                    hint: _tr(
+                      context,
+                      'Например, «Моя подписка»',
+                      'For example, My subscription',
+                    ),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -717,7 +730,9 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                   minimumSize: const Size(double.infinity, 48),
                 ),
                 icon: const Icon(Icons.add),
-                label: const Text('Проверить и добавить'),
+                label: Text(
+                  _tr(context, 'Проверить и добавить', 'Verify and add'),
+                ),
               ),
               const SizedBox(height: 16),
             ],
@@ -733,7 +748,9 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             key: const ValueKey('onboarding-ready-connect'),
             onPressed: disabled ? null : widget.onReadyToConnect,
             icon: const Icon(Icons.arrow_forward),
-            label: const Text('Перейти к подключению'),
+            label: Text(
+              _tr(context, 'Перейти к подключению', 'Go to connection'),
+            ),
           ),
         if (recentlyAddedId.isNotEmpty &&
             sources.length > 1 &&
@@ -746,7 +763,13 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                     () => widget.bridge.moveVpnSource(recentlyAddedId, 0),
                     'Выбираем подписку…',
                   ),
-            child: const Text('Использовать новую подписку'),
+            child: Text(
+              _tr(
+                context,
+                'Использовать новую подписку',
+                'Use new subscription',
+              ),
+            ),
           ),
         if (autoSelectSupported && sources.isNotEmpty) ...[
           Semantics(
@@ -837,9 +860,13 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           ),
         if (sources.isNotEmpty) ...[
           const SizedBox(height: 12),
-          const Text(
-            'Отклик — время проверки через VPN, не скорость загрузки.',
-            style: TextStyle(color: _atlasMuted, fontSize: 11),
+          Text(
+            _tr(
+              context,
+              'Отклик — время проверки через VPN, не скорость загрузки.',
+              'Latency measures response time through the VPN.',
+            ),
+            style: const TextStyle(color: _atlasMuted, fontSize: 11),
           ),
           Wrap(
             spacing: 12,
@@ -849,7 +876,13 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                 key: const ValueKey('refresh-source-lists'),
                 onPressed: controlsDisabled ? null : _refreshSources,
                 icon: const Icon(Icons.refresh, size: 18),
-                label: const Text('Обновить все подписки'),
+                label: Text(
+                  _tr(
+                    context,
+                    'Обновить все подписки',
+                    'Refresh all subscriptions',
+                  ),
+                ),
               ),
             ],
           ),
@@ -882,7 +915,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                               ),
                               'Сохраняем порядок…',
                             ),
-                      child: const Text('Выше'),
+                      child: Text(_tr(context, 'Выше', 'Move up')),
                     ),
                     TextButton(
                       key: ValueKey('vpn-source-down-${sources[i].id}'),
@@ -895,7 +928,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                               ),
                               'Сохраняем порядок…',
                             ),
-                      child: const Text('Ниже'),
+                      child: Text(_tr(context, 'Ниже', 'Move down')),
                     ),
                   ],
                 ),
@@ -908,34 +941,40 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
             key: ValueKey('add-public-vpn-${free.id}'),
             onPressed: controlsDisabled ? null : () => _addPublic(free),
             icon: const Icon(Icons.public_outlined),
-            label: const Text('Добавить Dropo Free'),
+            label: Text(_tr(context, 'Добавить Dropo Free', 'Add Dropo Free')),
           ),
         ],
         if ((sources.isEmpty || showPersonalForm) && catalogError.isNotEmpty)
           TextButton(
             onPressed: busy ? null : _loadCatalog,
-            child: const Text('Dropo Free недоступен · повторить'),
+            child: Text(
+              _tr(
+                context,
+                'Dropo Free недоступен · повторить',
+                'Dropo Free unavailable · retry',
+              ),
+            ),
           ),
         if (!widget.embedded)
           Align(
             alignment: Alignment.centerRight,
             child: TextButton(
               onPressed: busy ? null : () => Navigator.pop(context, true),
-              child: const Text('Готово'),
+              child: Text(_tr(context, 'Готово', 'Done')),
             ),
           ),
       ],
     );
     if (widget.embedded) {
       return _FeaturePage(
-        title: 'Источники VPN',
+        title: _uiText(context, 'Источники VPN'),
         icon: Icons.vpn_key_outlined,
         headerAction: addButton,
         child: content,
       );
     }
     return _AppDialog(
-      title: 'Источники VPN',
+      title: _uiText(context, 'Источники VPN'),
       icon: Icons.vpn_key_outlined,
       width: 680,
       centered: true,
@@ -1103,6 +1142,7 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
   @override
   Widget build(BuildContext context) {
     final source = widget.source;
+    final managed = _ownedSourceFamily(source.publicCatalogId) != null;
     final active =
         widget.statusKnown &&
         widget.running == true &&
@@ -1228,7 +1268,7 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
                   minimumSize: const Size(48, 48),
                   padding: const EdgeInsets.symmetric(horizontal: 4),
                 ),
-                child: const Text('Ещё'),
+                child: Text(_tr(context, 'Ещё', 'More')),
               ),
             ],
           ),
@@ -1237,7 +1277,20 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (source.nodeCount > 1 || missing && source.nodeCount > 0)
+                if (managed)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Text(
+                      _tr(
+                        context,
+                        'Автоматический выбор сервера',
+                        'Automatic server selection',
+                      ),
+                      style: const TextStyle(color: _atlasMuted, fontSize: 12),
+                    ),
+                  )
+                else if (source.nodeCount > 1 ||
+                    missing && source.nodeCount > 0)
                   TextButton.icon(
                     key: ValueKey('choose-vpn-node-${source.id}'),
                     onPressed: widget.busy ? null : _chooseNode,
@@ -1297,11 +1350,11 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
               key: ValueKey('source-recover-${source.id}'),
               onPressed: widget.busy
                   ? null
-                  : missing && source.nodeCount > 0
+                  : !managed && missing && source.nodeCount > 0
                   ? _chooseNode
                   : widget.onRefresh,
               child: Text(
-                missing && source.nodeCount > 0
+                !managed && missing && source.nodeCount > 0
                     ? 'Выбрать сервер'
                     : 'Обновить все подписки',
               ),
@@ -1316,23 +1369,31 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
                 TextButton(
                   key: ValueKey('rename-source-${source.id}'),
                   onPressed: widget.busy ? null : widget.onRename,
-                  child: const Text('Переименовать'),
+                  child: Text(_tr(context, 'Переименовать', 'Rename')),
                 ),
                 TextButton(
                   onPressed: widget.busy ? null : widget.onRefresh,
-                  child: const Text('Обновить все подписки'),
+                  child: Text(
+                    _tr(
+                      context,
+                      'Обновить все подписки',
+                      'Refresh all subscriptions',
+                    ),
+                  ),
                 ),
                 TextButton(
                   key: ValueKey('remove-source-${source.id}'),
                   onPressed: widget.busy ? null : widget.onRemove,
-                  child: const Text('Удалить'),
+                  child: Text(_tr(context, 'Удалить', 'Delete')),
                 ),
                 if (widget.onOrder != null)
                   TextButton.icon(
                     key: const ValueKey('source-order'),
                     onPressed: widget.busy ? null : widget.onOrder,
                     icon: const Icon(Icons.reorder, size: 18),
-                    label: const Text('Порядок резерва'),
+                    label: Text(
+                      _tr(context, 'Порядок подключений', 'Connection order'),
+                    ),
                   ),
               ],
             ),
@@ -1666,7 +1727,7 @@ class _RenameVpnSourceDialogState extends State<_RenameVpnSourceDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Название подписки'),
+    title: Text(_tr(context, 'Название подписки', 'Subscription name')),
     scrollable: true,
     content: TextField(
       key: const ValueKey('source-rename-input'),
@@ -1674,18 +1735,21 @@ class _RenameVpnSourceDialogState extends State<_RenameVpnSourceDialog> {
       autofocus: true,
       maxLength: 80,
       textInputAction: TextInputAction.done,
-      decoration: InputDecoration(labelText: 'Название', errorText: error),
+      decoration: InputDecoration(
+        labelText: _tr(context, 'Название', 'Name'),
+        errorText: error,
+      ),
       onSubmitted: (_) => save(),
     ),
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context),
-        child: const Text('Отмена'),
+        child: Text(_tr(context, 'Отмена', 'Cancel')),
       ),
       FilledButton(
         key: const ValueKey('source-rename-save'),
         onPressed: save,
-        child: const Text('Сохранить'),
+        child: Text(_tr(context, 'Сохранить', 'Save')),
       ),
     ],
   );

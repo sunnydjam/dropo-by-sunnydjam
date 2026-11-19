@@ -4,6 +4,15 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.11 — 2026-11-18
+
+- Show Dropo Free and Turbo as one connection each. Use each profile's own
+  reserves automatically and keep personal subscriptions independently selectable.
+- Check every managed reserve in the Windows source monitor and retain the
+  active profile label when either client switches to an internal route.
+- Ship the updated Android VPN scene and launcher icon, connection widget,
+  clearer account sign-in, system language selection and optional haptics.
+
 ## 3.1.10 — 2026-11-18
 
 - Add independent Finnish TCP/REALITY and Latvian Hysteria 2 reserves for

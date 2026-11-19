@@ -936,7 +936,7 @@ void main() {
       await _tap(tester, 'submit-personal-vpn');
       expect(
         find.text('3 сервера добавлено. Можно подключаться.'),
-        findsOneWidget,
+        findsNothing,
       );
       expect(bridge.personalTests, 1);
       expect(bridge.personalAdds, 1);
@@ -1093,7 +1093,7 @@ void main() {
     expect(find.byKey(const ValueKey('link-work')), findsOneWidget);
     await _tap(tester, 'nav-help');
     expect(find.text('Статистика'), findsOneWidget);
-    expect(find.text('Выход'), findsOneWidget);
+    expect(find.text('Выход'), findsNothing);
     expect(find.text('О приложении'), findsOneWidget);
     await _tap(tester, 'nav-home');
     expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);

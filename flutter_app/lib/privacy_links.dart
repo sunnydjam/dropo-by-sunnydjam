@@ -34,13 +34,19 @@ class _PrivacyActions extends StatelessWidget {
         key: const ValueKey('account-privacy-policy'),
         onPressed: () => unawaited(_open(context, dropoPrivacyPolicyUrl)),
         icon: const Icon(Icons.privacy_tip_outlined, size: 18),
-        label: const Text('Политика конфиденциальности'),
+        label: Text(_uiText(context, 'Политика конфиденциальности')),
       ),
       TextButton.icon(
         key: const ValueKey('account-deletion-page'),
         onPressed: () => unawaited(_open(context, dropoAccountDeletionUrl)),
         icon: const Icon(Icons.manage_accounts_outlined, size: 18),
-        label: const Text('Удаление аккаунта через сайт'),
+        label: Text(
+          _tr(
+            context,
+            'Удаление аккаунта через сайт',
+            'Delete your account on the website',
+          ),
+        ),
       ),
     ],
   );

@@ -354,7 +354,7 @@ void main() {
       final bridge = _Bridge();
       expect((await client().forgetLocalProfile(bridge))['success'], true);
       expect(bridge.removed, ['free', 'boost']);
-      expect(bridge.stops, 1);
+      expect(bridge.stops, 0);
       expect(protected, isNull);
     },
   );

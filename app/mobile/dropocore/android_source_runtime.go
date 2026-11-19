@@ -10,9 +10,34 @@ import (
 // A prepared candidate always represents one independent source and exactly
 // its authoritative node. No credentials or remote endpoints cross this API.
 type androidSourceCandidate struct {
-	ID     string `json:"id"`
-	Tag    string `json:"tag"`
-	NodeID string `json:"nodeId"`
+	ID      string `json:"id"`
+	Tag     string `json:"tag"`
+	NodeID  string `json:"nodeId"`
+	OwnerID string `json:"ownerId,omitempty"`
+}
+
+func androidLogicalSourceStatusLocked(id string) (bool, androidSourceResponse) {
+	response := androidSourceResponseLocked(id)
+	if !current.Connected {
+		return false, response
+	}
+	if current.activeSourceID == id {
+		return true, response
+	}
+	for _, candidate := range current.preparedSources {
+		if candidate.OwnerID != id || candidate.ID == id {
+			continue
+		}
+		sample := androidSourceResponseLocked(candidate.ID)
+		sample.SourceID, sample.NodeID = id, ""
+		if candidate.ID == current.activeSourceID {
+			return true, sample
+		}
+		if response.State != "ok" && sample.State == "ok" {
+			response = sample
+		}
+	}
+	return false, response
 }
 
 type androidSourceResponse struct {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"dropocore/ownedprofile"
 	"fmt"
 	"strings"
 	"time"
@@ -74,10 +75,18 @@ func (a *App) vpnSourceProbeBinding(tag string) (vpnSourceProbeBinding, bool) {
 		if !outboundTagExists(outbounds, tag) {
 			return vpnSourceProbeBinding{}, false
 		}
-		for _, source := range profile.VPNSources {
-			if source.Disabled || "vpn-source-"+source.ID != tag {
+		for _, candidate := range ownedprofile.Candidates(ownedSourceInputs(profile.VPNSources), time.Now()) {
+			if "vpn-source-"+candidate.ID != tag {
 				continue
 			}
+			if candidate.Index < 0 {
+				node, err := (&SubscriptionFetcher{}).ParseSingleLink(candidate.URI)
+				if err != nil || node.Server == "" {
+					return vpnSourceProbeBinding{}, false
+				}
+				return vpnSourceProbeBinding{ProfileID: profile.ID, SourceID: candidate.ID, NodeID: vpnNodeFingerprint(node), SessionGeneration: a.reconnectGeneration.Load()}, true
+			}
+			source := profile.VPNSources[candidate.Index]
 			nodeID := source.SelectedNodeID
 			if len(source.NodeIDs) > 0 {
 				if source.SelectedNode < 0 || source.SelectedNode >= len(source.NodeIDs) {
@@ -236,16 +245,30 @@ func (a *App) configuredVPNSourceTags() []string {
 	config, _ := a.storage.GetProfileConfig(profile.ID)
 	outbounds, _ := config["outbounds"].([]interface{})
 	result := make([]string, 0, len(profile.VPNSources))
-	for _, source := range profile.VPNSources {
-		if source.Disabled {
-			continue
-		}
+	for _, source := range ownedprofile.Candidates(ownedSourceInputs(profile.VPNSources), time.Now()) {
 		tag := "vpn-source-" + source.ID
 		if outboundTagExists(outbounds, tag) {
 			result = append(result, tag)
 		}
 	}
 	return result
+}
+
+func ownedVPNSourceTags(sources []VPNSource, now time.Time) map[string]string {
+	owners := make(map[string]string, len(sources))
+	for _, candidate := range ownedprofile.Candidates(ownedSourceInputs(sources), now) {
+		owners["vpn-source-"+candidate.ID] = "vpn-source-" + candidate.OwnerID
+	}
+	return owners
+}
+
+func (a *App) vpnSourceOwners(now time.Time) map[string]string {
+	if a.storage != nil {
+		if profile, err := a.storage.GetActiveProfile(); err == nil {
+			return ownedVPNSourceTags(profile.VPNSources, now)
+		}
+	}
+	return nil
 }
 
 func (a *App) selectFirstHealthyVPNSource(ctx context.Context, generation uint64) string {
@@ -439,8 +462,22 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 			break
 		}
 	}
-	for offset := 0; offset < len(tags); offset++ {
-		tag := tags[(start+offset)%len(tags)]
+	ordered := append(append([]string(nil), tags[start:]...), tags[:start]...)
+	owners := a.vpnSourceOwners(now)
+	if owner := owners[active]; owner != "" {
+		// Exhaust the active profile's own reserves before considering the
+		// next independently enabled profile or personal subscription.
+		var related, other []string
+		for _, tag := range ordered {
+			if owners[tag] == owner {
+				related = append(related, tag)
+			} else {
+				other = append(other, tag)
+			}
+		}
+		ordered = append(related, other...)
+	}
+	for _, tag := range ordered {
 		canAttempt, current := a.vpnSourceCanAttemptForMonitor(generation, tag, now)
 		if !current {
 			return
@@ -674,6 +711,9 @@ func (a *App) SelectVPNSource(id string) map[string]interface{} {
 	a.vpnSourceSelectionMu.Lock()
 	defer a.vpnSourceSelectionMu.Unlock()
 	tag := "vpn-source-" + normalizeVPNSourceID(id)
+	if owner := a.vpnSourceOwners(time.Now())[tag]; owner != "" && owner != tag {
+		return map[string]interface{}{"success": false, "error": "VPN source is unavailable"}
+	}
 	found := false
 	for _, candidate := range a.configuredVPNSourceTags() {
 		if candidate == tag {

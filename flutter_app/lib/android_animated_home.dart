@@ -73,10 +73,18 @@ bool isAndroidSceneCriticalResource(String? url) {
       if (value != 'blocked_only' && value != 'all_traffic') return null;
       return (action: action, value: value as String);
     }
+    if (action == 'ready') {
+      final revision = data['value'];
+      if (revision is! String ||
+          !RegExp(r'^[1-9][0-9]{0,7}$').hasMatch(revision)) {
+        return null;
+      }
+      return (action: action, value: revision);
+    }
     if (!const {
-      'ready',
       'failed',
-      'toggle',
+      'connect',
+      'disconnect',
       'cancel',
       'sources',
       'services',
@@ -94,6 +102,7 @@ class _AndroidAnimatedHome extends StatefulWidget {
   const _AndroidAnimatedHome({
     required this.connected,
     required this.connectedAt,
+    required this.responseMs,
     required this.connecting,
     required this.disconnecting,
     required this.busy,
@@ -105,22 +114,26 @@ class _AndroidAnimatedHome extends StatefulWidget {
     required this.source,
     required this.message,
     required this.error,
-    required this.onToggle,
+    required this.onConnectionRequested,
     required this.onCancel,
     required this.onMode,
     required this.onSources,
     required this.onServices,
     required this.onHelp,
     required this.fallback,
+    required this.onPresented,
   });
 
   final bool connected, connecting, disconnecting, busy, enabled, canCancel;
   final DateTime? connectedAt;
+  final int? responseMs;
   final bool motionEnabled, visible, error;
   final String routingMode, source, message;
-  final VoidCallback onToggle, onCancel, onSources, onServices, onHelp;
+  final ValueChanged<bool> onConnectionRequested;
+  final VoidCallback onCancel, onSources, onServices, onHelp;
   final ValueChanged<String> onMode;
   final Widget fallback;
+  final VoidCallback onPresented;
 
   @override
   State<_AndroidAnimatedHome> createState() => _AndroidAnimatedHomeState();
@@ -130,30 +143,38 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
     with WidgetsBindingObserver {
   static const _asset = 'assets/android_home/index.html';
   static const _url = 'file:///android_asset/flutter_assets/$_asset';
-  late final WebViewController _controller;
+  static const _visualState = MethodChannel('dropo/android-scene');
+  WebViewController? _controller;
   late final AndroidSceneLoadGuard _loadGuard;
+  MethodChannel? _rendererEvents;
   bool _loaded = false, _failed = false, _foreground = true;
   String? _lastPayload;
+  String? _candidate;
+  Timer? _retryPresentation;
+  bool _presented = false, _checking = false, _active = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    _foreground = lifecycle == null || lifecycle == AppLifecycleState.resumed;
     _loadGuard = AndroidSceneLoadGuard(onFailure: _fail);
     _initialize();
   }
 
   Future<void> _initialize() async {
     try {
-      _controller = WebViewController();
-      await _controller.setBackgroundColor(const Color(0xff030908));
-      await _controller.setJavaScriptMode(JavaScriptMode.unrestricted);
-      await _controller.enableZoom(false);
-      await _controller.addJavaScriptChannel(
+      final controller = WebViewController();
+      _controller = controller;
+      await controller.setBackgroundColor(const Color(0xff030908));
+      await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+      await controller.enableZoom(false);
+      await controller.addJavaScriptChannel(
         'DropoScene',
         onMessageReceived: (message) => _onMessage(message.message),
       );
-      await _controller.setNavigationDelegate(
+      await controller.setNavigationDelegate(
         NavigationDelegate(
           onNavigationRequest: (request) => request.url == _url
               ? NavigationDecision.navigate
@@ -172,8 +193,16 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
           },
         ),
       );
-      if (!mounted) return;
-      await _controller.loadFlutterAsset(_asset);
+      if (!mounted || _failed) return;
+      final platform = controller.platform as AndroidWebViewController;
+      final id = platform.webViewIdentifier;
+      _rendererEvents = MethodChannel('dropo/android-scene/$id')
+        ..setMethodCallHandler((call) async {
+          if (call.method == 'rendererGone') _fail();
+        });
+      await _visualState.invokeMethod<void>('observeRenderer', id);
+      if (!mounted || _failed) return;
+      await controller.loadFlutterAsset(_asset);
       if (mounted) setState(() {});
     } catch (_) {
       _fail();
@@ -182,25 +211,89 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
 
   void _fail() {
     _loadGuard.dispose();
-    if (mounted && !_failed) setState(() => _failed = true);
+    _retryPresentation?.cancel();
+    if (!mounted || _failed) return;
+    setState(() {
+      _failed = true;
+      _controller = null;
+    });
+    scheduleMicrotask(() {
+      if (mounted) widget.onPresented();
+    });
+  }
+
+  Future<void> _presentWhenDrawn() async {
+    final candidate = _candidate;
+    final controller = _controller;
+    if (!_active ||
+        _checking ||
+        _presented ||
+        _failed ||
+        candidate == null ||
+        controller == null) {
+      return;
+    }
+    _retryPresentation?.cancel();
+    _checking = true;
+    try {
+      final platform = controller.platform as AndroidWebViewController;
+      final frameSize = await _visualState.invokeListMethod<int>(
+        'awaitFrame',
+        platform.webViewIdentifier,
+      );
+      if (!mounted ||
+          !_active ||
+          _failed ||
+          frameSize == null ||
+          frameSize.length != 2 ||
+          _candidate != candidate) {
+        return;
+      }
+      final revealed = await controller.runJavaScriptReturningResult(
+        'window.DropoHome.reveal(${jsonEncode(candidate)},${frameSize[0]},${frameSize[1]})',
+      );
+      if (!mounted || _failed || revealed != true) return;
+      _presented = true;
+      _loadGuard.ready();
+      widget.onPresented();
+    } catch (_) {
+      _fail();
+    } finally {
+      _checking = false;
+      if (mounted && _active && !_presented && !_failed) {
+        _retryPresentation = Timer(
+          const Duration(milliseconds: 60),
+          () => unawaited(_presentWhenDrawn()),
+        );
+      }
+    }
   }
 
   void _onMessage(String message) {
     if (!mounted || _failed) return;
     final command = parseAndroidSceneAction(message);
     if (command == null) return;
+    if (!_presented &&
+        command.action != 'ready' &&
+        command.action != 'failed') {
+      return;
+    }
     // Recheck native state at dispatch time; stale JavaScript cannot start or
     // change a session while another operation owns the core.
     switch (command.action) {
       case 'ready':
-        _loadGuard.ready();
-        _loaded = true;
-        _lastPayload = null;
-        _synchronize();
+        _candidate = command.value;
+        unawaited(_presentWhenDrawn());
       case 'failed':
         _fail();
-      case 'toggle':
-        if (widget.enabled) widget.onToggle();
+      case 'connect':
+        if (widget.enabled && !widget.connected) {
+          widget.onConnectionRequested(true);
+        }
+      case 'disconnect':
+        if (widget.enabled && widget.connected) {
+          widget.onConnectionRequested(false);
+        }
       case 'cancel':
         if (widget.canCancel) widget.onCancel();
       case 'mode':
@@ -218,27 +311,36 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
     if (_failed || !mounted) return;
     final active =
         _foreground && widget.visible && TickerMode.valuesOf(context).enabled;
+    _active = active;
     _loadGuard.setActive(active);
-    if (!_loaded) return;
-    final payload = jsonEncode({
-      'connected': widget.connected,
-      'connectedAt': widget.connectedAt?.millisecondsSinceEpoch,
-      'connecting': widget.connecting,
-      'disconnecting': widget.disconnecting,
-      'busy': widget.busy,
-      'enabled': widget.enabled,
-      'canCancel': widget.canCancel,
-      'motion': widget.motionEnabled,
-      'active': active,
-      'mode': widget.routingMode,
-      'source': widget.source,
-      'message': widget.message,
-      'error': widget.error,
-    });
+    final controller = _controller;
+    if (!_loaded || controller == null) return;
+    unawaited(_presentWhenDrawn());
+    final payload = !active
+        ? '{"active":false}'
+        : jsonEncode({
+            'connected': widget.connected,
+            'connectedAt': widget.connectedAt?.millisecondsSinceEpoch,
+            'connecting': widget.connecting,
+            'disconnecting': widget.disconnecting,
+            'busy': widget.busy,
+            'enabled': widget.enabled,
+            'canCancel': widget.canCancel,
+            'motion':
+                widget.motionEnabled &&
+                !MediaQuery.disableAnimationsOf(context),
+            'active': active,
+            'mode': widget.routingMode,
+            'language': _english(context) ? 'en' : 'ru',
+            'source': widget.source,
+            'responseMs': widget.responseMs,
+            'message': widget.message,
+            'error': widget.error,
+          });
     if (_lastPayload == payload) return;
     _lastPayload = payload;
     unawaited(
-      _controller
+      controller
           .runJavaScript('window.DropoHome?.update($payload);')
           .catchError((Object _) {
             _fail();
@@ -261,12 +363,15 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   @override
   void dispose() {
     _loadGuard.dispose();
+    _retryPresentation?.cancel();
+    _rendererEvents?.setMethodCallHandler(null);
     WidgetsBinding.instance.removeObserver(this);
     // Android destroys the platform view with its widget. Stop its animation
     // immediately as well, including navigation away to the account page.
-    if (_loaded && !_failed) {
+    final controller = _controller;
+    if (_loaded && controller != null) {
       unawaited(
-        _controller
+        controller
             .runJavaScript('window.DropoHome?.update({active:false});')
             .catchError((Object _) {}),
       );
@@ -277,10 +382,75 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   @override
   Widget build(BuildContext context) {
     if (_failed) return widget.fallback;
+    final controller = _controller;
+    if (controller == null) return const SizedBox.expand();
     WidgetsBinding.instance.addPostFrameCallback((_) => _synchronize());
     return WebViewWidget(
       key: const ValueKey('android-animated-home'),
-      controller: _controller,
+      controller: controller,
+    );
+  }
+}
+
+// Keep the native platform view at a stable position in the widget tree.
+// Only Flutter pages cross-fade. A parked scene keeps its controller and pauses
+// drawing while the foreground page owns focus and pointer input.
+class _AndroidHomeSections extends StatelessWidget {
+  const _AndroidHomeSections({
+    required this.section,
+    required this.motionEnabled,
+    required this.home,
+    required this.page,
+  });
+
+  final String section;
+  final bool motionEnabled;
+  final Widget home;
+  final Widget? page;
+
+  @override
+  Widget build(BuildContext context) {
+    final showHome = page == null;
+    final animate = motionEnabled && !MediaQuery.disableAnimationsOf(context);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        IgnorePointer(
+          ignoring: !showHome,
+          child: ExcludeFocus(
+            excluding: !showHome,
+            child: ExcludeSemantics(excluding: !showHome, child: home),
+          ),
+        ),
+        AnimatedSwitcher(
+          duration: animate ? const Duration(milliseconds: 190) : Duration.zero,
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          layoutBuilder: (current, previous) => Stack(
+            fit: StackFit.expand,
+            children: [
+              for (final child in previous)
+                IgnorePointer(
+                  child: ExcludeFocus(child: ExcludeSemantics(child: child)),
+                ),
+              ?current,
+            ],
+          ),
+          child: showHome
+              ? null
+              : ColoredBox(
+                  key: ValueKey(section),
+                  color: _atlasBackground,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _AtlasSpaceBackground(motionEnabled: motionEnabled),
+                      Padding(padding: const EdgeInsets.all(12), child: page),
+                    ],
+                  ),
+                ),
+        ),
+      ],
     );
   }
 }

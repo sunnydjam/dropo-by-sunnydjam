@@ -25,9 +25,17 @@ const sourceProbeTimeout = 6 * time.Second
 var sourceProbeTargets = []string{"https://www.gstatic.com/generate_204", "https://cp.cloudflare.com/generate_204"}
 
 type sourceCandidate struct {
-	ID     string `json:"id"`
-	Tag    string `json:"tag"`
-	NodeID string `json:"nodeId"`
+	ID      string `json:"id"`
+	Tag     string `json:"tag"`
+	NodeID  string `json:"nodeId"`
+	OwnerID string `json:"ownerId,omitempty"`
+}
+
+func (c sourceCandidate) owner() string {
+	if c.OwnerID != "" {
+		return c.OwnerID
+	}
+	return c.ID
 }
 
 type sourceObservation struct {
@@ -209,7 +217,7 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 			if result.State != "ok" && cycleCtx.Err() == nil {
 				confirmedFailed = active
 				results = probeSourceCandidates(cycleCtx, candidates, probe)
-				chosen = chooseSourceCandidate(candidates, results, false)
+				chosen = chooseSourceAfterOutage(active, candidates, results)
 			}
 		}
 		if cycleCtx.Err() != nil {
@@ -282,7 +290,11 @@ func probeSourceCandidates(ctx context.Context, candidates []sourceCandidate, pr
 
 func chooseSourceCandidate(candidates []sourceCandidate, results []sourceObservation, automatic bool) string {
 	bestID, bestLatency := "", 0
+	healthyOwners := make(map[string]bool, len(candidates))
 	for _, candidate := range candidates {
+		if healthyOwners[candidate.owner()] {
+			continue
+		}
 		for _, result := range results {
 			if result.SourceID != candidate.ID || result.NodeID != candidate.NodeID || result.State != "ok" || result.LatencyMS < 1 {
 				continue
@@ -293,10 +305,29 @@ func chooseSourceCandidate(candidates []sourceCandidate, results []sourceObserva
 			if !automatic {
 				return bestID
 			}
+			healthyOwners[candidate.owner()] = true
 			break
 		}
 	}
 	return bestID
+}
+
+func chooseSourceAfterOutage(active sourceCandidate, candidates []sourceCandidate, results []sourceObservation) string {
+	for _, result := range results {
+		if result.SourceID == active.ID && result.NodeID == active.NodeID && result.State == "ok" && result.LatencyMS > 0 {
+			return active.ID
+		}
+	}
+	var sameOwner []sourceCandidate
+	for _, candidate := range candidates {
+		if candidate.owner() == active.owner() {
+			sameOwner = append(sameOwner, candidate)
+		}
+	}
+	if chosen := chooseSourceCandidate(sameOwner, results, false); chosen != "" {
+		return chosen
+	}
+	return chooseSourceCandidate(candidates, results, false)
 }
 
 func probeSource(ctx context.Context, candidate sourceCandidate, generation int64, outbound N.Dialer) sourceObservation {

@@ -36,6 +36,7 @@ class ManagedFreeSourceClient {
     )
     save,
     Future<Map<String, dynamic>> Function(String, int)? verifyCatalog,
+    bool requireIndividual = false,
   }) async {
     if (!consent || id != 'dropo-free') {
       return {
@@ -61,6 +62,7 @@ class ManagedFreeSourceClient {
           endpoint,
         ).enroll(api, save, verifyCatalog);
       }
+      if (requireIndividual) return _unavailable();
       final response = await api.request('GET', '/v1/vpn/free-source');
       if (response['available'] != true) return _unavailable();
       final provider = _asMap(response['provider']);
@@ -85,6 +87,13 @@ class ManagedFreeSourceClient {
       // A fixed operation code is safe for local support logs. Never log the
       // underlying exception, URL, session token or subscription contents.
       debugPrint('Dropo managed profile unavailable (${error.code})');
+      return _unavailable();
+    } on AccountApiException catch (error) {
+      if (error.code == 'play_integrity_required' ||
+          error.code == 'play_integrity_unavailable') {
+        return {'success': false, 'code': error.code};
+      }
+      debugPrint('Dropo source request failed (${_safeAccountFailure(error)})');
       return _unavailable();
     } catch (error) {
       debugPrint('Dropo source request failed (${_safeAccountFailure(error)})');

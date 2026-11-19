@@ -2,6 +2,7 @@ package `in`.droponevedimka.dropo
 
 import android.Manifest
 import android.app.Activity
+import android.appwidget.AppWidgetManager
 import android.app.PendingIntent
 import android.app.admin.DevicePolicyManager
 import android.content.ActivityNotFoundException
@@ -22,7 +23,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.UserManager
 import android.provider.Settings
+import android.util.Base64
 import android.util.Log
+import com.google.android.play.core.integrity.IntegrityManagerFactory
+import com.google.android.play.core.integrity.StandardIntegrityManager
+import java.security.MessageDigest
 import android.widget.Toast
 import dropoandroid.Dropoandroid
 import io.flutter.embedding.android.FlutterActivity
@@ -38,11 +43,15 @@ class MainActivity : FlutterActivity() {
     private val coreExecutor = Executors.newSingleThreadExecutor()
     private val subscriptionExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val playIntegrity by lazy { IntegrityManagerFactory.createStandard(applicationContext) }
+    private var integrityProvider: Pair<Long, StandardIntegrityManager.StandardIntegrityTokenProvider>? = null
     private var coreChannel: MethodChannel? = null
     private var accountSessionChannel: AccountSessionChannel? = null
     private var eventChannel: EventChannel? = null
     private var eventListener: DropoVpnRuntime.Listener? = null
     private var pendingConnectResult: MethodChannel.Result? = null
+    private var prepareVpnOnly = false
+    private var requestedNotificationPermission = false
     private val apkUpdater by lazy { AndroidApkUpdater(this) }
     private var destroyed = false
     private var resumedForReview = false
@@ -54,6 +63,7 @@ class MainActivity : FlutterActivity() {
             return
         }
         handleDropoSpaceShortcut(intent)
+        DropoVpnWidget.observe(this)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -63,6 +73,7 @@ class MainActivity : FlutterActivity() {
             return
         }
         handleDropoSpaceShortcut(intent)
+        if (WidgetVpnSetup.pending()) DropoVpnRuntime.emitWidgetStart()
     }
 
     private fun repairManagedProfileIfNeeded(): Boolean {
@@ -82,6 +93,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        flutterEngine.plugins.add(AndroidSceneVisualStatePlugin())
         accountSessionChannel = AccountSessionChannel(this,
             flutterEngine.dartExecutor.binaryMessenger)
         coreChannel = MethodChannel(
@@ -154,10 +166,12 @@ class MainActivity : FlutterActivity() {
             REQUEST_VPN_PREPARE -> {
                 if (destroyed || pendingConnectResult == null) return
                 if (resultCode == Activity.RESULT_OK) {
-                    startVpnAndResolve()
+                    finishVpnPreparation()
                 } else {
-                    DropoVpnRuntime.setFailed("VPN permission was denied")
-                    recordCoreCall("AndroidEngineError", "[\"VPN permission was denied\"]")
+                    if (!prepareVpnOnly) {
+                        DropoVpnRuntime.setFailed("VPN permission was denied")
+                        recordCoreCall("AndroidEngineError", "[\"VPN permission was denied\"]")
+                    }
                     resolvePendingConnect(errorJson("VPN permission was denied"))
                 }
             }
@@ -185,7 +199,48 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun requestPlayIntegrity(call: MethodCall, result: MethodChannel.Result) {
+        val project = call.argument<String>("projectNumber")?.toLongOrNull()
+        val body = call.argument<String>("body")?.toByteArray(Charsets.UTF_8)
+        if (!BuildConfig.PLAY_DISTRIBUTION || project == null || project <= 0 ||
+            body == null || body.isEmpty() || body.size > 4096
+        ) {
+            result.error("PLAY_INTEGRITY_UNAVAILABLE", null, null)
+            return
+        }
+        // Bind the proof to the body without exposing the installation credential to Google.
+        val hash = Base64.encodeToString(
+            MessageDigest.getInstance("SHA-256").digest(body),
+            Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
+        )
+        fun requestToken(provider: StandardIntegrityManager.StandardIntegrityTokenProvider) {
+            provider.request(
+                StandardIntegrityManager.StandardIntegrityTokenRequest.builder().setRequestHash(hash).build(),
+            ).addOnSuccessListener { result.success(it.token()) }
+                .addOnFailureListener {
+                    if (integrityProvider?.second === provider) integrityProvider = null
+                    result.error("PLAY_INTEGRITY_FAILED", null, null)
+                }
+        }
+        val cached = integrityProvider
+        if (cached != null && cached.first == project) {
+            requestToken(cached.second)
+            return
+        }
+        playIntegrity.prepareIntegrityToken(
+            StandardIntegrityManager.PrepareIntegrityTokenRequest.builder()
+                .setCloudProjectNumber(project).build(),
+        ).addOnSuccessListener {
+            integrityProvider = project to it
+            requestToken(it)
+        }.addOnFailureListener { result.error("PLAY_INTEGRITY_FAILED", null, null) }
+    }
+
     private fun handleCoreCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "requestPlayIntegrity") {
+            requestPlayIntegrity(call, result)
+            return
+        }
         if (call.method == "preparePlayReview" || call.method == "launchPlayReview") {
             if (!BuildConfig.PLAY_DISTRIBUTION || packageName != PlayReviewClient.PLAY_APPLICATION_ID) {
                 result.success(mapOf("prepared" to false, "attempted" to false))
@@ -274,6 +329,50 @@ class MainActivity : FlutterActivity() {
         }
         if (call.method == "setConnected") {
             handleSetConnected(call, result)
+            return
+        }
+        if (call.method == "prepareVpnPermission") {
+            requestVpnPreparation(result, permissionOnly = true)
+            return
+        }
+        if (call.method == "consumeVpnWidgetSetup") {
+            result.success(WidgetVpnSetup.consume())
+            return
+        }
+        if (call.method == "pinVpnWidget") {
+            val manager = AppWidgetManager.getInstance(this)
+            val requested = manager.isRequestPinAppWidgetSupported && runCatching {
+                manager.requestPinAppWidget(ComponentName(this, DropoVpnWidget::class.java), null, null)
+            }.getOrDefault(false)
+            result.success(requested)
+            return
+        }
+        if (call.method == "getHapticsEnabled") {
+            result.success(prefs().getBoolean("haptics_enabled", true))
+            return
+        }
+        if (call.method == "setHapticsEnabled") {
+            val enabled = call.arguments as? Boolean
+            if (enabled == null) {
+                result.error("invalid_haptics", "Expected a Boolean", null)
+            } else {
+                prefs().edit().putBoolean("haptics_enabled", enabled).apply()
+                result.success(null)
+            }
+            return
+        }
+        if (call.method == "getInterfaceLanguage") {
+            result.success(prefs().getString("interface_language", "system"))
+            return
+        }
+        if (call.method == "setInterfaceLanguage") {
+            val language = call.argument<String>("language")
+            if (language !in setOf("system", "ru", "en")) {
+                result.error("invalid_language", "Unsupported language", null)
+            } else {
+                prefs().edit().putString("interface_language", language).apply()
+                result.success(null)
+            }
             return
         }
         if (call.method !in BACKGROUND_CORE_METHODS) {
@@ -402,6 +501,10 @@ class MainActivity : FlutterActivity() {
             result.success(successJson("Android VPN stop requested"))
             return
         }
+        requestVpnPreparation(result, permissionOnly = false)
+    }
+
+    private fun requestVpnPreparation(result: MethodChannel.Result, permissionOnly: Boolean) {
         if (pendingConnectResult != null) {
             result.success(errorJson("VPN start is already pending"))
             return
@@ -411,18 +514,25 @@ class MainActivity : FlutterActivity() {
             return
         }
         pendingConnectResult = result
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            androidNotificationsEnabled() &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(
-                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                REQUEST_POST_NOTIFICATIONS,
-            )
-            return
+        prepareVpnOnly = permissionOnly
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                !requestedNotificationPermission &&
+                androidNotificationsEnabled() &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                requestedNotificationPermission = true
+                requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQUEST_POST_NOTIFICATIONS,
+                )
+                return
+            }
+            continueVpnPrepare()
+        } catch (_: Exception) {
+            resolvePendingConnect(errorJson("VPN permission request failed"))
         }
-        continueVpnPrepare()
     }
 
     private fun continueVpnPrepare() {
@@ -437,7 +547,15 @@ class MainActivity : FlutterActivity() {
             startActivityForResult(prepareIntent, REQUEST_VPN_PREPARE)
             return
         }
-        startVpnAndResolve()
+        finishVpnPreparation()
+    }
+
+    private fun finishVpnPreparation() {
+        if (prepareVpnOnly) {
+            resolvePendingConnect(successJson("VPN permission granted"))
+        } else {
+            startVpnAndResolve()
+        }
     }
 
     private fun startVpnAndResolve() {
@@ -466,6 +584,7 @@ class MainActivity : FlutterActivity() {
     private fun resolvePendingConnect(value: String) {
         val result = pendingConnectResult
         pendingConnectResult = null
+        prepareVpnOnly = false
         result?.success(value)
     }
 

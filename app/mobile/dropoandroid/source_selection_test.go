@@ -43,6 +43,31 @@ func TestSourceChoiceUsesIndependentSourcesAndStablePriority(t *testing.T) {
 	}
 }
 
+func TestManagedSourceSelectionKeepsReservesWithinTheActiveProfile(t *testing.T) {
+	free := sourceCandidate{ID: "free", NodeID: "a"}
+	turbo := sourceCandidate{ID: "turbo", NodeID: "b"}
+	turboReserve := sourceCandidate{ID: "turbo-reserve", NodeID: "c", OwnerID: "turbo"}
+	personal := sourceCandidate{ID: "personal", NodeID: "d"}
+	candidates := []sourceCandidate{free, turbo, turboReserve, personal}
+	results := []sourceObservation{
+		{SourceID: free.ID, NodeID: free.NodeID, State: "ok", LatencyMS: 30},
+		{SourceID: turbo.ID, NodeID: turbo.NodeID, State: "ok", LatencyMS: 70},
+		{SourceID: turboReserve.ID, NodeID: turboReserve.NodeID, State: "ok", LatencyMS: 10},
+		{SourceID: personal.ID, NodeID: personal.NodeID, State: "ok", LatencyMS: 40},
+	}
+	if chosen := chooseSourceCandidate(candidates, results, true); chosen != free.ID {
+		t.Fatalf("automatic selection preferred a reserve over its healthy primary: %q", chosen)
+	}
+	results[1].State = "failed"
+	if chosen := chooseSourceAfterOutage(turbo, candidates, results); chosen != turboReserve.ID {
+		t.Fatalf("Turbo outage selected a different profile before its own reserve: %q", chosen)
+	}
+	results[2].State, results[0].State = "failed", "failed"
+	if chosen := chooseSourceAfterOutage(turbo, candidates, results); chosen != personal.ID {
+		t.Fatalf("personal subscription did not remain an independent fallback: %q", chosen)
+	}
+}
+
 func TestSourceHTTPUsesExplicitOutboundAndRequiresExact204(t *testing.T) {
 	for _, status := range []int{204, 200, 302, 503} {
 		t.Run(http.StatusText(status), func(t *testing.T) {

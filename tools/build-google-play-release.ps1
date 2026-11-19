@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [string]$Version,
-    [string]$AccountEndpoint = 'https://dropo.fun',
+    [string]$AccountEndpoint = 'https://api.droponevedimka.ru',
     [switch]$AllowDirtySource,
     [switch]$KeepExistingBuilds = $true,
     [switch]$UseCachedFlutterPackages

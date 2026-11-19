@@ -8,10 +8,12 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'account_session_store.dart';
 import 'owned_http_transport.dart';
 
@@ -26,6 +28,8 @@ part 'compact_shell.dart';
 part 'accessible_controls.dart';
 part 'planet_animation.dart';
 part 'android_animated_home.dart';
+part 'app_language.dart';
+part 'android_haptics.dart';
 part 'space_background.dart';
 part 'update_progress.dart';
 part 'vpn_response.dart';
@@ -205,33 +209,59 @@ SystemUiOverlayStyle _systemOverlayFor(Brightness brightness) {
   );
 }
 
-class DropoApp extends StatelessWidget {
+class DropoApp extends StatefulWidget {
   const DropoApp({super.key, this.bridge});
 
   final CoreBridge? bridge;
 
   @override
+  State<DropoApp> createState() => _DropoAppState();
+}
+
+class _DropoAppState extends State<DropoApp> {
+  late final CoreBridge _bridge = widget.bridge ?? createCoreBridge();
+
+  @override
+  void initState() {
+    super.initState();
+    if (Platform.isAndroid) {
+      unawaited(_restoreAndroidLanguage());
+      unawaited(_restoreAndroidHaptics());
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: _dropoThemeMode,
-      builder: (context, themeMode, _) => MaterialApp(
+    return ValueListenableBuilder<String>(
+      valueListenable: _languageChoice,
+      builder: (context, language, _) => MaterialApp(
         title: 'dropo',
         debugShowCheckedModeBanner: false,
+        locale: !Platform.isAndroid
+            ? const Locale('ru')
+            : language == 'system'
+            ? null
+            : Locale(language),
+        supportedLocales: const [Locale('en'), Locale('ru')],
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
         // Atlas is a dark shell on both platforms. Apply the same brightness
         // to dialogs and Android system bars, not only the home subtree.
         themeMode: ThemeMode.dark,
         theme: _dropoTheme(Brightness.light),
         darkTheme: _dropoTheme(Brightness.dark),
-        builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
-          value: _systemOverlayFor(Theme.of(context).brightness),
-          // Also suppress implicit framework tooltips on every route/dialog.
-          // App controls carry explicit labels in accessible_controls.dart.
-          child: TooltipVisibility(
-            visible: false,
-            child: child ?? const SizedBox.shrink(),
+        builder: (context, child) => _DropoLocale(
+          english: Localizations.localeOf(context).languageCode == 'en',
+          child: AnnotatedRegion<SystemUiOverlayStyle>(
+            value: _systemOverlayFor(Theme.of(context).brightness),
+            // Also suppress implicit framework tooltips on every route/dialog.
+            // App controls carry explicit labels in accessible_controls.dart.
+            child: TooltipVisibility(
+              visible: false,
+              child: child ?? const SizedBox.shrink(),
+            ),
           ),
         ),
-        home: DropoHomePage(bridge: bridge ?? createCoreBridge()),
+        home: DropoHomePage(bridge: _bridge),
       ),
     );
   }
@@ -1183,6 +1213,9 @@ class HttpCoreBridge implements CoreBridge {
 }
 
 class ChannelCoreBridge implements CoreBridge {
+  Future<Map<String, dynamic>> prepareAndroidVpnPermission() =>
+      _invokeMap('prepareVpnPermission', timeout: const Duration(minutes: 2));
+
   @override
   Future<Map<String, dynamic>> setReduceMotion(bool reduced) =>
       callMap('SetReduceMotion', args: [reduced]);
@@ -1588,6 +1621,7 @@ class ChannelCoreBridge implements CoreBridge {
       _managedFreeSourceClient.add(
         id,
         consent,
+        requireIndividual: _isAndroidPlatform,
         save: (providerId, name, uri, accepted) => callMap(
           'AddManagedVPNSource',
           args: [providerId, name, uri, accepted],
@@ -3869,6 +3903,37 @@ class _DropoHomePageState extends State<DropoHomePage>
   int refreshFailureCount = 0;
   bool autoStartPromptShown = false;
   String activeMenuSection = 'home';
+  bool _androidHomeVisible = false;
+  bool _checkingWidgetSetup = false;
+
+  Future<void> _startVpnIfRequestedByWidget() async {
+    if (!Platform.isAndroid ||
+        _checkingWidgetSetup ||
+        !mounted ||
+        !windowVisible ||
+        booting ||
+        controlsDisabled ||
+        connectionBusy) {
+      return;
+    }
+    _checkingWidgetSetup = true;
+    try {
+      final requested = await const MethodChannel(
+        'dropo/core',
+      ).invokeMethod<bool>('consumeVpnWidgetSetup');
+      if (mounted && requested == true && !status.connected) {
+        if (activeMenuSection != 'home') await _selectMenuSection('home');
+        if (mounted) await _toggleConnection(requestedTarget: true);
+      }
+    } on PlatformException {
+      // Ignore an unavailable widget bridge.
+    } on MissingPluginException {
+      // Unsupported platforms have no widget setup request.
+    } finally {
+      _checkingWidgetSetup = false;
+    }
+  }
+
   String statusMessage = 'Запускаем dropo-core...';
   String connectionHint = 'Поднимаем локальный bridge и готовим компоненты.';
   String routeHint = '';
@@ -3901,6 +3966,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   int updateTotal = 0;
   bool homeRoutesExpanded = false;
   bool preparingFullVpnSource = false;
+  bool _androidAwaitingPermission = false;
   bool _androidCancelPending = false;
   int _androidConnectionAttempt = 0;
   DateTime? _androidConnectedAt;
@@ -4036,6 +4102,8 @@ class _DropoHomePageState extends State<DropoHomePage>
           !(kDebugMode && _bridgeMode == 'mock'),
       transport: debugAccountTransport,
       initialToken: debugAccountSessionToken,
+      // Android enrolls lazily through OwnedVPNClient on the first connection.
+      canEnrollGuest: _isAndroidPlatform ? () => false : null,
     )..addListener(_identityChanged);
     _incidents = IncidentReporter(
       readState: () => _guestIdentity.readPrivateState('incidents'),
@@ -4138,6 +4206,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           _startPolling();
           unawaited(_refresh(all: true));
         }
+        unawaited(_startVpnIfRequestedByWidget());
         break;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
@@ -4210,6 +4279,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           connectionHint = '';
         }
       });
+      unawaited(_startVpnIfRequestedByWidget());
       unawaited(_maybeShowAutoStartPrompt());
       _checkAndroidReviewPrompt();
     } catch (error) {
@@ -4535,6 +4605,10 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   void _handlePushEvent(BridgeEvent event) {
     if (!mounted || quitting) {
+      return;
+    }
+    if (event.name == 'android-widget-start') {
+      unawaited(_startVpnIfRequestedByWidget());
       return;
     }
     setState(() => _applyEvent(event));
@@ -5051,12 +5125,22 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
   }
 
-  Future<void> _toggleConnection() async {
+  Future<void> _toggleConnection({bool? requestedTarget}) async {
     if (controlsDisabled || connectionBusy) {
       return;
     }
-    final target = !status.connected;
+    final target = requestedTarget ?? !status.connected;
+    if (status.connected == target) return;
+    _androidHaptic(impact: true);
     final androidAttempt = _androidConnectionAttempt;
+    if (target && _isAndroidPlatform) {
+      if (!await _ensureAndroidVpnDisclosure()) return;
+      if (!mounted || controlsDisabled || connectionBusy) return;
+      if (widget.bridge case final ChannelCoreBridge bridge) {
+        if (!await _ensureAndroidVpnPermission(bridge)) return;
+      }
+      if (!mounted || controlsDisabled || connectionBusy) return;
+    }
     if (target && _accountConfigured) {
       setState(() => preparingFullVpnSource = true);
       try {
@@ -5081,9 +5165,6 @@ class _DropoHomePageState extends State<DropoHomePage>
       } finally {
         if (mounted) setState(() => preparingFullVpnSource = false);
       }
-    }
-    if (target && _isAndroidPlatform && !await _ensureAndroidVpnDisclosure()) {
-      return;
     }
     if (!mounted || controlsDisabled || connectionBusy) return;
     if (target &&
@@ -5170,6 +5251,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         preparingFullVpnSource) {
       return;
     }
+    _androidHaptic(impact: true);
     ++_androidConnectionAttempt;
     _invalidateCoreSnapshots();
     // Also invalidate a mode/source reconnect that may be waiting for Start.
@@ -5208,6 +5290,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   void _openBoost() {
+    _androidHaptic();
     // Keep the purchase destination through guest -> registered sign-in.
     setState(() => accountTurboRequested = true);
     unawaited(_selectMenuSection('account'));
@@ -5222,6 +5305,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
     final androidAttempt = _androidConnectionAttempt;
     if (!status.connected) return _setHomeRoutingMode(mode);
+    _androidHaptic();
     try {
       final result = await _applySourceChange(
         () => widget.bridge.setRoutingMode(mode),
@@ -5288,7 +5372,10 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<bool> _ensureAndroidVpnDisclosure() async {
-    setState(() => preparingFullVpnSource = true);
+    setState(() {
+      preparingFullVpnSource = true;
+      _androidAwaitingPermission = true;
+    });
     try {
       final store = VpnDisclosureConsentStore();
       if (await store.isAccepted()) return true;
@@ -5313,7 +5400,52 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       return false;
     } finally {
-      if (mounted) setState(() => preparingFullVpnSource = false);
+      if (mounted) {
+        setState(() {
+          preparingFullVpnSource = false;
+          _androidAwaitingPermission = false;
+        });
+      }
+    }
+  }
+
+  Future<bool> _ensureAndroidVpnPermission(ChannelCoreBridge bridge) async {
+    setState(() {
+      preparingFullVpnSource = true;
+      _androidAwaitingPermission = true;
+    });
+    try {
+      final result = await bridge.prepareAndroidVpnPermission();
+      if (!mounted || quitting) return false;
+      if (result['success'] == true) return true;
+      setState(() {
+        connectionHint = _tr(
+          context,
+          'Разрешите VPN в системном запросе Android.',
+          'Allow the VPN in the Android system prompt.',
+        );
+        connectionHintDanger = true;
+      });
+      return false;
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          connectionHint = _tr(
+            context,
+            'Не удалось запросить разрешение VPN.',
+            'Could not request VPN permission.',
+          );
+          connectionHintDanger = true;
+        });
+      }
+      return false;
+    } finally {
+      if (mounted) {
+        setState(() {
+          preparingFullVpnSource = false;
+          _androidAwaitingPermission = false;
+        });
+      }
     }
   }
 
@@ -5326,6 +5458,44 @@ class _DropoHomePageState extends State<DropoHomePage>
       );
       if (!mounted || quitting) return false;
       if (sources.any((source) => !source.disabled)) return true;
+      if (_isAndroidPlatform) {
+        if (sources.isNotEmpty) {
+          // Respect an explicit choice to disable all sources.
+          await _openSubscription();
+          return false;
+        }
+        final bridge = widget.bridge;
+        await _guestIdentity.allowEnrollmentAfterDeletion();
+        if (!mounted || quitting) return false;
+        final result = await bridge.addPublicVpnSource('dropo-free', true);
+        if (!mounted || quitting) return false;
+        final ready =
+            result['success'] == true &&
+            (await bridge.vpnSources()).any((source) => !source.disabled);
+        if (!mounted || quitting) return false;
+        if (!ready) {
+          final hint = switch (result['code']) {
+            'play_integrity_required' => _tr(
+              context,
+              'Не удалось подтвердить установку. Откройте Dropo из Google Play и повторите попытку.',
+              'Could not verify this installation. Open Dropo from Google Play and try again.',
+            ),
+            'play_integrity_unavailable' => _tr(
+              context,
+              'Проверка Google Play временно недоступна. Повторите попытку позже.',
+              'Google Play verification is temporarily unavailable. Try again later.',
+            ),
+            _ => _tr(
+              context,
+              'Dropo Free временно недоступен. Повторите попытку.',
+              'Dropo Free is temporarily unavailable. Try again.',
+            ),
+          };
+          throw StateError(hint);
+        }
+        unawaited(_guestIdentity.restore());
+        return true;
+      }
       final action = await showDialog<_VpnOnboardingAction>(
         context: context,
         barrierDismissible: false,
@@ -6349,6 +6519,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (uiBusy || mode == appConfig.routingMode) {
       return;
     }
+    _androidHaptic();
     setState(() {
       uiBusy = true;
       statusMessage = mode == 'all_traffic'
@@ -6524,7 +6695,7 @@ class _DropoHomePageState extends State<DropoHomePage>
               connected: online && status.connected,
               connectedAt: _androidConnectedAt,
               connecting:
-                  preparingFullVpnSource ||
+                  (preparingFullVpnSource && !_androidAwaitingPermission) ||
                   status.connecting ||
                   busyTasks.containsKey('vpn-connect'),
               disconnecting:
@@ -6542,12 +6713,21 @@ class _DropoHomePageState extends State<DropoHomePage>
                   !quitting &&
                   !sectionBusy,
               motionEnabled: !appConfig.reduceMotion,
-              visible: windowVisible,
+              visible: windowVisible && activeMenuSection == 'home',
+              responseMs: status.vpnResponse.current
+                  ? status.vpnResponse.latencyMs
+                  : null,
+              onPresented: () {
+                if (mounted && !_androidHomeVisible) {
+                  setState(() => _androidHomeVisible = true);
+                }
+              },
               routingMode: appConfig.routingMode,
-              source: source?.name ?? 'Источник VPN',
+              source: source?.name ?? '',
               message: showHint ? normalizedHint : '',
               error: hintDanger,
-              onToggle: () => unawaited(_toggleConnection()),
+              onConnectionRequested: (target) =>
+                  unawaited(_toggleConnection(requestedTarget: target)),
               onCancel: () => unawaited(_cancelAndroidConnection()),
               onMode: (mode) => unawaited(_setAndroidSceneRoutingMode(mode)),
               onSources: () => unawaited(_openSubscription()),
@@ -6810,7 +6990,6 @@ class _DropoHomePageState extends State<DropoHomePage>
           onWorkNetworks: controlsDisabled || _isMobileShell
               ? null
               : _openWireGuard,
-          onExit: quitting ? null : _quitApp,
         );
       case 'guided-help':
         return _GuidedHelpPage(
@@ -6833,7 +7012,9 @@ class _DropoHomePageState extends State<DropoHomePage>
       case 'account':
         return AccountPage(
           key: ValueKey(
-            accountTurboRequested ? 'turbo-section' : 'account-section',
+            !Platform.isAndroid && accountTurboRequested
+                ? 'turbo-section'
+                : 'account-section',
           ),
           showTurbo: accountTurboRequested,
           onBackToAccount: () => setState(() => accountTurboRequested = false),
@@ -6958,6 +7139,10 @@ class _DropoHomePageState extends State<DropoHomePage>
     final strategyBannerMessage = strategyTransitionNotice.trim();
     return _AtlasDesktopShell(
       activeSection: activeMenuSection,
+      homeSceneReady:
+          !Platform.isAndroid ||
+          activeMenuSection != 'home' ||
+          _androidHomeVisible,
       disabled: quitting || sectionBusy,
       onSelect: (section) {
         if (_isAndroidPlatform && section == 'account') {
@@ -6974,7 +7159,6 @@ class _DropoHomePageState extends State<DropoHomePage>
       onWorkNetworks: controlsDisabled || _isMobileShell
           ? null
           : _openWireGuard,
-      onExit: quitting ? null : _quitApp,
       version: status.version.version,
       accountDisplay: _accountDisplay.value,
       onBoost: _openBoost,
@@ -6985,7 +7169,8 @@ class _DropoHomePageState extends State<DropoHomePage>
       visible: windowVisible,
       motionEnabled: !appConfig.reduceMotion,
       homeTelemetry:
-          online &&
+          !Platform.isAndroid &&
+              online &&
               status.connected &&
               !connectionBusy &&
               refreshFailureCount == 0
@@ -7024,7 +7209,14 @@ class _DropoHomePageState extends State<DropoHomePage>
           : quitting
           ? _QuitProgressOverlay(message: quitProgressMessage)
           : null,
-      child: activeMenuSection == 'home'
+      child: Platform.isAndroid
+          ? _AndroidHomeSections(
+              section: activeMenuSection,
+              motionEnabled: !appConfig.reduceMotion,
+              home: _buildHomeDashboard(isBusy, hintMessage),
+              page: activeMenuSection == 'home' ? null : _buildMenuSection(),
+            )
+          : activeMenuSection == 'home'
           ? _buildHomeDashboard(isBusy, hintMessage)
           : _buildMenuSection(),
     );
@@ -7097,7 +7289,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           setState(() => menuStats = loaded);
         }
       } catch (_) {}
-    } else if (section == 'home') {
+    } else if (section == 'home' && !Platform.isAndroid) {
       await _refresh(all: true);
     } else if (section == 'logs') {
       await _refresh();
@@ -7260,7 +7452,7 @@ class _ConnectionHint extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    title.toUpperCase(),
+                    _uiText(context, title).toUpperCase(),
                     style: TextStyle(
                       color: titleColor,
                       fontSize: 10,
@@ -10600,6 +10792,72 @@ class _SettingsDialogState extends State<_SettingsDialog>
           _SettingsGroup(
             title: 'Внешний вид',
             children: [
+              if (Platform.isAndroid)
+                _ButtonSetting(
+                  title: _tr(context, 'Виджет VPN', 'VPN widget'),
+                  description: _tr(
+                    context,
+                    'Переключатель VPN на домашнем экране Android',
+                    'A VPN switch for the Android home screen',
+                  ),
+                  label: _tr(context, 'Добавить', 'Add'),
+                  icon: Icons.widgets_outlined,
+                  onPressed: canUseLiveSafe
+                      ? () async {
+                          var requested = false;
+                          try {
+                            requested =
+                                await const MethodChannel(
+                                  'dropo/core',
+                                ).invokeMethod<bool>('pinVpnWidget') ==
+                                true;
+                          } on PlatformException {
+                            // An alternate launcher can still expose the widget picker.
+                          } on MissingPluginException {
+                            // The active host does not support widget pinning.
+                          }
+                          if (!requested && mounted) {
+                            setState(
+                              () => statusText = _tr(
+                                this.context,
+                                'Выберите Dropo VPN в списке виджетов Android.',
+                                'Choose Dropo VPN in the Android widget picker.',
+                              ),
+                            );
+                          }
+                        }
+                      : null,
+                ),
+              if (_isAndroidPlatform)
+                ValueListenableBuilder<bool>(
+                  valueListenable: _hapticsEnabled,
+                  builder: (context, enabled, _) => _SwitchSetting(
+                    title: _tr(context, 'Виброотклик', 'Haptic feedback'),
+                    description: _tr(
+                      context,
+                      'Вибрация при подключении и других основных действиях',
+                      'Vibrate for VPN controls and other key actions',
+                    ),
+                    value: enabled,
+                    onChanged: canUseLiveSafe
+                        ? (value) async {
+                            try {
+                              await _setAndroidHaptics(value);
+                            } catch (_) {
+                              if (mounted) {
+                                setState(
+                                  () => statusText = _tr(
+                                    this.context,
+                                    'Не удалось сохранить настройку вибрации.',
+                                    'Could not save the haptic feedback setting.',
+                                  ),
+                                );
+                              }
+                            }
+                          }
+                        : null,
+                  ),
+                ),
               _SwitchSetting(
                 title: 'Анимации интерфейса',
                 description: isMobile
@@ -10613,11 +10871,46 @@ class _SettingsDialogState extends State<_SettingsDialog>
                       )
                     : null,
               ),
-              const ListTile(
+              if (_isAndroidPlatform)
+                _SelectSetting(
+                  title: _tr(context, 'Язык', 'Language'),
+                  description: _tr(
+                    context,
+                    'Язык интерфейса Dropo',
+                    'Dropo interface language',
+                  ),
+                  value: _languageChoice.value,
+                  stacked: true,
+                  options: {
+                    'system': _tr(context, 'Как в системе', 'System default'),
+                    'ru': 'Русский',
+                    'en': 'English',
+                  },
+                  onChanged: (value) async {
+                    try {
+                      await _saveAndroidLanguage(value);
+                      if (mounted) setState(() {});
+                    } catch (_) {
+                      if (mounted) {
+                        setState(
+                          () => statusText = _tr(
+                            context,
+                            'Не удалось сохранить язык.',
+                            'Could not save the language.',
+                          ),
+                        );
+                      }
+                    }
+                  },
+                ),
+              ListTile(
                 contentPadding: EdgeInsets.zero,
-                title: Text('Atlas'),
+                title: const Text('Atlas'),
                 subtitle: Text(
-                  'Тёмный космический фон с зелёными акцентами. Размер текста и уменьшение движения задаются в настройках устройства.',
+                  _uiText(
+                    context,
+                    'Тёмный космический фон с зелёными акцентами. Размер текста и уменьшение движения задаются в настройках устройства.',
+                  ),
                 ),
               ),
             ],
@@ -10752,7 +11045,10 @@ class _SettingsDialogState extends State<_SettingsDialog>
     );
     if (widget.embedded) {
       return _MenuPageSurface(
-        title: widget.advanced ? 'Сеть и диагностика' : 'Приложение',
+        title: _uiText(
+          context,
+          widget.advanced ? 'Сеть и диагностика' : 'Приложение',
+        ),
         icon: Icons.settings,
         child: content,
       );
@@ -10956,7 +11252,7 @@ class _SettingShell extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          title,
+          _uiText(context, title),
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
@@ -10967,7 +11263,7 @@ class _SettingShell extends StatelessWidget {
         ),
         const SizedBox(height: 3),
         Text(
-          description,
+          _uiText(context, description),
           maxLines: 3,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
@@ -11152,7 +11448,7 @@ class _ButtonSetting extends StatelessWidget {
       title: title,
       description: description,
       trailing: _ActionButton(
-        label: label,
+        label: _uiText(context, label),
         icon: icon,
         compact: true,
         onPressed: onPressed,

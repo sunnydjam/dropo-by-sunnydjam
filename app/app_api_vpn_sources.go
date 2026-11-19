@@ -17,13 +17,26 @@ func (a *App) GetVPNSources() map[string]interface{} {
 	}
 	active := a.activeVPNSource()
 	running, now := a.isVPNRunning() && !a.vpnStopping.Load(), time.Now()
+	owners := ownedVPNSourceTags(profile.VPNSources, now)
+	visibleActive := active
+	if owner := owners[active]; owner != "" {
+		visibleActive = owner
+	}
 	views := publicVPNSources(profile.VPNSources)
 	for _, view := range views {
 		tag := "vpn-source-" + view["id"].(string)
-		view["active"] = running && active == tag
-		view["response"] = a.vpnSourceResponseSnapshot(tag, running, now)
+		isActive := running && visibleActive == tag
+		probeTag := tag
+		if isActive {
+			probeTag = active
+		}
+		response := a.vpnSourceResponseSnapshot(probeTag, running, now)
+		if probeTag != tag {
+			response.SourceID, response.NodeID = view["id"].(string), ""
+		}
+		view["active"], view["response"] = isActive, response
 	}
-	return map[string]interface{}{"success": true, "sources": views, "activeSource": active, "running": running, "autoSelect": profile.VPNSourceSelectionMode != "priority"}
+	return map[string]interface{}{"success": true, "sources": views, "activeSource": visibleActive, "running": running, "autoSelect": profile.VPNSourceSelectionMode != "priority"}
 }
 
 func (a *App) AddVPNSource(name, uri string) map[string]interface{} {
@@ -128,7 +141,7 @@ func (a *App) SetVPNSourceEnabled(id string, enabled bool) map[string]interface{
 		for index := range profile.VPNSources {
 			if profile.VPNSources[index].ID == id {
 				profile.VPNSources[index].Disabled = !enabled
-				if provider := profile.VPNSources[index].PublicCatalogID; ownedprofile.IsPrimary(provider) {
+				if provider := profile.VPNSources[index].PublicCatalogID; ownedprofile.IsProvider(provider) {
 					for i := range profile.VPNSources {
 						if ownedprofile.SameFamily(provider, profile.VPNSources[i].PublicCatalogID) {
 							profile.VPNSources[i].Disabled = !enabled
@@ -144,25 +157,16 @@ func (a *App) SetVPNSourceEnabled(id string, enabled bool) map[string]interface{
 
 func (a *App) MoveVPNSource(id string, newIndex int) map[string]interface{} {
 	return a.changeVPNSources(func(profile *ProfileData) error {
-		if newIndex < 0 || newIndex >= len(profile.VPNSources) {
-			return fmt.Errorf("source index %d is outside range", newIndex)
-		}
 		id = normalizeVPNSourceID(id)
-		oldIndex := -1
-		for index, source := range profile.VPNSources {
-			if source.ID == id {
-				oldIndex = index
-				break
-			}
-		}
-		if oldIndex < 0 {
+		order, ok := ownedprofile.Move(ownedSourceInputs(profile.VPNSources), id, newIndex)
+		if !ok {
 			return fmt.Errorf("VPN source %q not found", id)
 		}
-		source := profile.VPNSources[oldIndex]
-		profile.VPNSources = append(profile.VPNSources[:oldIndex], profile.VPNSources[oldIndex+1:]...)
-		profile.VPNSources = append(profile.VPNSources, VPNSource{})
-		copy(profile.VPNSources[newIndex+1:], profile.VPNSources[newIndex:])
-		profile.VPNSources[newIndex] = source
+		reordered := make([]VPNSource, len(order))
+		for i, index := range order {
+			reordered[i] = profile.VPNSources[index]
+		}
+		profile.VPNSources = reordered
 		profile.VPNSourceSelectionMode = "priority"
 		return nil
 	})
@@ -195,12 +199,15 @@ func (a *App) changeVPNSources(change func(*ProfileData) error) map[string]inter
 func publicVPNSources(sources []VPNSource) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(sources))
 	for _, source := range sources {
+		if ownedprofile.IsReserve(source.PublicCatalogID) {
+			continue
+		}
 		problem := source.LastError
 		if source.PublicCatalogID == managedFreeVPNProviderID && problem != "" {
 			problem = "Не удалось обновить Dropo Free. Используются сохранённые серверы, если они доступны."
 		}
 		result = append(result, map[string]interface{}{
-			"id": source.ID, "name": source.Name, "kind": source.Kind,
+			"id": source.ID, "name": ownedprofile.DisplayName(source.PublicCatalogID, source.Name), "kind": source.Kind,
 			"public_catalog_id": source.PublicCatalogID, "using_cache": source.UsingCache,
 			"disabled": source.Disabled, "selected_node": source.SelectedNode,
 			"selected_node_id": source.SelectedNodeID, "node_count": source.NodeCount,

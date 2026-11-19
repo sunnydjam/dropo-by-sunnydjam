@@ -19,6 +19,7 @@ bool ownedAccountMirrorPathAllowed(String path, String method) {
     'POST': {
       '/v1/auth/password',
       '/v1/auth/guest',
+      '/v1/auth/guest/play',
       '/v1/auth/challenges',
       '/v1/installations/bind',
       '/v1/guest/link',

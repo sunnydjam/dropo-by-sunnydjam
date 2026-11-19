@@ -274,34 +274,24 @@ void main() {
   });
 
   for (final mode in ['all_traffic', 'blocked_only']) {
-    testWidgets(
-      'Android first connection keeps $mode and needs explicit Free consent',
-      (tester) async {
-        addTearDown(tester.view.resetPhysicalSize);
-        addTearDown(tester.view.resetDevicePixelRatio);
-        final bridge = _ProductBridge()..mode = mode;
-        await _pump(tester, bridge);
-        await _tap(tester, 'home-connect');
-        expect(_key('full-vpn-onboarding'), findsOneWidget);
-        expect(_key('onboarding-android-permission'), findsOneWidget);
-        expect(_key('onboarding-services-mode'), findsNothing);
-        expect(bridge.starts, 0);
-        expect(bridge.freeAdds, 0);
-        expect(bridge.mode, mode);
-        if (mode == 'all_traffic') {
-          await _capture(tester, 'android-first-connection');
-        }
-        await _tap(tester, 'onboarding-free-dropo-free');
-        expect(bridge.starts, 1);
-        expect(bridge.freeAdds, 1);
-        expect(bridge.mode, mode);
-        expect(_key('planet-connected'), findsOneWidget);
-        expect(tester.takeException(), isNull);
-      },
-    );
+    testWidgets('Android first connection provisions Free and keeps $mode', (
+      tester,
+    ) async {
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _ProductBridge()..mode = mode;
+      await _pump(tester, bridge);
+      await _tap(tester, 'home-connect');
+      expect(_key('full-vpn-onboarding'), findsNothing);
+      expect(bridge.starts, 1);
+      expect(bridge.freeAdds, 1);
+      expect(bridge.mode, mode);
+      expect(_key('planet-connected'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
   }
 
-  testWidgets('cancel and disabled sources never start or re-enable a source', (
+  testWidgets('disabled sources open settings without starting VPN', (
     tester,
   ) async {
     addTearDown(tester.view.resetPhysicalSize);
@@ -312,15 +302,11 @@ void main() {
       ];
     await _pump(tester, bridge);
     await _tap(tester, 'home-connect');
-    expect(_key('onboarding-free-dropo-free'), findsNothing);
-    await _tap(tester, 'onboarding-cancel');
+    expect(_key('full-vpn-onboarding'), findsNothing);
+    expect(_key('sources-section'), findsOneWidget);
     expect(bridge.starts, 0);
     expect(bridge.freeAdds, 0);
     expect(bridge.sources.single.disabled, isTrue);
-    await _tap(tester, 'home-connect');
-    await _tap(tester, 'onboarding-own-source');
-    expect(_key('sources-section'), findsOneWidget);
-    expect(bridge.starts, 0);
   });
 
   testWidgets(
@@ -331,7 +317,6 @@ void main() {
       final bridge = _ProductBridge()..denied = true;
       await _pump(tester, bridge);
       await _tap(tester, 'home-connect');
-      await _tap(tester, 'onboarding-free-dropo-free');
       expect(_key('planet-error'), findsOneWidget);
       expect(bridge.connected, isFalse);
       expect(bridge.mode, 'all_traffic');
@@ -404,9 +389,8 @@ void main() {
     final bridge = _ProductBridge();
     await _pump(tester, bridge, size: const Size(320, 568), scale: 2);
     await _tap(tester, 'home-connect');
-    expect(_key('full-vpn-onboarding'), findsOneWidget);
+    expect(_key('full-vpn-onboarding'), findsNothing);
     await _capture(tester, 'android-first-connection-320-large-text');
-    await _tap(tester, 'onboarding-free-dropo-free');
     expect(bridge.connected, isTrue);
     await openSection(tester, 'guided-help');
     await _capture(tester, 'android-guided-help-choices-320-large-text');

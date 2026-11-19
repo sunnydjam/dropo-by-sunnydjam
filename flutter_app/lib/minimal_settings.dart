@@ -30,13 +30,13 @@ class _SettingsLink extends StatelessWidget {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       leading: Icon(icon, size: 24, color: _atlasMuted),
       title: Text(
-        title,
+        _uiText(context, title),
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
       ),
       subtitle: detail == null
           ? null
           : Text(
-              detail!,
+              _uiText(context, detail!),
               style: const TextStyle(
                 fontSize: 13,
                 color: _atlasMuted,
@@ -54,12 +54,11 @@ class _MinimalSettingsPage extends StatelessWidget {
     required this.disabled,
     required this.onSelect,
     required this.onWorkNetworks,
-    required this.onExit,
   });
   final String section;
   final bool disabled;
   final ValueChanged<String> onSelect;
-  final VoidCallback? onWorkNetworks, onExit;
+  final VoidCallback? onWorkNetworks;
 
   @override
   Widget build(BuildContext context) {
@@ -118,7 +117,6 @@ class _MinimalSettingsPage extends StatelessWidget {
           'Версия, проект и лицензии',
           Icons.info_outline,
         ),
-        ('exit', 'Выход', 'Отключить соединение и закрыть Dropo', Icons.logout),
       ],
       _ => <(String, String, String, IconData)>[
         (
@@ -159,7 +157,6 @@ class _MinimalSettingsPage extends StatelessWidget {
                   ? null
                   : switch (target) {
                       'work' => onWorkNetworks,
-                      'exit' => onExit,
                       _ => () => onSelect(target),
                     },
             );

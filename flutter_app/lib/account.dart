@@ -321,6 +321,38 @@ class _AccountApi implements AccountTransport {
   final String endpoint;
   final Duration responseTimeout;
   final OwnedHttpTransport _transport;
+  String? _playProjectNumber;
+
+  Future<String> _requestPlayProof(String body) async {
+    final project =
+        _playProjectNumber ??
+        (await request('GET', '/v1/capabilities'))['playIntegrityProjectNumber']
+            as String?;
+    if (project == null || (int.tryParse(project) ?? 0) <= 0) {
+      throw const AccountApiException(
+        'Проверка Google Play временно недоступна.',
+        code: 'play_integrity_unavailable',
+      );
+    }
+    _playProjectNumber = project;
+    try {
+      final proof = await const MethodChannel('dropo/core')
+          .invokeMethod<String>('requestPlayIntegrity', {
+            'projectNumber': project,
+            'body': body,
+          })
+          .timeout(const Duration(seconds: 40));
+      if (proof != null && proof.isNotEmpty && proof.length <= 12 * 1024) {
+        return proof;
+      }
+    } on Exception {
+      _playProjectNumber = null;
+    }
+    throw const AccountApiException(
+      'Не удалось подтвердить установку из Google Play.',
+      code: 'play_integrity_required',
+    );
+  }
 
   @override
   Future<Map<String, dynamic>> request(
@@ -332,6 +364,14 @@ class _AccountApi implements AccountTransport {
     if (!accountEndpointAvailable(endpoint)) {
       throw const AccountApiException('Сервис аккаунтов пока не настроен.');
     }
+    final encodedBody = body == null ? null : jsonEncode(body);
+    final needsPlayProof =
+        _isPlayDistribution &&
+        method == 'POST' &&
+        path == '/v1/auth/guest' &&
+        encodedBody != null;
+    final proof = needsPlayProof ? await _requestPlayProof(encodedBody) : null;
+    if (proof != null) path = '/v1/auth/guest/play';
     final base = Uri.parse(endpoint);
     final target = base.resolve(path);
     final publicCatalog = path == '/public/v1/catalog' && method == 'GET';
@@ -349,9 +389,12 @@ class _AccountApi implements AccountTransport {
       if (token != null && token.isNotEmpty) {
         request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       }
-      if (body != null) {
+      if (proof != null) {
+        request.headers.set('X-Dropo-Play-Integrity', proof);
+      }
+      if (encodedBody != null) {
         request.headers.contentType = ContentType.json;
-        request.write(jsonEncode(body));
+        request.add(utf8.encode(encodedBody));
       }
       late final HttpClientResponse response;
       late final String raw;
@@ -535,7 +578,10 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
   Timer? _authPoll;
   Timer? _authDeadlineTimer;
   DateTime? _authDeadline;
-  _AccountPhase _phase = _AccountPhase.loading;
+  _AccountPhase _phase = _isAndroidPlatform
+      ? _AccountPhase.signedOut
+      : _AccountPhase.loading;
+  Future<void>? _capabilitiesRequest;
   _AccountRecord? _account;
   _AccountProduct _product = const _AccountProduct(
     id: '',
@@ -567,6 +613,9 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.identity?.addListener(_identityUpdated);
+    if (_isAndroidPlatform && widget.identity?.account != null) {
+      _identityUpdated();
+    }
     unawaited(_restore());
   }
 
@@ -595,15 +644,17 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       widget.onDisplayChanged?.call(null);
       return;
     }
-    await _loadCapabilities();
-    if (!mounted) return;
+    final generation = _authGeneration;
+    await _checkCapabilities();
+    if (!mounted || generation != _authGeneration) return;
     // A pending background profile request must not hide local logout. Once a
     // credential is restored, this page can perform its own bounded refresh.
     if (widget.identity?.token == null) await widget.identity?.restore();
-    if (!mounted) return;
+    if (!mounted || generation != _authGeneration) return;
     final token = widget.identity != null
         ? widget.identity!.token
         : await _vault.read();
+    if (!mounted || generation != _authGeneration) return;
     if (token == null || token.isEmpty) {
       final identity = widget.identity;
       if (identity?.state == 'storage_error') {
@@ -622,6 +673,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     try {
       await _refreshAccount();
     } catch (error) {
+      if (!mounted || generation != _authGeneration || token != _token) return;
       final invalid =
           error is AccountApiException &&
           (error.status == 401 || error.code == 'invalid_session');
@@ -644,6 +696,12 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       }
     }
   }
+
+  Future<void> _checkCapabilities() =>
+      _capabilitiesRequest ??= _loadCapabilities().whenComplete(() {
+        _capabilitiesRequest = null;
+        if (mounted && _isAndroidPlatform) setState(() {});
+      });
 
   Future<void> _loadCapabilities() async {
     _message = '';
@@ -837,6 +895,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         widget.identity?.deletionPending == true) {
       return;
     }
+    _androidHaptic();
     _stopAuthTimers();
     final generation = ++_authGeneration;
     setState(() {
@@ -1297,6 +1356,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
         setState(() => _busy = false);
       }
     }
+    _androidHaptic();
     setState(() => _message = '');
     await showDialog<bool>(
       context: context,
@@ -1437,10 +1497,18 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
               icon: const Icon(Icons.refresh),
               label: const Text('Повторить'),
             ),
-            TextButton(
-              onPressed: _busy ? null : _logout,
-              child: const Text('Выйти на этом устройстве'),
-            ),
+            if (_account?.guestAccount == false ||
+                widget.identity?.accountKind == 'registered')
+              TextButton(
+                onPressed: _busy ? null : _logout,
+                child: Text(
+                  _tr(
+                    context,
+                    'Выйти на этом устройстве',
+                    'Sign out on this device',
+                  ),
+                ),
+              ),
           ],
         ),
         const SizedBox(height: 20),
@@ -1541,156 +1609,295 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     ),
   );
 
-  Widget _signedOut() => _page(
-    LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 700;
-        final form = _AuthForm(
-          busy: _busy,
-          available:
-              _registrationAvailable &&
-              widget.identity?.deletionPending != true,
-          development: _development,
-          recovery: _authPurpose == 'recovery',
-          retry: _authRetryAvailable,
-          message: _message,
-          onOpenExternal: widget.onOpenExternal,
-          onSubmit: () => _startAuth(purpose: _authPurpose),
-          onToggleRecovery: () => setState(() {
-            _authPurpose = _authPurpose == 'login' ? 'recovery' : 'login';
-            _message = '';
-            _authRetryAvailable = false;
-          }),
-        );
-        const steps = _TelegramAuthSteps();
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _signedOut() =>
+      _page(_isAndroidPlatform ? _androidSignIn() : _legacySignIn());
+
+  bool _confirmingTelegram = false;
+
+  Widget _telegramIcon(Color color) => SvgPicture.asset(
+    'assets/service-telegram.svg',
+    width: 22,
+    height: 22,
+    colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+    excludeFromSemantics: true,
+  );
+
+  Future<void> _confirmTelegramSignIn() async {
+    if (_busy || _confirmingTelegram) return;
+    setState(() => _confirmingTelegram = true);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          _tr(context, 'Вход через Telegram', 'Sign in with Telegram'),
+        ),
+        content: Text(
+          _tr(
+            context,
+            'Dropo получает ID аккаунта и чата Telegram, имя и имя пользователя. После подтверждения эти данные используются для входа и безопасности. VPN-трафик и личные подписки не передаются сервису аккаунтов.',
+            'Dropo receives your Telegram account and chat IDs, name, and username for sign-in and security. VPN traffic and personal subscriptions are not sent to the account service.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_tr(context, 'Отмена', 'Cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_tr(context, 'Продолжить', 'Continue')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _capabilitiesRequest;
+    if (!mounted) return;
+    setState(() => _confirmingTelegram = false);
+    if (confirmed == true &&
+        !_busy &&
+        widget.identity?.deletionPending != true) {
+      await _startAuth(purpose: 'login');
+    }
+  }
+
+  Widget _androidSignIn() {
+    final guest =
+        _account?.guestAccount == true ||
+        widget.identity?.accountKind == 'guest';
+    final canSignIn =
+        !_busy &&
+        !_confirmingTelegram &&
+        widget.identity?.deletionPending != true;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          _tr(context, 'Войти в Dropo', 'Sign in to Dropo'),
+          style: const TextStyle(
+            color: _atlasText,
+            fontSize: 32,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 20),
+        FilledButton.icon(
+          key: const ValueKey('account-submit'),
+          onPressed:
+              canSignIn &&
+                  (_registrationAvailable || _capabilitiesRequest != null)
+              ? _confirmTelegramSignIn
+              : null,
+          icon: _telegramIcon(_atlasBackground),
+          label: Text(
+            _tr(context, 'Войти через Telegram', 'Sign in with Telegram'),
+          ),
+          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(50)),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          _tr(
+            context,
+            'Подтвердите вход в боте Dropo. Для бесплатного VPN вход не нужен.',
+            'Confirm sign-in in the Dropo bot. Free VPN does not require sign-in.',
+          ),
+          style: const TextStyle(color: _atlasMuted),
+        ),
+        if (_confirmingTelegram && _capabilitiesRequest != null)
+          const LinearProgressIndicator(),
+        if (!_registrationAvailable && _capabilitiesRequest == null)
+          TextButton.icon(
+            key: const ValueKey('account-retry'),
+            onPressed: _busy ? null : _retryAccount,
+            icon: const Icon(Icons.refresh),
+            label: Text(
+              _tr(context, 'Повторить проверку сервиса', 'Check service again'),
+            ),
+          ),
+        if (_message.isNotEmpty) _AccountNotice(message: _message),
+        const SizedBox(height: 14),
+        ExpansionTile(
+          key: const ValueKey('account-extra-actions'),
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: EdgeInsets.zero,
+          title: Text(
+            _tr(context, 'Дополнительные возможности', 'Additional options'),
+          ),
+          expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Войти в Dropo',
-              style: TextStyle(
-                color: _atlasText,
-                fontSize: 32,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            const SizedBox(height: 10),
-            if (widget.identity?.suppressed == true) ...[
-              Text(
-                widget.identity!.deletionPending
-                    ? 'Удаление бесплатного профиля ожидает соединения с сервером. Автоматическое создание нового профиля отключено.'
-                    : 'Автоматическое создание бесплатного профиля отключено после выхода или удаления.',
-              ),
-              const SizedBox(height: 12),
-              if (!widget.identity!.deletionPending &&
-                  widget.identity!.guestAvailable)
-                OutlinedButton(
-                  key: const ValueKey('guest-create-new'),
-                  onPressed: _busy
-                      ? null
-                      : () async {
-                          setState(() => _busy = true);
-                          try {
-                            await widget.identity!.createNewGuest();
-                            await _restore();
-                          } catch (_) {
-                            if (mounted) {
-                              setState(
-                                () => _message =
-                                    'Не удалось создать профиль. Повторите позже.',
-                              );
-                            }
-                          } finally {
-                            if (mounted) setState(() => _busy = false);
-                          }
-                        },
-                  child: const Text('Создать новый бесплатный профиль'),
-                ),
-              if (widget.identity!.deletionPending)
-                TextButton(
-                  onPressed: _busy ? null : _retryAccount,
-                  child: const Text('Повторить удаление'),
-                ),
-              const SizedBox(height: 16),
-            ],
-            if (widget.identity?.accountKind == 'guest') ...[
-              TextButton(
-                onPressed: _busy
-                    ? null
-                    : widget.showTurbo
-                    ? widget.onBackToAccount
-                    : _retryAccount,
-                child: const Text('Вернуться к бесплатному профилю'),
-              ),
-              const SizedBox(height: 12),
-            ],
-            Text(
-              _passwordLoginAvailable
-                  ? 'Выберите способ входа: Telegram или выданный логин и пароль. Бесплатный VPN работает и без входа.'
-                  : 'Войдите через Telegram. При первом подтверждении аккаунт создаётся автоматически. Бесплатный VPN работает и без входа.',
-              style: const TextStyle(color: _atlasMuted, fontSize: 15),
-            ),
-            const SizedBox(height: 28),
-            if (_passwordLoginAvailable) ...[
+            if (_passwordLoginAvailable)
               OutlinedButton.icon(
                 key: const ValueKey('account-password-open'),
-                onPressed: _busy || widget.identity?.deletionPending == true
-                    ? null
-                    : _startPasswordSignIn,
+                onPressed: canSignIn ? _startPasswordSignIn : null,
                 icon: const Icon(Icons.password_outlined),
-                label: const Text('Войти по логину и паролю'),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Для аккаунтов с выданными данными входа. Telegram не требуется.',
-                style: TextStyle(color: _atlasMuted, height: 1.4),
-              ),
-              const SizedBox(height: 28),
-            ],
-            if (_development) ...[
-              const _AccountNotice(
-                message:
-                    'Локальная проверка: подтверждение имитируется в браузере. Это не настоящий вход через Telegram.',
-              ),
-              const SizedBox(height: 20),
-            ],
-            if (!_registrationAvailable) ...[
-              TextButton.icon(
-                key: const ValueKey('account-retry'),
-                onPressed: _busy ? null : _retryAccount,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Повторить проверку сервиса'),
-              ),
-              const SizedBox(height: 16),
-            ],
-            if (compact) ...[
-              form,
-              const SizedBox(height: 28),
-              steps,
-            ] else
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(flex: 6, child: form),
-                  const SizedBox(width: 48),
-                  const Expanded(flex: 5, child: _TelegramAuthSteps()),
-                ],
-              ),
-            if (widget.onDeleteGuestVPN != null && !_development) ...[
-              const SizedBox(height: 24),
-              TextButton.icon(
-                key: const ValueKey('delete-guest-vpn'),
-                onPressed: _busy ? null : _deleteGuestVPN,
-                icon: const Icon(Icons.delete_outline),
-                label: const Text(
-                  'Удалить бесплатный профиль этого устройства',
+                label: Text(
+                  _tr(
+                    context,
+                    'Войти по логину и паролю',
+                    'Sign in with username and password',
+                  ),
                 ),
               ),
-            ],
+            if (guest && widget.identity != null)
+              TextButton.icon(
+                key: const ValueKey('guest-delete'),
+                onPressed: _busy ? null : _deleteGuestProfile,
+                icon: const Icon(Icons.delete_outline),
+                label: Text(
+                  _tr(context, 'Удалить мои данные', 'Delete my data'),
+                ),
+              ),
+            _PrivacyActions(onOpenExternal: widget.onOpenExternal),
           ],
-        );
-      },
-    ),
+        ),
+      ],
+    );
+  }
+
+  Widget _legacySignIn() => LayoutBuilder(
+    builder: (context, constraints) {
+      final compact = constraints.maxWidth < 700;
+      final form = _AuthForm(
+        busy: _busy,
+        available:
+            _registrationAvailable && widget.identity?.deletionPending != true,
+        development: _development,
+        recovery: _authPurpose == 'recovery',
+        retry: _authRetryAvailable,
+        message: _message,
+        onOpenExternal: widget.onOpenExternal,
+        onSubmit: () => _startAuth(purpose: _authPurpose),
+        onToggleRecovery: () => setState(() {
+          _authPurpose = _authPurpose == 'login' ? 'recovery' : 'login';
+          _message = '';
+          _authRetryAvailable = false;
+        }),
+      );
+      const steps = _TelegramAuthSteps();
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Войти в Dropo',
+            style: TextStyle(
+              color: _atlasText,
+              fontSize: 32,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (widget.identity?.suppressed == true) ...[
+            Text(
+              widget.identity!.deletionPending
+                  ? 'Удаление бесплатного профиля ожидает соединения с сервером. Автоматическое создание нового профиля отключено.'
+                  : 'Автоматическое создание бесплатного профиля отключено после выхода или удаления.',
+            ),
+            const SizedBox(height: 12),
+            if (!widget.identity!.deletionPending &&
+                widget.identity!.guestAvailable)
+              OutlinedButton(
+                key: const ValueKey('guest-create-new'),
+                onPressed: _busy
+                    ? null
+                    : () async {
+                        setState(() => _busy = true);
+                        try {
+                          await widget.identity!.createNewGuest();
+                          await _restore();
+                        } catch (_) {
+                          if (mounted) {
+                            setState(
+                              () => _message =
+                                  'Не удалось создать профиль. Повторите позже.',
+                            );
+                          }
+                        } finally {
+                          if (mounted) setState(() => _busy = false);
+                        }
+                      },
+                child: const Text('Создать новый бесплатный профиль'),
+              ),
+            if (widget.identity!.deletionPending)
+              TextButton(
+                onPressed: _busy ? null : _retryAccount,
+                child: const Text('Повторить удаление'),
+              ),
+            const SizedBox(height: 16),
+          ],
+          if (widget.identity?.accountKind == 'guest') ...[
+            TextButton(
+              onPressed: _busy
+                  ? null
+                  : widget.showTurbo
+                  ? widget.onBackToAccount
+                  : _retryAccount,
+              child: const Text('Вернуться к бесплатному профилю'),
+            ),
+            const SizedBox(height: 12),
+          ],
+          Text(
+            _passwordLoginAvailable
+                ? 'Выберите способ входа: Telegram или выданный логин и пароль. Бесплатный VPN работает и без входа.'
+                : 'Войдите через Telegram. При первом подтверждении аккаунт создаётся автоматически. Бесплатный VPN работает и без входа.',
+            style: const TextStyle(color: _atlasMuted, fontSize: 15),
+          ),
+          const SizedBox(height: 28),
+          if (_passwordLoginAvailable) ...[
+            OutlinedButton.icon(
+              key: const ValueKey('account-password-open'),
+              onPressed: _busy || widget.identity?.deletionPending == true
+                  ? null
+                  : _startPasswordSignIn,
+              icon: const Icon(Icons.password_outlined),
+              label: const Text('Войти по логину и паролю'),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Для аккаунтов с выданными данными входа. Telegram не требуется.',
+              style: TextStyle(color: _atlasMuted, height: 1.4),
+            ),
+            const SizedBox(height: 28),
+          ],
+          if (_development) ...[
+            const _AccountNotice(
+              message:
+                  'Локальная проверка: подтверждение имитируется в браузере. Это не настоящий вход через Telegram.',
+            ),
+            const SizedBox(height: 20),
+          ],
+          if (!_registrationAvailable) ...[
+            TextButton.icon(
+              key: const ValueKey('account-retry'),
+              onPressed: _busy ? null : _retryAccount,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Повторить проверку сервиса'),
+            ),
+            const SizedBox(height: 16),
+          ],
+          if (compact) ...[
+            form,
+            const SizedBox(height: 28),
+            steps,
+          ] else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(flex: 6, child: form),
+                const SizedBox(width: 48),
+                const Expanded(flex: 5, child: _TelegramAuthSteps()),
+              ],
+            ),
+          if (widget.onDeleteGuestVPN != null && !_development) ...[
+            const SizedBox(height: 24),
+            TextButton.icon(
+              key: const ValueKey('delete-guest-vpn'),
+              onPressed: _busy ? null : _deleteGuestVPN,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Удалить бесплатный профиль этого устройства'),
+            ),
+          ],
+        ],
+      );
+    },
   );
 
   Widget _pendingAuth() => _page(
@@ -1699,8 +1906,8 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
       children: [
         Text(
           _authPurpose == 'recovery'
-              ? 'Восстановление доступа'
-              : 'Подтвердите вход',
+              ? _tr(context, 'Восстановление доступа', 'Recover access')
+              : _tr(context, 'Подтвердите вход', 'Confirm sign-in'),
           style: const TextStyle(
             color: _atlasText,
             fontSize: 30,
@@ -1739,7 +1946,11 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                           ? 'Не удалось проверить подтверждение'
                           : _development
                           ? 'Ожидаем локальное подтверждение'
-                          : 'Ожидаем подтверждение в Telegram',
+                          : _tr(
+                              context,
+                              'Ожидаем подтверждение в Telegram',
+                              'Waiting for confirmation in Telegram',
+                            ),
                       style: const TextStyle(
                         color: _atlasText,
                         fontSize: 18,
@@ -1750,15 +1961,23 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                 ],
               ),
               const SizedBox(height: 16),
-              const Text(
-                'После подтверждения вернитесь в Dropo. Если время заявки истечёт, можно повторить вход.',
-                style: TextStyle(color: _atlasMuted, height: 1.5),
+              Text(
+                _tr(
+                  context,
+                  'После подтверждения вернитесь в Dropo. Если время заявки истечёт, можно повторить вход.',
+                  'Return to Dropo after confirming. If the request expires, you can start again.',
+                ),
+                style: const TextStyle(color: _atlasMuted, height: 1.5),
               ),
               const SizedBox(height: 12),
               Text(
                 _development
                     ? 'Подтвердите тестовый вход на локальной странице в браузере. Это имитация: настоящий Telegram-бот не используется.'
-                    : 'Откройте бота и подтвердите вход. Передавать контакт или вводить коды Telegram не нужно. Статус обновится автоматически.',
+                    : _tr(
+                        context,
+                        'Откройте бота и подтвердите вход. Передавать контакт или вводить коды Telegram не нужно. Статус обновится автоматически.',
+                        'Open the bot and confirm sign-in. The status updates automatically.',
+                      ),
                 style: const TextStyle(color: _atlasMuted, height: 1.5),
               ),
               if (_message.isNotEmpty) ...[
@@ -1782,12 +2001,16 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
                     label: Text(
                       _development
                           ? 'Открыть тестовую страницу'
-                          : 'Открыть Telegram снова',
+                          : _tr(
+                              context,
+                              'Открыть Telegram снова',
+                              'Reopen Telegram',
+                            ),
                     ),
                   ),
                   OutlinedButton(
                     onPressed: _busy ? null : _cancelAuth,
-                    child: const Text('Отменить'),
+                    child: Text(_tr(context, 'Отменить', 'Cancel')),
                   ),
                 ],
               ),
@@ -1804,9 +2027,15 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Удалить бесплатный профиль?'),
-        content: const Text(
-          'Текущий профиль, его сессии и связанные ключи Dropo будут удалены. Свои подписки и настройки сохранятся. Отдельный бесплатный профиль, если он есть, удаляется своей кнопкой. Новый профиль не будет создан автоматически.',
+        title: Text(
+          _tr(context, 'Удалить бесплатный профиль?', 'Delete Free profile?'),
+        ),
+        content: Text(
+          _tr(
+            context,
+            'Будут удалены данные этой установки, её сессии и выданные ей ключи Dropo Free.',
+            'This deletes this installation’s profile, sessions, and Dropo Free keys.',
+          ),
         ),
         actions: [
           TextButton(
@@ -1940,10 +2169,6 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
           spacing: 12,
           runSpacing: 12,
           children: [
-            TextButton(
-              onPressed: _busy ? null : _logout,
-              child: const Text('Выйти'),
-            ),
             TextButton(
               key: const ValueKey('guest-delete'),
               onPressed: _busy ? null : _deleteGuestProfile,
@@ -2118,7 +2343,11 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
 
   Widget _signedIn() {
     final account = _account!;
-    if (account.guestAccount) return _guestProfile();
+    if (account.guestAccount) {
+      return _isAndroidPlatform
+          ? TickerMode(enabled: !_passwordDialogOpen, child: _signedOut())
+          : _guestProfile();
+    }
     return _page(
       Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2187,7 +2416,7 @@ class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
               ),
               OutlinedButton(
                 onPressed: _busy ? null : _logout,
-                child: const Text('Выйти'),
+                child: Text(_tr(context, 'Выйти', 'Sign out')),
               ),
             ],
           ),

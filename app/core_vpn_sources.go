@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -10,6 +11,14 @@ import (
 )
 
 type VPNSourceKind string
+
+func ownedSourceInputs(sources []VPNSource) []ownedprofile.Source {
+	inputs := make([]ownedprofile.Source, len(sources))
+	for i, source := range sources {
+		inputs[i] = ownedprofile.Source{ID: source.ID, Provider: source.PublicCatalogID, URI: source.URI, Disabled: source.Disabled}
+	}
+	return inputs
+}
 
 const (
 	VPNSourceSubscription VPNSourceKind = "subscription"
@@ -83,10 +92,7 @@ func hasConfiguredVPNSource(profile *ProfileData) bool {
 	if len(sources) == 0 && strings.TrimSpace(profile.SubscriptionURL) != "" {
 		sources = []VPNSource{{ID: "legacy", URI: profile.SubscriptionURL}}
 	}
-	for _, source := range sources {
-		if source.Disabled || ownedSourceExpired(source) {
-			continue
-		}
+	for _, source := range ownedprofile.Candidates(ownedSourceInputs(sources), time.Now()) {
 		uri := strings.TrimSpace(source.URI)
 		if uri == "" {
 			continue
@@ -174,7 +180,7 @@ func normalizeProfileVPNSources(profile *ProfileData) {
 	profile.ProxyCount = 0
 	profile.LastUpdated = ""
 	for _, source := range profile.VPNSources {
-		if source.Disabled {
+		if source.Disabled || ownedprofile.IsReserve(source.PublicCatalogID) {
 			continue
 		}
 		if profile.SubscriptionURL == "" {

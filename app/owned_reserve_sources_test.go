@@ -164,6 +164,21 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		t.Fatal("source selector missing")
 	}
 	primary, reserve := profile.VPNSources[0].ID, profile.VPNSources[1].ID
+	if views := publicVPNSources(profile.VPNSources); len(views) != 1 || views[0]["id"] != primary {
+		t.Fatal("Windows exposed an internal relay as a selectable connection")
+	}
+	tags := app.configuredVPNSourceTags()
+	if len(tags) != 4 {
+		t.Fatalf("Windows monitor does not include all four managed routes: %v", tags)
+	}
+	for _, tag := range tags {
+		if _, ok := app.vpnSourceProbeBinding(tag); !ok {
+			t.Fatalf("Windows monitor cannot bind %s to its independent node", tag)
+		}
+	}
+	if result := app.SelectVPNSource(reserve); result["error"] != "VPN source is unavailable" {
+		t.Fatal("Windows permits direct manual selection of an internal relay")
+	}
 	if result := app.SetVPNSourceEnabled(primary, false); result["success"] != true {
 		t.Fatalf("disable failed: %v", result)
 	}

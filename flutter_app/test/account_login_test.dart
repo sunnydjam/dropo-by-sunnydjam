@@ -9,6 +9,49 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   WidgetController.hitTestWarningShouldBeFatal = true;
 
+  for (final showTurbo in [false, true]) {
+    testWidgets(
+      'Android login is immediate and keeps its destination ($showTurbo)',
+      (tester) async {
+        debugAndroidPlatformOverride = true;
+        addTearDown(() => debugAndroidPlatformOverride = null);
+        final pending = Completer<void>();
+        final api = _PasswordTransport()..capabilitiesGate = pending.future;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: AccountPage(
+                endpoint: 'https://accounts.example.com',
+                transport: api,
+                initialToken: 'guest-bearer',
+                persistSession: false,
+                showTurbo: showTurbo,
+                onOpenExternal: (_) async => fail('No external link is needed'),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.text('Войти в Dropo'), findsOneWidget);
+        expect(find.byKey(const ValueKey('account-submit')), findsOneWidget);
+        expect(find.byType(CircularProgressIndicator), findsNothing);
+        pending.complete();
+        await tester.pumpAndSettle();
+        expect(find.text('Войти в Dropo'), findsOneWidget);
+        await _tap(tester, find.byKey(const ValueKey('account-extra-actions')));
+        await _login(tester);
+        expect(
+          find.text('Play Review'),
+          showTurbo ? findsNothing : findsWidgets,
+        );
+        expect(
+          find.byKey(const ValueKey('turbo-page')),
+          showTurbo ? findsOneWidget : findsNothing,
+        );
+      },
+    );
+  }
+
   testWidgets(
     'Boost opens sign-in directly for an existing guest and keeps the purchase destination',
     (tester) async {
@@ -355,6 +398,7 @@ class _PasswordTransport implements AccountTransport {
   bool demoAccount = true;
   String action = '';
   Completer<Map<String, dynamic>>? pendingLogin;
+  Future<void>? capabilitiesGate;
   Iterable<_Request> get logins =>
       requests.where((r) => r.path == '/v1/auth/password');
   Iterable<_Request> get confirmations =>
@@ -384,6 +428,7 @@ class _PasswordTransport implements AccountTransport {
   }) async {
     requests.add(_Request(method, path, token, body));
     if (path == '/v1/capabilities') {
+      await capabilitiesGate;
       return {
         'authMode': 'telegram_bot',
         'registrationAvailable': true,

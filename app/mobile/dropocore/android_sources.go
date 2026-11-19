@@ -81,11 +81,19 @@ func migrateAndroidSourcesLocked() {
 
 func primaryAndroidSourceLocked() *androidVPNSource {
 	for i := range current.VPNSources {
-		if !current.VPNSources[i].Disabled && !ownedAndroidSourceExpired(current.VPNSources[i]) {
+		if !ownedprofile.IsReserve(current.VPNSources[i].PublicCatalogID) && !current.VPNSources[i].Disabled && !ownedAndroidSourceExpired(current.VPNSources[i]) {
 			return &current.VPNSources[i]
 		}
 	}
 	return nil
+}
+
+func androidSourceInputs(sources []androidVPNSource) []ownedprofile.Source {
+	inputs := make([]ownedprofile.Source, len(sources))
+	for i, s := range sources {
+		inputs[i] = ownedprofile.Source{ID: s.ID, Provider: s.PublicCatalogID, URI: s.URI, Disabled: s.Disabled}
+	}
+	return inputs
 }
 
 func syncAndroidSubscriptionLocked() {
@@ -104,6 +112,10 @@ func androidSourcesViewLocked() map[string]interface{} {
 	migrateAndroidSourcesLocked()
 	views := make([]map[string]interface{}, 0, len(current.VPNSources))
 	for _, source := range current.VPNSources {
+		if ownedprofile.IsReserve(source.PublicCatalogID) {
+			continue
+		}
+		active, response := androidLogicalSourceStatusLocked(source.ID)
 		names := make([]string, 0, len(source.Nodes))
 		ids := make([]string, 0, len(source.Nodes))
 		for i, node := range source.Nodes {
@@ -135,12 +147,12 @@ func androidSourcesViewLocked() map[string]interface{} {
 		}
 		views = append(views, map[string]interface{}{
 			"public_catalog_id": publicID,
-			"id":                source.ID, "name": source.Name, "kind": kind, "disabled": source.Disabled,
+			"id":                source.ID, "name": ownedprofile.DisplayName(publicID, source.Name), "kind": kind, "disabled": source.Disabled,
 			"selected_node": androidSelectedNode(source), "node_count": len(source.Nodes),
 			"node_names": names, "last_updated": source.UpdatedAt, "last_error": problem,
 			"node_ids": ids, "favorite_node_ids": append([]string{}, source.FavoriteNodeIDs...),
-			"active":   current.Connected && current.activeSourceID == source.ID,
-			"response": androidSourceResponseLocked(source.ID),
+			"active":   active,
+			"response": response,
 		})
 	}
 	return map[string]interface{}{"success": true, "sources": views, "running": current.Connected,
@@ -315,7 +327,7 @@ func changeAndroidSources(method string, args []interface{}) string {
 				return androidSourceError("Неверное состояние источника.")
 			}
 			sources[index].Disabled = !enabled
-			if provider := sources[index].PublicCatalogID; ownedprofile.IsPrimary(provider) {
+			if provider := sources[index].PublicCatalogID; ownedprofile.IsProvider(provider) {
 				for i := range sources {
 					if ownedprofile.SameFamily(provider, sources[i].PublicCatalogID) {
 						sources[i].Disabled = !enabled
@@ -338,12 +350,16 @@ func changeAndroidSources(method string, args []interface{}) string {
 			if method == "SetVPNSourceNode" {
 				sources[index].SelectedNodeID = androidNodeID(sources[index].Nodes[n])
 			} else {
+				order, ok := ownedprofile.Move(androidSourceInputs(sources), id, n)
+				if !ok {
+					return androidSourceError("Источник не найден. Обновите список.")
+				}
 				autoSelect = false
-				source := sources[index]
-				sources = append(sources[:index], sources[index+1:]...)
-				sources = append(sources, androidVPNSource{})
-				copy(sources[n+1:], sources[n:])
-				sources[n] = source
+				reordered := make([]androidVPNSource, len(order))
+				for i, index := range order {
+					reordered[i] = sources[index]
+				}
+				sources = reordered
 			}
 		}
 	default:

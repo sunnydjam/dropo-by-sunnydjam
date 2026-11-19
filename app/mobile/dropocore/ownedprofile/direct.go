@@ -26,32 +26,6 @@ type Source struct {
 	Disabled          bool
 }
 
-// ReservePlan inserts the independent candidates after the last enabled
-// member of their own family, preserving explicit source order elsewhere.
-func ReservePlan(sources []Source, now time.Time) map[int][]DirectReserve {
-	last := map[string]int{}
-	primary := map[string]string{}
-	occupied := make(map[string]bool, len(sources))
-	for i, s := range sources {
-		occupied[s.ID] = true
-		if family := Family(s.Provider); family != "" && !s.Disabled {
-			last[family] = i
-			if IsPrimary(s.Provider) {
-				primary[family] = s.URI
-			}
-		}
-	}
-	result := make(map[int][]DirectReserve, len(primary))
-	for family, raw := range primary {
-		for _, reserve := range DirectReserves(family, raw, now) {
-			if !occupied[reserve.ID] {
-				result[last[family]] = append(result[last[family]], reserve)
-			}
-		}
-	}
-	return result
-}
-
 // DirectReserves adds one candidate per independent ingress. The protected
 // primary is authoritative for lifetime and identity; arbitrary keys never
 // acquire an owned reserve and no client sends a primary UUID to FI or LV.

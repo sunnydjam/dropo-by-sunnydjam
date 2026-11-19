@@ -16,7 +16,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v14-direct-reserves"
+	androidConfigSchema     = "android-package-routing-v15-managed-source-groups"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -36,12 +36,13 @@ func BuildSingBoxConfig() string {
 	androidBuildCancel = cancel
 	defer cancel()
 	migrateAndroidSourcesLocked()
-	for _, source := range current.VPNSources {
-		if !source.Disabled && !ownedAndroidSourceExpired(source) && len(source.Nodes) > 0 {
+	for _, candidate := range ownedprofile.Candidates(androidSourceInputs(current.VPNSources), time.Now()) {
+		if candidate.Index < 0 || len(current.VPNSources[candidate.Index].Nodes) > 0 {
 			mu.Unlock()
 			return buildPreparedAndroidSourcePool(buildCtx)
 		}
 	}
+	syncAndroidSubscriptionLocked()
 	selectedNodeID := ""
 	if source := primaryAndroidSourceLocked(); source != nil {
 		selectedNodeID = source.SelectedNodeID
@@ -263,40 +264,33 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 		return androidSourceError("VPN configuration was cancelled")
 	}
 	sources := current.VPNSources
-	inputs := make([]ownedprofile.Source, len(sources))
-	for i, s := range sources {
-		inputs[i] = ownedprofile.Source{ID: s.ID, Provider: s.PublicCatalogID, URI: s.URI, Disabled: s.Disabled}
-	}
-	reservePlan := ownedprofile.ReservePlan(inputs, time.Now())
+	plan := ownedprofile.Candidates(androidSourceInputs(sources), time.Now())
 	outbounds := make([]interface{}, 0, len(sources)+2)
 	proxyTags := make([]string, 0, len(sources))
 	candidates := make([]androidSourceCandidate, 0, len(sources))
-	for i, source := range sources {
-		if source.Disabled || ownedAndroidSourceExpired(source) {
-			continue
-		}
-		selected := androidSelectedNode(source)
-		if selected < 0 || selected >= len(source.Nodes) {
-			continue
-		}
-		node := source.Nodes[selected]
-		if normalizeTransport(node.Network) == "xhttp" && !isAndroidProxySupported(node) {
-			return androidSourceError("Сохранённый XHTTP-сервер не поддерживается. Обновите источник или выберите другой сервер.")
-		}
-		node.Tag = "vpn-" + source.ID
-		outbounds = append(outbounds, proxyToSingBoxOutbound(node))
-		proxyTags = append(proxyTags, node.Tag)
-		candidates = append(candidates, androidSourceCandidate{ID: source.ID, Tag: node.Tag, NodeID: androidNodeID(node)})
-		for _, reserve := range reservePlan[i] {
-			node, err := parseAndroidDirectProxyCandidate(reserve.URI)
+	for _, candidate := range plan {
+		var node proxyConfig
+		if candidate.Index < 0 {
+			parsed, err := parseAndroidDirectProxyCandidate(candidate.URI)
 			if err != nil {
 				return androidSourceError("Некорректный прямой резерв Dropo.")
 			}
-			node.Tag = "vpn-" + reserve.ID
-			outbounds = append(outbounds, proxyToSingBoxOutbound(node))
-			proxyTags = append(proxyTags, node.Tag)
-			candidates = append(candidates, androidSourceCandidate{ID: reserve.ID, Tag: node.Tag, NodeID: androidNodeID(node)})
+			node = parsed
+		} else {
+			source := sources[candidate.Index]
+			selected := androidSelectedNode(source)
+			if selected < 0 || selected >= len(source.Nodes) {
+				continue
+			}
+			node = source.Nodes[selected]
 		}
+		if normalizeTransport(node.Network) == "xhttp" && !isAndroidProxySupported(node) {
+			return androidSourceError("Сохранённый XHTTP-сервер не поддерживается. Обновите источник или выберите другой сервер.")
+		}
+		node.Tag = "vpn-" + candidate.ID
+		outbounds = append(outbounds, proxyToSingBoxOutbound(node))
+		proxyTags = append(proxyTags, node.Tag)
+		candidates = append(candidates, androidSourceCandidate{ID: candidate.ID, Tag: node.Tag, NodeID: androidNodeID(node), OwnerID: candidate.OwnerID})
 	}
 	if len(candidates) == 0 {
 		return androidSourceError("Включённые источники не содержат выбранных серверов. Обновите подписки или выберите сервер.")

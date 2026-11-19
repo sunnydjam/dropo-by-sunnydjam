@@ -7,6 +7,7 @@ class GuestIdentityCoordinator extends ChangeNotifier {
     required this.endpoint,
     required this.available,
     this.persistSession = true,
+    this.canEnrollGuest,
     AccountTransport? transport,
     ProtectedAccountIdentityStore? store,
     String? initialToken,
@@ -31,6 +32,7 @@ class GuestIdentityCoordinator extends ChangeNotifier {
 
   final String endpoint;
   final bool available, persistSession;
+  final bool Function()? canEnrollGuest;
   final ProtectedAccountIdentityStore store;
   final AccountTransport _api;
   final bool _ownsApi;
@@ -376,7 +378,8 @@ class GuestIdentityCoordinator extends ChangeNotifier {
         }
       }
     }
-    if (!guestAvailable) {
+    if (!guestAvailable ||
+        (installationId == null && !(canEnrollGuest?.call() ?? true))) {
       state = existing == null ? 'signed_out' : 'offline';
       _publish();
       return;
@@ -762,22 +765,44 @@ class GuestIdentityCoordinator extends ChangeNotifier {
           return;
         }
       }
-      await _save(
-        (record) => record.remove('pendingDeletion'),
-        expectedEpoch: epoch,
-      );
+      await _save((record) {
+        record.remove('pendingDeletion');
+        record['guestDeletionConfirmed'] = true;
+      }, expectedEpoch: epoch);
     } on AccountApiException catch (error) {
       if (error.code == 'installation_revoked' &&
           !_disposed &&
           epoch == _epoch) {
-        await _save(
-          (record) => record.remove('pendingDeletion'),
-          expectedEpoch: epoch,
-        );
+        await _save((record) {
+          record.remove('pendingDeletion');
+          record['guestDeletionConfirmed'] = true;
+        }, expectedEpoch: epoch);
       }
     } catch (_) {
       /* Keep the durable deletion intent for a bounded later retry. */
     }
+  }
+
+  // Only an explicit Connect after confirmed deletion may start a new
+  // installation. A blocked or otherwise suppressed identity stays suppressed.
+  Future<void> allowEnrollmentAfterDeletion() async {
+    if (!persistSession ||
+        !suppressed ||
+        deletionPending ||
+        _record['guestDeletionConfirmed'] != true) {
+      return;
+    }
+    await _restoring;
+    if (_disposed || _changingIdentity) return;
+    await _save((record) {
+      if (record['guestDeletionConfirmed'] == true &&
+          record['pendingDeletion'] == null &&
+          record['token'] == null) {
+        record.remove('guestDeletionConfirmed');
+        record['suppressed'] = false;
+      }
+    });
+    if (_record['suppressed'] == false) _locallySuppressed = false;
   }
 
   Future<void> createNewGuest() async {
@@ -795,6 +820,7 @@ class GuestIdentityCoordinator extends ChangeNotifier {
       ]) {
         record.remove(key);
       }
+      record.remove('guestDeletionConfirmed');
       record['suppressed'] = false;
     });
     _locallySuppressed = false;

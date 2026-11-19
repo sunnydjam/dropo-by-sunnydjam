@@ -85,19 +85,24 @@ Future<void> showAndroidReviewPrompt(
     builder: (dialogContext) => AlertDialog(
       scrollable: true,
       icon: const Icon(Icons.rate_review_outlined),
-      title: const Text('Оставить отзыв о Dropo?'),
-      content: const Text(
-        'Поделитесь впечатлениями в Google Play. '
-        'Ваш отзыв поможет нам улучшить приложение.',
+      title: Text(
+        _tr(dialogContext, 'Оставить отзыв о Dropo?', 'Review Dropo?'),
+      ),
+      content: Text(
+        _tr(
+          dialogContext,
+          'Поделитесь впечатлениями в Google Play. Ваш отзыв поможет нам улучшить приложение.',
+          'Share your experience on Google Play to help us improve Dropo.',
+        ),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(dialogContext).pop(false),
-          child: const Text('Не сейчас'),
+          child: Text(_tr(dialogContext, 'Не сейчас', 'Not now')),
         ),
         FilledButton(
           onPressed: () => Navigator.of(dialogContext).pop(true),
-          child: const Text('Оставить отзыв'),
+          child: Text(_tr(dialogContext, 'Оставить отзыв', 'Leave a review')),
         ),
       ],
     ),
@@ -108,7 +113,15 @@ Future<void> showAndroidReviewPrompt(
   } catch (_) {
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Не удалось открыть Google Play.')),
+      SnackBar(
+        content: Text(
+          _tr(
+            context,
+            'Не удалось открыть Google Play.',
+            'Could not open Google Play.',
+          ),
+        ),
+      ),
     );
   }
 }

@@ -62,6 +62,10 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 	if !CommitAndroidSourceProbeBatch(plan.Generation, sourceObservationJSON(reserve.ID, reserve.NodeID, plan.Generation, "ok", 40), reserve.ID, selector) {
 		t.Fatal("healthy reserve did not commit")
 	}
+	view := sourceCall(t, "GetVPNSources")["sources"].([]interface{})
+	if len(view) != 1 || view[0].(map[string]interface{})["id"] != "old-owned" || view[0].(map[string]interface{})["active"] != true {
+		t.Fatal("an active reserve must still display as the main profile")
+	}
 	CancelPendingSourceWork()
 	if CommitAndroidSourceProbeBatch(plan.Generation, sourceObservationJSON(reserve.ID, reserve.NodeID, plan.Generation, "ok", 40), reserve.ID, selector) {
 		t.Fatal("stale reserve committed after Stop")
@@ -74,14 +78,17 @@ func TestAndroidOwnedPairRefreshDeletionAndRedaction(t *testing.T) {
 	personal := current.VPNSources[0]
 	sourceSuccess(t, "AddManagedVPNSource", ownedprofile.Free, "ignored", ownedReserveFixture, true)
 	primaryID, reserveID := current.VPNSources[1].ID, current.VPNSources[2].ID
-	sourceSuccess(t, "SetVPNSourceEnabled", reserveID, false)
-	sourceSuccess(t, "MoveVPNSource", reserveID, 1)
+	sourceSuccess(t, "SetVPNSourceEnabled", primaryID, false)
+	if sourceCall(t, "MoveVPNSource", reserveID, 1)["success"] == true {
+		t.Fatal("an internal reserve was reorderable")
+	}
+	sourceSuccess(t, "MoveVPNSource", primaryID, 0)
 	sourceSuccess(t, "EnableVPNSourceAutoSelect", true)
-	personal = current.VPNSources[0]
+	personal = current.VPNSources[2]
 	refreshed := strings.ReplaceAll(ownedReserveFixture, "11111111-2222-3333-4444-555555555555", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 	sourceSuccess(t, "AddManagedVPNSource", ownedprofile.Free, "ignored", refreshed, true)
-	if current.VPNSources[1].ID != reserveID || !current.VPNSources[1].Disabled || current.VPNSources[2].ID != primaryID || !current.VPNSourceAutoSelect || !reflect.DeepEqual(current.VPNSources[0], personal) {
-		t.Fatal("refresh overwrote source ordering, disabled reserve or personal data")
+	if current.VPNSources[0].ID != primaryID || current.VPNSources[1].ID != reserveID || !current.VPNSources[0].Disabled || !current.VPNSources[1].Disabled || !current.VPNSourceAutoSelect || !reflect.DeepEqual(current.VPNSources[2], personal) {
+		t.Fatal("refresh overwrote group ordering, disabled state or personal data")
 	}
 	before := current.sourcesRevision
 	sourceSuccess(t, "AddManagedVPNSource", ownedprofile.Free, "ignored", refreshed, true)

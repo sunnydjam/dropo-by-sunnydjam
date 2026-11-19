@@ -40,6 +40,10 @@ object DropoVpnRuntime {
         emit(name, payload)
     }
 
+    fun emitWidgetStart() {
+        emit("android-widget-start", emptyMap())
+    }
+
     fun setStarting(text: String = "VPN запускается") {
         setState(STATE_STARTING, text, "")
     }

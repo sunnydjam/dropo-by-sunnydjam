@@ -9,6 +9,38 @@ import (
 
 const reserveTestPrimary = "vless://11111111-2222-3333-4444-555555555555@193.233.88.97:443?type=xhttp&security=tls&sni=cdn.droponevedimka.ru&host=cdn.droponevedimka.ru&path=%2Fmanaged%2Fv1%2Ffree&encryption=none&dropo_expiry=0"
 
+func TestManagedGroupsKeepPersonalSourcesAndOwnReserveOrder(t *testing.T) {
+	boost := strings.ReplaceAll(strings.ReplaceAll(reserveTestPrimary, "%2Ffree", "%2Fboost"), "expiry=0", "expiry=2000")
+	_, freeRelay, _ := Pair(Free, reserveTestPrimary)
+	_, boostRelay, _ := Pair(Boost, boost)
+	sources := []Source{
+		{ID: "free-relay", Provider: FreeReserve, URI: freeRelay, Disabled: true},
+		{ID: "personal"},
+		{ID: "turbo", Provider: Boost, URI: boost},
+		{ID: "free", Provider: Free, URI: reserveTestPrimary},
+		{ID: "turbo-relay", Provider: BoostReserve, URI: boostRelay},
+	}
+	plan := Candidates(sources, time.Unix(1000, 0))
+	want := []string{"personal", "turbo", "turbo-relay", Boost + "-fi-tcp", Boost + "-lv-quic", "free", "free-relay", Free + "-fi-tcp", Free + "-lv-quic"}
+	if len(plan) != len(want) {
+		t.Fatalf("expected %d candidates, got %d", len(want), len(plan))
+	}
+	for i, candidate := range plan {
+		if candidate.ID != want[i] || (i > 0 && i < 5 && candidate.OwnerID != "turbo") || (i >= 5 && candidate.OwnerID != "free") {
+			t.Fatalf("incorrect candidate ownership or order at index %d", i)
+		}
+	}
+	order, ok := Move(sources, "free", 0)
+	if !ok || len(order) != len(sources) || order[0] != 3 || order[1] != 0 || order[2] != 1 {
+		t.Fatal("reordering did not move an entire group or affected the personal source")
+	}
+	sources[3].Disabled = true
+	plan = Candidates(sources, time.Unix(2001, 0))
+	if len(plan) != 1 || plan[0].ID != "personal" {
+		t.Fatal("disabled Free or expired Turbo left a reserve active")
+	}
+}
+
 func TestDirectReserveCompatibilityWithController(t *testing.T) {
 	const fiKey = "cec3ca12-ad4b-4714-a401-a31c79362f07"
 	const lvKey = "iUhknX5NjVWE2kSZjzYHqxHCSZnivpjJfBZCuCKrbUM"

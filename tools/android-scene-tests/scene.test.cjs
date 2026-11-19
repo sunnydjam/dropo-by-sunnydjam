@@ -34,7 +34,7 @@ after(async () => {
   if (server) await new Promise(resolve => server.close(resolve));
 });
 
-async function pageFor(t, {viewport={width:390,height:760}, fault=null}={}) {
+async function pageFor(t, {viewport={width:390,height:760}, fault=null, manualStartup=false}={}) {
   const context = await browser.newContext({viewport, deviceScaleFactor:1});
   t.after(() => context.close());
   await context.addInitScript(() => {
@@ -57,9 +57,10 @@ async function pageFor(t, {viewport={width:390,height:760}, fault=null}={}) {
   t.after(() => assert.deepEqual(external, [], 'scene must not access external services'));
   if (!fault) t.after(() => assert.deepEqual(errors, [], 'no runtime errors'));
   await page.goto(origin+'/android_home/index.html');
-  if (!fault) {
-    await page.waitForFunction(() => window.sceneMessages.some(x=>x.action==='ready'));
+  if (!fault && !manualStartup) {
     await update(page, idle);
+    const revision = await preparedFrame(page);
+    assert.equal(await reveal(page, revision), true);
     assert.equal(await page.title(), 'Подключение Dropo');
   }
   return page;
@@ -73,24 +74,111 @@ const state=page=>page.evaluate(()=>{
     timer:q('.dp-session-time').textContent, messages:window.sceneMessages};
 });
 
-test('success exposes controls synchronously while artwork completes its flight', async t => {
-  const page=await pageFor(t);
-  await update(page,{connecting:true,enabled:false,canCancel:true,busy:true});
-  await page.waitForTimeout(150);
-  const immediate=await page.evaluate(()=>{
-    window.DropoHome.update({connected:true,connecting:false,canCancel:false,busy:false,enabled:true});
-    const d=document.querySelector('.dp-details');
-    return {hidden:d.hidden,inert:d.inert,disabled:document.querySelector('.dp-mode-all').disabled,
-      status:document.querySelector('.dp-status-text').textContent};
+const reveal = (page, revision) => page.evaluate(
+  revision => window.DropoHome.reveal(revision, innerWidth * devicePixelRatio, innerHeight * devicePixelRatio),
+  revision,
+);
+
+const preparedFrame = async (page, after) => {
+  const result = await page.waitForFunction(after => {
+    const ready = window.sceneMessages.filter(message => message.action === 'ready').pop();
+    return ready && ready.value !== after && ready.value;
+  }, after);
+  return result.jsonValue();
+};
+
+test('startup waits for host state and two drawn frames, and ignores an outdated viewport', async t => {
+  const page = await pageFor(t, {manualStartup: true});
+  const main = page.locator('.dp-main');
+  const power = page.locator('.dp-start');
+  assert.equal(await main.getAttribute('data-startup'), 'loading');
+  assert.equal(await main.isVisible(), false);
+  assert.equal(await power.isDisabled(), true);
+  assert.deepEqual((await state(page)).messages, []);
+
+  await update(page, {...idle, active:false});
+  await page.waitForTimeout(120);
+  assert.deepEqual((await state(page)).messages, []);
+  await update(page, {active:true, motion:false});
+  const oldRevision = await preparedFrame(page);
+  assert.ok(await page.evaluate(() => window.paintCount > 0));
+  assert.equal(await main.getAttribute('aria-hidden'), 'true');
+  assert.equal(await power.isDisabled(), true);
+  await page.evaluate(() => document.querySelector('.dp-start').dispatchEvent(new MouseEvent('click')));
+  assert.equal((await state(page)).messages.some(message => message.action === 'connect'), false);
+
+  await page.setViewportSize({width:360, height:680});
+  assert.equal(await reveal(page, oldRevision), false);
+  const revision = await preparedFrame(page, oldRevision);
+  assert.equal(await page.evaluate(
+    revision => window.DropoHome.reveal(revision, 390, 760), revision,
+  ), false, 'a frame from the old native surface cannot lift the cover');
+  assert.equal(await reveal(page, revision), true);
+  assert.equal(await main.getAttribute('data-startup'), 'visible');
+  assert.equal(await main.getAttribute('aria-hidden'), null);
+  assert.equal(await power.isEnabled(), true);
+  const positions = await page.evaluate(() => {
+    const bounds = document.querySelector('.dp-start').getBoundingClientRect();
+    return [bounds.left + bounds.width / 2, innerWidth / 2];
   });
-  assert.deepEqual(immediate,{hidden:false,inert:false,disabled:false,status:'VPN подключён'});
+  assert.deepEqual(positions, [180, 180]);
+});
+
+test('fast success waits for the orbit, landing and compact Earth before showing the panel', async t => {
+  const page = await pageFor(t);
+  await update(page, {connected:true, responseMs:78});
+  let current = await state(page);
+  assert.equal(current.state, 'connected');
+  assert.equal(current.phase, 'launch');
+  assert.equal(current.hidden, true);
+  assert.equal(current.inert, true);
+  await page.waitForFunction(() => document.querySelector('.dp-main').dataset.phase === 'orbit');
+  assert.equal((await state(page)).hidden, true);
+  await page.waitForFunction(() => document.querySelector('.dp-main').dataset.phase === 'arrive');
+  assert.equal((await state(page)).hidden, true);
+  await page.waitForFunction(() => document.querySelector('.dp-main').dataset.phase === 'connected');
+  current = await state(page);
+  assert.equal(current.hidden, false);
+  assert.equal(current.disabled, false);
+  assert.equal(await page.locator('.dp-response').textContent(), '78 мс');
   await page.locator('.dp-mode-all').click();
-  assert.ok((await state(page)).messages.some(x=>x.action==='mode'&&x.value==='all_traffic'));
+  assert.equal((await state(page)).messages.at(-1).action, 'mode');
+});
+
+test('Earth starts a connection and only the Disconnect button stops it', async t => {
+  const page = await pageFor(t);
+  const earth = page.locator('.dp-earth-action');
+  await update(page, {motion:false});
+  const globe = await earth.boundingBox();
+  await page.mouse.click(globe.x + globe.width * .2, globe.y + globe.height / 2);
+  assert.equal((await state(page)).messages.at(-1).action, 'connect');
+
+  await update(page, {connecting:true, canCancel:true, enabled:false});
+  assert.equal(await earth.isHidden(), true);
+  await earth.dispatchEvent('click');
+  assert.equal((await state(page)).messages.at(-1).action, 'connect');
+
+  const oldTop = await earth.evaluate(button => button.style.top);
+  await update(page, {connected:true, connecting:false, canCancel:false, enabled:true});
+  assert.equal(await earth.isHidden(), true);
+  await page.waitForFunction(
+    oldTop => document.querySelector('.dp-earth-action').style.top !== oldTop, oldTop,
+  );
+  const center = await earth.evaluate(button => {
+    const scene = button.parentElement.getBoundingClientRect();
+    return [scene.left + parseFloat(button.style.left) + parseFloat(button.style.width) / 2,
+      scene.top + parseFloat(button.style.top) + parseFloat(button.style.height) / 2];
+  });
+  await page.mouse.click(...center);
+  await earth.dispatchEvent('click');
+  assert.equal((await state(page)).messages.at(-1).action, 'connect');
+  await page.locator('.dp-disconnect').click();
+  assert.equal((await state(page)).messages.at(-1).action, 'disconnect');
 });
 
 test('native busy gate remains authoritative even when the VPN is connected', async t => {
   const page=await pageFor(t);
-  await update(page,{connected:true,enabled:false,busy:true});
+  await update(page,{connected:true,enabled:false,busy:true,motion:false});
   let current=await state(page);assert.equal(current.hidden,false);assert.equal(current.disabled,true);
   await update(page,{enabled:true,busy:false});
   assert.equal((await state(page)).disabled,false);
@@ -105,7 +193,7 @@ test('cancel and error retry send native commands without inventing success', as
   assert.equal((await state(page)).state,'error');
   await page.locator('.dp-start').click();
   let current=await state(page);assert.equal(current.state,'error');
-  assert.ok(current.messages.some(x=>x.action==='toggle'));
+  assert.ok(current.messages.some(x=>x.action==='connect'));
   await update(page,{connecting:true,enabled:false,canCancel:true});
   assert.equal((await state(page)).state,'connecting');
 });
@@ -174,12 +262,24 @@ for (const viewport of [{width:360,height:600},{width:320,height:600},{width:760
     const page=await pageFor(t,{viewport});
     await update(page,{error:true,motion:false,message:'Не удалось подключиться к выбранному источнику. Проверьте соединение с интернетом и доступность сервера, затем попробуйте ещё раз. Если ошибка повторяется, выберите другой источник в меню.'});
     await page.waitForTimeout(80);
-    const overlaps=await page.evaluate(()=>{
+    const retry=await page.evaluate(()=>{
       const a=document.querySelector('.dp-hint span').getBoundingClientRect();
       const b=document.querySelector('.dp-message').getBoundingClientRect();
-      return a.x<b.right&&a.right>b.x&&a.y<b.bottom&&a.bottom>b.y;
+      const canvas=document.querySelector('.dp-hint canvas');
+      const power=document.querySelector('.dp-start').getBoundingClientRect();
+      const arrow=canvas.getBoundingClientRect();
+      const tipX=90+39*Math.sin(Math.PI/6), tipY=39*Math.cos(Math.PI/6);
+      const tip=canvas.getContext('2d').getImageData(Math.round(tipX*2),Math.round(tipY*2),1,1);
+      return {
+        overlaps:a.x<b.right&&a.right>b.x&&a.y<b.bottom&&a.bottom>b.y,
+        tipVisible:tip.data[3]>0&&arrow.width>0&&arrow.height>0,
+        tipDistance:Math.hypot(arrow.left+tipX-power.left-power.width/2,
+                               arrow.top+tipY-power.top-power.height/2),
+      };
     });
-    assert.equal(overlaps,false,'error text must not cover the retry caption');
+    assert.equal(retry.overlaps,false,'error text must not cover the retry caption');
+    assert.ok(retry.tipVisible,'retry keeps the drawn arrow visible');
+    assert.ok(Math.abs(retry.tipDistance-39)<2,'the retry arrow points to the power button border');
     await update(page,{connected:true,error:false,message:''});
     const bounds=await page.evaluate(()=>{
       const doc=document.documentElement,b=document.querySelector('.dp-disconnect').getBoundingClientRect();
