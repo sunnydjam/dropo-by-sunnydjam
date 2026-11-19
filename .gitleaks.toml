@@ -3,6 +3,17 @@
 [extend]
 useDefault = true
 
+# Deterministic public vectors derived from the fixed synthetic UUID in the
+# shared client/controller compatibility test. Match only these full vectors
+# in this test file, including its earlier revisions in Git history.
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+condition = "AND"
+paths = ['''^app/mobile/dropocore/ownedprofile/reserve_test\.go$''']
+regexTarget = "secret"
+regexes = ['''^cec3ca12-ad4b-4714-a401-a31c79362f07$''', '''^iUhknX5NjVWE2kSZjzYHqxHCSZnivpjJfBZCuCKrbUM$''']
+
 [[rules]]
 id = "private-key"
 [[rules.allowlists]]
