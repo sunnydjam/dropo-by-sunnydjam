@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,12 @@ import (
 const Hostname = "dns.droponevedimka.ru"
 const BootstrapIPv4 = "193.233.88.97"
 const QueryPath = "/dns-query"
+const FinlandHostname = "dropo.fun"
+const FinlandIPv4 = "77.42.65.119"
+const LatviaHostname = "lv1.dropo.fun"
+const LatviaIPv4 = "62.72.20.9"
+
+var errNameNotFound = errors.New("public DNS name does not exist")
 
 type Endpoint struct {
 	Hostname string   `json:"hostname"`
@@ -34,14 +42,34 @@ type Policy struct {
 }
 
 func Default() Policy {
-	return Policy{Version: 1, PrivacyMode: "encrypted", Resolvers: []Endpoint{{Hostname: Hostname, IPv4: []string{BootstrapIPv4}, Port: 443, Path: QueryPath}}}
+	return Policy{Version: 1, PrivacyMode: "encrypted", Resolvers: []Endpoint{
+		{Hostname: Hostname, IPv4: []string{BootstrapIPv4}, Port: 443, Path: QueryPath},
+		{Hostname: FinlandHostname, IPv4: []string{FinlandIPv4}, Port: 443, Path: QueryPath},
+		{Hostname: LatviaHostname, IPv4: []string{LatviaIPv4}, Port: 853},
+	}}
 }
 func (p Policy) Validate() error {
 	if p.Version != 1 || p.PrivacyMode != "encrypted" || len(p.Resolvers) < 1 || len(p.Resolvers) > 4 {
 		return errors.New("unsupported DNS policy")
 	}
 	for _, e := range p.Resolvers {
-		if e.Hostname != Hostname || e.Port != 443 || e.Path != QueryPath || len(e.IPv4) < 1 || len(e.IPv4) > 8 {
+		switch e.Hostname {
+		case Hostname:
+			if e.Port != 443 || e.Path != QueryPath {
+				return errors.New("untrusted primary DNS transport")
+			}
+		case FinlandHostname:
+			if e.Port != 443 || e.Path != QueryPath || len(e.IPv4) != 1 || e.IPv4[0] != FinlandIPv4 {
+				return errors.New("untrusted Finnish DNS endpoint")
+			}
+		case LatviaHostname:
+			if e.Port != 853 || e.Path != "" || len(e.IPv4) != 1 || e.IPv4[0] != LatviaIPv4 {
+				return errors.New("untrusted Latvian DNS endpoint")
+			}
+		default:
+			return errors.New("untrusted DNS endpoint")
+		}
+		if len(e.IPv4) < 1 || len(e.IPv4) > 8 {
 			return errors.New("untrusted DNS endpoint")
 		}
 		for _, raw := range e.IPv4 {
@@ -108,11 +136,25 @@ func (r Resolver) Lookup(ctx context.Context, host string) ([]netip.Addr, error)
 	if err != nil {
 		return nil, errors.New("DNS encoding failed")
 	}
+	remaining := 0
+	for _, endpoint := range r.Policy.Resolvers {
+		remaining += len(endpoint.IPv4)
+	}
 	for _, endpoint := range r.Policy.Resolvers {
 		for _, ip := range endpoint.IPv4 {
-			addresses, err := r.exchange(ctx, endpoint, ip, wire, name)
+			timeout := 2 * time.Second
+			if deadline, bounded := ctx.Deadline(); bounded {
+				timeout = min(timeout, time.Until(deadline)/time.Duration(remaining))
+			}
+			remaining--
+			attempt, cancel := context.WithTimeout(ctx, timeout)
+			addresses, err := r.exchange(attempt, endpoint, ip, wire, name)
+			cancel()
 			if err == nil && len(addresses) > 0 {
 				return addresses, nil
+			}
+			if errors.Is(err, errNameNotFound) {
+				return nil, err
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -134,8 +176,52 @@ func (r Resolver) exchange(ctx context.Context, e Endpoint, ip string, wire []by
 			return nil, errors.New("TLS verification is required")
 		}
 	}
+	address := net.JoinHostPort(ip, strconv.Itoa(e.Port))
+	var body []byte
+	var err error
+	if e.Path == "" {
+		body, err = exchangeTLS(ctx, dial, address, tlsConfig, wire)
+	} else {
+		body, err = exchangeHTTPS(ctx, dial, address, tlsConfig, e, wire)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return publicAddresses(body, name)
+}
+
+func exchangeTLS(ctx context.Context, dial DialContext, address string, config *tls.Config, wire []byte) ([]byte, error) {
+	conn, err := dial(ctx, "tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	deadline, _ := ctx.Deadline()
+	if err = conn.SetDeadline(deadline); err != nil {
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	stream := tls.Client(conn, config)
+	if err = stream.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	frame := binary.BigEndian.AppendUint16(nil, uint16(len(wire)))
+	if _, err = stream.Write(append(frame, wire...)); err != nil {
+		return nil, err
+	}
+	var length [2]byte
+	if _, err = io.ReadFull(stream, length[:]); err != nil {
+		return nil, err
+	}
+	body := make([]byte, binary.BigEndian.Uint16(length[:]))
+	_, err = io.ReadFull(stream, body)
+	return body, err
+}
+
+func exchangeHTTPS(ctx context.Context, dial DialContext, address string, tlsConfig *tls.Config, e Endpoint, wire []byte) ([]byte, error) {
 	transport := &http.Transport{Proxy: nil, ForceAttemptHTTP2: true, TLSClientConfig: tlsConfig, TLSHandshakeTimeout: 4 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxConnsPerHost: 2, DisableKeepAlives: true, DialContext: func(c context.Context, n, _ string) (net.Conn, error) {
-		return dial(c, "tcp", net.JoinHostPort(ip, "443"))
+		return dial(c, "tcp", address)
 	}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 6 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -157,9 +243,19 @@ func (r Resolver) exchange(ctx context.Context, e Endpoint, ip string, wire []by
 	if err != nil || len(body) > 65535 {
 		return nil, errors.New("invalid DNS response size")
 	}
+	return body, nil
+}
+
+func publicAddresses(body []byte, name dnsmessage.Name) ([]netip.Addr, error) {
 	var message dnsmessage.Message
-	if err = message.Unpack(body); err != nil || !message.Header.Response || message.Header.ID != 0 || message.Header.Truncated || message.Header.RCode != dnsmessage.RCodeSuccess || len(message.Questions) != 1 || message.Questions[0].Name != name || message.Questions[0].Type != dnsmessage.TypeA || message.Questions[0].Class != dnsmessage.ClassINET {
+	if err := message.Unpack(body); err != nil || !message.Header.Response || message.Header.ID != 0 || message.Header.Truncated || len(message.Questions) != 1 || message.Questions[0].Name != name || message.Questions[0].Type != dnsmessage.TypeA || message.Questions[0].Class != dnsmessage.ClassINET {
 		return nil, errors.New("invalid DNS response")
+	}
+	if message.Header.RCode == dnsmessage.RCodeNameError {
+		return nil, errNameNotFound
+	}
+	if message.Header.RCode != dnsmessage.RCodeSuccess {
+		return nil, errors.New("upstream DNS failed")
 	}
 	allowed := map[dnsmessage.Name]bool{name: true}
 	for i := 0; i < 16; i++ {

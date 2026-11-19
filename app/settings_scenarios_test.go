@@ -302,8 +302,13 @@ func TestAllTrafficDNSPreservesWorkNetworkResolver(t *testing.T) {
 	builder.applyDNSRouting(template, GlobalAppSettings{}, true)
 	dns := template["dns"].(map[string]interface{})
 	rules := dns["rules"].([]interface{})
-	if len(rules) != 2 || rules[0].(map[string]interface{})["server"] != "wg-dns" || rules[1].(map[string]interface{})["server"] != "dns-local" {
+	if len(rules) != 9 || rules[0].(map[string]interface{})["server"] != "wg-dns" || rules[1].(map[string]interface{})["server"] != "dns-local" {
 		t.Fatalf("full VPN DNS work/local exceptions = %#v", rules)
+	}
+	for i, tag := range map[int]string{2: "dns-remote", 5: "dns-remote-fi", 8: "dns-remote-lv"} {
+		if rules[i].(map[string]interface{})["server"] != tag {
+			t.Fatalf("full VPN DNS resolver order at %d does not match %s", i, tag)
+		}
 	}
 }
 

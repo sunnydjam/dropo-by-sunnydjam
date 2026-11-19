@@ -9,6 +9,26 @@ import (
 
 const reserveTestPrimary = "vless://11111111-2222-3333-4444-555555555555@193.233.88.97:443?type=xhttp&security=tls&sni=cdn.droponevedimka.ru&host=cdn.droponevedimka.ru&path=%2Fmanaged%2Fv1%2Ffree&encryption=none&dropo_expiry=0"
 
+func TestDirectReserveCompatibilityWithController(t *testing.T) {
+	const fiKey = "cec3ca12-ad4b-4714-a401-a31c79362f07"
+	const lvKey = "iUhknX5NjVWE2kSZjzYHqxHCSZnivpjJfBZCuCKrbUM"
+	want := []struct{ scheme, port, key string }{{"vless", "2443", fiKey}, {"hysteria2", "2443", lvKey}}
+	candidates := DirectReserves(Free, reserveTestPrimary, time.Now())
+	if len(candidates) != len(want) {
+		t.Fatal("expected both direct transports")
+	}
+	for i, candidate := range candidates {
+		link, err := url.Parse(candidate.URI)
+		if err != nil || link.Scheme != want[i].scheme || link.Port() != want[i].port || link.User.Username() != want[i].key {
+			t.Fatalf("direct reserve %d does not match the backend contract", i)
+		}
+	}
+	boost := strings.ReplaceAll(strings.ReplaceAll(reserveTestPrimary, "%2Ffree", "%2Fboost"), "expiry=0", "expiry=2000")
+	if len(DirectReserves(Boost, boost, time.Unix(2001, 0))) != 0 || len(DirectReserves("personal", reserveTestPrimary, time.Now())) != 0 {
+		t.Fatal("expired Boost or a personal source acquired a managed reserve")
+	}
+}
+
 func TestOwnedReservePreservesIdentityPoolAndExpiry(t *testing.T) {
 	for _, primary := range []string{Free, Boost} {
 		raw := reserveTestPrimary

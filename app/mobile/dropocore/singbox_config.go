@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"dropocore/dnspolicy"
+	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -15,7 +16,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v13-tunneled-public-dns"
+	androidConfigSchema     = "android-package-routing-v14-direct-reserves"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -202,19 +203,17 @@ func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, lo
 	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies)
 	finalOutbound := androidFinalOutbound(routingMode)
 	finalDNSServer := androidFinalDNSServer(routingMode)
+	dns := map[string]interface{}{
+		"servers": dnsServers, "rules": dnsRules, "final": finalDNSServer,
+		"strategy": "ipv4_only", "reverse_mapping": true, "independent_cache": true,
+	}
+	dnspolicy.ConfigureRuntimeFailover(dns)
 	config := map[string]interface{}{
 		"log": map[string]interface{}{
 			"level":     logLevel,
 			"timestamp": true,
 		},
-		"dns": map[string]interface{}{
-			"servers":           dnsServers,
-			"rules":             dnsRules,
-			"final":             finalDNSServer,
-			"strategy":          "ipv4_only",
-			"reverse_mapping":   true,
-			"independent_cache": true,
-		},
+		"dns": dns,
 		"inbounds": []interface{}{
 			map[string]interface{}{
 				"type":         "tun",
@@ -264,10 +263,15 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 		return androidSourceError("VPN configuration was cancelled")
 	}
 	sources := current.VPNSources
+	inputs := make([]ownedprofile.Source, len(sources))
+	for i, s := range sources {
+		inputs[i] = ownedprofile.Source{ID: s.ID, Provider: s.PublicCatalogID, URI: s.URI, Disabled: s.Disabled}
+	}
+	reservePlan := ownedprofile.ReservePlan(inputs, time.Now())
 	outbounds := make([]interface{}, 0, len(sources)+2)
 	proxyTags := make([]string, 0, len(sources))
 	candidates := make([]androidSourceCandidate, 0, len(sources))
-	for _, source := range sources {
+	for i, source := range sources {
 		if source.Disabled || ownedAndroidSourceExpired(source) {
 			continue
 		}
@@ -283,6 +287,16 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 		outbounds = append(outbounds, proxyToSingBoxOutbound(node))
 		proxyTags = append(proxyTags, node.Tag)
 		candidates = append(candidates, androidSourceCandidate{ID: source.ID, Tag: node.Tag, NodeID: androidNodeID(node)})
+		for _, reserve := range reservePlan[i] {
+			node, err := parseAndroidDirectProxyCandidate(reserve.URI)
+			if err != nil {
+				return androidSourceError("Некорректный прямой резерв Dropo.")
+			}
+			node.Tag = "vpn-" + reserve.ID
+			outbounds = append(outbounds, proxyToSingBoxOutbound(node))
+			proxyTags = append(proxyTags, node.Tag)
+			candidates = append(candidates, androidSourceCandidate{ID: reserve.ID, Tag: node.Tag, NodeID: androidNodeID(node)})
+		}
 	}
 	if len(candidates) == 0 {
 		return androidSourceError("Включённые источники не содержат выбранных серверов. Обновите подписки или выберите сервер.")

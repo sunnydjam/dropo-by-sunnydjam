@@ -4,6 +4,13 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.10 — 2026-11-18
+
+- Add independent Finnish TCP/REALITY and Latvian Hysteria 2 reserves for
+  Dropo Free and Boost, after the primary ingress and existing HTTPS relay.
+- Fail over encrypted public DNS from Moscow DoH to Finnish DoH and Latvian
+  DoT while preserving local and work-network DNS routing.
+
 ## 3.1.5 — 2026-11-07
 
 - Keep Android adaptive direct routing in service mode and fence stale-session

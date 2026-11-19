@@ -35,8 +35,17 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 	if current.VPNSources[0].Disabled || current.VPNSources[1].Disabled {
 		t.Fatal("explicit product enable did not enable the family")
 	}
-	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 2 || current.preparedSources[0].ID == current.preparedSources[1].ID || current.preparedSources[0].Tag == current.preparedSources[1].Tag {
-		t.Fatal("managed pair did not create independent source candidates")
+	if !decodeSuccess(BuildSingBoxConfig()) {
+		t.Fatal("cannot prepare managed failover")
+	}
+	wantIDs := []string{"old-owned", current.VPNSources[1].ID, ownedprofile.Free + "-fi-tcp", ownedprofile.Free + "-lv-quic"}
+	if len(current.preparedSources) != len(wantIDs) {
+		t.Fatalf("expected four independent sources, got %d", len(current.preparedSources))
+	}
+	for i, candidate := range current.preparedSources {
+		if candidate.ID != wantIDs[i] || candidate.Tag != "vpn-"+candidate.ID {
+			t.Fatalf("incorrect failover order at %d: %#v", i, candidate)
+		}
 	}
 	for _, s := range current.VPNSources {
 		if len(s.Nodes) != 1 {

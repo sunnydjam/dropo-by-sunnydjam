@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"dropocore/dnspolicy"
+	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -1667,10 +1668,28 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 	}
 	xrayBridge := BuildXrayBridgeConfig(xrayCandidates)
 	proxies = append(proxies, xrayBridge.SingBoxProxies...)
+	inputs := make([]ownedprofile.Source, len(updatedSources))
+	for i, s := range updatedSources {
+		inputs[i] = ownedprofile.Source{ID: s.ID, Provider: s.PublicCatalogID, URI: s.URI, Disabled: s.Disabled}
+	}
+	directReserves := ownedprofile.ReservePlan(inputs, time.Now())
+	orderedSources := make([]VPNSource, 0, len(updatedSources)+4)
+	for i, source := range updatedSources {
+		orderedSources = append(orderedSources, source)
+		for _, reserve := range directReserves[i] {
+			proxy, err := b.fetcher.ParseSingleLink(reserve.URI)
+			if err != nil {
+				return nil, fmt.Errorf("invalid protected direct reserve %s", reserve.ID)
+			}
+			proxy.Tag = "vpn-source-" + reserve.ID
+			proxies = append(proxies, proxy)
+			orderedSources = append(orderedSources, VPNSource{ID: reserve.ID})
+		}
+	}
 	if NormalizeRoutingMode(b.routingMode) == RoutingModeAllTraffic && len(proxies) == 0 {
 		return nil, fmt.Errorf("для режима «Всё через VPN» выберите и включите поддерживаемый VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
 	}
-	orderVPNSourceProxies(proxies, updatedSources)
+	orderVPNSourceProxies(proxies, orderedSources)
 
 	// Generate outbounds
 	outbounds := b.generateOutbounds(template, proxies)
@@ -2528,6 +2547,7 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 		dns = map[string]interface{}{}
 		template["dns"] = dns
 	}
+	defer dnspolicy.ConfigureRuntimeFailover(dns)
 	// Migrate only exact historical built-ins. Preserve manually extended
 	// server entries and all corporate/private DNS rules.
 	if servers, ok := dns["servers"].([]interface{}); ok {
@@ -2647,6 +2667,15 @@ func preserveCustomDNSRules(value interface{}) []interface{} {
 	if !ok {
 		return nil
 	}
+	generated := make(map[string]bool, 2)
+	for _, raw := range rules {
+		rule, _ := raw.(map[string]interface{})
+		tag, _ := rule["tag"].(string)
+		if rule["action"] == "evaluate" && strings.HasPrefix(tag, "dropo-dns-") {
+			server, _ := rule["server"].(string)
+			generated[strings.TrimSuffix(server, "-fi")+"-lv"] = true
+		}
+	}
 
 	preserved := make([]interface{}, 0, len(rules))
 	for _, rule := range rules {
@@ -2657,6 +2686,10 @@ func preserveCustomDNSRules(value interface{}) []interface{} {
 		}
 
 		server, _ := ruleMap["server"].(string)
+		tag, _ := ruleMap["tag"].(string)
+		if generated[server] || ruleMap["action"] == "evaluate" && strings.HasPrefix(tag, "dropo-dns-") {
+			continue
+		}
 		switch server {
 		case "dns-local", "dns-direct", "dns-remote", "":
 			continue

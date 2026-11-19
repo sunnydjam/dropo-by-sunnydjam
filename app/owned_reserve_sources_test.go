@@ -147,8 +147,16 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		out := raw.(map[string]interface{})
 		if out["tag"] == "auto-select" {
 			found = true
-			if reflect.ValueOf(out["outbounds"]).Len() != 2 {
-				t.Fatal("reserve missing from selector")
+			tags := reflect.ValueOf(out["outbounds"])
+			want := []string{"vpn-source-" + profile.VPNSources[0].ID, "vpn-source-" + profile.VPNSources[1].ID,
+				"vpn-source-" + ownedprofile.Free + "-fi-tcp", "vpn-source-" + ownedprofile.Free + "-lv-quic"}
+			if tags.Len() != len(want) {
+				t.Fatalf("expected four independent source candidates, got %v", out["outbounds"])
+			}
+			for i, tag := range want {
+				if tags.Index(i).Interface() != tag {
+					t.Fatalf("source order at %d: got %v want %s", i, tags.Index(i), tag)
+				}
 			}
 		}
 	}

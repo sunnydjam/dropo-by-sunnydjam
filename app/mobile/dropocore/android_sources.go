@@ -30,9 +30,10 @@ type androidVPNSource struct {
 
 const maxAndroidVPNSources = 16
 
-// Two derived owned reserves have dedicated slots and cannot evict a user's
-// existing subscriptions when an older 16-source profile is restored.
+// The existing HTTPS relays have dedicated persistent slots. Direct FI/LV
+// sources are generated in memory and do not evict existing subscriptions.
 const maxAndroidSourceCandidates = maxAndroidVPNSources + 2
+const maxAndroidRuntimeSourceCandidates = maxAndroidSourceCandidates + 4
 
 func androidLogicalSourceCount(sources []androidVPNSource) int {
 	count := 0

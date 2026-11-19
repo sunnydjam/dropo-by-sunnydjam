@@ -18,7 +18,7 @@ import (
 
 var publicDNSQueryID atomic.Uint32
 
-// lookupPublicHostWithoutHosts uses protected DoH with a numeric bootstrap.
+// lookupPublicHostWithoutHosts uses protected DNS with a numeric bootstrap.
 // It deliberately bypasses the Windows hosts overlay so a native application's
 // exact fake bootstrap name can still be connected to its real public address
 // by Dropo's in-process relay.
