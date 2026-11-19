@@ -61,8 +61,8 @@ func TestOwnedPairDefaultPriorityExpiryAndAtomicValidation(t *testing.T) {
 	if !ownedSourceExpired(profile.VPNSources[0]) || !ownedSourceExpired(profile.VPNSources[1]) || ownedSourceExpired(profile.VPNSources[2]) || ownedSourceExpired(profile.VPNSources[3]) {
 		t.Fatal("reserve changed entitlement expiry")
 	}
-	if profile.VPNSourceSelectionMode != "priority" {
-		t.Fatal("fresh family must use primary before reserve")
+	if profile.VPNSourceSelectionMode != "latency" {
+		t.Fatal("fresh family must preserve automatic selection")
 	}
 	before := append([]VPNSource(nil), profile.VPNSources...)
 	if err := upsertOwnedVPNPair(&profile, ownedprofile.FreeReserve, profile.VPNSources[3].URI); err == nil || !reflect.DeepEqual(before, profile.VPNSources) {
@@ -135,8 +135,8 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		t.Fatalf("managed pair add failed: %v", result)
 	}
 	profile, _ := storage.GetActiveProfile()
-	if len(profile.VPNSources) != 2 {
-		t.Fatal("missing independent reserve")
+	if len(profile.VPNSources) != 3 {
+		t.Fatal("missing independent managed ingress")
 	}
 	for _, s := range profile.VPNSources {
 		if s.NodeCount != 1 {
@@ -149,16 +149,8 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		out := raw.(map[string]interface{})
 		if out["tag"] == "auto-select" {
 			found = true
-			tags := reflect.ValueOf(out["outbounds"])
-			want := []string{"vpn-source-" + profile.VPNSources[0].ID, "vpn-source-" + profile.VPNSources[1].ID,
-				"vpn-source-" + ownedprofile.Free + "-fi-tcp", "vpn-source-" + ownedprofile.Free + "-lv-quic"}
-			if tags.Len() != len(want) {
-				t.Fatalf("expected four independent source candidates, got %v", out["outbounds"])
-			}
-			for i, tag := range want {
-				if tags.Index(i).Interface() != tag {
-					t.Fatalf("source order at %d: got %v want %s", i, tags.Index(i), tag)
-				}
+			if reflect.ValueOf(out["outbounds"]).Len() != 3 {
+				t.Fatal("reserve missing from selector")
 			}
 		}
 	}
@@ -166,21 +158,6 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		t.Fatal("source selector missing")
 	}
 	primary, reserve := profile.VPNSources[0].ID, profile.VPNSources[1].ID
-	if views := publicVPNSources(profile.VPNSources); len(views) != 1 || views[0]["id"] != primary {
-		t.Fatal("Windows exposed an internal relay as a selectable connection")
-	}
-	tags := app.configuredVPNSourceTags()
-	if len(tags) != 4 {
-		t.Fatalf("Windows monitor does not include all four managed routes: %v", tags)
-	}
-	for _, tag := range tags {
-		if _, ok := app.vpnSourceProbeBinding(tag); !ok {
-			t.Fatalf("Windows monitor cannot bind %s to its independent node", tag)
-		}
-	}
-	if result := app.SelectVPNSource(reserve); result["error"] != "VPN source is unavailable" {
-		t.Fatal("Windows permits direct manual selection of an internal relay")
-	}
 	if result := app.SetVPNSourceEnabled(primary, false); result["success"] != true {
 		t.Fatalf("disable failed: %v", result)
 	}
@@ -197,96 +174,6 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 	profile, _ = storage.GetActiveProfile()
 	if len(profile.VPNSources) != 0 {
 		t.Fatal("family removal left a source reference")
-	}
-}
-
-func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *testing.T) {
-	boost := strings.Replace(ownedReserveFixture, "%2Ffree", "%2Fboost", 1)
-	boost = strings.Replace(boost, "expiry=0", "expiry="+strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10), 1)
-	for _, tier := range []struct{ id, key string }{
-		{ownedprofile.Free, ownedReserveFixture},
-		{ownedprofile.Boost, boost},
-	} {
-		for _, mode := range []RoutingMode{RoutingModeBlockedOnly, RoutingModeAllTraffic} {
-			t.Run(tier.id+"/"+string(mode), func(t *testing.T) {
-				storage, builder := publicVPNTestBuilder(t, "")
-				app := &App{storage: storage, configBuilder: builder, initialized: true}
-				app.initializedReady.Store(true)
-				requireAPISuccess(t, app.SetRoutingMode(string(mode)))
-				requireAPISuccess(t, app.AddManagedVPNSource(tier.id, "Managed", tier.key, true))
-
-				profile, err := storage.GetActiveProfile()
-				if err != nil {
-					t.Fatal(err)
-				}
-				want := []string{
-					"vpn-source-" + profile.VPNSources[0].ID,
-					"vpn-source-" + profile.VPNSources[1].ID,
-					"vpn-source-" + tier.id + "-fi-tcp",
-					"vpn-source-" + tier.id + "-lv-quic",
-				}
-				app.rememberRouteProbeResults([]routeProbeServiceResult{
-					{Tag: "openai", Success: true, MethodKind: "vpn", MethodTag: want[0]},
-				})
-				path, err := app.getActiveConfigPath()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if shouldUseSelectiveWindowsSession(storage.GetAppSettings()) {
-					path, err = app.writeDeepWindowsProxyFallbackConfig(path)
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-				config, err := readJSONConfig(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				selector := getOutbound(config, "auto-select")
-				if got := interfaceStringSlice(selector["outbounds"]); !reflect.DeepEqual(got, want) || selector["type"] != "selector" || selector["default"] != want[0] {
-					t.Fatalf("runtime selector lost independent transports: %v", got)
-				}
-				for i, protocol := range []string{"socks", "socks", "socks", "hysteria2"} {
-					if getOutbound(config, want[i])["type"] != protocol {
-						t.Fatalf("unexpected runtime transport at position %d", i)
-					}
-					if _, ok := app.vpnSourceProbeBinding(want[i]); !ok {
-						t.Fatalf("monitor cannot switch to candidate at position %d", i)
-					}
-				}
-				// Simulate reopening a cached 3.1.12 profile with a native FI outbound.
-				cached, err := storage.GetProfileConfig(profile.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				getOutbound(cached, want[2])["type"] = "vless"
-				if err := storage.UpdateProfileConfig(profile.ID, cached); err != nil {
-					t.Fatal(err)
-				}
-				if err := app.ensureActiveConfigForStart(); err != nil {
-					t.Fatal(err)
-				}
-				rebuilt, err := storage.GetProfileConfig(profile.ID)
-				if err != nil || getOutbound(rebuilt, want[2])["type"] != "socks" {
-					t.Fatal("old managed Finland outbound survived restart")
-				}
-				bridge, err := storage.GetProfileXrayConfig(profile.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				fiStream, _ := getOutbound(bridge, "xray-out-2")["streamSettings"].(map[string]interface{})
-				if fiStream["network"] != "tcp" || fiStream["security"] != "reality" {
-					t.Fatal("Finland ingress lost its REALITY transport")
-				}
-				for _, tag := range []string{"xray-out-0", "xray-out-1"} {
-					outbound := getOutbound(bridge, tag)
-					transport, _ := outbound["streamSettings"].(map[string]interface{})
-					if transport["network"] != "xhttp" {
-						t.Fatal("XHTTP ingress lost its Xray transport")
-					}
-				}
-			})
-		}
 	}
 }
 
@@ -353,5 +240,169 @@ func TestOwnedOrphanReserveKeepsExistingOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(profile.VPNSources[:3], before) {
 		t.Fatal("orphan reserve restoration reordered existing sources")
+	}
+}
+
+func TestEnrollingBoostKeepsPreferredFreeRelay(t *testing.T) {
+	p := ProfileData{}
+	if err := upsertOwnedVPNPair(&p, ownedprofile.Free, ownedReserveFixture); err != nil {
+		t.Fatal(err)
+	}
+	p.VPNSources[0], p.VPNSources[1] = p.VPNSources[1], p.VPNSources[0]
+	p.VPNSourceSelectionMode = "priority"
+	boost := strings.ReplaceAll(strings.ReplaceAll(ownedReserveFixture, "%2Ffree", "%2Fboost"), "expiry=0", "expiry=4102444800")
+	if err := upsertOwnedVPNPair(&p, ownedprofile.Boost, boost); err != nil {
+		t.Fatal(err)
+	}
+	views := publicVPNSources(p.VPNSources)
+	want := []string{ownedprofile.FreeReserve, ownedprofile.Free, ownedprofile.Boost, ownedprofile.BoostReserve}
+	if len(views) != len(want) {
+		t.Fatalf("got %d source rows", len(views))
+	}
+	for i, id := range want {
+		if views[i]["public_catalog_id"] != id {
+			t.Fatalf("row %d should be %s", i, id)
+		}
+	}
+}
+
+func TestWindowsLatviaMigrationAndEntitlement(t *testing.T) {
+	boost := strings.NewReplacer("%2Ffree", "%2Fboost", "expiry=0", "expiry=4102444800").Replace(ownedReserveFixture)
+	p := ProfileData{VPNSourceSelectionMode: "priority"}
+	for _, product := range []struct{ id, key string }{{ownedprofile.Free, ownedReserveFixture}, {ownedprofile.Boost, boost}} {
+		if err := upsertOwnedVPNPair(&p, product.id, product.key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.VPNSources[0], p.VPNSources[3] = p.VPNSources[3], p.VPNSources[0]
+	original := append([]VPNSource(nil), p.VPNSources...)
+	for _, product := range []struct{ id, key string }{{ownedprofile.Free, ownedReserveFixture}, {ownedprofile.Boost, boost}} {
+		if err := upsertWindowsOwnedSources(&p, product.id, product.key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(p.VPNSources) != 6 || !reflect.DeepEqual(original, p.VPNSources[:4]) {
+		t.Fatal("migration changed original four priorities")
+	}
+	for _, i := range []int{4, 5} {
+		source := p.VPNSources[i]
+		raw, err := windowsLatviaURI(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		node, err := (&SubscriptionFetcher{}).ParseSingleLink(raw)
+		if err != nil || node.Type != "hysteria2" || strings.Contains(raw, "11111111-2222-3333-4444-555555555555") {
+			t.Fatal("invalid transport or credential scope")
+		}
+		safe := settingsWithoutOwnedSecrets(&SettingsFile{Profiles: []ProfileData{p}})
+		bytes, _ := json.Marshal(safe)
+		if strings.Contains(string(bytes), "11111111-2222-3333-4444-555555555555") || safe.Profiles[0].VPNSources[i].URI != "" {
+			t.Fatal("managed credential persisted")
+		}
+	}
+	p.VPNSources[0], p.VPNSources[5] = p.VPNSources[5], p.VPNSources[0]
+	id := p.VPNSources[0].ID
+	p.VPNSources[0].Disabled = true
+	rotated := strings.ReplaceAll(boost, "11111111-2222-3333-4444-555555555555", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	if err := upsertWindowsOwnedSources(&p, ownedprofile.Boost, rotated); err != nil {
+		t.Fatal(err)
+	}
+	if p.VPNSources[0].ID != id || !p.VPNSources[0].Disabled || p.VPNSources[0].URI != rotated {
+		t.Fatal("rotation lost manual preference")
+	}
+	expired := strings.ReplaceAll(boost, "4102444800", "1")
+	expiredSource := p.VPNSources[0]
+	expiredSource.URI = expired
+	if _, err := windowsLatviaURI(expiredSource); err == nil || len(publicVPNSources([]VPNSource{expiredSource})) != 0 {
+		t.Fatal("expired fast entitlement remains available")
+	}
+	if err := upsertWindowsOwnedSources(&p, ownedprofile.Boost, expired); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.VPNSources) != 5 {
+		t.Fatal("expiry affected other sources or retained fast Boost")
+	}
+	var orphan []VPNSource
+	for _, source := range p.VPNSources {
+		if isLatviaProvider(source.PublicCatalogID) {
+			orphan = append(orphan, source)
+		}
+	}
+	if len(orphan) != 1 {
+		t.Fatal("remaining Free route missing")
+	}
+	normalizePublicVPNSourceMetadata(orphan)
+	if !isLatviaProvider(orphan[0].PublicCatalogID) || orphan[0].URI != "" {
+		t.Fatal("orphan retained a usable credential")
+	}
+}
+
+func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *testing.T) {
+	boost := strings.Replace(ownedReserveFixture, "%2Ffree", "%2Fboost", 1)
+	boost = strings.Replace(boost, "expiry=0", "expiry="+strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10), 1)
+	for _, tier := range []struct{ id, key string }{
+		{ownedprofile.Free, ownedReserveFixture},
+		{ownedprofile.Boost, boost},
+	} {
+		for _, mode := range []RoutingMode{RoutingModeBlockedOnly, RoutingModeAllTraffic} {
+			t.Run(tier.id+"/"+string(mode), func(t *testing.T) {
+				storage, builder := publicVPNTestBuilder(t, "")
+				app := &App{storage: storage, configBuilder: builder, initialized: true}
+				app.initializedReady.Store(true)
+				requireAPISuccess(t, app.SetRoutingMode(string(mode)))
+				requireAPISuccess(t, app.AddManagedVPNSource(tier.id, "Managed", tier.key, true))
+
+				profile, err := storage.GetActiveProfile()
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := []string{
+					"vpn-source-" + profile.VPNSources[0].ID,
+					"vpn-source-" + profile.VPNSources[1].ID,
+
+					"vpn-source-" + profile.VPNSources[2].ID,
+				}
+				app.rememberRouteProbeResults([]routeProbeServiceResult{
+					{Tag: "openai", Success: true, MethodKind: "vpn", MethodTag: want[0]},
+				})
+				path, err := app.getActiveConfigPath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if shouldUseSelectiveWindowsSession(storage.GetAppSettings()) {
+					path, err = app.writeDeepWindowsProxyFallbackConfig(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				config, err := readJSONConfig(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				selector := getOutbound(config, "auto-select")
+				if got := interfaceStringSlice(selector["outbounds"]); !reflect.DeepEqual(got, want) || selector["type"] != "selector" || selector["default"] != want[0] {
+					t.Fatalf("runtime selector lost independent transports: %v", got)
+				}
+				for i, protocol := range []string{"socks", "socks", "hysteria2"} {
+					if getOutbound(config, want[i])["type"] != protocol {
+						t.Fatalf("unexpected runtime transport at position %d", i)
+					}
+					if _, ok := app.vpnSourceProbeBinding(want[i]); !ok {
+						t.Fatalf("monitor cannot switch to candidate at position %d", i)
+					}
+				}
+				bridge, err := storage.GetProfileXrayConfig(profile.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, tag := range []string{"xray-out-0", "xray-out-1"} {
+					outbound := getOutbound(bridge, tag)
+					transport, _ := outbound["streamSettings"].(map[string]interface{})
+					if transport["network"] != "xhttp" {
+						t.Fatal("XHTTP ingress lost its Xray transport")
+					}
+				}
+			})
+		}
 	}
 }

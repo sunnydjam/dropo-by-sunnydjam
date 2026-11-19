@@ -1,12 +1,20 @@
 part of 'main.dart';
 
-typedef OwnedVPNSave =
-    Future<Map<String, dynamic>> Function(String, String, String, bool);
+typedef OwnedVPNSave = Future<Map<String, dynamic>> Function(
+  String,
+  String,
+  String,
+  bool,
+);
 
 String? _ownedSourceFamily(Object? provider) {
   for (final pool in ['free', 'boost']) {
     final id = 'dropo-individual-$pool';
-    if (provider == id || provider == '$id-reserve') return id;
+    if (provider == id ||
+        provider == '$id-reserve' ||
+        provider == '$id-lv-quic') {
+      return id;
+    }
   }
   return null;
 }
@@ -132,9 +140,8 @@ class OwnedVPNClient {
         }
         if (source['installationId'] != null &&
             (source['installationId'] is! String ||
-                !RegExp(
-                  r'^[A-Za-z0-9_-]{8,128}$',
-                ).hasMatch(source['installationId'] as String))) {
+                !RegExp(r'^[A-Za-z0-9_-]{8,128}$')
+                    .hasMatch(source['installationId'] as String))) {
           throw const FormatException(
             'Invalid protected installation identity.',
           );
@@ -547,8 +554,7 @@ class OwnedVPNClient {
     } catch (_) {
       return {
         'success': false,
-        'error':
-            'Не удалось удалить ключи Dropo с устройства. Повторите очистку; свои подписки сохранятся.',
+        'error': 'Не удалось удалить ключи Dropo с устройства. Повторите очистку; свои подписки сохранятся.',
       };
     }
   });
@@ -565,8 +571,7 @@ class OwnedVPNClient {
     if (first['success'] != true) {
       return {
         'success': false,
-        'error':
-            'Профиль сохранён защищённо. Отключите VPN и повторите обновление профиля для применения.',
+        'error': 'Профиль сохранён защищённо. Отключите VPN и повторите обновление профиля для применения.',
       };
     }
     final boost = _record?['boostKey'];
@@ -582,8 +587,7 @@ class OwnedVPNClient {
       if (result['success'] != true) {
         return {
           'success': false,
-          'error':
-              'Free готов. Отключите VPN и повторите обновление профиля для применения Boost.',
+          'error': 'Free готов. Отключите VPN и повторите обновление профиля для применения Boost.',
         };
       }
     }
@@ -722,8 +726,7 @@ class OwnedVPNClient {
       if (_record?['standaloneGuest'] == true) {
         return {
           'success': false,
-          'error':
-              'На устройстве сохранён отдельный бесплатный профиль. Удалите его отдельной кнопкой в аккаунте, затем обновите профиль VPN для привязки и Турбо.',
+          'error': 'На устройстве сохранён отдельный бесплатный профиль. Удалите его отдельной кнопкой в аккаунте, затем обновите профиль VPN для привязки и Турбо.',
         };
       }
       if (identity['accountKind'] == 'registered' &&
@@ -806,8 +809,7 @@ class OwnedVPNClient {
     } catch (_) {
       return {
         'success': false,
-        'error':
-            'Не удалось обновить профиль VPN. Сохранённые источники доступны; повторите позже.',
+        'error': 'Не удалось обновить профиль VPN. Сохранённые источники доступны; повторите позже.',
       };
     } finally {
       api.close();
@@ -829,8 +831,7 @@ class OwnedVPNClient {
       if (_record!['linked'] == true) {
         return {
           'success': false,
-          'error':
-              'Профиль привязан к аккаунту. Управляйте им после входа через Telegram.',
+          'error': 'Профиль привязан к аккаунту. Управляйте им после входа через Telegram.',
         };
       }
       final independentGuest = _record!['standaloneGuest'] == true;
@@ -914,8 +915,7 @@ class OwnedVPNClient {
     } catch (_) {
       return {
         'success': false,
-        'error':
-            'Удаление пока не завершено. Сохранён защищённый запрос; повторите удаление при доступном интернете.',
+        'error': 'Удаление пока не завершено. Сохранён защищённый запрос; повторите удаление при доступном интернете.',
       };
     } finally {
       if (transport == null) api.close();

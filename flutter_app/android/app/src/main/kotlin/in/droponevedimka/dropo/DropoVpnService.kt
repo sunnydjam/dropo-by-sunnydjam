@@ -303,6 +303,7 @@ class DropoVpnService :
             coreLog("starting sing-box service")
             server.startOrReloadService(config, OverrideOptions().apply { autoRedirect = false })
             committed = sessionFence.commit(generation) {
+                server.setSourceNetwork(sourceNetworkIdentity(physicalNetwork()))
                 commandServer = server
                 DropoVpnRuntime.setStarting("Проверяем соединение")
                 showForeground("Проверяем соединение")
@@ -857,6 +858,7 @@ class DropoVpnService :
         if (network == null || linkProperties == null || capabilities == null || name == null || javaInterface == null) {
             sessionFence.commit(generation) {
                 if (interfaceUpdateListener === listener && physicalNetworkSignature != "offline") {
+                    commandServer?.setSourceNetwork("")
                     physicalNetworkSignature = "offline"
                     setUnderlyingNetworks(emptyArray())
                     listener.updateDefaultInterface("", -1, false, false)
@@ -880,6 +882,7 @@ class DropoVpnService :
                 !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED),
             )
             if (changed) {
+                commandServer?.setSourceNetwork(sourceNetworkIdentity(network))
                 runCatching { commandServer?.resetNetwork() }
                 runCatching {
                     if (restored) {
@@ -890,6 +893,24 @@ class DropoVpnService :
                 }.onFailure { coreLog("network source recheck could not start: ${describeError(it)}") }
             }
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sourceNetworkIdentity(network: Network?): String {
+        if (network == null) return ""
+        val caps = connectivity.getNetworkCapabilities(network) ?: return ""
+        if (android.os.Build.VERSION.SDK_INT >= 29 && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            val id = (caps.transportInfo as? android.net.wifi.WifiInfo)?.networkId
+            if (id != null && id >= 0) return "wifi:$id"
+        }
+        // With Wi-Fi identity redacted, scope the hint to the OS network
+        // lifetime. Independent, unidentified Wi-Fi networks must not collide.
+        if (android.os.Build.VERSION.SDK_INT >= 31 && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+            val subscriptions = caps.subscriptionIds.sorted()
+            if (subscriptions.isNotEmpty()) return "cell:" + subscriptions.joinToString(",")
+        }
+        val boot = android.provider.Settings.Global.getInt(contentResolver, "boot_count", -1)
+        return "network:$boot:" + network.networkHandle
     }
 
     private fun physicalNetwork(): Network? {

@@ -113,6 +113,7 @@ type CommandServer struct {
 	sourceCancel         context.CancelFunc
 	sourceCycleCancel    context.CancelFunc
 	sourceGeneration     uint64
+	sourceNetwork        string
 	sourceCoreGeneration int64
 	sourceWake           chan struct{}
 	adaptiveWake         chan struct{}

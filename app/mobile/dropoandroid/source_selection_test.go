@@ -174,3 +174,37 @@ func TestPhysicalNetworkChangeCancelsAndFencesOldProbeCycle(t *testing.T) {
 		t.Fatal("network callback revived a stopped session")
 	}
 }
+
+func TestAutoCachedSixthEntryStartsEarlyAndKeepsWinner(t *testing.T) {
+	candidates := []sourceCandidate{{ID: "primary"}, {ID: "relay"}, {ID: "unreachable"}, {ID: "another"}, {ID: "slow"}, {ID: "last-working"}}
+	hold := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	picked := make(chan string, 6)
+	done := make(chan int, 1)
+	go func() {
+		results := raceSourceCandidates(ctx, candidates, "last-working", func(ctx context.Context, c sourceCandidate) sourceObservation {
+			if c.ID != "last-working" {
+				select {
+				case <-ctx.Done():
+					return sourceObservation{}
+				case <-hold:
+				}
+			}
+			return sourceObservation{State: "ok", LatencyMS: 1, SourceID: c.ID}
+		}, func(c sourceCandidate, _ sourceObservation) bool { picked <- c.ID; return true })
+		done <- len(results)
+	}()
+	select {
+	case id := <-picked:
+		if id != "last-working" {
+			t.Fatal("cache ignored")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ready blocked on background probes")
+	}
+	close(hold)
+	if n := <-done; n != 6 || len(picked) != 0 || candidates[0].ID != "primary" {
+		t.Fatal("changed winner, priority, or skipped background entries")
+	}
+}

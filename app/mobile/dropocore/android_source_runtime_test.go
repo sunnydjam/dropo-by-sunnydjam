@@ -201,3 +201,19 @@ func TestAndroidCancelledBuildCannotRegisterAfterStop(t *testing.T) {
 		t.Fatal("new fenced session did not rearm the build")
 	}
 }
+
+func TestLastVerifiedAndroidSourceIsNetworkAndNodeScoped(t *testing.T) {
+	g := preparedSourceSession(t)
+	c := current.preparedSources[1]
+	if !CommitAndroidSourceProbeBatch(g, sourceObservationJSON(c.ID, c.NodeID, g, "ok", 21), c.ID, &testSourceSelector{}) {
+		t.Fatal("selection failed")
+	}
+	RememberAndroidNetworkSource("test-wifi", g)
+	if PreferredAndroidNetworkSource("test-cell", g) != "" || PreferredAndroidNetworkSource("test-wifi", g) != c.ID {
+		t.Fatal("network history crossed network boundaries")
+	}
+	current.preparedSources[1].NodeID = "rotated"
+	if PreferredAndroidNetworkSource("test-wifi", g) != "" {
+		t.Fatal("stale source reused")
+	}
+}

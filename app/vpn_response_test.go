@@ -280,3 +280,21 @@ func TestVPNResponseCancellationDoesNotLaunchFallback(t *testing.T) {
 		t.Fatal("cancelled probe launched a fallback request")
 	}
 }
+
+func TestVPNResponseSlowPrimaryUsesIndependentTargetWithoutWaitingForTimeout(t *testing.T) {
+	var calls atomic.Int32
+	app, ctx, _ := newVPNResponseTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Query().Get("url") == vpnResponseProbeTarget {
+			<-r.Context().Done()
+			return
+		}
+		fmt.Fprint(w, `{"delay":45}`)
+	})
+	limit, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	delay, target, err := app.testProxyDelayWithTargetContext(limit, "vpn-source-alpha")
+	if err != nil || delay != 45 || target != vpnResponseFallbackProbeTarget || calls.Load() != 2 {
+		t.Fatalf("delay=%d target=%q count=%d err=%v", delay, target, calls.Load(), err)
+	}
+}

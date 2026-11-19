@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
+	"dropocore/sourcehistory"
+	"slices"
 	"sort"
-	"sync"
 	"time"
 )
 
@@ -27,30 +28,6 @@ func rankVPNSourceLatencies(tags []string, delays map[string]int) []string {
 		return left > 0 && (right <= 0 || left < right)
 	})
 	return ranked
-}
-
-func rankVPNSourceGroups(tags []string, delays map[string]int, owners map[string]string) []string {
-	var groups []string
-	members := make(map[string][]string, len(tags))
-	firstHealthy := make(map[string]int, len(tags))
-	for _, tag := range tags {
-		owner := owners[tag]
-		if owner == "" {
-			owner = tag
-		}
-		if len(members[owner]) == 0 {
-			groups = append(groups, owner)
-		}
-		members[owner] = append(members[owner], tag)
-		if firstHealthy[owner] == 0 && delays[tag] > 0 {
-			firstHealthy[owner] = delays[tag]
-		}
-	}
-	result := make([]string, 0, len(tags))
-	for _, owner := range rankVPNSourceLatencies(groups, firstHealthy) {
-		result = append(result, members[owner]...)
-	}
-	return result
 }
 
 func (a *App) sessionVPNSourceTags() []string {
@@ -83,59 +60,48 @@ func (a *App) selectInitialVPNSource(ctx context.Context, generation uint64) {
 	// comparison and its concurrency, even when a user imports many sources.
 	probeCtx, cancel := context.WithTimeout(ctx, vpnSourceSelectionBudget)
 	defer cancel()
-	type sample struct {
-		tag   string
-		delay int
-	}
-	jobs := make(chan string)
-	results := make(chan sample, len(tags))
-	var workers sync.WaitGroup
-	for i := 0; i < min(vpnSourceProbeWorkers, len(tags)); i++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for tag := range jobs {
-				if probeCtx.Err() != nil {
-					return
-				}
-				binding, valid := a.vpnSourceProbeBinding(tag)
-				if !valid {
-					continue
-				}
-				delay, target, err := a.testProxyDelayWithTargetContext(probeCtx, tag)
-				if probeCtx.Err() != nil {
-					return // A cancelled sample is not evidence of source failure.
-				}
-				healthy := err == nil && delay > 0
-				if !a.recordVPNSourceObservation(probeCtx, generation, tag, binding, delay, healthy, time.Now(), target) {
-					continue
-				}
-				a.recordVPNSourceHealthForMonitor(generation, tag, healthy, time.Now())
-				if healthy {
-					results <- sample{tag, delay}
-				}
+	network := vpnSourceNetworkKey()
+	if profile, err := a.storage.GetActiveProfile(); err == nil {
+		last := profile.SourceHistory.Last(network)
+		i := slices.Index(tags, last.Source)
+		if i > 0 {
+			if binding, ok := a.vpnSourceProbeBinding(tags[i]); ok && binding.NodeID == last.Node {
+				copy(tags[1:i+1], tags[:i])
+				tags[0] = last.Source
 			}
-		}()
-	}
-dispatch:
-	for _, tag := range tags {
-		select {
-		case <-probeCtx.Done():
-			break dispatch
-		case jobs <- tag:
 		}
 	}
-	close(jobs)
-	workers.Wait()
-	close(results)
+	delays := map[string]int{}
+	winner := ""
+	sourcehistory.Race(probeCtx, tags, vpnSourceProbeWorkers, func(pctx context.Context, tag string) int {
+		binding, valid := a.vpnSourceProbeBinding(tag)
+		if !valid {
+			return 0
+		}
+		delay, target, err := a.testProxyDelayWithTargetContext(pctx, tag)
+		healthy := err == nil && delay > 0
+		if !a.recordVPNSourceObservation(pctx, generation, tag, binding, delay, healthy, time.Now(), target) {
+			return 0
+		}
+		a.recordVPNSourceHealthForMonitor(generation, tag, healthy, time.Now())
+		if !healthy {
+			return 0
+		}
+		return delay
+	}, func(tag string, delay int) {
+		if delay <= 0 {
+			return
+		}
+		delays[tag] = delay
+		if winner == "" && a.switchConfirmedSource(ctx, generation, tag, true) {
+			winner = tag
+			a.setVPNSourceAvailabilityForMonitor(generation, true, "")
+		}
+	})
 	if !a.vpnSourceMonitorCurrent(ctx, generation) {
 		return
 	}
-	delays := make(map[string]int)
-	for result := range results {
-		delays[result.tag] = result.delay
-	}
-	ranked := rankVPNSourceGroups(tags, delays, a.vpnSourceOwners(time.Now()))
+	ranked := rankVPNSourceLatencies(tags, delays)
 	a.vpnSourceMonitorMu.Lock()
 	if a.vpnSourceMonitorCancel == nil || a.vpnSourceMonitorGeneration != generation || a.vpnSourceManual != "" {
 		a.vpnSourceMonitorMu.Unlock()
@@ -143,17 +109,8 @@ dispatch:
 	}
 	a.vpnSourceRankedTags = ranked
 	a.vpnSourceMonitorMu.Unlock()
-	switchCtx, stopSwitch := context.WithTimeout(ctx, 5*time.Second)
-	defer stopSwitch()
-	for _, tag := range ranked {
-		if switchCtx.Err() != nil {
-			break
-		}
-		if delays[tag] > 0 && a.switchVPNSourceForMonitor(switchCtx, generation, tag) {
-			a.setVPNSourceAvailabilityForMonitor(generation, true, "")
-			a.writeLog("[VPNSources] selected lowest measured HTTP latency between independent sources; keeping healthy session stable")
-			return
-		}
+	if winner != "" {
+		return
 	}
 	// Do not turn an incomplete comparison into a confirmed network failure.
 	if probeCtx.Err() == nil {

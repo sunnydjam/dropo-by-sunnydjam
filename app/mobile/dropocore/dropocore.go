@@ -3,6 +3,7 @@ package dropocore
 import (
 	"crypto/sha256"
 	"dropocore/catalog"
+	"dropocore/sourcehistory"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -34,13 +35,14 @@ const (
 )
 
 type coreState struct {
-	BasePath                 string             `json:"basePath"`
-	Connected                bool               `json:"connected"`
-	StartedAt                string             `json:"startedAt"`
-	Subscription             string             `json:"subscription"`
-	SubscriptionProxyCount   int                `json:"subscriptionProxyCount,omitempty"`
-	VPNSources               []androidVPNSource `json:"vpnSources"`
-	VPNSourceAutoSelect      bool               `json:"vpnSourceAutoSelect"`
+	BasePath                 string                `json:"basePath"`
+	Connected                bool                  `json:"connected"`
+	StartedAt                string                `json:"startedAt"`
+	Subscription             string                `json:"subscription"`
+	SubscriptionProxyCount   int                   `json:"subscriptionProxyCount,omitempty"`
+	VPNSources               []androidVPNSource    `json:"vpnSources"`
+	VPNSourceAutoSelect      bool                  `json:"vpnSourceAutoSelect"`
+	SourceHistory            sourcehistory.History `json:"sourceHistory,omitempty"`
 	sourcesRevision          uint64
 	preparedSources          []androidSourceCandidate
 	sourceSession            int64

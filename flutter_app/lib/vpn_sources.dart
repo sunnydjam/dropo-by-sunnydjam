@@ -450,7 +450,12 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Удалить «${source.name}»?'),
-        content: const Text('Подключение исчезнет из списка.'),
+        content: Text(
+          Platform.isWindows &&
+                  _ownedSourceFamily(source.publicCatalogId) != null
+              ? 'Все входы этого профиля Dropo будут удалены. Другие профили сохранятся.'
+              : 'Подключение исчезнет из списка.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -572,6 +577,19 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
               !sources.any((source) => source.publicCatalogId == provider.id),
         )
         .firstOrNull;
+    final connectedSource = sources
+        .where((source) => source.active && !source.disabled)
+        .firstOrNull;
+    final usingFallback =
+        Platform.isWindows &&
+        sourcesFresh &&
+        widget.enabled &&
+        !loading &&
+        (widget.connected ?? running) == true &&
+        autoSelect == false &&
+        firstEnabled != null &&
+        connectedSource != null &&
+        firstEnabled.id != connectedSource.id;
     final addButton = FilledButton.icon(
       key: const ValueKey('add-personal-vpn'),
       onPressed: disabled ? null : _toggleAddOptions,
@@ -791,7 +809,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
               subtitle: const Text(
-                'По отклику между подписками',
+                'Первый ответивший вход в этой сети',
                 style: TextStyle(color: _atlasMuted, fontSize: 12),
               ),
               onTap: controlsDisabled || autoSelect == true
@@ -807,6 +825,15 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
           ),
           const Divider(height: 1, color: _atlasBorder),
         ],
+        if (usingFallback)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Text(
+              'Вы выбрали «${firstEnabled.name}». Сейчас подключено через «${connectedSource.name}».',
+              key: const ValueKey('source-fallback-active'),
+              style: const TextStyle(color: _atlasMint),
+            ),
+          ),
         for (final source in sources)
           _VpnSourceTile(
             key: ValueKey('vpn-source-${source.id}'),

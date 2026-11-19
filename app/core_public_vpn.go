@@ -83,6 +83,28 @@ func removeRetiredPublicVPNSource(profile *ProfileData) {
 func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 	for index := range sources {
 		source := &sources[index]
+		if isLatviaProvider(source.PublicCatalogID) || ownedprofile.IsReserve(source.PublicCatalogID) {
+			// Only a matching, validated primary may supply a managed fast route.
+			live := false
+			for _, parent := range sources {
+				if parent.PublicCatalogID != windowsOwnedFamily(source.PublicCatalogID) || parent.URI == "" {
+					continue
+				}
+				_, relay, err := ownedprofile.Pair(parent.PublicCatalogID, parent.URI)
+				if err == nil {
+					if isLatviaProvider(source.PublicCatalogID) {
+						live = source.URI == parent.URI
+					} else {
+						live = source.URI == relay
+					}
+				}
+				break
+			}
+			if !live {
+				source.URI, source.CachedNodes = "", nil
+			}
+			continue
+		}
 		if ownedprofile.IsProvider(source.PublicCatalogID) {
 			if source.URI == "" {
 				continue

@@ -102,7 +102,7 @@ func (a *App) GetProxiesWithDelay() map[string]interface{} {
 	}
 }
 
-const vpnResponseProbeTarget = "http://www.gstatic.com/generate_204"
+const vpnResponseProbeTarget = "https://www.gstatic.com/generate_204"
 const vpnResponseFallbackProbeTarget = "https://cp.cloudflare.com/generate_204"
 const vpnResponseProbeBudget = 9 * time.Second
 
@@ -129,25 +129,58 @@ func (a *App) testProxyDelayContext(ctx context.Context, proxyName string) (int,
 func (a *App) testProxyDelayWithTargetContext(ctx context.Context, proxyName string) (int, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, vpnResponseProbeBudget)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
+	if !a.isVPNRunning() {
+		return 0, "", fmt.Errorf("VPN не запущен")
+	}
+	type sample struct {
+		delay  int
+		target string
+		err    error
+	}
+	results := make(chan sample, 2)
+	probe := func(target string, apiTimeout int, limit time.Duration) {
+		go func() {
+			pctx, stop := context.WithTimeout(ctx, limit)
+			defer stop()
+			delay, err := a.testProxyDelayTarget(pctx, proxyName, target, apiTimeout)
+			results <- sample{delay, target, err}
+		}()
+	}
+	probe(vpnResponseProbeTarget, 5000, 6*time.Second)
+	// A healthy first target normally answers alone. On a slow route, overlap
+	// the independent confirmation instead of stacking both timeouts.
+	timer := time.NewTimer(1500 * time.Millisecond)
+	defer timer.Stop()
+	hedge := timer.C
+	remaining := 1
 	var lastErr error
-	for index, target := range []string{vpnResponseProbeTarget, vpnResponseFallbackProbeTarget} {
-		if err := ctx.Err(); err != nil {
-			return 0, "", err
+	for remaining > 0 || hedge != nil {
+		select {
+		case <-ctx.Done():
+			return 0, "", ctx.Err()
+		case r := <-results:
+			remaining--
+			if err := ctx.Err(); err != nil {
+				return 0, "", err
+			}
+			if r.err == nil {
+				return r.delay, r.target, nil
+			}
+			lastErr = r.err
+			if hedge == nil {
+				continue
+			}
+		case <-hedge:
+			if err := ctx.Err(); err != nil {
+				return 0, "", err
+			}
 		}
-		if !a.isVPNRunning() {
-			return 0, "", fmt.Errorf("VPN не запущен")
-		}
-		apiTimeout, requestTimeout := 5000, 6*time.Second
-		if index > 0 {
-			apiTimeout, requestTimeout = 2500, 3*time.Second
-		}
-		probeCtx, cancelProbe := context.WithTimeout(ctx, requestTimeout)
-		delay, err := a.testProxyDelayTarget(probeCtx, proxyName, target, apiTimeout)
-		cancelProbe()
-		if err == nil {
-			return delay, target, nil
-		}
-		lastErr = err
+		hedge = nil
+		remaining++
+		probe(vpnResponseFallbackProbeTarget, 2500, 3*time.Second)
 	}
 	return 0, "", lastErr
 }

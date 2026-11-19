@@ -2,13 +2,16 @@ package dropoandroid
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"dropocore/sourcehistory"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -157,6 +160,19 @@ func (s *CommandServer) stopSourceSelectionLocked() {
 
 // A changed/lost physical network invalidates displayed observations at once
 // and wakes a bounded health cycle; it does not recreate the engine or TUN.
+func (s *CommandServer) SetSourceNetwork(identity string) {
+	key := ""
+	if identity != "" {
+		key = fmt.Sprintf("%x", sha256.Sum256([]byte(identity)))
+	}
+	s.sourceMu.Lock()
+	defer s.sourceMu.Unlock()
+	if s.sourceNetwork != key && s.sourceCycleCancel != nil {
+		s.sourceCycleCancel()
+	}
+	s.sourceNetwork = key
+}
+
 func (s *CommandServer) RecheckSourceSelection() {
 	s.sourceMu.Lock()
 	defer s.sourceMu.Unlock()
@@ -204,9 +220,13 @@ func (s *CommandServer) commitSourceResultsWithOutage(ctx context.Context, gener
 	current := func() bool {
 		return ctx.Err() == nil && s.sourceGeneration == generation && core.AndroidSourceSessionCurrent(coreGeneration)
 	}
-	return commitSourceAndCleanup(current, func() bool {
+	ok := commitSourceAndCleanup(current, func() bool {
 		return core.CommitAndroidSourceProbeBatch(coreGeneration, string(encoded), selectedID, sourceSelector{selector})
 	}, flows, failedTag)
+	if ok && selectedID != "" {
+		core.RememberAndroidNetworkSource(s.sourceNetwork, coreGeneration)
+	}
+	return ok
 }
 
 func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint64, coreGeneration int64, automatic bool, candidates []sourceCandidate, outbounds adapter.OutboundManager, selector *group.Selector, flows sourceFlowTable, wake <-chan struct{}, activeID string, initial bool, checked chan bool) {
@@ -222,6 +242,9 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 		}
 		return probeSource(ctx, candidate, coreGeneration, outbound)
 	}
+	s.sourceMu.Lock()
+	lastNetwork := s.sourceNetwork
+	s.sourceMu.Unlock()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -231,6 +254,12 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 				return
 			case <-ticker.C:
 			case <-wake:
+				s.sourceMu.Lock()
+				changed := lastNetwork != s.sourceNetwork
+				s.sourceMu.Unlock()
+				if automatic && changed {
+					initial = true
+				}
 			}
 		}
 		if !core.AndroidSourceSessionCurrent(coreGeneration) {
@@ -240,7 +269,25 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 		var results []sourceObservation
 		var confirmedFailed sourceCandidate
 		chosen := ""
-		if initial {
+		if initial && automatic {
+			s.sourceMu.Lock()
+			network := s.sourceNetwork
+			lastNetwork = network
+			s.sourceMu.Unlock()
+			preferred := core.PreferredAndroidNetworkSource(network, coreGeneration)
+			results = raceSourceCandidates(cycleCtx, candidates, preferred, probe, func(c sourceCandidate, r sourceObservation) bool {
+				if !s.commitSourceResults(cycleCtx, generation, coreGeneration, []sourceObservation{r}, c.ID, selector) {
+					return false
+				}
+				activeID = c.ID
+				if checked != nil {
+					checked <- true
+					checked = nil
+				}
+				return true
+			})
+			// Publish the rest as observations only. An active healthy flow stays put.
+		} else if initial {
 			results = probeSourceCandidates(cycleCtx, candidates, probe)
 			chosen = chooseSourceCandidate(candidates, results, automatic)
 		} else {
@@ -332,6 +379,26 @@ func probeSourceCandidates(ctx context.Context, candidates []sourceCandidate, pr
 		}(i, candidate)
 	}
 	workers.Wait()
+	return results
+}
+
+func raceSourceCandidates(ctx context.Context, candidates []sourceCandidate, preferred string, probe func(context.Context, sourceCandidate) sourceObservation, choose func(sourceCandidate, sourceObservation) bool) []sourceObservation {
+	ordered := slices.Clone(candidates)
+	for i, c := range ordered {
+		if c.ID == preferred {
+			copy(ordered[1:i+1], ordered[:i])
+			ordered[0] = c
+			break
+		}
+	}
+	results := make([]sourceObservation, 0, len(ordered))
+	selected := false
+	sourcehistory.Race(ctx, ordered, 4, probe, func(c sourceCandidate, r sourceObservation) {
+		results = append(results, r)
+		if !selected && r.State == "ok" && r.LatencyMS > 0 {
+			selected = choose(c, r)
+		}
+	})
 	return results
 }
 

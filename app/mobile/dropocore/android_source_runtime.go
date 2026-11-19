@@ -2,6 +2,7 @@ package dropocore
 
 import (
 	"context"
+	"dropocore/sourcehistory"
 	"encoding/json"
 	"sync/atomic"
 	"time"
@@ -213,4 +214,36 @@ func androidSourceResponseLocked(id string) androidSourceResponse {
 		}
 	}
 	return result
+}
+
+// Validate cached IDs against currently prepared nodes, including entitlement.
+func PreferredAndroidNetworkSource(network string, generation int64) string {
+	mu.Lock()
+	defer mu.Unlock()
+	if generation <= 0 || current.sourceSession != generation {
+		return ""
+	}
+	e := current.SourceHistory.Last(network)
+	for _, c := range current.preparedSources {
+		if c.ID == e.Source && c.NodeID == e.Node {
+			return c.ID
+		}
+	}
+	return ""
+}
+func RememberAndroidNetworkSource(network string, generation int64) {
+	mu.Lock()
+	defer mu.Unlock()
+	if network == "" || generation <= 0 || current.sourceSession != generation {
+		return
+	}
+	r := current.sourceResponses[current.activeSourceID]
+	if r.State != "ok" || r.NodeID == "" {
+		return
+	}
+	e := sourcehistory.Entry{Network: network, Source: current.activeSourceID, Node: r.NodeID}
+	if current.SourceHistory.Last(network) != e {
+		current.SourceHistory = current.SourceHistory.With(e)
+		_ = saveLocked()
+	}
 }

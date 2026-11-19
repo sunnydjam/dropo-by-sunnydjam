@@ -32,7 +32,7 @@ func (a *App) applyOwnedVPNSource(provider, raw, expectedSourceID, expectedNodeI
 			if restore && (!ownedVPNRestoreReferenceMatches(observed, provider, expectedSourceID, expectedNodeID) || !ownedVPNRestoreCredentialsMatch(observed, provider, raw, reserveID, reserve)) {
 				return map[string]interface{}{"success": false, "error": "Профиль Dropo изменился. Повторите обновление источника."}
 			}
-			if ownedVPNPairCurrent(profile.VPNSources, provider, raw, reserveID, reserve) {
+			if ownedVPNPairCurrent(profile.VPNSources, provider, raw, reserveID, reserve) && latviaSourceCurrent(profile.VPNSources, provider, raw) {
 				return map[string]interface{}{"success": true}
 			}
 		}
@@ -41,7 +41,7 @@ func (a *App) applyOwnedVPNSource(provider, raw, expectedSourceID, expectedNodeI
 		if (restore && (!ownedVPNRestoreReferenceMatches(profile.VPNSources, provider, expectedSourceID, expectedNodeID) || !ownedVPNRestoreCredentialsMatch(profile.VPNSources, provider, raw, reserveID, reserve))) || !ownedVPNFamilyUnchanged(observed, profile.VPNSources, provider) {
 			return fmt.Errorf("Профиль Dropo изменился. Повторите обновление источника.")
 		}
-		return upsertOwnedVPNPair(profile, provider, raw)
+		return upsertWindowsOwnedSources(profile, provider, raw)
 	})
 }
 
@@ -52,7 +52,7 @@ func ownedVPNRestoreCredentialsMatch(sources []VPNSource, primary, key, reserve,
 		if source.URI == "" {
 			continue
 		}
-		if source.PublicCatalogID == primary && source.URI != key || source.PublicCatalogID == reserve && source.URI != reserveKey {
+		if (source.PublicCatalogID == primary || source.PublicCatalogID == primary+latviaSuffix) && source.URI != key || source.PublicCatalogID == reserve && source.URI != reserveKey {
 			return false
 		}
 	}
@@ -68,7 +68,7 @@ func ownedVPNRestoreReferenceMatches(sources []VPNSource, provider, expectedID, 
 		if source.ID != expectedID {
 			continue
 		}
-		if !ownedprofile.SameFamily(provider, source.PublicCatalogID) {
+		if !sameWindowsOwnedFamily(provider, source.PublicCatalogID) {
 			return false
 		}
 		nodeID := ""
@@ -91,7 +91,7 @@ func ownedVPNFamilyUnchanged(before, after []VPNSource, provider string) bool {
 	refs := func(sources []VPNSource) map[reference]int {
 		result := map[reference]int{}
 		for _, s := range sources {
-			if ownedprofile.SameFamily(provider, s.PublicCatalogID) {
+			if sameWindowsOwnedFamily(provider, s.PublicCatalogID) {
 				result[reference{s.ID, s.PublicCatalogID, s.URI}]++
 			}
 		}
@@ -195,7 +195,7 @@ func upsertOwnedVPNPair(profile *ProfileData, provider, raw string) error {
 	}
 	// Only a newly enrolled product gets the default product priority. Adding
 	// a missing reserve to an existing primary must preserve its saved order.
-	if !seen[provider] && !seen[reserveID] {
+	if !seen[provider] && !seen[reserveID] && profile.VPNSourceSelectionMode != "priority" {
 		sort.SliceStable(managed, func(i, j int) bool {
 			return ownedprofile.Priority(managed[i].PublicCatalogID) < ownedprofile.Priority(managed[j].PublicCatalogID)
 		})
@@ -204,8 +204,8 @@ func upsertOwnedVPNPair(profile *ProfileData, provider, raw string) error {
 		}
 	}
 	profile.VPNSources = sources
-	if wasEmpty {
-		profile.VPNSourceSelectionMode = "priority"
+	if wasEmpty && profile.VPNSourceSelectionMode == "" {
+		profile.VPNSourceSelectionMode = "latency"
 	}
 	return nil
 }
@@ -213,7 +213,7 @@ func upsertOwnedVPNPair(profile *ProfileData, provider, raw string) error {
 func removeOwnedVPNFamily(sources []VPNSource, provider string) []VPNSource {
 	remaining := make([]VPNSource, 0, len(sources))
 	for _, s := range sources {
-		if !ownedprofile.SameFamily(s.PublicCatalogID, provider) {
+		if !sameWindowsOwnedFamily(s.PublicCatalogID, provider) {
 			remaining = append(remaining, s)
 		}
 	}
@@ -234,7 +234,7 @@ func settingsWithoutOwnedSecrets(settings *SettingsFile) *SettingsFile {
 		sources := make([]VPNSource, 0, len(p.VPNSources))
 		found := false
 		for _, s := range p.VPNSources {
-			if ownedprofile.IsProvider(s.PublicCatalogID) {
+			if windowsOwnedFamily(s.PublicCatalogID) != "" {
 				found = true
 				s.URI = ""
 				s.CachedNodes = nil
@@ -261,5 +261,8 @@ func settingsWithoutOwnedSecrets(settings *SettingsFile) *SettingsFile {
 	return &copySettings
 }
 func ownedSourceExpired(s VPNSource) bool {
+	if isLatviaProvider(s.PublicCatalogID) {
+		return ownedprofile.Expired(windowsOwnedFamily(s.PublicCatalogID), s.URI, time.Now())
+	}
 	return ownedprofile.Expired(s.PublicCatalogID, s.URI, time.Now())
 }

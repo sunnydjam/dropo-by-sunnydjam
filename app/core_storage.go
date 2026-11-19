@@ -5,7 +5,7 @@ package main
 import (
 	"context"
 	"dropocore/dnspolicy"
-	"dropocore/ownedprofile"
+	"dropocore/sourcehistory"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -20,6 +20,7 @@ import (
 
 // ProfileData contains all data for a single profile.
 type ProfileData struct {
+	SourceHistory sourcehistory.History `json:"source_history,omitempty"`
 	// Profile metadata
 	ID        int       `json:"id"`
 	Name      string    `json:"name"`
@@ -1605,30 +1606,19 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 	b.addWireGuardDNSNew(template, wireGuardConfigs)
 
 	updatedSources := append([]VPNSource(nil), sources...)
-	plan := ownedprofile.Candidates(ownedSourceInputs(updatedSources), time.Now())
-	order := make([]VPNSource, 0, len(plan))
 	proxies := make([]ProxyConfig, 0, len(updatedSources))
 	xrayCandidates := make([]ProxyConfig, 0)
 	enabledSources := 0
 	sourceErrors := make([]string, 0)
-	for _, candidate := range plan {
+	for index := range updatedSources {
+		source := &updatedSources[index]
+		if source.Disabled || ownedSourceExpired(*source) {
+			continue
+		}
 		enabledSources++
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		order = append(order, VPNSource{ID: candidate.ID})
-		if candidate.Index < 0 {
-			proxy, err := b.fetcher.ParseSingleLink(candidate.URI)
-			if err != nil {
-				return nil, fmt.Errorf("invalid protected direct reserve %s", candidate.ID)
-			}
-			proxy.Tag = "vpn-source-" + candidate.ID
-			split := SplitProxyConfigs([]ProxyConfig{proxy})
-			proxies = append(proxies, split.SingBox...)
-			xrayCandidates = append(xrayCandidates, split.XrayBridge...)
-			continue
-		}
-		source := &updatedSources[candidate.Index]
 		nodes, fetchErr := b.fetchVPNSourceNodesContext(ctx, *source)
 		// Cancellation must never turn into a partial-success cache fallback.
 		if err := ctx.Err(); err != nil {
@@ -1682,7 +1672,7 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 	if NormalizeRoutingMode(b.routingMode) == RoutingModeAllTraffic && len(proxies) == 0 {
 		return nil, fmt.Errorf("для режима «Всё через VPN» выберите и включите поддерживаемый VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
 	}
-	orderVPNSourceProxies(proxies, order)
+	orderVPNSourceProxies(proxies, updatedSources)
 
 	// Generate outbounds
 	outbounds := b.generateOutbounds(template, proxies)
@@ -1764,6 +1754,13 @@ func (b *ConfigBuilderForStorage) fetchVPNSourceNodes(source VPNSource) ([]Proxy
 }
 
 func (b *ConfigBuilderForStorage) fetchVPNSourceNodesContext(ctx context.Context, source VPNSource) ([]ProxyConfig, error) {
+	if isLatviaProvider(source.PublicCatalogID) {
+		raw, err := windowsLatviaURI(source)
+		if err != nil {
+			return nil, err
+		}
+		source.URI = raw
+	}
 	if source.Kind == VPNSourceDirect || isDirectProxyLink(source.URI) {
 		nodes, err := b.fetcher.ParseSubscription(source.URI)
 		if err != nil {
@@ -3174,4 +3171,22 @@ func (s *Storage) MigrateFromOldFormat(basePath string) error {
 	}
 
 	return nil
+}
+
+func (s *Storage) rememberSource(profileID int, e sourcehistory.Entry) {
+	if e.Network == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.data.Profiles {
+		p := &s.data.Profiles[i]
+		if p.ID == profileID {
+			if p.SourceHistory.Last(e.Network) != e {
+				p.SourceHistory = p.SourceHistory.With(e)
+				_ = s.saveInternal()
+			}
+			return
+		}
+	}
 }

@@ -93,6 +93,9 @@ func TestVPNSourceLatencySelectionMeasuresOnlyIndependentSources(t *testing.T) {
 	var mu sync.Mutex
 	var probes, switches []string
 	a, ctx, generation := newVPNResponseTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut && strings.Contains(r.URL.Path, "alpha") {
+			time.Sleep(80 * time.Millisecond)
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		if r.Method == http.MethodPut {
@@ -268,6 +271,7 @@ func TestVPNSourceLatencyFailureUsesIndependentFallback(t *testing.T) {
 			}
 			fmt.Fprint(w, `{"delay":20}`)
 		} else {
+			time.Sleep(50 * time.Millisecond)
 			fmt.Fprint(w, `{"delay":100}`)
 		}
 	})
@@ -281,5 +285,78 @@ func TestVPNSourceLatencyFailureUsesIndependentFallback(t *testing.T) {
 	a.checkActiveVPNSource(ctx, generation)
 	if a.activeVPNSource() != "vpn-source-alpha" {
 		t.Fatal("failed source did not advance to independent fallback")
+	}
+}
+
+func TestPreferredIngressFallbackIsVerifiedAndPreservesPriority(t *testing.T) {
+	var failedProbes atomic.Int32
+	a, ctx, generation := newVPNResponseTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if strings.Contains(r.URL.Path, "alpha") {
+			failedProbes.Add(1)
+			w.WriteHeader(http.StatusGatewayTimeout)
+			return
+		}
+		fmt.Fprint(w, `{"delay":57}`)
+	})
+	p, _ := a.storage.GetActiveProfile()
+	if err := a.storage.UpdateProfileVPNSources(p.ID, p.VPNSources, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	a.vpnSourceHealth = make(map[string]vpnSourceHealthState)
+	a.selectInitialVPNSource(ctx, generation)
+	list := a.GetVPNSources()
+	views := list["sources"].([]map[string]interface{})
+	if failedProbes.Load() != 2 || list["autoSelect"] != false || list["activeSource"] != "vpn-source-beta" || views[0]["id"] != "alpha" || views[0]["active"] != false || views[1]["active"] != true {
+		t.Fatalf("preferred source, verified fallback or number of probes incorrect: %v; probes=%d", list, failedProbes.Load())
+	}
+	a.activateVPNSource("vpn-source-alpha", true)
+	if list = a.GetVPNSources(); list["activeSource"] != "" {
+		t.Fatal("unverified manual selector reported as connected")
+	}
+}
+
+func TestFastAutoCommitsWhileOtherSourcesStillPending(t *testing.T) {
+	hold := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(hold)
+		}
+	}()
+	selected := make(chan struct{}, 2)
+	a, ctx, gen := newVPNResponseTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.WriteHeader(204)
+			selected <- struct{}{}
+			return
+		}
+		if strings.Contains(r.URL.Path, "alpha") {
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		fmt.Fprint(w, `{"delay":25}`)
+	})
+	a.vpnSourceHealth = map[string]vpnSourceHealthState{}
+	done := make(chan struct{})
+	go func() { a.selectInitialVPNSource(ctx, gen); close(done) }()
+	select {
+	case <-selected:
+	case <-time.After(2 * time.Second):
+		close(hold)
+		released = true
+		t.Fatal("waited for losing probe")
+	}
+	close(hold)
+	released = true
+	<-done
+	if a.activeVPNSource() != "vpn-source-beta" || len(selected) != 0 {
+		t.Fatal("background comparison changed a healthy session")
 	}
 }
