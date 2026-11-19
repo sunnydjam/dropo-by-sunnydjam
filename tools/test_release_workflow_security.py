@@ -32,19 +32,28 @@ def accepted(values):
 
 class ReleaseTrust(unittest.TestCase):
     def setUp(self):
-        self.event={'github.repository':'owner/project','github.event.workflow_run.head_repository.full_name':'owner/project','github.event.workflow_run.event':'push','github.event.workflow_run.conclusion':'success','github.event.workflow_run.head_branch':'Dzhamuha-develop'}
-    def test_trusted_push(self):self.assertTrue(accepted(self.event))
+        self.event = {
+            'github.repository': 'owner/project',
+            'github.event.workflow_run.head_repository.full_name': 'owner/project',
+            'github.event.workflow_run.event': 'workflow_dispatch',
+            'github.event.workflow_run.conclusion': 'success',
+            'github.event.workflow_run.head_branch': 'main',
+        }
+
+    def test_trusted_main_dispatch(self):
+        self.assertTrue(accepted(self.event))
+
     def test_fork_same_branch(self):
         self.event['github.event.workflow_run.head_repository.full_name']='attacker/fork';self.assertFalse(accepted(self.event))
     def test_untrusted_events(self):
-        for value in ['pull_request','pull_request_target','workflow_dispatch','issue_comment','']:
+        for value in ['push','pull_request','pull_request_target','issue_comment','']:
             with self.subTest(value=value):
                 e={**self.event,'github.event.workflow_run.event':value};self.assertFalse(accepted(e))
     def test_failed_or_incomplete_upstream(self):
         for value in ['failure','cancelled','skipped','action_required','']:
             with self.subTest(value=value):self.assertFalse(accepted({**self.event,'github.event.workflow_run.conclusion':value}))
     def test_other_or_missing_branch(self):
-        for value in ['main','feature','']:
+        for value in ['develop','feature','']:
             self.assertFalse(accepted({**self.event,'github.event.workflow_run.head_branch':value}))
     def test_missing_repository_fails_closed(self):
         del self.event['github.event.workflow_run.head_repository.full_name'];self.assertFalse(accepted(self.event))
@@ -67,11 +76,16 @@ class ReleaseTrust(unittest.TestCase):
         self.assertLess(text.index('./tools/check-existing-release.ps1'),text.index('"tag=$tag"'))
         readiness=(ROOT/'tools/test-release-readiness.ps1').read_text(encoding='utf-8')
         self.assertIn("'test-existing-release.ps1'",readiness)
+    def test_publisher_listens_to_completed_main_package_runs(self):
+        text,_=condition()
+        self.assertIn('    workflows: ["Windows package release gate"]\n    branches: [main]\n    types: [completed]',text)
     def test_required_package_gate_runs_before_merge_without_path_skips(self):
         text=WORKFLOW.with_name('windows-release-gate.yml').read_text(encoding='utf-8')
         events=text.split('\npermissions:',1)[0]
-        for event in ['push','pull_request']:
-            self.assertRegex(events,rf'(?m)^  {event}:\n(?:    #[^\n]*\n)*    branches: \[Dzhamuha-develop\]')
+        self.assertIn('  pull_request:\n    branches: [develop, main]',events)
+        self.assertIn('  workflow_dispatch: {}',events)
+        self.assertNotIn('  push:',events)
+        self.assertIn("if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'",text)
         self.assertNotRegex(events,r'(?m)^\s+(paths|paths-ignore):')
         self.assertNotIn('pull_request_target:',events)
         self.assertIn('persist-credentials: false',text)

@@ -5,14 +5,14 @@ name: Publish Windows Release
 # no signing keys are stored in Actions.
 on:
   workflow_run:
-    workflows: ["CI", "Windows package release gate"]
+    workflows: ["Windows package release gate"]
+    branches: [main]
     types: [completed]
 
 permissions:
   contents: read
 
-# Either workflow may finish first. The second completion retries the check;
-# serialize publication for one SHA so two completions cannot create a release.
+# Serialize publication for a commit if its package gate is dispatched twice.
 concurrency:
   group: publish-windows-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
@@ -21,9 +21,9 @@ jobs:
   release-record:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.head_branch == 'Dzhamuha-develop'
+      github.event.workflow_run.head_branch == 'main'
     runs-on: windows-latest
     environment: release
     permissions:

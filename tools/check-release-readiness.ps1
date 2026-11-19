@@ -1,7 +1,7 @@
 param(
     [string]$Repository = $env:GITHUB_REPOSITORY,
     [string]$Sha = "",
-    [string]$Branch = "Dzhamuha-develop",
+    [string]$Branch = "main",
     [switch]$FunctionsOnly
 )
 
@@ -13,11 +13,16 @@ function Get-ReleaseReadiness {
     param([object[]]$Runs, [string]$Repository, [string]$Sha, [string]$Branch)
     $packageRun = $null
     foreach ($path in @('.github/workflows/ci.yml', '.github/workflows/windows-release-gate.yml')) {
+        $eligibleEvents = if ($path -eq '.github/workflows/ci.yml') {
+            @('push', 'workflow_dispatch')
+        } else {
+            @('workflow_dispatch')
+        }
         $latest = @($Runs | Where-Object {
             $_.path -eq $path -and $_.head_sha -ceq $Sha -and
             $_.head_branch -ceq $Branch -and
             $_.head_repository.full_name -ceq $Repository -and
-            $_.event -in @('push', 'workflow_dispatch')
+            $_.event -in $eligibleEvents
         } | Sort-Object @{ Expression = { [long]$_.id }; Descending = $true },
             @{ Expression = { [int]$_.run_attempt }; Descending = $true } | Select-Object -First 1)
         if ($latest.Count -ne 1 -or $latest[0].status -ne 'completed' -or

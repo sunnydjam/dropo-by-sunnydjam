@@ -110,9 +110,9 @@ void main() {
       'Сообщить о проблеме':
           'https://github.com/sunnydjam/dropo-by-sunnydjam/issues',
       'Лицензия MIT':
-          'https://github.com/sunnydjam/dropo-by-sunnydjam/blob/Dzhamuha-develop/LICENSE',
+          'https://github.com/sunnydjam/dropo-by-sunnydjam/blob/develop/LICENSE',
       'Сторонние компоненты':
-          'https://github.com/sunnydjam/dropo-by-sunnydjam/blob/Dzhamuha-develop/THIRD_PARTY_NOTICES.md',
+          'https://github.com/sunnydjam/dropo-by-sunnydjam/blob/develop/THIRD_PARTY_NOTICES.md',
     };
     for (final entry in expected.entries) {
       final link = find.byKey(ValueKey('about-link-${entry.key}'));

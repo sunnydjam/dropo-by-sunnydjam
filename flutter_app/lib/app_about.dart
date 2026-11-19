@@ -132,14 +132,14 @@ class _AboutContent extends StatelessWidget {
         ),
         _AboutLink(
           label: 'Лицензия MIT',
-          url: '$repository/blob/Dzhamuha-develop/LICENSE',
+          url: '$repository/blob/develop/LICENSE',
           icon: Icons.description_outlined,
           onOpenExternal: onOpenExternal,
         ),
         _AboutLink(
           label: 'Сторонние компоненты',
           detail: 'Лицензии и благодарности',
-          url: '$repository/blob/Dzhamuha-develop/THIRD_PARTY_NOTICES.md',
+          url: '$repository/blob/develop/THIRD_PARTY_NOTICES.md',
           icon: Icons.extension_outlined,
           onOpenExternal: onOpenExternal,
         ),

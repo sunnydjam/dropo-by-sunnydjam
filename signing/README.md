@@ -36,12 +36,18 @@ user's machine.
 
 ## GitHub release publishing
 
-GitHub Actions builds Windows installer/portable artifacts in the Windows
-package release gate. Publication requires both that gate and the general CI
-workflow to have completed successfully for the exact same commit on
-`Dzhamuha-develop`. The newest run/attempt is authoritative: an older successful
-run cannot override a failed or pending newer run. Packages are downloaded from
-the verified package-gate run, even when the CI completion triggers publication.
+1. Promote tested changes from `develop` to `main` through a release pull
+   request. Wait for CI to pass on the resulting `main` commit.
+2. In GitHub Actions, manually run **Windows package release gate** on `main`.
+   It produces the installer, portable archive, source archive and checksums.
+3. **Publish Windows Release** verifies the exact commit and downloads the
+   packages from that run. The channel in `version.json` determines whether it
+   creates a pilot draft or attempts a stable release. Stable releases require
+   a publicly trusted publisher signature.
+
+Pull-request package checks never publish. Publication requires successful CI
+and a manual package-gate run for the same `main` commit. A newer failed or
+pending run takes precedence over an older success.
 
 No private signing keys are configured in this workflow, so these packages
 remain unsigned. SHA-256 verification provides integrity checking, not a

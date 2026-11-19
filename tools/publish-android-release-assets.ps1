@@ -181,7 +181,7 @@ foreach ($workflow in @('ci.yml', 'windows-release-gate.yml')) {
         '--paginate', '--slurp'))
     foreach ($page in $pages) { $runs += @($page.workflow_runs) }
 }
-$readiness = Get-ReleaseReadiness -Runs $runs -Repository $Repository -Sha $SourceRevision -Branch 'Dzhamuha-develop'
+$readiness = Get-ReleaseReadiness -Runs $runs -Repository $Repository -Sha $SourceRevision -Branch 'main'
 if (-not $readiness.Ready) { throw $readiness.Reason }
 $release = Invoke-AndroidReleaseGhJson -Arguments @('api', "repos/$Repository/releases/tags/$releaseTag")
 if ($release.draft -or $release.prerelease -or $release.tag_name -cne $releaseTag) {

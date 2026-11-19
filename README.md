@@ -12,7 +12,7 @@ Connect Booster — название приложения, а не обещан�
 Подробнее о публичном названии и описании для магазина:
 [Публичное позиционирование](docs/public-branding.md).
 
-[![CI](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml/badge.svg?branch=Dzhamuha-develop)](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml)
+[![CI](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > [!IMPORTANT]
@@ -45,13 +45,14 @@ Connect Booster — название приложения, а не обещан�
 | Discord через выборочный VPN | Рекомендуемый стабильный маршрут для web, приложения и voice/video |
 | Discord через встроенный Zapret | Экспериментальный; web/API и voice/media проверяются раздельно |
 | Android | Общий интерфейс, источники и оба режима; стабильная публикация требует release-ключ |
-| Windows release fork | `v3.0.44`, unsigned |
+| Windows | [Сборки и контрольные суммы](https://github.com/sunnydjam/dropo-by-sunnydjam/releases) |
 | Публичная Authenticode-подпись | Пока отсутствует |
 | Аккаунт и Telegram-регистрация | HTTPS backend подключён к настоящему боту; ручной сквозной тест пройден, адрес встроен в новые Windows/Android сборки |
 | Покупки / Dropo Boost | Отключены до появления платной VPN-инфраструктуры |
 
-Текущая ветка разработки: `Dzhamuha-develop`. Текущая версия исходников
-и Windows-выпуска: `3.0.44`.
+Разработка и локальное тестирование идут в `develop`. Релизы готовятся из
+`main`. Версия исходников указана в [version.json](version.json), публичную
+сборку можно скачать в [GitHub Releases](https://github.com/sunnydjam/dropo-by-sunnydjam/releases/latest).
 
 ## Аккаунт и Telegram
 
@@ -354,9 +355,8 @@ SDK принято хранить отдельно от репозитория. 
 Откройте новое окно PowerShell и выполните:
 
 ```powershell
-git clone https://github.com/sunnydjam/dropo-by-sunnydjam.git
+git clone --branch develop https://github.com/sunnydjam/dropo-by-sunnydjam.git
 cd dropo-by-sunnydjam
-git switch Dzhamuha-develop
 flutter --version
 go version
 pwsh -File .\scripts\build\build.ps1 -AppOnly

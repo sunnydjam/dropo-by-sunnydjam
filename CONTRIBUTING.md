@@ -1,6 +1,17 @@
 # Contributing
 
-Development currently happens in the `Dzhamuha-develop` branch.
+Create feature branches from `develop`, open pull requests against it, and
+test locally from `origin/develop`. Promote tested changes to `main` through
+a release pull request. CI and the Windows package checks run on pull requests
+to both branches. A push or merge does not publish a release.
+
+Use these commands to switch an existing clone to the development branch.
+
+```powershell
+git fetch origin
+git switch develop
+git pull --ff-only
+```
 
 ## Before opening a change
 
@@ -34,6 +45,7 @@ pwsh -File .\scripts\build\build.ps1 -AppOnly
 ```
 
 Then run `tools/preflight-release.ps1` against the generated release folder.
+For the GitHub release procedure, see [Release signing](signing/README.md#github-release-publishing).
 
 Explain the affected traffic policy, expected direct/VPN behavior and test
 evidence in the pull request. Security issues should follow

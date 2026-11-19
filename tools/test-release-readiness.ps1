@@ -3,12 +3,13 @@ $ErrorActionPreference = 'Stop'
 $testRepo = 'owner/project'
 $testSha = 'a' * 40
 function New-Run([string]$Path, [long]$Id, [string]$Conclusion = 'success') {
+    $event = if ($Path -eq '.github/workflows/windows-release-gate.yml') { 'workflow_dispatch' } else { 'push' }
     [pscustomobject]@{ path = $Path; id = $Id; run_attempt = 1; head_sha = $testSha;
-        head_branch = 'Dzhamuha-develop'; head_repository = @{ full_name = $testRepo };
-        event = 'push'; status = 'completed'; conclusion = $Conclusion }
+        head_branch = 'main'; head_repository = @{ full_name = $testRepo };
+        event = $event; status = 'completed'; conclusion = $Conclusion }
 }
 function Assert-Ready([object[]]$Runs, [bool]$Expected, [string]$Case) {
-    $result = Get-ReleaseReadiness -Runs $Runs -Repository $testRepo -Sha $testSha -Branch 'Dzhamuha-develop'
+    $result = Get-ReleaseReadiness -Runs $Runs -Repository $testRepo -Sha $testSha -Branch 'main'
     if ($result.Ready -ne $Expected) { throw "Release gate fixture failed: $Case" }
     if ($Expected -and $result.PackageRunId -ne '20') { throw 'Wrong package artifact run selected' }
 }
@@ -37,5 +38,13 @@ foreach ($field in @('head_sha', 'head_branch', 'event', 'path')) {
 $fork = New-Run $ci.path 10
 $fork.head_repository.full_name = 'someone/fork'
 Assert-Ready @($fork, $package) $false 'fork cannot satisfy release gate'
-Write-Host 'Release readiness fixtures passed (24 cases).'
+foreach ($ineligibleEvent in @('push', 'pull_request')) {
+    $unrequestedPackage = New-Run $package.path 20
+    $unrequestedPackage.event = $ineligibleEvent
+    Assert-Ready @($ci, $unrequestedPackage) $false "package from $ineligibleEvent cannot publish"
+}
+$dispatchedCI = New-Run $ci.path 11
+$dispatchedCI.event = 'workflow_dispatch'
+Assert-Ready @($dispatchedCI, $package) $true 'main CI may be dispatched'
+Write-Host 'Release readiness fixtures passed (27 cases).'
 & (Join-Path $PSScriptRoot 'test-existing-release.ps1')

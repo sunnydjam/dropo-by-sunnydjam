@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [Dzhamuha-develop]
+    branches: [develop, main]
   pull_request:
-    branches: [Dzhamuha-develop]
+    branches: [develop, main]
   workflow_dispatch: {}
 
 permissions:

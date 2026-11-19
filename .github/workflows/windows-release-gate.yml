@@ -2,18 +2,17 @@ name: Windows package release gate
 
 on:
   workflow_dispatch: {}
-  push:
-    branches: [Dzhamuha-develop]
   # Required checks must also run before merge, including documentation-only
   # changes; a path-filtered skipped workflow leaves protected PRs pending.
   pull_request:
-    branches: [Dzhamuha-develop]
+    branches: [develop, main]
 
 permissions:
   contents: read
 
 jobs:
   clean-windows-package:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 60
     env:
