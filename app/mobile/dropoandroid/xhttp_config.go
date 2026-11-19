@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	core "dropocore"
+	"dropocore/ownedprofile"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	xcore "github.com/xtls/xray-core/core"
@@ -34,7 +35,7 @@ func init() {
 	core.RegisterAndroidXHTTPValidator(androidXHTTPValidator{})
 }
 
-// Only one canonical VLESS XHTTP outbound is accepted. No source-supplied
+// Only VLESS XHTTP and the managed Finnish REALITY endpoint are accepted. No source-supplied
 // inbound, file, listener, socket-option, detour, or arbitrary Xray app config
 // ever reaches the embedded runtime. All failures are credential-free.
 func buildXHTTPConfig(raw []byte, roots []string) (*xcore.Config, error) {
@@ -56,10 +57,10 @@ func buildXHTTPConfig(raw []byte, roots []string) (*xcore.Config, error) {
 		}
 	}
 	stream, ok := outbound["streamSettings"].(map[string]any)
-	if !ok || outbound["protocol"] != "vless" || stream["network"] != "xhttp" {
+	if !ok || outbound["protocol"] != "vless" {
 		return nil, errXHTTPConfig
 	}
-	if !validateXHTTPStream(stream, 0) {
+	if !validateXHTTPStream(stream, 0) && !managedFinlandStream(outbound, stream) {
 		return nil, errXHTTPConfig
 	}
 	settings, ok := outbound["settings"].(map[string]any)
@@ -116,6 +117,30 @@ func buildXHTTPConfig(raw []byte, roots []string) (*xcore.Config, error) {
 		return nil, errXHTTPConfig
 	}
 	return built, nil
+}
+
+// The TCP exception accepts only the generated managed REALITY endpoint.
+func managedFinlandStream(outbound, stream map[string]any) bool {
+	if outbound["protocol"] != "vless" || len(stream) != 3 || stream["network"] != "tcp" || stream["security"] != "reality" {
+		return false
+	}
+	tls, _ := stream["realitySettings"].(map[string]any)
+	if len(tls) != 4 {
+		return false
+	}
+	settings, _ := outbound["settings"].(map[string]any)
+	servers, _ := settings["vnext"].([]any)
+	if len(servers) != 1 {
+		return false
+	}
+	server, _ := servers[0].(map[string]any)
+	addr, _ := server["address"].(string)
+	port, _ := server["port"].(float64)
+	if port != 2443 && port != 2444 {
+		return false
+	}
+	get := func(k string) string { v, _ := tls[k].(string); return v }
+	return ownedprofile.IsFinlandReality(addr, int(port), "tcp", "reality", get("serverName"), get("publicKey"), get("shortId"), get("fingerprint"))
 }
 
 func validateXHTTPStream(stream map[string]any, depth int) bool {

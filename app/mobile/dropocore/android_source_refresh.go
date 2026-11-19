@@ -11,7 +11,7 @@ import (
 // after disconnect or before a new engine starts. Manual node IDs are retained.
 func RefreshAndroidSourcesForNextSession(ctx context.Context, generation int64) {
 	mu.Lock()
-	if !current.Connected || generation == 0 || current.sourceSession != generation || !current.Config.AutoUpdateSub {
+	if !androidSourceEngineActiveLocked() || generation == 0 || current.sourceSession != generation || !current.Config.AutoUpdateSub {
 		mu.Unlock()
 		return
 	}
@@ -62,7 +62,7 @@ func RefreshAndroidSourcesForNextSession(ctx context.Context, generation int64) 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if ctx.Err() != nil || !current.Connected || current.sourceSession != generation || !current.Config.AutoUpdateSub {
+	if ctx.Err() != nil || !androidSourceEngineActiveLocked() || current.sourceSession != generation || !current.Config.AutoUpdateSub {
 		return
 	}
 	previous := current.VPNSources

@@ -255,13 +255,20 @@ class _HomeConnectionPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final danger = !booting && (!online || status.hasError || operationError);
-    final connected = online && status.connected && !danger;
+    final checking = status.connected && status.sourceVerification == 'pending';
+    final failed = status.connected && status.sourceVerification == 'failed';
+    final danger =
+        !booting && (!online || status.hasError || operationError || failed);
+    final connected = online && status.connected && !checking && !danger;
     final stopping = disconnecting || status.disconnecting;
     final title = booting
         ? 'Запуск приложения'
         : !online
         ? 'Нет связи с ядром'
+        : failed
+        ? 'Не удалось подключиться'
+        : checking
+        ? 'Проверяем соединение…'
         : status.hasError || operationError
         ? 'Требуется внимание'
         : stopping
@@ -292,6 +299,7 @@ class _HomeConnectionPanel extends StatelessWidget {
         accent: accent,
         connected: connected,
         sessionActive: status.connected,
+        checking: checking,
         busy: busy,
         stopping: stopping,
         enabled: enabled,

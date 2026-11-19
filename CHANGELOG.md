@@ -4,6 +4,12 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.13 — 2026-11-19
+
+- Android opens service routing from the home screen before connecting and supports live route edits.
+- Connection feedback follows verified outbound health. The Android scene shows controls immediately after verification and reduces background rendering.
+- Managed Free and Boost Finland TCP connections use the bundled Xray transport on Windows and Android. Cached profiles migrate automatically.
+
 ## 3.1.12 — 2026-11-19
 
 - Apply Android routing mode and service policy changes while the VPN service

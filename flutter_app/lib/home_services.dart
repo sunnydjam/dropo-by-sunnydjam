@@ -47,6 +47,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
   @override
   void initState() {
     super.initState();
+    if (widget.showInFullMode) pinnedOnly = false;
     if (widget.routeSnapshot != null) {
       services = widget.routeSnapshot!;
     } else {
@@ -249,6 +250,14 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
             ),
           ),
           if (widget.expanded) ...[
+            if (widget.showInFullMode)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(4, 8, 4, 4),
+                child: Text(
+                  'Выберите сервис, затем укажите маршрут: автоматически, через VPN или напрямую.',
+                  style: TextStyle(color: _atlasMuted, height: 1.4),
+                ),
+              ),
             const SizedBox(height: 12),
             TextField(
               key: const ValueKey('service-search'),
@@ -445,16 +454,13 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
     );
   }
 
-  Widget _service(
-    RouteService service, {
-    required bool available,
-  }) {
+  Widget _service(RouteService service, {required bool available}) {
     final expanded = openServiceTag == service.tag;
     final primary = isPrimaryHomeRouteService(service.tag);
     final policy = _normalizedHomeRoutePolicy(service);
     final label = switch (policy) {
       'direct' => 'Напрямую',
-      'vpn' => 'VPN',
+      'vpn' => widget.showInFullMode ? 'Через VPN' : 'VPN',
       'zapret' => 'Zapret',
       _ => 'Авто',
     };
@@ -494,12 +500,24 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                       ),
                       const SizedBox(width: 12),
                       Flexible(
-                        child: Text(
-                          label,
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(
-                            color: _atlasMuted,
-                            fontSize: 12,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: policy == 'vpn'
+                                ? _atlasMint.withValues(alpha: .10)
+                                : _atlasSurface,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            label,
+                            textAlign: TextAlign.right,
+                            style: TextStyle(
+                              color: policy == 'vpn' ? _atlasMint : _atlasText,
+                              fontSize: 12,
+                            ),
                           ),
                         ),
                       ),

@@ -15,6 +15,17 @@ import (
 const finlandPublicKey = "TB8FIOdQ6nJc4M4pKScvt6isIN97rwcBjwzzhWSSPjs"
 const finlandShortID = "156fc43012055390"
 
+func IsFinlandReserveID(id string) bool {
+	return id == Free+"-fi-tcp" || id == Boost+"-fi-tcp"
+}
+
+// IsFinlandReality identifies the managed endpoint whose server requires the
+// REALITY handshake supported by our pinned Xray client.
+func IsFinlandReality(server string, port int, network, security, sni, key, shortID, fingerprint string) bool {
+	return server == dnspolicy.FinlandIPv4 && (port == 2443 || port == 2444) && network == "tcp" &&
+		security == "reality" && sni == dnspolicy.FinlandHostname && key == finlandPublicKey && shortID == finlandShortID && fingerprint == "chrome"
+}
+
 type DirectReserve struct {
 	ID   string
 	Name string

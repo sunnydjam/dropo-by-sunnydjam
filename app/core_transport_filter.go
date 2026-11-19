@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"dropocore/ownedprofile"
+	"strings"
+)
 
 var UnsupportedTransports = []string{
 	"kcp",
@@ -37,12 +40,26 @@ func RequiresXrayBridge(proxy ProxyConfig) bool {
 	if proxy.Type != "vless" {
 		return false
 	}
+	if ownedprofile.IsFinlandReserveID(strings.TrimPrefix(proxy.Tag, "vpn-source-")) &&
+		ownedprofile.IsFinlandReality(proxy.Server, proxy.ServerPort, proxy.Network, proxy.Security, proxy.SNI, proxy.PublicKey, proxy.ShortID, proxy.Fingerprint) {
+		return true
+	}
 	switch NormalizeTransport(proxy.Network) {
 	case "xhttp", "httpupgrade":
 		return true
 	default:
 		return false
 	}
+}
+
+func hasLegacyFinlandOutbound(config map[string]interface{}) bool {
+	outbounds, _ := config["outbounds"].([]interface{})
+	for _, tier := range []string{ownedprofile.Free, ownedprofile.Boost} {
+		if configOutboundByTag(outbounds, "vpn-source-"+tier+"-fi-tcp")["type"] == "vless" {
+			return true
+		}
+	}
+	return false
 }
 
 func IsTransportSupported(transport string) bool {

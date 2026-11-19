@@ -316,6 +316,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
     required this.accent,
     required this.connected,
     required this.sessionActive,
+    required this.checking,
     required this.busy,
     required this.stopping,
     required this.enabled,
@@ -330,6 +331,8 @@ class _AtlasConnectionPanel extends StatelessWidget {
   final bool hasError;
   final VoidCallback onPressed;
 
+  final bool checking;
+
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
@@ -339,7 +342,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
         constraints.hasBoundedHeight ? constraints.maxHeight : 240.0,
       );
       final widePlanet = planetSize >= 480;
-      final actionIcon = busy
+      final actionIcon = busy || checking
           ? SizedBox(
               width: 20,
               height: 20,
@@ -357,7 +360,9 @@ class _AtlasConnectionPanel extends StatelessWidget {
               size: 24,
             );
       final actionLabel = Text(
-        busy
+        checking && !stopping
+            ? 'Проверяем соединение…'
+            : busy
             ? (stopping ? 'Отключаем…' : 'Подключаем…')
             : sessionActive
             ? 'Отключить'

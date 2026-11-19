@@ -99,7 +99,7 @@ func proxyToAndroidXrayOutbound(proxy proxyConfig, tag string) map[string]interf
 	if proxy.Flow != "" {
 		user["flow"] = proxy.Flow
 	}
-	stream := map[string]interface{}{"network": "xhttp"}
+	stream := map[string]interface{}{"network": normalizeTransport(proxy.Network)}
 	if proxy.Security != "" && proxy.Security != "none" {
 		stream["security"] = proxy.Security
 	}
@@ -146,7 +146,9 @@ func proxyToAndroidXrayOutbound(proxy proxyConfig, tag string) map[string]interf
 		xhttp["extra"] = extra
 	}
 	ownedprofile.ApplyXHTTPBudget(proxy.Server, proxy.ServerPort, proxy.Security, proxy.SNI, proxy.Host, xhttp)
-	stream["xhttpSettings"] = xhttp
+	if stream["network"] == "xhttp" {
+		stream["xhttpSettings"] = xhttp
+	}
 	return map[string]interface{}{
 		"tag": tag, "protocol": "vless", "settings": map[string]interface{}{
 			"vnext": []interface{}{map[string]interface{}{

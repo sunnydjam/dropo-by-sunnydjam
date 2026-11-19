@@ -124,7 +124,7 @@ func validateEncryptedVPNConfig(content string) error {
 		case xhttpOutboundType:
 			xray, ok := outbound["xray_outbound"].(map[string]any)
 			stream, streamOK := xray["streamSettings"].(map[string]any)
-			if !ok || !streamOK || !verifiedXHTTPEncryption(stream, 0) {
+			if !ok || !streamOK || (!verifiedXHTTPEncryption(stream, 0) && !managedFinlandStream(xray, stream)) {
 				return errVPNEncryption
 			}
 			encryptedEndpoints++

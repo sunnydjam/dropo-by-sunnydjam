@@ -297,11 +297,15 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
       case 'cancel':
         if (widget.canCancel) widget.onCancel();
       case 'mode':
-        if (widget.enabled && widget.connected) widget.onMode(command.value!);
+        if (widget.enabled && !widget.connecting && !widget.disconnecting) {
+          widget.onMode(command.value!);
+        }
       case 'sources':
         if (widget.enabled) widget.onSources();
       case 'services':
-        if (widget.enabled && widget.connected) widget.onServices();
+        if (widget.enabled && !widget.connecting && !widget.disconnecting) {
+          widget.onServices();
+        }
       case 'help':
         widget.onHelp();
     }

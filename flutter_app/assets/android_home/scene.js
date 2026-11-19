@@ -31,7 +31,7 @@
   let visible = document.visibilityState !== 'hidden', intersecting = true, pausedAt = null;
   let w = 390, h = 610, dpr = 1, spaceW = 390, spaceH = 760, nebula = null;
   let renderer, world, camera, earth, earthUniforms, sprites, flight;
-  let lastView = null;
+  let lastView = null, lastSpacePaint = -Infinity, haloKey = null;
   let retryArrow;
 
   const en = () => host.language === 'en';
@@ -66,12 +66,14 @@
     return host.error ? 'error' : 'idle';
   }
   function syncConnectedPanel() {
-    const show = presented && logicalState === 'connected' &&
-      (!settings.motion || phase === 'connected');
+    const resting = logicalState === 'idle' || logicalState === 'error';
+    const show = presented && (resting || logicalState === 'connected');
     details.hidden = !show;
     details.inert = !show;
+    details.classList.toggle('dp-setup', resting);
     const disabled = !show || !host.enabled;
-    service.disabled = all.disabled = disconnect.disabled = disabled;
+    service.disabled = all.disabled = disabled;
+    disconnect.disabled = disabled || resting;
     $('.dp-source-row').disabled = $('.dp-services').disabled = disabled;
   }
 
@@ -99,7 +101,7 @@
     earthAction.setAttribute('aria-label', error ? retry :
       text('Подключить VPN нажатием на Землю', 'Tap Earth to connect VPN'));
     const label = logicalState === 'connected' ? text('VPN подключён', 'VPN connected') :
-      logicalState === 'connecting' ? text('Подключаем VPN', 'Connecting VPN') :
+      logicalState === 'connecting' ? text('Проверяем соединение…', 'Checking connection…') :
       logicalState === 'disconnecting' ? text('Отключаем VPN', 'Disconnecting VPN') :
       error ? text('Не удалось подключиться', 'Connection failed') :
       host.busy ? text('Подготавливаем VPN', 'Preparing VPN') : text('Не подключено', 'Disconnected');
@@ -117,7 +119,7 @@
   }
   function layout(zoom) {
     const big = Math.min(322, w * .88);
-    return { cx: w / 2, cy: mix(Math.min(h * .48, h - 278), Math.min(236, h - 420), zoom),
+    return { cx: w / 2, cy: mix(Math.min(h * .43, h - 325), Math.min(236, h - 420), zoom),
       d: mix(big, Math.min(240, w * .66), zoom), big };
   }
   function seated() {
@@ -177,9 +179,8 @@
       return;
     }
     if (logicalState === 'connected') {
-      if (!['connected', 'arrive', 'launch', 'orbit'].includes(phase)) {
-        // A quick native start may deliver success before the busy frame.
-        if (presented && host.active) transition('launch', .65);
+      if (!['connected', 'arrive'].includes(phase)) {
+        if (presented && host.active) transition('arrive', .42);
         else setPhase('connected');
       }
     } else if (logicalState === 'connecting') {
@@ -353,7 +354,11 @@
     lastView = view;
     const inFlight = settings.motion && ['launch', 'orbit', 'arrive', 'return'].includes(phase);
     const b = layout(view.zoom);
-    drawSpace(t); drawHalo(b, view);
+    if (now - lastSpacePaint >= 100 || !settings.motion) {
+      drawSpace(t); lastSpacePaint = now;
+    }
+    const haloState = [b.d, b.cy, view.glow, view.error].join('/');
+    if (haloState !== haloKey) { drawHalo(b, view); haloKey = haloState; }
     if (renderer) {
       earth.position.set(b.cx-w/2,h/2-b.cy,0);earth.scale.setScalar(b.d*.432);
       earth.rotation.set(.21,-1.77+t*Math.PI*2/100,-.08,'XYZ');
@@ -505,7 +510,8 @@
     if (!presented) main.dataset.startup = 'loading';
     if (!valid) return false;
 
-    w = rect.width; h = rect.height; dpr = Math.min(ratio, 2);
+    w = rect.width; h = rect.height; dpr = Math.min(ratio, 1.5);
+    haloKey = null; lastSpacePaint = -Infinity;
     spaceW = bounds.width; spaceH = bounds.height;
     haloCanvas.width = Math.round(w * dpr); haloCanvas.height = Math.round(h * dpr);
     halo.setTransform(dpr, 0, 0, dpr, 0, 0);

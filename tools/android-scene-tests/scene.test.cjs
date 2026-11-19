@@ -124,19 +124,18 @@ test('startup waits for host state and two drawn frames, and ignores an outdated
   assert.deepEqual(positions, [180, 180]);
 });
 
-test('fast success waits for the orbit, landing and compact Earth before showing the panel', async t => {
+test('offline service setup and verified connection controls are immediately actionable', async t => {
   const page = await pageFor(t);
-  await update(page, {connected:true, responseMs:78});
+  await page.locator('.dp-mode-service').click();
+  assert.equal((await state(page)).messages.at(-1).action, 'mode');
+  await page.locator('.dp-services').click();
+  assert.equal((await state(page)).messages.at(-1).action, 'services');
+  assert.equal(await page.locator('.dp-disconnect').isVisible(), false);
+  await update(page, {connecting:true, enabled:false});
+  assert.equal(await page.locator('.dp-mode-service').isVisible(), false);
+  await update(page, {connecting:false, enabled:true, connected:true, responseMs:78});
   let current = await state(page);
   assert.equal(current.state, 'connected');
-  assert.equal(current.phase, 'launch');
-  assert.equal(current.hidden, true);
-  assert.equal(current.inert, true);
-  await page.waitForFunction(() => document.querySelector('.dp-main').dataset.phase === 'orbit');
-  assert.equal((await state(page)).hidden, true);
-  await page.waitForFunction(() => document.querySelector('.dp-main').dataset.phase === 'arrive');
-  assert.equal((await state(page)).hidden, true);
-  await page.waitForFunction(() => document.querySelector('.dp-main').dataset.phase === 'connected');
   current = await state(page);
   assert.equal(current.hidden, false);
   assert.equal(current.disabled, false);

@@ -68,6 +68,17 @@ func (a *App) GetStatus() map[string]interface{} {
 	}
 	networkMode := a.currentNetworkModeStatus()
 	healthKnown, sourceAvailable, sourceError := a.vpnSourceAvailabilitySnapshot()
+	verification := ""
+	if running {
+		switch {
+		case healthKnown && sourceAvailable:
+			verification = "ok"
+		case healthKnown:
+			verification = "failed"
+		case len(a.configuredVPNSourceTags()) > 0:
+			verification = "pending"
+		}
+	}
 	fullVPNSourceFailed, fullVPNError := fullVPNSourceFailure(
 		running,
 		routingMode,
@@ -107,6 +118,7 @@ func (a *App) GetStatus() map[string]interface{} {
 		"hasError":                  hasError,
 		"error":                     fullVPNError,
 		"routingMode":               string(routingMode),
+		"sourceVerification":        verification,
 		"vpnSourceHealthKnown":      healthKnown,
 		"vpnSourceAvailable":        sourceAvailable,
 		"vpnResponse":               a.vpnResponseSnapshot(running, time.Now()),
@@ -1329,6 +1341,10 @@ func (a *App) ensureActiveConfigForStart() error {
 		// is configured but the cached config has no VPN candidates (e.g. it was
 		// built before the subscription was added → VPN would never be used).
 		needsRebuild := subscriptionURL != "" && !profile.XrayConfigReady
+		if !needsRebuild && hasLegacyFinlandOutbound(config) {
+			a.writeLog("Rebuilding cached managed Finland REALITY transport")
+			needsRebuild = true
+		}
 		if !needsRebuild && !configSupportsDiscordRealtimeRouting(config) {
 			a.writeLog("Active config predates Discord realtime routing; rebuilding before start")
 			needsRebuild = true

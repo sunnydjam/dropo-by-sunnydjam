@@ -38,6 +38,31 @@ func preparedSourceSession(t *testing.T) int64 {
 	return plan.Generation
 }
 
+func TestStartupProbeCanCommitBeforeConnected(t *testing.T) {
+	resetSourceTest(t)
+	sourceSuccess(t, "AddVPNSource", "One", sourceTestKey)
+	sourceSuccess(t, "AndroidEngineStarting")
+	if !decodeSuccess(BuildSingBoxConfig()) || !decodeSuccess(BeginAndroidSourceSession()) {
+		t.Fatal("no verification session")
+	}
+	g := current.sourceSession
+	c := current.preparedSources[0]
+	if current.Connected || !AndroidSourceSessionCurrent(g) {
+		t.Fatal("optimistic connection during verification")
+	}
+	if !CommitAndroidSourceProbeBatch(g, sourceObservationJSON(c.ID, c.NodeID, g, "ok", 45), c.ID, &testSourceSelector{}) {
+		t.Fatal("could not verify starting tunnel")
+	}
+	SetConnected(true)
+	if !AndroidSourceSessionCurrent(g) {
+		t.Fatal("lost verified source")
+	}
+	CancelPendingSourceWork()
+	if AndroidSourceSessionCurrent(g) {
+		t.Fatal("cancelled verification remained active")
+	}
+}
+
 func sourceObservationJSON(id, nodeID string, generation int64, state string, latency int) string {
 	data, _ := json.Marshal([]androidSourceResponse{{State: state, SourceID: id, NodeID: nodeID,
 		SessionGeneration: generation, LatencyMS: latency, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano)}})

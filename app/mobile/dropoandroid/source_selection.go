@@ -55,6 +55,29 @@ func (s *CommandServer) StartSourceSelection() error {
 }
 
 func (s *CommandServer) startSourceSelection(activeID string) error {
+	return s.launchSourceSelection(activeID, nil)
+}
+
+// StartVerifiedSourceSelection waits for the existing selector to commit a
+// working outbound. The Android service worker owns the wait; Stop cancels it.
+func (s *CommandServer) StartVerifiedSourceSelection() error {
+	checked := make(chan bool, 1)
+	if err := s.launchSourceSelection("", checked); err != nil {
+		return err
+	}
+	timer := time.NewTimer(45 * time.Second)
+	defer timer.Stop()
+	select {
+	case ok := <-checked:
+		if ok {
+			return nil
+		}
+	case <-timer.C:
+	}
+	return errors.New("Не удалось подключиться. Ни один доступный вход не подтвердил соединение.")
+}
+
+func (s *CommandServer) launchSourceSelection(activeID string, checked chan bool) error {
 	s.sourceMu.Lock()
 	defer s.sourceMu.Unlock()
 	s.stopSourceSelectionLocked()
@@ -101,7 +124,7 @@ func (s *CommandServer) startSourceSelection(activeID string) error {
 	if !fresh {
 		wake <- struct{}{}
 	}
-	go s.runSourceSelection(ctx, generation, plan.Generation, plan.AutoSelect, plan.Candidates, outbounds, selector, flows, wake, plan.ActiveID, fresh)
+	go s.runSourceSelection(ctx, generation, plan.Generation, plan.AutoSelect, plan.Candidates, outbounds, selector, flows, wake, plan.ActiveID, fresh, checked)
 	go core.RefreshAndroidSourcesForNextSession(ctx, plan.Generation)
 	return nil
 }
@@ -186,7 +209,12 @@ func (s *CommandServer) commitSourceResultsWithOutage(ctx context.Context, gener
 	}, flows, failedTag)
 }
 
-func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint64, coreGeneration int64, automatic bool, candidates []sourceCandidate, outbounds adapter.OutboundManager, selector *group.Selector, flows sourceFlowTable, wake <-chan struct{}, activeID string, initial bool) {
+func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint64, coreGeneration int64, automatic bool, candidates []sourceCandidate, outbounds adapter.OutboundManager, selector *group.Selector, flows sourceFlowTable, wake <-chan struct{}, activeID string, initial bool, checked chan bool) {
+	defer func() {
+		if checked != nil {
+			close(checked)
+		}
+	}()
 	probe := func(ctx context.Context, candidate sourceCandidate) sourceObservation {
 		outbound, ok := outbounds.Outbound(candidate.Tag)
 		if !ok {
@@ -250,6 +278,10 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 				return
 			}
 			continue
+		}
+		if checked != nil {
+			checked <- chosen != ""
+			checked = nil
 		}
 		initial = false
 		if chosen != "" {

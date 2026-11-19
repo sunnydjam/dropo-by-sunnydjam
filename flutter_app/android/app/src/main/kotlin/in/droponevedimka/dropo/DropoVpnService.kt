@@ -219,7 +219,7 @@ class DropoVpnService :
         if (starting || commandServer != null) {
             executor.execute { coreLog("start skipped: VPN service is already running") }
             sessionFence.commit(engineGeneration) {
-                if (commandServer != null) {
+                if (!starting && commandServer != null) {
                     DropoVpnRuntime.setConnected("VPN уже работает")
                     showForeground("VPN работает")
                 } else {
@@ -304,15 +304,19 @@ class DropoVpnService :
             server.startOrReloadService(config, OverrideOptions().apply { autoRedirect = false })
             committed = sessionFence.commit(generation) {
                 commandServer = server
-                Dropoandroid.setConnected(true)
+                DropoVpnRuntime.setStarting("Проверяем соединение")
+                showForeground("Проверяем соединение")
+            }
+            requireActiveSession(generation)
+            server.startVerifiedSourceSelection()
+            requireActiveSession(generation)
+            sessionFence.commit(generation) {
                 val version = configResult.optString("version", Dropoandroid.version())
                 DropoVpnRuntime.setConnected("VPN работает")
                 syncCoreServiceState("connected", "VPN работает")
                 coreLog("sing-box $version is active")
                 runCatching { AndroidReviewPrompt.tracker(this).connected() }
                 showForeground("VPN работает")
-                runCatching { server.startSourceSelection() }
-                    .onFailure { coreLog("source selection could not start: ${describeError(it)}") }
             }
         } finally {
             if (!committed) {

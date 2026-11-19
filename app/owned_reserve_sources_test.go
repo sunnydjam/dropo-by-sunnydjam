@@ -246,7 +246,7 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 				if got := interfaceStringSlice(selector["outbounds"]); !reflect.DeepEqual(got, want) || selector["type"] != "selector" || selector["default"] != want[0] {
 					t.Fatalf("runtime selector lost independent transports: %v", got)
 				}
-				for i, protocol := range []string{"socks", "socks", "vless", "hysteria2"} {
+				for i, protocol := range []string{"socks", "socks", "socks", "hysteria2"} {
 					if getOutbound(config, want[i])["type"] != protocol {
 						t.Fatalf("unexpected runtime transport at position %d", i)
 					}
@@ -254,9 +254,29 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 						t.Fatalf("monitor cannot switch to candidate at position %d", i)
 					}
 				}
+				// Simulate reopening a cached 3.1.12 profile with a native FI outbound.
+				cached, err := storage.GetProfileConfig(profile.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				getOutbound(cached, want[2])["type"] = "vless"
+				if err := storage.UpdateProfileConfig(profile.ID, cached); err != nil {
+					t.Fatal(err)
+				}
+				if err := app.ensureActiveConfigForStart(); err != nil {
+					t.Fatal(err)
+				}
+				rebuilt, err := storage.GetProfileConfig(profile.ID)
+				if err != nil || getOutbound(rebuilt, want[2])["type"] != "socks" {
+					t.Fatal("old managed Finland outbound survived restart")
+				}
 				bridge, err := storage.GetProfileXrayConfig(profile.ID)
 				if err != nil {
 					t.Fatal(err)
+				}
+				fiStream, _ := getOutbound(bridge, "xray-out-2")["streamSettings"].(map[string]interface{})
+				if fiStream["network"] != "tcp" || fiStream["security"] != "reality" {
+					t.Fatal("Finland ingress lost its REALITY transport")
 				}
 				for _, tag := range []string{"xray-out-0", "xray-out-1"} {
 					outbound := getOutbound(bridge, tag)

@@ -2625,6 +2625,7 @@ class CoreStatus {
   const CoreStatus({
     this.vpnResponse = const VpnResponseSnapshot(),
     this.vpnUptimeMs,
+    this.sourceVerification = '',
     required this.connected,
     required this.running,
     required this.connecting,
@@ -2643,6 +2644,8 @@ class CoreStatus {
   });
 
   final bool connected;
+
+  final String sourceVerification;
 
   /// Elapsed native VPN session time, not a Unix timestamp.
   final int? vpnUptimeMs;
@@ -2701,6 +2704,7 @@ class CoreStatus {
       networkDescription: json['networkModeDescription']?.toString() ?? '',
       dependencies: DepsStatus.fromJson(_asMap(json['dependencies'])),
       version: VersionInfo.fromJson(_asMap(json['version'])),
+      sourceVerification: json['sourceVerification']?.toString() ?? '',
       vpnResponse: VpnResponseSnapshot.fromJson(_asMap(json['vpnResponse'])),
     );
   }
@@ -2737,6 +2741,7 @@ class CoreStatus {
       networkDescription: networkDescription,
       dependencies: dependencies,
       version: version,
+      sourceVerification: sourceVerification,
       vpnResponse: vpnResponse ?? this.vpnResponse,
     );
   }
@@ -6477,6 +6482,14 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
   }
 
+  Future<void> _chooseAndroidHomeMode(String mode) async {
+    if (controlsDisabled || connectionBusy) return;
+    if (mode != appConfig.routingMode) await _setHomeRoutingMode(mode);
+    if (mounted && mode == 'blocked_only' && appConfig.routingMode == mode) {
+      await _selectMenuSection('services');
+    }
+  }
+
   Future<void> _setHomeRoutingMode(String mode) async {
     if (controlsDisabled || connectionBusy || mode == appConfig.routingMode) {
       return;
@@ -6691,7 +6704,7 @@ class _DropoHomePageState extends State<DropoHomePage>
               onConnectionRequested: (target) =>
                   unawaited(_toggleConnection(requestedTarget: target)),
               onCancel: () => unawaited(_cancelAndroidConnection()),
-              onMode: (mode) => unawaited(_setHomeRoutingMode(mode)),
+              onMode: (mode) => unawaited(_chooseAndroidHomeMode(mode)),
               onSources: () => unawaited(_openSubscription()),
               onServices: () => unawaited(_selectMenuSection('services')),
               onHelp: () => unawaited(_selectMenuSection('guided-help')),
@@ -6714,7 +6727,15 @@ class _DropoHomePageState extends State<DropoHomePage>
                       padding: const EdgeInsets.all(16),
                       child: Text(normalizedHint),
                     ),
-                  if (status.connected) _buildRouteControls(summaryOnly: true),
+                  _buildRouteControls(summaryOnly: true),
+                  if (appConfig.routingMode == 'blocked_only')
+                    TextButton.icon(
+                      onPressed: powerEnabled
+                          ? () => _selectMenuSection('services')
+                          : null,
+                      icon: const Icon(Icons.tune),
+                      label: const Text('Настроить сервисы'),
+                    ),
                 ],
               ),
             ),
@@ -6911,7 +6932,9 @@ class _DropoHomePageState extends State<DropoHomePage>
     connected: online && status.connected,
     onExpandedChanged: (expanded) =>
         setState(() => homeRoutesExpanded = expanded),
-    onRoutingModeChanged: _setHomeRoutingMode,
+    onRoutingModeChanged: Platform.isAndroid
+        ? _chooseAndroidHomeMode
+        : _setHomeRoutingMode,
     onPolicyChanged: _setHomeRoutePolicy,
     onZapretStrategyChanged: _setHomeZapretStrategy,
     onAdd: controlsDisabled ? null : _openAddHomeRouteService,

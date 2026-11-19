@@ -80,10 +80,15 @@ func BeginAndroidSourceSession() string {
 	return BeginAndroidSourceSessionWithActive("")
 }
 
+// The TUN is available for health checks before the user-visible session is connected.
+func androidSourceEngineActiveLocked() bool {
+	return !current.sourceWorkCancelled && (current.Connected || current.ServiceState == "starting")
+}
+
 func BeginAndroidSourceSessionWithActive(activeID string) string {
 	mu.Lock()
 	defer mu.Unlock()
-	if !current.Connected || current.sourceWorkCancelled || len(current.preparedSources) == 0 {
+	if !androidSourceEngineActiveLocked() || len(current.preparedSources) == 0 {
 		return androidSourceError("VPN-источники ещё не готовы к проверке.")
 	}
 	current.sourceSession = androidSourceGeneration.Add(1)
@@ -127,13 +132,13 @@ func EndAndroidSourceSession(generation int64) {
 func AndroidSourceSessionCurrent(generation int64) bool {
 	mu.Lock()
 	defer mu.Unlock()
-	return generation > 0 && current.sourceSession == generation && current.Connected
+	return generation > 0 && current.sourceSession == generation && androidSourceEngineActiveLocked()
 }
 
 func InvalidateAndroidSourceObservations(generation int64) {
 	mu.Lock()
 	defer mu.Unlock()
-	if generation == 0 || current.sourceSession != generation || !current.Connected {
+	if generation == 0 || current.sourceSession != generation || !androidSourceEngineActiveLocked() {
 		return
 	}
 	for _, candidate := range current.preparedSources {
@@ -151,7 +156,7 @@ func CommitAndroidSourceProbeBatch(generation int64, observationsJSON, selectedI
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !current.Connected || generation <= 0 || generation != current.sourceSession {
+	if !androidSourceEngineActiveLocked() || generation <= 0 || generation != current.sourceSession {
 		return false
 	}
 	candidates := make(map[string]androidSourceCandidate, len(current.preparedSources))

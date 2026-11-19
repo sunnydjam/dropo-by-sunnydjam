@@ -1623,7 +1623,9 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 				return nil, fmt.Errorf("invalid protected direct reserve %s", candidate.ID)
 			}
 			proxy.Tag = "vpn-source-" + candidate.ID
-			proxies = append(proxies, proxy)
+			split := SplitProxyConfigs([]ProxyConfig{proxy})
+			proxies = append(proxies, split.SingBox...)
+			xrayCandidates = append(xrayCandidates, split.XrayBridge...)
 			continue
 		}
 		source := &updatedSources[candidate.Index]
