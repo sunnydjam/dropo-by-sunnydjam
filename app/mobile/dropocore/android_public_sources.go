@@ -10,9 +10,7 @@ import (
 
 // Retained only to recognise previously saved sources, not offered by the
 // managed catalog. No executable downloads or bundled private credentials.
-const androidPublicSourceID = "vpn-checker-ru-part9"
 const androidPublicSourceURL = "https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_part9.txt"
-const androidPublicSourceName = "VPN Checker · RU"
 const androidManagedFreeSourceID = "dropo-free"
 
 func androidPublicProviders() string {
@@ -24,7 +22,7 @@ func androidPublicProviders() string {
 }
 
 func isAndroidPublicSource(uri string) bool {
-	parsed, err := url.Parse(uri)
+	parsed, err := url.Parse(strings.TrimSpace(uri))
 	if err != nil || parsed.User != nil {
 		return false
 	}
@@ -56,10 +54,7 @@ func parseAndroidSourceContext(ctx context.Context, uri string) ([]proxyConfig, 
 		fetcher.ctx = ctx
 		nodes, err = parseAndroidProxyCandidatesWithFetcher(uri, fetcher)
 	}
-	if err != nil || !isAndroidPublicSource(uri) {
-		return nodes, err
-	}
-	return usableAndroidFreeNodes(nodes)
+	return nodes, err
 }
 
 func usableAndroidFreeNodes(nodes []proxyConfig) ([]proxyConfig, error) {

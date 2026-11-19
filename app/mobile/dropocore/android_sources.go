@@ -79,6 +79,24 @@ func migrateAndroidSourcesLocked() {
 	}
 }
 
+func removeRetiredAndroidSourcesLocked() {
+	removed := isAndroidPublicSource(current.Subscription)
+	kept := current.VPNSources[:0]
+	for _, source := range current.VPNSources {
+		if isAndroidPublicSource(source.URI) {
+			removed = true
+			continue
+		}
+		kept = append(kept, source)
+	}
+	if removed {
+		clear(current.VPNSources[len(kept):])
+		current.VPNSources = kept
+		syncAndroidSubscriptionLocked()
+		clearCachedConfigLocked()
+	}
+}
+
 func primaryAndroidSourceLocked() *androidVPNSource {
 	for i := range current.VPNSources {
 		if !ownedprofile.IsReserve(current.VPNSources[i].PublicCatalogID) && !current.VPNSources[i].Disabled && !ownedAndroidSourceExpired(current.VPNSources[i]) {
@@ -135,9 +153,6 @@ func androidSourcesViewLocked() map[string]interface{} {
 		publicID := source.PublicCatalogID
 		if !ownedprofile.IsProvider(publicID) && (publicID != androidManagedFreeSourceID || validateAndroidManagedFreeURL(source.URI) != nil) {
 			publicID = ""
-		}
-		if isAndroidPublicSource(source.URI) {
-			publicID = androidPublicSourceID
 		}
 		if publicID == androidManagedFreeSourceID && problem != "" {
 			problem = "Не удалось обновить Dropo Free. Используются сохранённые серверы, если они доступны."
@@ -222,11 +237,8 @@ func changeAndroidSources(method string, args []interface{}) string {
 		if err := validateAndroidSubscriptionLocally(uri); err != nil {
 			return androidSourceError(err.Error())
 		}
-		if isAndroidPublicSource(uri) {
-			uri = androidPublicSourceURL
-		}
 		for _, source := range sources {
-			if source.URI == uri || (managedProviderID != "" && source.PublicCatalogID == managedProviderID) || (isAndroidPublicSource(source.URI) && uri == androidPublicSourceURL) {
+			if source.URI == uri || (managedProviderID != "" && source.PublicCatalogID == managedProviderID) {
 				return androidSourceError("Этот источник уже добавлен.")
 			}
 		}

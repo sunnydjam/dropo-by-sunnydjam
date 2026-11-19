@@ -515,42 +515,6 @@ func androidRouteMethodCache(services []routeInfo) map[string]string {
 	return result
 }
 
-func setAndroidRoutePolicyLocked(args []interface{}) map[string]interface{} {
-	if current.Connected {
-		return map[string]interface{}{"success": false, "error": "VPN must be stopped before changing service routes"}
-	}
-	tag := stringArg(args, 0, "")
-	policy := normalizeAndroidRoutePolicy(stringArg(args, 1, ""))
-	_, ok := androidServiceByTag(tag)
-	if !ok {
-		return map[string]interface{}{"success": false, "error": "Unknown Android route service: " + tag}
-	}
-	if policy == "" {
-		return map[string]interface{}{"success": false, "error": "Unknown Android route policy"}
-	}
-	defaultPolicy := androidRoutePolicyAuto
-	if current.RoutePolicies == nil {
-		current.RoutePolicies = map[string]string{}
-	}
-	if policy == defaultPolicy {
-		delete(current.RoutePolicies, tag)
-	} else {
-		current.RoutePolicies[tag] = policy
-	}
-	clearCachedConfigLocked()
-	appendLogLocked(fmt.Sprintf("android route policy %s: %s", tag, policy))
-	_ = saveLocked()
-	effectivePolicy := androidEffectiveRoutePolicy(policy, strings.TrimSpace(current.Subscription) != "")
-	return map[string]interface{}{
-		"success":              true,
-		"tag":                  tag,
-		"method":               policy,
-		"methodLabel":          androidRoutePolicyLabel(policy),
-		"effectiveMethodLabel": androidRoutePolicyLabel(effectivePolicy),
-		"requiresVpn":          effectivePolicy == androidRoutePolicyVPN,
-	}
-}
-
 func androidServiceDomainSuffixesByPolicy(policies map[string]string, policy string) []string {
 	policy = normalizeAndroidRoutePolicy(policy)
 	if policy == "" {

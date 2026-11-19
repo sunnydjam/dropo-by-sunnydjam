@@ -1010,11 +1010,6 @@ func shouldUseSelectiveWindowsSession(settings GlobalAppSettings) bool {
 }
 
 func (a *App) pruneProxyFallbackVPNCandidates(config map[string]interface{}) bool {
-	workingTags := a.workingVPNTagsFromRouteProbe()
-	if len(workingTags) == 0 {
-		return false
-	}
-
 	outbounds, ok := config["outbounds"].([]interface{})
 	if !ok {
 		return false
@@ -1026,11 +1021,24 @@ func (a *App) pruneProxyFallbackVPNCandidates(config map[string]interface{}) boo
 			continue
 		}
 		tag, _ := outboundMap["tag"].(string)
+		if tag == "auto-select" && outboundMap["type"] == "selector" {
+			for _, candidate := range interfaceStringSlice(outboundMap["outbounds"]) {
+				if strings.HasPrefix(candidate, "vpn-source-") {
+					// The source monitor switches this selector at runtime. A
+					// cached service probe cannot retire an independent source.
+					return false
+				}
+			}
+		}
 		if tag != "" {
 			available[tag] = true
 		}
 	}
 
+	workingTags := a.workingVPNTagsFromRouteProbe()
+	if len(workingTags) == 0 {
+		return false
+	}
 	keep := make([]string, 0, len(workingTags))
 	for _, tag := range workingTags {
 		if available[tag] {

@@ -1331,14 +1331,6 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
               ],
             ),
           ),
-          if (source.publicCatalogId == 'vpn-checker-ru-part9')
-            const Padding(
-              padding: EdgeInsets.only(top: 8),
-              child: Text(
-                'Старый публичный список больше не предлагается. Сохранённый источник можно удалить через «Ещё».',
-                style: TextStyle(color: Color(0xFFFFD38B), fontSize: 12),
-              ),
-            ),
           if (problem.isNotEmpty) ...[
             const SizedBox(height: 8),
             Text(

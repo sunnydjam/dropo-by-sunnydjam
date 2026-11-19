@@ -125,6 +125,7 @@ type CommandServer struct {
 	xhttpRuntime         *xhttpRuntime
 	platform             PlatformInterface
 	xhttpEpoch           uint64
+	routingConfig        string // Accessed only on the engine worker.
 }
 
 func NewCommandServer(handler CommandServerHandler, platformInterface PlatformInterface) (*CommandServer, error) {
@@ -191,6 +192,7 @@ func (s *CommandServer) StartOrReloadService(configContent string, options *Over
 		return err
 	}
 	s.xhttpRuntime = runtime
+	s.routingConfig = configContent
 	return nil
 }
 

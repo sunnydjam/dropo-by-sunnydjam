@@ -452,33 +452,8 @@ func Call(method, argsJSON string) string {
 		return encode(map[string]interface{}{"success": false, "error": "Profiles are not editable on Android yet"})
 	case "GetRoutingMode":
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.RoutingMode})
-	case "SetRoutingMode":
-		if androidSourcesBusyLocked() {
-			return encode(map[string]interface{}{"success": false, "error": "VPN must be stopped before changing routing mode"})
-		}
-		mode := normalizeAndroidRoutingMode(stringArg(args, 0, current.Config.RoutingMode))
-		if mode == "" {
-			return encode(map[string]interface{}{"success": false, "error": "Unknown routing mode"})
-		}
-		previousMode := current.Config.RoutingMode
-		previousCache := captureAndroidSubscriptionStateLocked()
-		previousPrepared := current.preparedSources
-		changed := mode != current.Config.RoutingMode
-		if changed {
-			current.Config.RoutingMode = mode
-			clearCachedConfigLocked()
-		}
-		if err := saveLocked(); err != nil {
-			current.Config.RoutingMode = previousMode
-			restoreAndroidSubscriptionStateLocked(previousCache)
-			current.preparedSources = previousPrepared
-			return androidSourceError("Не удалось сохранить режим подключения. Попробуйте ещё раз.")
-		}
-		if changed {
-			current.sourcesRevision++
-			appendLogLocked("android routing mode changed: " + mode)
-		}
-		return encode(map[string]interface{}{"success": true, "mode": current.Config.RoutingMode})
+	case "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod":
+		return setAndroidRoutingLocked(method, args)
 	case "GetNetworkMode":
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.NetworkMode})
 	case "SetNetworkMode":
@@ -536,8 +511,6 @@ func Call(method, argsJSON string) string {
 		current.Config.DisableFreeAccess = boolArg(args, 0, current.Config.DisableFreeAccess)
 		_ = saveLocked()
 		return encode(map[string]interface{}{"success": true, "disableFreeAccess": current.Config.DisableFreeAccess})
-	case "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod":
-		return encode(setAndroidRoutePolicyLocked(args))
 	case "SetHomeRouteServiceVisible":
 		return encode(setAndroidHomeRouteServiceVisibleLocked(args))
 	case "GetBypassRouteSummary":
@@ -671,6 +644,9 @@ func validateAndroidSubscriptionLocally(value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return fmt.Errorf("VPN subscription is empty")
+	}
+	if isAndroidPublicSource(value) {
+		return fmt.Errorf("Публичный список VPN Checker больше не поддерживается. Выберите Dropo Free.")
 	}
 	if !isDirectProxyLink(value) {
 		return validateSubscriptionURL(value)
@@ -1294,6 +1270,7 @@ func loadLocked() error {
 	normalizeLoadedAppConfigLocked()
 	normalizeLoadedAndroidSubscriptionCountLocked()
 	migrateAndroidSourcesLocked()
+	removeRetiredAndroidSourcesLocked()
 	for i := range current.VPNSources {
 		current.VPNSources[i].FavoriteNodeIDs = normalizeAndroidFavoriteNodeIDs(current.VPNSources[i].FavoriteNodeIDs)
 	}

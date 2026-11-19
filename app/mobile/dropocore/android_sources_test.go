@@ -189,6 +189,8 @@ func TestAndroidSlowSourceDoesNotBlockStatusOrCommitAcrossSession(t *testing.T) 
 	}
 }
 
+const androidPublicSourceID = "vpn-checker-ru-part9"
+
 func TestAndroidPublicSourceConsentAndFiltering(t *testing.T) {
 	resetSourceTest(t)
 	calls := 0
@@ -207,6 +209,9 @@ func TestAndroidPublicSourceConsentAndFiltering(t *testing.T) {
 	if sourceCall(t, "AddPublicVPNSource", androidPublicSourceID, true)["success"] == true || calls != 0 {
 		t.Fatal("retired public source API recreated an aggregator")
 	}
+	if sourceCall(t, "AddVPNSource", "Old", androidPublicSourceURL+"?ts=123")["success"] == true || calls != 0 {
+		t.Fatal("manual import requested the retired public catalog")
+	}
 	if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", false)["success"] == true || calls != 0 {
 		t.Fatal("managed source fetched without consent")
 	}
@@ -216,6 +221,26 @@ func TestAndroidPublicSourceConsentAndFiltering(t *testing.T) {
 	}
 	if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", true)["success"] == true {
 		t.Fatal("duplicate public source accepted")
+	}
+}
+
+func TestAndroidUpgradeRemovesOnlyRetiredPublicSource(t *testing.T) {
+	resetSourceTest(t)
+	current.Subscription = androidPublicSourceURL
+	current.CachedSingBoxConfig = "old-runtime-config"
+	current.VPNSources = []androidVPNSource{
+		{ID: "old-public", URI: androidPublicSourceURL + "?ts=123"},
+		{ID: "personal", URI: sourceTestKey, PublicCatalogID: androidPublicSourceID},
+	}
+	if err := saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	base := current.BasePath
+	current = defaultState()
+	EnsureStarted(base, "test")
+	if len(current.VPNSources) != 1 || current.VPNSources[0].ID != "personal" ||
+		current.Subscription != sourceTestKey || current.CachedSingBoxConfig != "" {
+		t.Fatal("upgrade did not replace summary and invalidate the retired source config")
 	}
 }
 

@@ -264,16 +264,14 @@ void main() {
     );
   });
 
-  testWidgets('offline and active Android disable policy changes', (
+  testWidgets('offline disables editing and connected Android accepts it', (
     tester,
   ) async {
     for (final mobile in [false, true]) {
       debugMobileShellOverride = mobile;
       addTearDown(() => debugMobileShellOverride = null);
-      await _pump(
-        tester,
-        _page(_CatalogBridge(), connected: true, enabled: mobile),
-      );
+      final bridge = _CatalogBridge();
+      await _pump(tester, _page(bridge, connected: true, enabled: mobile));
       await _search(tester, 'discord');
       final button = tester.widget<OutlinedButton>(
         find.descendant(
@@ -281,7 +279,13 @@ void main() {
           matching: find.byType(OutlinedButton),
         ),
       );
-      expect(button.onPressed, isNull);
+      if (mobile) {
+        expect(button.onPressed, isNotNull);
+        await _tap(tester, 'service-route-discord-vpn');
+        expect(bridge.policies['discord'], 'vpn');
+      } else {
+        expect(button.onPressed, isNull);
+      }
     }
   });
 
@@ -317,7 +321,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('connected Android keeps service routes read-only on Home', (
+  testWidgets('connected Android changes service routes on Home', (
     tester,
   ) async {
     debugMobileShellOverride = true;
@@ -341,20 +345,23 @@ void main() {
           matching: find.byType(OutlinedButton),
         ),
       );
-      expect(button.onPressed, isNull);
+      expect(button.onPressed, method == 'direct' ? isNull : isNotNull);
     }
     expect(
       find.byKey(const ValueKey('service-route-discord-zapret')),
       findsNothing,
     );
-    expect(bridge.writes, 0);
+    await _tap(tester, 'service-route-discord-vpn');
+    expect(bridge.policies['discord'], 'vpn');
+    expect(bridge.writes, 1);
+    expect((await bridge.status()).connected, isTrue);
     expect(bridge.modeWrites, 0);
     await openSection(tester, 'sources');
     await openSection(tester, 'home');
     expect((await bridge.status()).connected, isTrue);
     expect((await bridge.routingMode())['mode'], 'blocked_only');
     expect(bridge.modeWrites, 0);
-    expect(bridge.writes, 0);
+    expect(bridge.writes, 1);
     expect(tester.takeException(), isNull);
   });
 

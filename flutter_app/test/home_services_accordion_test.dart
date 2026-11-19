@@ -57,7 +57,7 @@ class _ServicesBridge extends MockCoreBridge {
     routeWrites++;
     if (failWrite) return {'success': false, 'error': 'save refused'};
     savedPolicy = method;
-    return {'success': true};
+    return {'success': true, 'applied': connected};
   }
 
   @override
@@ -258,34 +258,32 @@ void main() {
     },
   );
 
-  testWidgets(
-    'connected Android keeps service details read-only without Stop',
-    (tester) async {
-      final bridge = _ServicesBridge()..connected = true;
-      await _pump(tester, bridge);
-      await _open(tester);
-      await _tap(tester, 'home-service-row-youtube');
-      final policy = tester.widget<OutlinedButton>(
-        find.descendant(
-          of: find.byKey(const ValueKey('service-route-youtube-vpn')),
-          matching: find.byType(OutlinedButton),
-        ),
-      );
-      expect(policy.onPressed, isNull);
-      expect(
-        find.byKey(const ValueKey('home-services-read-only')),
-        findsOneWidget,
-      );
-      await _search(tester, 'telegram');
-      await _tap(tester, 'home-service-row-telegram');
-      await _tap(tester, 'pin-service-telegram');
-      expect(bridge.pins['telegram'], true);
-      expect(bridge.routeWrites, 0);
-      expect(bridge.disconnects, 0);
-      expect(bridge.connected, true);
-      expect(tester.takeException(), isNull);
-    },
-  );
+  testWidgets('connected Android updates service routes without Stop', (
+    tester,
+  ) async {
+    final bridge = _ServicesBridge()..connected = true;
+    await _pump(tester, bridge);
+    await _open(tester);
+    await _tap(tester, 'home-service-row-youtube');
+    final policy = tester.widget<OutlinedButton>(
+      find.descendant(
+        of: find.byKey(const ValueKey('service-route-youtube-vpn')),
+        matching: find.byType(OutlinedButton),
+      ),
+    );
+    expect(policy.onPressed, isNotNull);
+    await _tap(tester, 'service-route-youtube-vpn');
+    expect(find.text('Маршрут применён.'), findsOneWidget);
+    expect(bridge.savedPolicy, 'vpn');
+    await _search(tester, 'telegram');
+    await _tap(tester, 'home-service-row-telegram');
+    await _tap(tester, 'pin-service-telegram');
+    expect(bridge.pins['telegram'], true);
+    expect(bridge.routeWrites, 1);
+    expect(bridge.disconnects, 0);
+    expect(bridge.connected, true);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('failed route write preserves policy and releases editing lock', (
     tester,

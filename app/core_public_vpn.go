@@ -61,8 +61,25 @@ func publicVPNProviderForURI(uri string) (PublicVPNProvider, bool) {
 	return PublicVPNProvider{}, false
 }
 
-// Recognise only legacy public URIs; managed identity is explicit and must never
-// be derived from a personal URI. Saved source order remains authoritative.
+func removeRetiredPublicVPNSource(profile *ProfileData) {
+	_, removed := publicVPNProviderForURI(profile.SubscriptionURL)
+	kept := profile.VPNSources[:0]
+	for _, source := range profile.VPNSources {
+		if _, retired := publicVPNProviderForURI(source.URI); retired {
+			removed = true
+			continue
+		}
+		kept = append(kept, source)
+	}
+	if removed {
+		clear(profile.VPNSources[len(kept):])
+		profile.VPNSources = kept
+		profile.SubscriptionURL = ""
+		profile.SingboxConfig, profile.XrayConfig, profile.XrayConfigReady = nil, nil, false
+	}
+}
+
+// Managed identity is explicit and is never derived from a personal URI.
 func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 	for index := range sources {
 		source := &sources[index]
@@ -78,10 +95,6 @@ func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 			continue
 		}
 		source.PublicCatalogID = ""
-		if provider, ok := publicVPNProviderForURI(source.URI); ok {
-			source.PublicCatalogID = provider.ID
-			source.URI = provider.URL
-		}
 	}
 }
 

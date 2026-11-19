@@ -215,6 +215,10 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
       setState(
         () => feedback = !routeChange
             ? 'Быстрый список сохранён.'
+            : widget.routingMode == 'all_traffic'
+            ? 'Маршрут сохранён. Применится в режиме «По сервисам».'
+            : result['applied'] == true
+            ? 'Маршрут применён.'
             : result['restarted'] == true
             ? 'Маршрут сохранён, VPN автоматически переподключён.'
             : 'Маршрут сохранён. Настройка применяется ядром при следующем подключении.',
@@ -260,7 +264,6 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                 : _homeRouteName(a).compareTo(_homeRouteName(b));
           });
     final enabled = widget.enabled && !busy && !loading && loadError.isEmpty;
-    final editing = enabled && (!_isMobileShell || !widget.connected);
     return _FeaturePage(
       title: 'Сервисы',
       icon: Icons.apps_outlined,
@@ -392,7 +395,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                         loadError.isEmpty &&
                         !loading,
                     allTraffic: widget.routingMode == 'all_traffic',
-                    enabled: editing,
+                    enabled: enabled,
                     onRemove: null,
                     headerAction: _AccessibleIconButton(
                       key: ValueKey('pin-service-${service.tag}'),

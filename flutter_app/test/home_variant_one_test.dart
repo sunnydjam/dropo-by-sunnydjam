@@ -314,7 +314,7 @@ void main() {
   }
 
   testWidgets(
-    'Android disabled mode explanation keeps planet and selector stable',
+    'Android changes routing while connected and keeps planet stable',
     (tester) async {
       final bridge = _VariantBridge();
       await _pump(
@@ -333,18 +333,20 @@ void main() {
         find.byKey(const ValueKey('home-update-slot')),
       );
       expect(updateSlot.overlaps(planetBefore), isFalse);
-      expect(
-        find.byKey(const ValueKey('home-routing-read-only')),
-        findsNothing,
-      );
+      expect(find.byKey(const ValueKey('home-routing-live')), findsNothing);
       bridge.connected = true;
       await tester.pump(const Duration(seconds: 3));
       await tester.pump();
-      expect(find.text('Отключите VPN, чтобы сменить режим'), findsOneWidget);
-      expect(tester.widget<OutlinedButton>(selected).onPressed, isNull);
-      expect(tester.widget<OutlinedButton>(all).onPressed, isNull);
+      expect(find.byKey(const ValueKey('home-routing-live')), findsOneWidget);
+      expect(tester.widget<OutlinedButton>(selected).onPressed, isNotNull);
+      expect(tester.widget<OutlinedButton>(all).onPressed, isNotNull);
       expect(tester.getRect(planet), planetBefore);
       expect(tester.getRect(selected), modesBefore);
+      await tester.ensureVisible(selected);
+      await tester.tap(selected);
+      await tester.pumpAndSettle();
+      expect((await bridge.appConfig())['routingMode'], 'blocked_only');
+      expect(bridge.connected, isTrue);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },

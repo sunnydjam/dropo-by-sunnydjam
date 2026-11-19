@@ -22,10 +22,11 @@ class _HomeServicesAccordion extends StatefulWidget {
     required this.onExpandedChanged,
     this.onChanged,
     this.routeSnapshot,
+    this.showInFullMode = false,
   });
 
   final CoreBridge bridge;
-  final bool connected, enabled, expanded;
+  final bool connected, enabled, expanded, showInFullMode;
   final String routingMode;
   final ValueChanged<bool> onBusyChanged, onExpandedChanged;
   final VoidCallback? onChanged;
@@ -107,9 +108,6 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
     bool routeChange = true,
   }) async {
     if (busy || loading || !widget.enabled || loadError.isNotEmpty) return;
-    // Reading an active Android session is safe; editing its routes is not.
-    // The user, never the disclosure control, decides when to disconnect.
-    if (routeChange && _isMobileShell && widget.connected) return;
     setState(() {
       busy = true;
       feedback = 'Сохраняем…';
@@ -125,6 +123,10 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
       setState(
         () => feedback = !routeChange
             ? 'Список сохранён.'
+            : widget.routingMode == 'all_traffic'
+            ? 'Сохранено. Применится в режиме «По сервисам».'
+            : result['applied'] == true
+            ? 'Маршрут применён.'
             : result['restarted'] == true
             ? 'Сохранено. VPN переподключён.'
             : 'Сохранено. Применится при подключении.',
@@ -171,10 +173,10 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.routingMode != 'blocked_only') return const SizedBox.shrink();
+    final fullMode = widget.routingMode == 'all_traffic';
+    if (fullMode && !widget.showInFullMode) return const SizedBox.shrink();
     final pinnedCount = services.where(_pinned).length;
     final available = widget.enabled && !busy && !loading && loadError.isEmpty;
-    final editing = available && (!_isMobileShell || !widget.connected);
     final filtered = _filtered;
     return Material(
       color: Colors.transparent,
@@ -336,13 +338,12 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                 ),
               ),
             for (final service in filtered)
-              _service(service, available: available, editing: editing),
-            if (_isMobileShell && widget.connected)
+              _service(service, available: available),
+            if (fullMode)
               const Padding(
                 padding: EdgeInsets.only(top: 12),
                 child: Text(
-                  'Отключите VPN, чтобы изменить настройки сервисов.',
-                  key: ValueKey('home-services-read-only'),
+                  'Настройки применятся в режиме «По сервисам».',
                   style: TextStyle(
                     color: _atlasMuted,
                     fontSize: 12,
@@ -350,7 +351,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                   ),
                 ),
               ),
-            if (!_isMobileShell && widget.connected)
+            if (!fullMode && !_isMobileShell && widget.connected)
               const Padding(
                 padding: EdgeInsets.only(top: 12),
                 child: Text(
@@ -447,7 +448,6 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
   Widget _service(
     RouteService service, {
     required bool available,
-    required bool editing,
   }) {
     final expanded = openServiceTag == service.tag;
     final primary = isPrimaryHomeRouteService(service.tag);
@@ -524,8 +524,8 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                   service: service,
                   keyPrefix: 'service',
                   connected: widget.connected && available,
-                  allTraffic: false,
-                  enabled: editing,
+                  allTraffic: widget.routingMode == 'all_traffic',
+                  enabled: available,
                   statusKnown: widget.enabled && !loading && loadError.isEmpty,
                   onRemove: null,
                   headerAction: _AccessibleIconButton(

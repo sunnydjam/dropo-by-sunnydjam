@@ -5296,45 +5296,6 @@ class _DropoHomePageState extends State<DropoHomePage>
     unawaited(_selectMenuSection('account'));
   }
 
-  Future<void> _setAndroidSceneRoutingMode(String mode) async {
-    if (!const {'blocked_only', 'all_traffic'}.contains(mode) ||
-        controlsDisabled ||
-        connectionBusy ||
-        mode == appConfig.routingMode) {
-      return;
-    }
-    final androidAttempt = _androidConnectionAttempt;
-    if (!status.connected) return _setHomeRoutingMode(mode);
-    _androidHaptic();
-    try {
-      final result = await _applySourceChange(
-        () => widget.bridge.setRoutingMode(mode),
-      );
-      if (androidAttempt != _androidConnectionAttempt) return;
-      if (result['success'] == false) {
-        throw StateError(
-          result['userMessage']?.toString() ??
-              result['error']?.toString() ??
-              'Режим не изменён',
-        );
-      }
-      if (mounted) {
-        setState(() {
-          appConfig = appConfig.copyWith(routingMode: mode);
-          liveRoutesConfirmed = false;
-        });
-      }
-    } catch (error) {
-      if (androidAttempt != _androidConnectionAttempt) return;
-      if (mounted) {
-        setState(() {
-          connectionHint = _cleanError(error);
-          connectionHintDanger = true;
-        });
-      }
-    }
-  }
-
   Future<Map<String, dynamic>> _applySourceChange(
     Future<Map<String, dynamic>> Function() operation,
   ) async {
@@ -5512,6 +5473,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         return false;
       }
       if (action == _VpnOnboardingAction.services) {
+        setState(() => preparingFullVpnSource = false);
         await _setHomeRoutingMode('blocked_only');
         return false;
       }
@@ -6516,7 +6478,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _setHomeRoutingMode(String mode) async {
-    if (uiBusy || mode == appConfig.routingMode) {
+    if (controlsDisabled || connectionBusy || mode == appConfig.routingMode) {
       return;
     }
     _androidHaptic();
@@ -6525,7 +6487,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       statusMessage = mode == 'all_traffic'
           ? 'Переключаем весь трафик на VPN'
           : 'Включаем выборочные маршруты';
-      connectionHint = status.connected
+      connectionHint = status.connected && !_isAndroidPlatform
           ? 'VPN будет автоматически переподключён.'
           : '';
       connectionHintDanger = false;
@@ -6729,7 +6691,7 @@ class _DropoHomePageState extends State<DropoHomePage>
               onConnectionRequested: (target) =>
                   unawaited(_toggleConnection(requestedTarget: target)),
               onCancel: () => unawaited(_cancelAndroidConnection()),
-              onMode: (mode) => unawaited(_setAndroidSceneRoutingMode(mode)),
+              onMode: (mode) => unawaited(_setHomeRoutingMode(mode)),
               onSources: () => unawaited(_openSubscription()),
               onServices: () => unawaited(_selectMenuSection('services')),
               onHelp: () => unawaited(_selectMenuSection('guided-help')),
@@ -6942,7 +6904,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           (route) => route.homeVisible || isPrimaryHomeRouteService(route.tag),
         )
         .toList(growable: false),
-    enabled: !controlsDisabled && (!_isMobileShell || !status.connected),
+    enabled: !controlsDisabled && !connectionBusy,
     expanded: homeRoutesExpanded,
     routingMode: appConfig.routingMode,
     hasSubscription: subscription.hasSubscription,
@@ -6974,6 +6936,7 @@ class _DropoHomePageState extends State<DropoHomePage>
             connected: online && status.connected,
             enabled: !controlsDisabled && !connectionBusy,
             routingMode: appConfig.routingMode,
+            showInFullMode: true,
             expanded: true,
             onExpandedChanged: (_) {},
             onBusyChanged: _setSectionBusy,
@@ -10628,8 +10591,8 @@ class _SettingsDialogState extends State<_SettingsDialog>
             icon: Icons.lock_outline,
             title: 'VPN активен',
             body: isMobile
-                ? 'Остановите Android VPN, чтобы изменить маршруты, режим сети или логирование.'
-                : 'Режим сети и логирование требуют остановки VPN. Маршрут отдельного сервиса можно изменить: dropo безопасно переподключит VPN автоматически.',
+                ? 'Маршруты можно менять при активном VPN. Режим сети и логирование требуют остановки VPN.'
+                : 'Маршруты можно менять при активном VPN. Dropo автоматически переподключится. Режим сети и логирование требуют остановки VPN.',
           ),
           const SizedBox(height: 14),
         ],
@@ -10928,7 +10891,10 @@ class _SettingsDialogState extends State<_SettingsDialog>
                   'blocked_only': 'Выбранные сервисы',
                   'all_traffic': 'Весь трафик',
                 },
-                onChanged: canChangeRuntime
+                onChanged:
+                    !saving &&
+                        !widget.currentStatus.connecting &&
+                        !widget.currentStatus.disconnecting
                     ? (value) => _applySpecial(
                         () => widget.bridge.setRoutingMode(value),
                         config.copyWith(routingMode: value),

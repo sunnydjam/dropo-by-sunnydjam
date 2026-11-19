@@ -4,6 +4,19 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.12 — 2026-11-19
+
+- Apply Android routing mode and service policy changes while the VPN service
+  is active. Preserve the selected source, including an active reserve, and
+  restore the previous configuration if reloading fails.
+- Keep all independent Windows VPN sources in the runtime selector, including
+  when the cached service probe only recorded the primary source.
+- Remove the retired VPN Checker catalog and invalidate configurations that
+  still reference it. Keep custom subscriptions and managed Dropo reserves.
+- Windows VM testing verified Free failover to the HTTPS relay and LV QUIC
+  with HTTPS and UDP DNS. The primary XHTTP and FI REALITY traffic checks
+  failed from the test network.
+
 ## 3.1.11 — 2026-11-18
 
 - Show Dropo Free and Turbo as one connection each. Use each profile's own

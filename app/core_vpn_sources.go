@@ -52,6 +52,9 @@ func newVPNSource(id, name, uri string) (VPNSource, error) {
 	if uri == "" {
 		return VPNSource{}, fmt.Errorf("VPN source URI is empty")
 	}
+	if _, retired := publicVPNProviderForURI(uri); retired {
+		return VPNSource{}, fmt.Errorf("Публичный список VPN Checker больше не поддерживается. Выберите Dropo Free.")
+	}
 	kind := VPNSourceSubscription
 	if isDirectProxyLink(uri) {
 		kind = VPNSourceDirect
@@ -129,6 +132,7 @@ func normalizeProfileVPNSources(profile *ProfileData) {
 	if profile == nil {
 		return
 	}
+	removeRetiredPublicVPNSource(profile)
 	if profile.VPNSourceSelectionMode != "latency" && profile.VPNSourceSelectionMode != "priority" {
 		// Old profiles never recorded whether their ordering was manual. Preserve
 		// an existing multi-source chain rather than overwrite possible user intent.

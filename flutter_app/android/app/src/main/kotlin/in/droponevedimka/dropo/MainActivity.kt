@@ -440,10 +440,15 @@ class MainActivity : FlutterActivity() {
                 JSONObject(DropoVpnRuntime.snapshot()).toString()
             }
             "diagnostics" -> buildDiagnostics()
-            "call" -> Dropoandroid.call(
-                stringArg(call, "method"),
-                stringArg(call, "argsJson", "[]"),
-            )
+            "call" -> {
+                val method = stringArg(call, "method")
+                val args = stringArg(call, "argsJson", "[]")
+                when (method) {
+                    "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod" ->
+                        DropoVpnService.applyRoutingChange(method, args)
+                    else -> Dropoandroid.call(method, args)
+                }
+            }
             "shutdown" -> Dropoandroid.shutdown()
             else -> error("Unsupported core method ${call.method}")
         }

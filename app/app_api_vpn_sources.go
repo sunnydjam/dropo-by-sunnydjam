@@ -45,13 +45,6 @@ func (a *App) AddVPNSource(name, uri string) map[string]interface{} {
 		if err != nil {
 			return err
 		}
-		if provider, public := publicVPNProviderForURI(uri); public {
-			for _, existing := range profile.VPNSources {
-				if known, ok := publicVPNProviderForURI(existing.URI); ok && known.ID == provider.ID {
-					return fmt.Errorf("бесплатный источник уже добавлен")
-				}
-			}
-		}
 		profile.VPNSources = append(profile.VPNSources, source)
 		return nil
 	})

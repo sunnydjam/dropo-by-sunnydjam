@@ -77,9 +77,13 @@ func CancelPendingSourceWork() {
 }
 
 func BeginAndroidSourceSession() string {
+	return BeginAndroidSourceSessionWithActive("")
+}
+
+func BeginAndroidSourceSessionWithActive(activeID string) string {
 	mu.Lock()
 	defer mu.Unlock()
-	if !current.Connected || len(current.preparedSources) == 0 {
+	if !current.Connected || current.sourceWorkCancelled || len(current.preparedSources) == 0 {
 		return androidSourceError("VPN-источники ещё не готовы к проверке.")
 	}
 	current.sourceSession = androidSourceGeneration.Add(1)
@@ -87,11 +91,25 @@ func BeginAndroidSourceSession() string {
 	current.activeSourceID = current.preparedSources[0].ID
 	current.sourceResponses = make(map[string]androidSourceResponse, len(current.preparedSources))
 	for _, candidate := range current.preparedSources {
+		if candidate.ID == activeID {
+			current.activeSourceID = activeID
+		}
 		current.sourceResponses[candidate.ID] = androidSourceResponse{State: "pending", SourceID: candidate.ID,
 			NodeID: candidate.NodeID, SessionGeneration: current.sourceSession}
 	}
 	return encode(map[string]interface{}{"success": true, "generation": current.sourceSession,
-		"autoSelect": current.VPNSourceAutoSelect, "candidates": current.preparedSources})
+		"autoSelect": current.VPNSourceAutoSelect, "candidates": current.preparedSources, "activeId": current.activeSourceID})
+}
+
+func ActiveAndroidSource() (id, tag string) {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, candidate := range current.preparedSources {
+		if candidate.ID == current.activeSourceID {
+			return candidate.ID, candidate.Tag
+		}
+	}
+	return "", ""
 }
 
 func EndAndroidSourceSession(generation int64) {

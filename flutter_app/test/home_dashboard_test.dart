@@ -1709,7 +1709,7 @@ void main() {
     );
   }
 
-  testWidgets('Android drawer preserves Space and connected route guards', (
+  testWidgets('Android drawer preserves Space and connected routing controls', (
     tester,
   ) async {
     debugMobileShellOverride = true;
@@ -1728,7 +1728,7 @@ void main() {
               ),
             )
             .onPressed,
-        isNull,
+        policy == 'vpn' ? isNull : isNotNull,
       );
     }
     expect(
@@ -1737,8 +1737,14 @@ void main() {
             find.byKey(const ValueKey('home-routing-all-vpn')),
           )
           .onPressed,
-      isNull,
+      isNotNull,
     );
+    await _tap(tester, 'service-route-youtube-direct');
+    expect(bridge.policyWrites, 1);
+    await _tap(tester, 'home-routing-all-vpn');
+    expect((await bridge.routingMode())['mode'], 'all_traffic');
+    expect(bridge.connected, isTrue);
+    expect(bridge.toggles, 0);
     await _tap(tester, 'nav-advanced');
     expect(find.byKey(const ValueKey('link-work')), findsNothing);
     expect(find.byKey(const ValueKey('link-profiles')), findsNothing);
@@ -1749,7 +1755,7 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('navigation-drawer')), findsNothing);
     expect(find.byKey(const ValueKey('dropo-space-section')), findsOneWidget);
-    expect(bridge.policyWrites, 0);
+    expect(bridge.policyWrites, 1);
     expect(bridge.toggles, 0);
     expect(tester.takeException(), isNull);
   });

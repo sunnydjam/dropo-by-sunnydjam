@@ -43,28 +43,28 @@ func TestPublicVPNIsOptInAndConsentIsRequired(t *testing.T) {
 	}
 }
 
-func TestPublicVPNKeepsManualOrderIncludingLegacyCacheBuster(t *testing.T) {
+func TestRetiredPublicVPNIsRemovedWithCachedConfig(t *testing.T) {
 	provider := retiredPublicVPNProvider()
-	profile := ProfileData{VPNSources: []VPNSource{
+	profile := ProfileData{SingboxConfig: map[string]interface{}{"stale": true}, XrayConfigReady: true, VPNSources: []VPNSource{
 		{ID: "free", URI: provider.URL + "?ts=123"},
 		{ID: "personal-2", URI: "https://example.com/private-two", Disabled: true},
 		{ID: "personal-1", URI: "https://example.com/private-one"},
 	}}
 	normalizeProfileVPNSources(&profile)
-	got := []string{profile.VPNSources[0].ID, profile.VPNSources[1].ID, profile.VPNSources[2].ID}
-	if !reflect.DeepEqual(got, []string{"free", "personal-2", "personal-1"}) {
-		t.Fatalf("source order = %v", got)
+	if len(profile.VPNSources) != 2 || profile.VPNSources[0].ID != "personal-2" ||
+		!profile.VPNSources[0].Disabled || profile.VPNSources[1].ID != "personal-1" {
+		t.Fatal("migration changed personal source priority or disabled state")
 	}
-	if profile.SubscriptionURL != provider.URL {
-		t.Fatal("summary does not follow the user's primary source")
+	if profile.SubscriptionURL != profile.VPNSources[1].URI || profile.SingboxConfig != nil || profile.XrayConfigReady {
+		t.Fatal("retired source remained in the primary summary or runtime config")
 	}
-	if profile.VPNSources[0].URI != provider.URL || profile.VPNSources[0].PublicCatalogID != provider.ID {
-		t.Fatal("legacy public URL not recognized")
+	legacy := ProfileData{SubscriptionURL: provider.URL, XrayConfig: map[string]interface{}{"stale": true}}
+	normalizeProfileVPNSources(&legacy)
+	if len(legacy.VPNSources) != 0 || legacy.SubscriptionURL != "" || legacy.XrayConfig != nil {
+		t.Fatal("legacy subscription field resurrected the retired public source")
 	}
-	profile.VPNSources[1].PublicCatalogID = provider.ID
-	normalizeProfileVPNSources(&profile)
-	if profile.VPNSources[1].PublicCatalogID != "" {
-		t.Fatal("catalog identity must be derived from the actual source URL")
+	if _, err := newVPNSource("old", "Public", provider.URL); err == nil {
+		t.Fatal("old public source can still be imported")
 	}
 }
 

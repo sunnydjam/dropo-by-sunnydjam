@@ -4,8 +4,10 @@ import (
 	"dropocore/ownedprofile"
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const ownedReserveFixture = "vless://11111111-2222-3333-4444-555555555555@193.233.88.97:443?type=xhttp&security=tls&sni=cdn.droponevedimka.ru&host=cdn.droponevedimka.ru&path=%2Fmanaged%2Fv1%2Ffree&encryption=none&dropo_expiry=0"
@@ -195,6 +197,76 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 	profile, _ = storage.GetActiveProfile()
 	if len(profile.VPNSources) != 0 {
 		t.Fatal("family removal left a source reference")
+	}
+}
+
+func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *testing.T) {
+	boost := strings.Replace(ownedReserveFixture, "%2Ffree", "%2Fboost", 1)
+	boost = strings.Replace(boost, "expiry=0", "expiry="+strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10), 1)
+	for _, tier := range []struct{ id, key string }{
+		{ownedprofile.Free, ownedReserveFixture},
+		{ownedprofile.Boost, boost},
+	} {
+		for _, mode := range []RoutingMode{RoutingModeBlockedOnly, RoutingModeAllTraffic} {
+			t.Run(tier.id+"/"+string(mode), func(t *testing.T) {
+				storage, builder := publicVPNTestBuilder(t, "")
+				app := &App{storage: storage, configBuilder: builder, initialized: true}
+				app.initializedReady.Store(true)
+				requireAPISuccess(t, app.SetRoutingMode(string(mode)))
+				requireAPISuccess(t, app.AddManagedVPNSource(tier.id, "Managed", tier.key, true))
+
+				profile, err := storage.GetActiveProfile()
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := []string{
+					"vpn-source-" + profile.VPNSources[0].ID,
+					"vpn-source-" + profile.VPNSources[1].ID,
+					"vpn-source-" + tier.id + "-fi-tcp",
+					"vpn-source-" + tier.id + "-lv-quic",
+				}
+				app.rememberRouteProbeResults([]routeProbeServiceResult{
+					{Tag: "openai", Success: true, MethodKind: "vpn", MethodTag: want[0]},
+				})
+				path, err := app.getActiveConfigPath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if shouldUseSelectiveWindowsSession(storage.GetAppSettings()) {
+					path, err = app.writeDeepWindowsProxyFallbackConfig(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				config, err := readJSONConfig(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				selector := getOutbound(config, "auto-select")
+				if got := interfaceStringSlice(selector["outbounds"]); !reflect.DeepEqual(got, want) || selector["type"] != "selector" || selector["default"] != want[0] {
+					t.Fatalf("runtime selector lost independent transports: %v", got)
+				}
+				for i, protocol := range []string{"socks", "socks", "vless", "hysteria2"} {
+					if getOutbound(config, want[i])["type"] != protocol {
+						t.Fatalf("unexpected runtime transport at position %d", i)
+					}
+					if _, ok := app.vpnSourceProbeBinding(want[i]); !ok {
+						t.Fatalf("monitor cannot switch to candidate at position %d", i)
+					}
+				}
+				bridge, err := storage.GetProfileXrayConfig(profile.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, tag := range []string{"xray-out-0", "xray-out-1"} {
+					outbound := getOutbound(bridge, tag)
+					transport, _ := outbound["streamSettings"].(map[string]interface{})
+					if transport["network"] != "xhttp" {
+						t.Fatal("XHTTP ingress lost its Xray transport")
+					}
+				}
+			})
+		}
 	}
 }
 

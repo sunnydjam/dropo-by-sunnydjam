@@ -553,7 +553,7 @@ class _AtlasRouteControls extends StatelessWidget {
             padding: const EdgeInsets.only(top: 8),
             child: LayoutBuilder(
               builder: (context, constraints) {
-                const explanation = 'Отключите VPN, чтобы сменить режим';
+                const explanation = 'Режим можно изменить при активном VPN';
                 const style = TextStyle(
                   color: _atlasMuted,
                   fontFamily: 'Inter',
@@ -572,7 +572,7 @@ class _AtlasRouteControls extends StatelessWidget {
                   child: c.connected
                       ? const Text(
                           explanation,
-                          key: ValueKey('home-routing-read-only'),
+                          key: ValueKey('home-routing-live'),
                           textAlign: TextAlign.center,
                           style: style,
                         )

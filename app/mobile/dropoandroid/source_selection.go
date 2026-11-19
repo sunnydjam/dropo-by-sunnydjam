@@ -51,6 +51,10 @@ type sourceObservation struct {
 // StartSourceSelection returns immediately after registering a session. Only
 // after Kotlin publishes Connected does this worker test independent outbounds.
 func (s *CommandServer) StartSourceSelection() error {
+	return s.startSourceSelection("")
+}
+
+func (s *CommandServer) startSourceSelection(activeID string) error {
 	s.sourceMu.Lock()
 	defer s.sourceMu.Unlock()
 	s.stopSourceSelectionLocked()
@@ -63,14 +67,22 @@ func (s *CommandServer) StartSourceSelection() error {
 		Generation int64             `json:"generation"`
 		AutoSelect bool              `json:"autoSelect"`
 		Candidates []sourceCandidate `json:"candidates"`
+		ActiveID   string            `json:"activeId"`
 	}
-	if json.Unmarshal([]byte(core.BeginAndroidSourceSession()), &plan) != nil || !plan.Success || len(plan.Candidates) == 0 {
+	if json.Unmarshal([]byte(core.BeginAndroidSourceSessionWithActive(activeID)), &plan) != nil || !plan.Success || len(plan.Candidates) == 0 {
 		return errors.New("VPN sources are not ready for source checks")
 	}
 	outbounds := instance.Box().Outbound()
 	selected, exists := outbounds.Outbound("proxy")
 	selector, valid := selected.(*group.Selector)
-	if !exists || !valid || !selector.SelectOutbound(plan.Candidates[0].Tag) {
+	selectedTag := ""
+	for _, candidate := range plan.Candidates {
+		if candidate.ID == plan.ActiveID {
+			selectedTag = candidate.Tag
+			break
+		}
+	}
+	if !exists || !valid || selectedTag == "" || !selector.SelectOutbound(selectedTag) {
 		core.EndAndroidSourceSession(plan.Generation)
 		return errors.New("VPN source selector is not ready")
 	}
@@ -85,7 +97,11 @@ func (s *CommandServer) StartSourceSelection() error {
 	if manager := instance.TrafficManager(); manager != nil {
 		flows = manager
 	}
-	go s.runSourceSelection(ctx, generation, plan.Generation, plan.AutoSelect, plan.Candidates, outbounds, selector, flows, wake)
+	fresh := activeID == "" || plan.ActiveID != activeID
+	if !fresh {
+		wake <- struct{}{}
+	}
+	go s.runSourceSelection(ctx, generation, plan.Generation, plan.AutoSelect, plan.Candidates, outbounds, selector, flows, wake, plan.ActiveID, fresh)
 	go core.RefreshAndroidSourcesForNextSession(ctx, plan.Generation)
 	return nil
 }
@@ -170,7 +186,7 @@ func (s *CommandServer) commitSourceResultsWithOutage(ctx context.Context, gener
 	}, flows, failedTag)
 }
 
-func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint64, coreGeneration int64, automatic bool, candidates []sourceCandidate, outbounds adapter.OutboundManager, selector *group.Selector, flows sourceFlowTable, wake <-chan struct{}) {
+func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint64, coreGeneration int64, automatic bool, candidates []sourceCandidate, outbounds adapter.OutboundManager, selector *group.Selector, flows sourceFlowTable, wake <-chan struct{}, activeID string, initial bool) {
 	probe := func(ctx context.Context, candidate sourceCandidate) sourceObservation {
 		outbound, ok := outbounds.Outbound(candidate.Tag)
 		if !ok {
@@ -178,7 +194,6 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 		}
 		return probeSource(ctx, candidate, coreGeneration, outbound)
 	}
-	activeID, initial := candidates[0].ID, true
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {

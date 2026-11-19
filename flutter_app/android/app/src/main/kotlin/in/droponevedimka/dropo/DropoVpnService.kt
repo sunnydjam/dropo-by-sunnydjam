@@ -693,6 +693,22 @@ class DropoVpnService :
         stopVpn(stopSelf = true)
     }
 
+    private fun updateRouting(method: String, args: String): String {
+        val generation = engineGeneration
+        val server = commandServer ?: return Dropoandroid.call(method, args)
+        requireActiveSession(generation)
+        return try {
+            server.applyRoutingChange(method, args)
+        } catch (error: Exception) {
+            val message = "Не удалось восстановить маршруты Android VPN."
+            if (sessionFence.isActive(generation)) {
+                coreLog(message)
+                stopVpn(stopSelf = true, failureMessage = message)
+            }
+            JSONObject().put("success", false).put("error", message).toString()
+        }
+    }
+
     override fun serviceReload() {
         val generation = engineGeneration
         // Command callbacks can arrive on a Go/gRPC thread. Keep reloads on
@@ -1081,6 +1097,11 @@ class DropoVpnService :
 
         @Volatile
         private var activeService: DropoVpnService? = null
+
+        fun applyRoutingChange(method: String, args: String): String {
+            val service = activeService ?: return Dropoandroid.call(method, args)
+            return service.executor.submit<String> { service.updateRouting(method, args) }.get()
+        }
 
         fun refreshVpnProtection(): Map<String, Any?> {
             val service = activeService
