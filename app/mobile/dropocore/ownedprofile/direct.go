@@ -90,7 +90,17 @@ func finlandUUID(key string) string {
 // FinlandQUICCarrier uses the paying subscriber's independent Latvian key.
 // The second hop still authenticates to the Finnish Boost server.
 func FinlandQUICCarrier(raw, uuid, tag string) (map[string]any, bool) {
-	if Expired(Boost, raw, time.Now()) {
+	return finlandQUICCarrier(Boost, raw, uuid, tag)
+}
+
+// FinlandRelayQUICCarrier reconstructs the same first hop from the validated
+// Boost relay credential already carried by Android's prepared plan.
+func FinlandRelayQUICCarrier(raw, uuid, tag string) (map[string]any, bool) {
+	return finlandQUICCarrier(BoostReserve, raw, uuid, tag)
+}
+
+func finlandQUICCarrier(provider, raw, uuid, tag string) (map[string]any, bool) {
+	if Expired(provider, raw, time.Now()) {
 		return nil, false
 	}
 	u, _ := url.Parse(raw)

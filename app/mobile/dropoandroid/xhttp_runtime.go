@@ -467,34 +467,56 @@ func normalizeXHTTPConfig(content string, platform PlatformInterface, start bool
 		if err != nil {
 			return "", nil, err
 		}
-		port, username, password := 1, "dropo-check", "dropo-check"
-		var carrier *xhttpBridge
-		var target string
-		physicalDNS := func() []string { return physicalXHTTPDNSServers(platform) }
-		if placeholder.FinlandRelay != "" {
-			var carrierConfig *xcore.Config
-			carrierConfig, target, err = buildFinlandCarrier(placeholder.XrayOutbound, roots, placeholder.FinlandRelay)
-			if err != nil {
-				return "", nil, err
-			}
+		makePath := func(tag string, exit, firstHop *xcore.Config, target string) (json.RawMessage, error) {
+			port, username, password := 1, "dropo-check", "dropo-check"
 			if start {
-				carrier, err = newXHTTPBridge(carrierConfig, platform.AutoDetectInterfaceControl, physicalDNS, ownerEpochs...)
-				if err != nil {
-					return "", nil, err
+				physicalDNS := func() []string { return physicalXHTTPDNSServers(platform) }
+				var carrier *xhttpBridge
+				if firstHop != nil {
+					carrier, err = newXHTTPBridge(firstHop, platform.AutoDetectInterfaceControl, physicalDNS, ownerEpochs...)
+					if err != nil {
+						return nil, err
+					}
+					runtime.bridges = append(runtime.bridges, carrier)
 				}
-				runtime.bridges = append(runtime.bridges, carrier)
+				bridge, err := newRoutedXHTTPBridge(exit, platform.AutoDetectInterfaceControl, physicalDNS, carrier, target, ownerEpochs...)
+				if err != nil {
+					return nil, err
+				}
+				runtime.bridges = append(runtime.bridges, bridge)
+				port = bridge.listener.Addr().(*net.TCPAddr).Port
+				username, password = bridge.username, bridge.password
 			}
+			return json.Marshal(map[string]any{"type": "socks", "tag": tag, "server": "127.0.0.1", "server_port": port, "version": "5", "username": username, "password": password, "network": []string{"tcp", "udp"}})
 		}
-		if start {
-			bridge, err := newRoutedXHTTPBridge(built, platform.AutoDetectInterfaceControl, physicalDNS, carrier, target, ownerEpochs...)
+		if placeholder.FinlandRelay == "" {
+			outbounds[i], err = makePath(placeholder.Tag, built, nil, "")
 			if err != nil {
 				return "", nil, err
 			}
-			runtime.bridges = append(runtime.bridges, bridge)
-			port = bridge.listener.Addr().(*net.TCPAddr).Port
-			username, password = bridge.username, bridge.password
+			continue
 		}
-		outbounds[i], _ = json.Marshal(map[string]any{"type": "socks", "tag": placeholder.Tag, "server": "127.0.0.1", "server_port": port, "version": "5", "username": username, "password": password, "network": []string{"tcp", "udp"}})
+		relay, relayTarget, err := buildFinlandCarrier(placeholder.XrayOutbound, roots, placeholder.FinlandRelay)
+		if err != nil {
+			return "", nil, err
+		}
+		fast, fastExit, fastTarget, err := buildFastFinlandPath(placeholder.XrayOutbound, roots, placeholder.FinlandRelay)
+		if err != nil {
+			return "", nil, err
+		}
+		fastTag, relayTag := placeholder.Tag+"-via-lv", placeholder.Tag+"-via-https"
+		fastPath, err := makePath(fastTag, fastExit, fast, fastTarget)
+		if err != nil {
+			return "", nil, err
+		}
+		relayPath, err := makePath(relayTag, built, relay, relayTarget)
+		if err != nil {
+			return "", nil, err
+		}
+		// Probe through the full Finnish exit on both paths. The source list and
+		// manual choice still identify one Boost subscription.
+		outbounds[i], _ = json.Marshal(map[string]any{"type": "urltest", "tag": placeholder.Tag, "outbounds": []string{fastTag, relayTag}, "url": sourceProbeTargets[0], "interval": "30s", "tolerance": 100, "interrupt_exist_connections": false})
+		outbounds = append(outbounds, fastPath, relayPath)
 	}
 	config["outbounds"], _ = json.Marshal(outbounds)
 	encoded, err := json.Marshal(config)

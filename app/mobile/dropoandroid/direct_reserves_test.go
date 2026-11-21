@@ -4,6 +4,7 @@ package dropoandroid
 
 import (
 	core "dropocore"
+	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
 	"strings"
@@ -57,6 +58,43 @@ func TestPlayManagedDirectReservesPassPinnedEngineConfig(t *testing.T) {
 	}
 	if _, _, err := buildFinlandCarrier(raw, nil, strings.Replace(relay, ownedprofile.ReserveIPv4, "192.0.2.10", 1)); err == nil {
 		t.Fatal("accepted tampered relay URI")
+	}
+	fast, exit, target, err := buildFastFinlandPath(raw, nil, relay)
+	if err != nil || fast == nil || exit == nil || target != dnspolicy.FinlandIPv4+":2444" {
+		t.Fatal("missing full accelerated Finnish path")
+	}
+	for _, badRelay := range []string{fixture, paid, strings.Replace(relay, "11111111", "99999999", 1)} {
+		if _, _, _, err := buildFastFinlandPath(raw, nil, badRelay); err == nil {
+			t.Fatal("accepted unrelated carrier credential")
+		}
+	}
+	normalized, _, err := normalizeXHTTPConfig(runtime.Config, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var internal struct{ Outbounds []map[string]any }
+	if json.Unmarshal([]byte(normalized), &internal) != nil {
+		t.Fatal("invalid graph")
+	}
+	tag := "vpn-" + ownedprofile.Boost + "-fi-tcp"
+	found := map[string]bool{}
+	for _, out := range internal.Outbounds {
+		switch out["tag"] {
+		case tag:
+			paths, _ := out["outbounds"].([]any)
+			if out["type"] != "urltest" || len(paths) != 2 || paths[0] != tag+"-via-lv" || paths[1] != tag+"-via-https" {
+				t.Fatal("Finnish path order or fallback changed")
+			}
+			found[tag] = true
+		case tag + "-via-lv", tag + "-via-https":
+			if out["type"] != "socks" || out["server"] != "127.0.0.1" || out["password"] == "" {
+				t.Fatal("unscoped internal path")
+			}
+			found[out["tag"].(string)] = true
+		}
+	}
+	if len(found) != 3 {
+		t.Fatal("incomplete Finnish path graph")
 	}
 	stream, _ := fi["streamSettings"].(map[string]any)
 	if !managedFinlandStream(fi, stream) {

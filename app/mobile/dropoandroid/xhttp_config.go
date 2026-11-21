@@ -10,12 +10,15 @@ import (
 	"strings"
 
 	core "dropocore"
+	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	xcore "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf"
+	_ "github.com/xtls/xray-core/proxy/hysteria"
 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
+	_ "github.com/xtls/xray-core/transport/internet/hysteria"
 	_ "github.com/xtls/xray-core/transport/internet/reality"
 	_ "github.com/xtls/xray-core/transport/internet/splithttp"
 	_ "github.com/xtls/xray-core/transport/internet/tcp"
@@ -102,6 +105,10 @@ func buildXHTTPConfig(raw []byte, roots []string) (*xcore.Config, error) {
 	// Candidate tags remain sing-box identities; the embedded instance uses
 	// one stable internal outbound identity, independent of source ordering.
 	outbound["tag"] = "dropo-xhttp-out"
+	return compileBridgeOutbound(outbound)
+}
+
+func compileBridgeOutbound(outbound map[string]any) (*xcore.Config, error) {
 	encoded, err := json.Marshal(outbound)
 	if err != nil {
 		return nil, errXHTTPConfig
@@ -149,6 +156,39 @@ func buildFinlandCarrier(raw []byte, roots []string, relay string) (*xcore.Confi
 	}
 	config, err := buildXHTTPConfig(encoded, roots)
 	return config, net.JoinHostPort(ownedprofile.ReserveIPv4, strconv.Itoa(port)), err
+}
+
+// Both outbounds are derived locally after validating the existing Finnish
+// exit and its matching live Boost relay. Imported Xray options are excluded.
+func buildFastFinlandPath(raw []byte, roots []string, relay string) (carrier, exit *xcore.Config, target string, err error) {
+	if _, err := buildXHTTPConfig(raw, roots); err != nil {
+		return nil, nil, "", err
+	}
+	var outbound map[string]any
+	if json.Unmarshal(raw, &outbound) != nil {
+		return nil, nil, "", errXHTTPConfig
+	}
+	stream, _ := outbound["streamSettings"].(map[string]any)
+	if !managedFinlandStream(outbound, stream) {
+		return nil, nil, "", errXHTTPConfig
+	}
+	server := outbound["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
+	user := server["users"].([]any)[0].(map[string]any)
+	id := user["id"].(string)
+	fast, ok := ownedprofile.FinlandRelayQUICCarrier(relay, id, "dropo-fi-quic")
+	if !ok {
+		return nil, nil, "", errXHTTPConfig
+	}
+	installXHTTPRoots(fast["streamSettings"].(map[string]any), roots)
+	carrier, err = compileBridgeOutbound(fast)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	server["address"] = dnspolicy.FinlandIPv4
+	outbound["tag"] = "dropo-fi-fast"
+	outbound["mux"] = map[string]any{"enabled": true, "concurrency": 4, "xudpConcurrency": -1, "xudpProxyUDP443": "skip"}
+	exit, err = compileBridgeOutbound(outbound)
+	return carrier, exit, net.JoinHostPort(dnspolicy.FinlandIPv4, "2444"), err
 }
 
 // The TCP exception accepts only the generated managed REALITY endpoint.
