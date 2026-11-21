@@ -186,7 +186,8 @@ func buildFastFinlandPath(raw []byte, roots []string, relay string) (carrier, ex
 	}
 	server["address"] = dnspolicy.FinlandIPv4
 	outbound["tag"] = "dropo-fi-fast"
-	outbound["mux"] = map[string]any{"enabled": true, "concurrency": 4, "xudpConcurrency": -1, "xudpProxyUDP443": "skip"}
+	// Hysteria already shares its QUIC connection. Xray's separate VLESS mux
+	// creates workers on context.Background and loses Android socket protection.
 	exit, err = compileBridgeOutbound(outbound)
 	return carrier, exit, net.JoinHostPort(dnspolicy.FinlandIPv4, "2444"), err
 }

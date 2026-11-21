@@ -7,6 +7,7 @@ import (
 	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
+	"github.com/xtls/xray-core/app/proxyman"
 	"strings"
 	"testing"
 )
@@ -62,6 +63,10 @@ func TestPlayManagedDirectReservesPassPinnedEngineConfig(t *testing.T) {
 	fast, exit, target, err := buildFastFinlandPath(raw, nil, relay)
 	if err != nil || fast == nil || exit == nil || target != dnspolicy.FinlandIPv4+":2444" {
 		t.Fatal("missing full accelerated Finnish path")
+	}
+	sender, err := exit.Outbound[0].SenderSettings.GetInstance()
+	if err != nil || sender.(*proxyman.SenderConfig).GetMultiplexSettings().GetEnabled() {
+		t.Fatal("Finnish exit would discard Android session context in a mux worker")
 	}
 	for _, badRelay := range []string{fixture, paid, strings.Replace(relay, "11111111", "99999999", 1)} {
 		if _, _, _, err := buildFastFinlandPath(raw, nil, badRelay); err == nil {
