@@ -1214,6 +1214,19 @@ class HttpCoreBridge implements CoreBridge {
 }
 
 class ChannelCoreBridge implements CoreBridge {
+  Future<void> recordConnectionPreflightFailure(String reason) async {
+    try {
+      await _channel.invokeMethod<void>(
+        'recordConnectionPreflightFailure',
+        reason,
+      );
+    } on PlatformException {
+      // Reporting must not prevent restoring the connection controls.
+    } on MissingPluginException {
+      // Older native bridges have no persistent failure record.
+    }
+  }
+
   Future<Map<String, dynamic>> prepareAndroidVpnPermission() =>
       _invokeMap('prepareVpnPermission', timeout: const Duration(minutes: 2));
 
@@ -2627,6 +2640,7 @@ class CoreStatus {
     this.vpnResponse = const VpnResponseSnapshot(),
     this.vpnUptimeMs,
     this.sourceVerification = '',
+    this.lastConnectionFailure = '',
     required this.connected,
     required this.running,
     required this.connecting,
@@ -2647,6 +2661,7 @@ class CoreStatus {
   final bool connected;
 
   final String sourceVerification;
+  final String lastConnectionFailure;
 
   /// Elapsed native VPN session time, not a Unix timestamp.
   final int? vpnUptimeMs;
@@ -2705,6 +2720,7 @@ class CoreStatus {
       networkDescription: json['networkModeDescription']?.toString() ?? '',
       dependencies: DepsStatus.fromJson(_asMap(json['dependencies'])),
       version: VersionInfo.fromJson(_asMap(json['version'])),
+      lastConnectionFailure: json['lastConnectionFailure']?.toString() ?? '',
       sourceVerification: json['sourceVerification']?.toString() ?? '',
       vpnResponse: VpnResponseSnapshot.fromJson(_asMap(json['vpnResponse'])),
     );
@@ -2743,6 +2759,7 @@ class CoreStatus {
       dependencies: dependencies,
       version: version,
       sourceVerification: sourceVerification,
+      lastConnectionFailure: lastConnectionFailure,
       vpnResponse: vpnResponse ?? this.vpnResponse,
     );
   }
@@ -5146,7 +5163,12 @@ class _DropoHomePageState extends State<DropoHomePage>
     _androidHaptic(impact: true);
     final androidAttempt = _androidConnectionAttempt;
     if (target && _isAndroidPlatform) {
-      if (!await _ensureAndroidVpnDisclosure()) return;
+      if (!await _ensureAndroidVpnDisclosure()) {
+        if (mounted && !quitting) {
+          await _recordAndroidPreflightFailure('disclosure_required');
+        }
+        return;
+      }
       if (!mounted || controlsDisabled || connectionBusy) return;
       if (widget.bridge case final ChannelCoreBridge bridge) {
         if (!await _ensureAndroidVpnPermission(bridge)) return;
@@ -5213,6 +5235,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       } on TimeoutException catch (error) {
         if (androidAttempt != _androidConnectionAttempt) return;
         if (target) {
+          await _recordAndroidPreflightFailure('start_timeout');
           await widget.bridge
               .setConnected(false)
               .catchError((_) => <String, dynamic>{});
@@ -5344,6 +5367,13 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
   }
 
+  Future<void> _recordAndroidPreflightFailure(String reason) async {
+    if (!_isAndroidPlatform) return;
+    if (widget.bridge case final ChannelCoreBridge bridge) {
+      await bridge.recordConnectionPreflightFailure(reason);
+    }
+  }
+
   Future<bool> _ensureAndroidVpnDisclosure() async {
     setState(() {
       preparingFullVpnSource = true;
@@ -5401,6 +5431,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       });
       return false;
     } catch (_) {
+      await _recordAndroidPreflightFailure('request_failed');
       if (mounted) {
         setState(() {
           connectionHint = _tr(
@@ -5433,6 +5464,8 @@ class _DropoHomePageState extends State<DropoHomePage>
       if (sources.any((source) => !source.disabled)) return true;
       if (_isAndroidPlatform) {
         if (sources.isNotEmpty) {
+          await _recordAndroidPreflightFailure('all_disabled');
+          if (!mounted || quitting) return false;
           // Respect an explicit choice to disable all sources.
           await _openSubscription();
           return false;
@@ -5502,6 +5535,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       return true;
     } catch (error) {
+      await _recordAndroidPreflightFailure('source_unavailable');
       if (mounted) {
         setState(() {
           statusMessage = 'Не удалось подготовить VPN-источник';

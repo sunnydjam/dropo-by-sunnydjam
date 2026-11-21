@@ -147,6 +147,7 @@ class DropoVpnService :
             // upgraded app must show the new disclosure, never infer consent
             // from a previously granted Android VpnService permission.
             showForeground(VpnDisclosurePolicy.REQUIRED_MESSAGE)
+            ConnectionFailure.DISCLOSURE.save(this)
             stopVpn(stopSelf = true, failureMessage = VpnDisclosurePolicy.REQUIRED_MESSAGE)
             return START_NOT_STICKY
         }
@@ -184,6 +185,7 @@ class DropoVpnService :
     }
 
     override fun onRevoke() {
+        ConnectionFailure.REVOKED.save(this)
         stopVpn(stopSelf = true)
         super.onRevoke()
     }
@@ -212,6 +214,7 @@ class DropoVpnService :
         createNotificationChannel()
         if (!VpnDisclosureConsent.isAccepted(this)) {
             showForeground(VpnDisclosurePolicy.REQUIRED_MESSAGE)
+            ConnectionFailure.DISCLOSURE.save(this)
             stopVpn(stopSelf = true, failureMessage = VpnDisclosurePolicy.REQUIRED_MESSAGE)
             return
         }
@@ -236,6 +239,7 @@ class DropoVpnService :
             showForeground("VPN запускается")
         }) return
         executor.execute {
+            var failure = ConnectionFailure.SERVICE
             try {
                 Dropoandroid.configureDistribution(BuildConfig.PLAY_DISTRIBUTION)
                 Dropoandroid.ensureStarted(filesDir.absolutePath, packageVersionName())
@@ -244,7 +248,7 @@ class DropoVpnService :
                     Dropoandroid.call("AndroidEngineStarting", "[]")
                 }) return@execute
                 coreLog("startForeground requested")
-                startEngine(generation)
+                startEngine(generation) { failure = it }
             } catch (error: Throwable) {
                 if (!sessionFence.isActive(generation)) {
                     Log.i(TAG, "cancelled VPN start discarded")
@@ -252,7 +256,16 @@ class DropoVpnService :
                 }
                 val message = describeError(error)
                 Log.e(TAG, "startEngine failed: $message", error)
-                if (sessionFence.commit(generation) { coreError(message) }) {
+                if (sessionFence.commit(generation) {
+                    val reason = when {
+                        message.contains("android: missing VPN permission") -> ConnectionFailure.DENIED
+                        failure == ConnectionFailure.NO_RESPONSE &&
+                            message.contains("not ready") -> ConnectionFailure.SELECTOR
+                        else -> failure
+                    }
+                    reason.save(this)
+                    coreError(message)
+                }) {
                     stopVpn(stopSelf = true, failureMessage = message)
                 }
             } finally {
@@ -261,7 +274,7 @@ class DropoVpnService :
         }
     }
 
-    private fun startEngine(generation: Long) {
+    private fun startEngine(generation: Long, stage: (ConnectionFailure) -> Unit) {
         requireActiveSession(generation)
         if (commandServer != null) {
             coreLog("start skipped: command server is already running")
@@ -276,6 +289,7 @@ class DropoVpnService :
         coreLog("libbox setup")
         ensureLibboxSetup(this)
         requireActiveSession(generation)
+        stage(ConnectionFailure.CONFIG)
         coreLog("building sing-box config")
         val configResult = JSONObject(Dropoandroid.buildSingBoxConfig())
         requireActiveSession(generation)
@@ -294,6 +308,7 @@ class DropoVpnService :
         Dropoandroid.checkConfig(config)
         requireActiveSession(generation)
 
+        stage(ConnectionFailure.TUNNEL)
         coreLog("starting command server")
         val server = CommandServer(this, this)
         var committed = false
@@ -309,6 +324,7 @@ class DropoVpnService :
                 showForeground("Проверяем соединение")
             }
             requireActiveSession(generation)
+            stage(ConnectionFailure.NO_RESPONSE)
             server.startVerifiedSourceSelection()
             requireActiveSession(generation)
             sessionFence.commit(generation) {

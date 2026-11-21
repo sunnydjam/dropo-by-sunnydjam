@@ -66,6 +66,24 @@ String buildSafeSupportReport({
   final checks = reportIsCurrent
       ? report!.results.take(2048).toList(growable: false)
       : const <ConnectionHealthResult>[];
+  // Only fixed native stage/reason pairs may leave the device.
+  const failureCodes = {
+    'permission.disclosure_required',
+    'permission.denied',
+    'permission.request_failed',
+    'permission.revoked',
+    'source.source_unavailable',
+    'source.all_disabled',
+    'service.start_failed',
+    'service.start_timeout',
+    'config.prepare_failed',
+    'tunnel.start_failed',
+    'verification.selector_unavailable',
+    'verification.no_verified_entry',
+  };
+  final failure = failureCodes.contains(status.lastConnectionFailure)
+      ? status.lastConnectionFailure.split('.')
+      : null;
   final successful = checks.where((item) => item.success).length;
   return <String>[
     'Dropo support summary v1',
@@ -80,6 +98,10 @@ String buildSafeSupportReport({
     'connecting: ${coreAvailable ? status.connecting : 'unknown'}',
     'disconnecting: ${coreAvailable ? status.disconnecting : 'unknown'}',
     'runtime_error_present: ${coreAvailable ? status.hasError : 'unknown'}',
+    if (failure != null) ...[
+      'last_failure_stage: ${failure.first}',
+      'last_failure_reason: ${failure.last}',
+    ],
     'checks_available: ${checks.isNotEmpty}',
     'checks_total: ${checks.length}',
     'checks_responded: $successful',

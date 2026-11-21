@@ -90,6 +90,47 @@ func TestSourceHTTPUsesExplicitOutboundAndRequiresExact204(t *testing.T) {
 	}
 }
 
+func TestFirstVerifiedEndpointDoesNotWaitForSlowPeer(t *testing.T) {
+	started, stopped := make(chan struct{}), make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	latency, ok := firstVerifiedEndpoint(ctx, []string{"slow", "fast"}, func(ctx context.Context, target string) error {
+		if target == "slow" {
+			close(started)
+			<-ctx.Done()
+			close(stopped)
+			return ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-started:
+			return nil
+		}
+	})
+	if !ok || latency < 1 {
+		t.Fatal("healthy peer was not accepted")
+	}
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		t.Fatal("losing request was not cancelled")
+	}
+}
+
+func TestFirstVerifiedEndpointRejectsFailuresAndCancelledSession(t *testing.T) {
+	var calls atomic.Int32
+	probe := func(context.Context, string) error { calls.Add(1); return errors.New("unavailable") }
+	if _, ok := firstVerifiedEndpoint(context.Background(), []string{"one", "two"}, probe); ok || calls.Load() != 2 {
+		t.Fatal("both failures must reject the candidate")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, ok := firstVerifiedEndpoint(ctx, []string{"one", "two"}, func(context.Context, string) error { return nil }); ok {
+		t.Fatal("cancelled session accepted a response")
+	}
+}
+
 func TestSourceHTTPStopCancelsInflightRequest(t *testing.T) {
 	entered := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

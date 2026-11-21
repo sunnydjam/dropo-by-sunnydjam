@@ -168,6 +168,7 @@ class MainActivity : FlutterActivity() {
                 if (resultCode == Activity.RESULT_OK) {
                     finishVpnPreparation()
                 } else {
+                    ConnectionFailure.DENIED.save(this)
                     if (!prepareVpnOnly) {
                         DropoVpnRuntime.setFailed("VPN permission was denied")
                         recordCoreCall("AndroidEngineError", "[\"VPN permission was denied\"]")
@@ -288,6 +289,19 @@ class MainActivity : FlutterActivity() {
                 }.getOrElse { mapOf("eligible" to false, "claimed" to false) }
                 runOnUiThread { result.success(response) }
             }
+            return
+        }
+        if (call.method == "recordConnectionPreflightFailure") {
+            val failure = when (call.arguments) {
+                "start_timeout" -> ConnectionFailure.TIMEOUT
+                "source_unavailable" -> ConnectionFailure.SOURCE
+                "all_disabled" -> ConnectionFailure.DISABLED
+                "disclosure_required" -> ConnectionFailure.DISCLOSURE
+                "request_failed" -> ConnectionFailure.REQUEST_FAILED
+                else -> null
+            }
+            failure?.save(this)
+            result.success(null)
             return
         }
         if (call.method == "getVpnDisclosureConsent") {
@@ -431,7 +445,7 @@ class MainActivity : FlutterActivity() {
             "ensureStarted" -> ensureCoreStarted()
             "status" -> {
                 DropoVpnService.refreshVpnProtection()
-                DropoVpnRuntime.mergeCoreStatus(Dropoandroid.status())
+                DropoVpnRuntime.mergeCoreStatus(Dropoandroid.status(), ConnectionFailure.last(this))
             }
             "logs" -> Dropoandroid.logs()
             "events" -> Dropoandroid.events(longArg(call, "since"))
@@ -536,6 +550,7 @@ class MainActivity : FlutterActivity() {
             }
             continueVpnPrepare()
         } catch (_: Exception) {
+            ConnectionFailure.REQUEST_FAILED.save(this)
             resolvePendingConnect(errorJson("VPN permission request failed"))
         }
     }
@@ -546,13 +561,18 @@ class MainActivity : FlutterActivity() {
             resolvePendingConnect(errorJson(VpnDisclosurePolicy.REQUIRED_MESSAGE))
             return
         }
-        val prepareIntent = VpnService.prepare(this)
-        if (prepareIntent != null) {
-            @Suppress("DEPRECATION")
-            startActivityForResult(prepareIntent, REQUEST_VPN_PREPARE)
-            return
+        try {
+            val prepareIntent = VpnService.prepare(this)
+            if (prepareIntent == null) {
+                finishVpnPreparation()
+            } else {
+                @Suppress("DEPRECATION")
+                startActivityForResult(prepareIntent, REQUEST_VPN_PREPARE)
+            }
+        } catch (_: Exception) {
+            ConnectionFailure.REQUEST_FAILED.save(this)
+            resolvePendingConnect(errorJson("VPN permission request failed"))
         }
-        finishVpnPreparation()
     }
 
     private fun finishVpnPreparation() {
@@ -576,6 +596,7 @@ class MainActivity : FlutterActivity() {
             resolvePendingConnect(successJson("Android VPN start requested"))
         } catch (error: Throwable) {
             val message = error.message ?: error.javaClass.simpleName
+            ConnectionFailure.SERVICE.save(this)
             DropoVpnRuntime.setFailed(message)
             recordCoreCall(
                 "AndroidServiceState",

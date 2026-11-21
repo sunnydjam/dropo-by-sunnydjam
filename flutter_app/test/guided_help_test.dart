@@ -180,6 +180,21 @@ Future<void> _capture(WidgetTester tester, String name) async {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('stopped report retains only an allowlisted last failure', () {
+    String report(String failure) => buildSafeSupportReport(
+      status: CoreStatus.fromJson({
+        'vpnState': 'stopped',
+        'lastConnectionFailure': failure,
+      }).copyWith(connected: false),
+      routingMode: 'all_traffic',
+    );
+    final stopped = report('verification.no_verified_entry');
+    expect(stopped, contains('last_failure_stage: verification'));
+    expect(stopped, contains('last_failure_reason: no_verified_entry'));
+    expect(report('private:secret'), isNot(contains('private:secret')));
+    expect(report('private:secret'), isNot(contains('last_failure_reason:')));
+  });
+
   setUpAll(() async {
     WidgetController.hitTestWarningShouldBeFatal = true;
     await (FontLoader(

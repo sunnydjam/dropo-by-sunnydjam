@@ -380,7 +380,7 @@ func failedSourceObservation(candidate sourceCandidate, generation int64) source
 }
 
 // Bounded concurrency retains the original source order in results. A source
-// is healthy only after BOTH independent HTTPS endpoints return exact 204s.
+// is healthy only after an independent HTTPS endpoint returns an exact 204.
 func probeSourceCandidates(ctx context.Context, candidates []sourceCandidate, probe func(context.Context, sourceCandidate) sourceObservation) []sourceObservation {
 	results := make([]sourceObservation, len(candidates))
 	var workers sync.WaitGroup
@@ -467,24 +467,43 @@ func chooseSourceAfterOutage(active sourceCandidate, candidates []sourceCandidat
 
 func probeSource(ctx context.Context, candidate sourceCandidate, generation int64, outbound N.Dialer) sourceObservation {
 	result := failedSourceObservation(candidate, generation)
-	total := 0
-	for _, target := range sourceProbeTargets {
-		probeCtx, cancel := context.WithTimeout(ctx, sourceProbeTimeout)
-		started := time.Now()
-		err := probeSourceHTTP(probeCtx, target, outbound)
-		elapsed := int(time.Since(started).Milliseconds())
-		cancel()
-		if err != nil {
-			return result
-		}
-		if elapsed < 1 {
-			elapsed = 1
-		}
-		total += elapsed
+	latency, ok := firstVerifiedEndpoint(ctx, sourceProbeTargets, func(ctx context.Context, target string) error {
+		return probeSourceHTTP(ctx, target, outbound)
+	})
+	if !ok {
+		return result
 	}
-	result.State, result.LatencyMS = "ok", total/len(sourceProbeTargets)
+	result.State, result.LatencyMS = "ok", latency
 	result.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return result
+}
+
+// Both probes use the candidate outbound. The first exact 204 wins.
+func firstVerifiedEndpoint(ctx context.Context, targets []string, probe func(context.Context, string) error) (int, bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, sourceProbeTimeout)
+	defer cancel()
+	results := make(chan int, len(targets))
+	for _, target := range targets {
+		go func() {
+			start := time.Now()
+			latency := 0
+			if probe(probeCtx, target) == nil {
+				latency = max(1, int(time.Since(start).Milliseconds()))
+			}
+			results <- latency
+		}()
+	}
+	for range targets {
+		select {
+		case <-probeCtx.Done():
+			return 0, false
+		case latency := <-results:
+			if latency > 0 && probeCtx.Err() == nil {
+				return latency, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func probeSourceHTTP(ctx context.Context, target string, outbound N.Dialer) error {

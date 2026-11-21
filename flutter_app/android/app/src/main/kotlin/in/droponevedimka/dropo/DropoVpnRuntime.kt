@@ -129,13 +129,14 @@ object DropoVpnRuntime {
 
     fun recentLogs(): List<String> = synchronized(lock) { recentLogs.toList() }
 
-    fun mergeCoreStatus(coreStatusJson: String): String {
+    fun mergeCoreStatus(coreStatusJson: String, lastConnectionFailure: String): String {
         val status = JSONObject(coreStatusJson)
         val snapshot = snapshot()
         val stateValue = snapshot["state"]?.toString().orEmpty()
         val nativeHasError = snapshot["hasError"] == true
         val coreHasError = status.optBoolean("hasError")
 
+        status.put("lastConnectionFailure", lastConnectionFailure)
         status.put("vpnState", stateValue)
         status.put("connected", snapshot["connected"] == true)
         status.put("running", snapshot["running"] == true)
