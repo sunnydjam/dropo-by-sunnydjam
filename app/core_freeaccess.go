@@ -560,6 +560,9 @@ func DefaultFreeAccessServiceMethodState() map[string]string {
 }
 
 func FreshInstallFreeAccessServiceMethodState() map[string]string {
+	if runtime.GOOS != "windows" && runtime.GOOS != "android" {
+		return DefaultFreeAccessServiceMethodState()
+	}
 	state := make(map[string]string, len(DefaultFreeAccessServices))
 	for _, service := range DefaultFreeAccessServices {
 		state[service.Tag] = FreeAccessMethodAuto
