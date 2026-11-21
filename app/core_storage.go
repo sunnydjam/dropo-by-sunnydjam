@@ -5,14 +5,17 @@ package main
 import (
 	"context"
 	"dropocore/dnspolicy"
+	"dropocore/ownedprofile"
 	"dropocore/sourcehistory"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -325,11 +328,6 @@ func (s *Storage) normalizeAppSettings() {
 	}
 	for _, svc := range DefaultFreeAccessServices {
 		normalized := NormalizeFreeAccessServiceMethod(app.FreeAccessMethods[svc.Tag])
-		// Schema v5 removes the implicit catch-all policy. Old Auto values become
-		// Direct once; future routing changes must be explicit per service.
-		if normalized == FreeAccessMethodAuto {
-			normalized = FreeAccessMethodDirect
-		}
 		if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(normalized) || IsFreeAccessTransparentMethod(normalized)) {
 			if serviceHasFreeBypass(svc.Tag) {
 				normalized = FreeAccessMethodZapret
@@ -914,7 +912,7 @@ func (s *Storage) WriteActiveConfigToFile() (string, error) {
 
 			// Write to temp config file
 			configPath := filepath.Join(s.resourcesPath, "active_config.json")
-			data, err := json.MarshalIndent(config, "", "  ")
+			data, err := json.MarshalIndent(windowsSessionConfig(config), "", "  ")
 			if err != nil {
 				return "", fmt.Errorf("failed to marshal config: %w", err)
 			}
@@ -1016,6 +1014,51 @@ func (s *Storage) disableRiskyDirectOptions(config map[string]interface{}) {
 	}
 }
 
+// Upgrade cached independent-source selectors at emission without redownloading
+// subscriptions. sing-box reconnects affected streams only on an actual change.
+func windowsSessionConfig(config map[string]any) map[string]any {
+	result := windowsDialResolverConfig(config)
+	outbounds, _ := result["outbounds"].([]any)
+	for i, raw := range outbounds {
+		group, _ := raw.(map[string]any)
+		if group["type"] != "selector" || group["tag"] != "auto-select" || group["interrupt_exist_connections"] == true {
+			continue
+		}
+		tags := interfaceStringSlice(group["outbounds"])
+		if !multipleIndependentVPNSourceTags(tags) {
+			continue
+		}
+		result = maps.Clone(result)
+		group = maps.Clone(group)
+		updated := slices.Clone(outbounds)
+		group["interrupt_exist_connections"] = true
+		updated[i] = group
+		result["outbounds"] = updated
+		break
+	}
+	return result
+}
+
+// Apply to the emitted file as cached profiles also reach this entry point.
+// Preserve the logical resolver in storage and all private/work-network rules.
+func windowsDialResolverConfig(config map[string]any) map[string]any {
+	route, _ := config["route"].(map[string]any)
+	resolver, _ := route["default_domain_resolver"].(map[string]any)
+	tag, _ := resolver["server"].(string)
+	dns, _ := config["dns"].(map[string]any)
+	dns = maps.Clone(dns)
+	preferred := dnspolicy.EnsurePreferredDialResolver(dns, tag)
+	if preferred == tag {
+		return config
+	}
+	result := maps.Clone(config)
+	route, resolver = maps.Clone(route), maps.Clone(resolver)
+	resolver["server"] = preferred
+	route["default_domain_resolver"] = resolver
+	result["dns"], result["route"] = dns, route
+	return result
+}
+
 func (s *Storage) preferIPv4Resolution(config map[string]interface{}) {
 	resolver := "dns-direct"
 	if dns, ok := config["dns"].(map[string]interface{}); ok {
@@ -1081,7 +1124,15 @@ func collectXrayEndpointHosts(xrayConfig map[string]interface{}) []string {
 		if !ok {
 			continue
 		}
+		stream, _ := outboundMap["streamSettings"].(map[string]any)
+		sockopt, _ := stream["sockopt"].(map[string]any)
+		if via, _ := sockopt["dialerProxy"].(string); via != "" {
+			continue
+		}
 		settings, _ := outboundMap["settings"].(map[string]interface{})
+		if outboundMap["protocol"] == "hysteria" {
+			hosts = appendEndpointHost(hosts, settings["address"])
+		}
 		vnext, _ := settings["vnext"].([]interface{})
 		for _, item := range vnext {
 			server, ok := item.(map[string]interface{})
@@ -1625,7 +1676,7 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 			return nil, err
 		}
 		usingCache := false
-		if fetchErr != nil && len(source.CachedNodes) > 0 {
+		if fetchErr != nil && windowsOwnedFamily(source.PublicCatalogID) == "" && len(source.CachedNodes) > 0 {
 			nodes, fetchErr = b.parseCachedVPNNodes(source.CachedNodes)
 			usingCache = fetchErr == nil
 		}
@@ -1649,6 +1700,19 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 		}
 		selected := nodes[source.SelectedNode]
 		selected.Tag = "vpn-source-" + source.ID
+		if source.PublicCatalogID == ownedprofile.Boost {
+			_, relay, err := ownedprofile.Pair(windowsOwnedFamily(source.PublicCatalogID), source.URI)
+			carrier, ok := ownedprofile.FinlandRelayOutbound(relay, selected.UUID, selected.ServerPort, "fi-carrier-"+source.ID)
+			if err != nil || !ok {
+				return nil, fmt.Errorf("не удалось проверить финский маршрут Dropo")
+			}
+			fast, ok := ownedprofile.FinlandQUICCarrier(source.URI, selected.UUID, "fi-quic-"+source.ID)
+			if !ok {
+				return nil, fmt.Errorf("не удалось проверить ключ финского маршрута Dropo")
+			}
+			selected.finlandQUIC = fast
+			selected.finlandRelay = carrier
+		}
 		split := SplitProxyConfigs([]ProxyConfig{selected})
 		if split.AllFiltered || len(split.SingBox)+len(split.XrayBridge) == 0 {
 			sourceErr := fmt.Errorf("selected node %d uses an unsupported transport", source.SelectedNode)
@@ -1754,8 +1818,8 @@ func (b *ConfigBuilderForStorage) fetchVPNSourceNodes(source VPNSource) ([]Proxy
 }
 
 func (b *ConfigBuilderForStorage) fetchVPNSourceNodesContext(ctx context.Context, source VPNSource) ([]ProxyConfig, error) {
-	if isLatviaProvider(source.PublicCatalogID) {
-		raw, err := windowsLatviaURI(source)
+	if ownedprofile.IsPrimary(source.PublicCatalogID) {
+		raw, err := windowsRegionalURI(source)
 		if err != nil {
 			return nil, err
 		}

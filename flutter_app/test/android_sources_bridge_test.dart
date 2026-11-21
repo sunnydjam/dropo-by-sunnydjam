@@ -86,7 +86,7 @@ void main() {
       expect(snapshot.fallbackSupported, isTrue);
       expect((await bridge.publicVpnProviders()).single.id, 'dropo-free');
       await bridge.addVpnSource(' Test ', ' https://example.test/sub ');
-      await bridge.addPublicVpnSource('dropo-free', true);
+      expect((await bridge.addPublicVpnSource('dropo-free', true))['success'], false);
       await bridge.setVpnSourceNode('one', 1);
       await bridge.setVpnSourceEnabled('two', true);
       await bridge.moveVpnSource('two', 0);
@@ -99,15 +99,6 @@ void main() {
         [
           'AddVPNSource',
           ['Test', 'https://example.test/sub'],
-        ],
-        [
-          'AddManagedVPNSource',
-          [
-            'dropo-free',
-            'Dropo Free',
-            'https://free.example.test/sub/fixture',
-            true,
-          ],
         ],
         [
           'SetVPNSourceNode',

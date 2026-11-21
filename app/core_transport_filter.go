@@ -40,7 +40,7 @@ func RequiresXrayBridge(proxy ProxyConfig) bool {
 	if proxy.Type != "vless" {
 		return false
 	}
-	if ownedprofile.IsFinlandReserveID(strings.TrimPrefix(proxy.Tag, "vpn-source-")) &&
+	if (proxy.finlandRelay != nil || ownedprofile.IsFinlandReserveID(strings.TrimPrefix(proxy.Tag, "vpn-source-"))) &&
 		ownedprofile.IsFinlandReality(proxy.Server, proxy.ServerPort, proxy.Network, proxy.Security, proxy.SNI, proxy.PublicKey, proxy.ShortID, proxy.Fingerprint) {
 		return true
 	}

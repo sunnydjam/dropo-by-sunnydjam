@@ -12,7 +12,8 @@ String? _ownedSourceFamily(Object? provider) {
     final id = 'dropo-individual-$pool';
     if (provider == id ||
         provider == '$id-reserve' ||
-        provider == '$id-lv-quic') {
+        provider == '$id-lv-quic' ||
+        provider == '$id-fi-tcp') {
       return id;
     }
   }
@@ -72,6 +73,12 @@ OwnedVPNClient _ownedVPNForEndpoint(String endpoint) =>
       () => OwnedVPNClient(endpoint: endpoint),
     );
 final _ownedVPNClient = _ownedVPNForEndpoint(_accountEndpoint);
+
+bool _ownedProfileSessionBusy(CoreStatus status) =>
+    status.connected ||
+    status.running ||
+    status.connecting ||
+    status.disconnecting;
 
 /// Only the native vault persists installation/session secrets and cached keys.
 /// Restore is local and does not query the account service during connection.
@@ -685,7 +692,9 @@ class OwnedVPNClient {
     if (!active && _record?['boostKey'] == null && cachedUntil == 0) {
       return {'success': true, 'unchanged': true};
     }
-    if ((await bridge.status()).connected) {
+    if (_ownedProfileSessionBusy(
+      await bridge.status().timeout(const Duration(seconds: 5)),
+    )) {
       return {'success': true, 'deferred': true};
     }
     if (active) {
@@ -722,6 +731,15 @@ class OwnedVPNClient {
           identity['token'] != token ||
           identity['accountKind'] != 'registered') {
         throw const AccountIdentityChanged();
+      }
+      // Enrollment caches the delivered keys before native application. Do not
+      // advance that cache while the native source pool is busy: a later
+      // connection could otherwise mistake an unapplied Boost for an unchanged
+      // entitlement. The next stopped-session sync still sees the old expiry.
+      if (_ownedProfileSessionBusy(
+        await bridge.status().timeout(const Duration(seconds: 5)),
+      )) {
+        return {'success': true, 'deferred': true};
       }
       if (_record?['standaloneGuest'] == true) {
         return {

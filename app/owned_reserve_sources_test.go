@@ -3,7 +3,10 @@ package main
 import (
 	"dropocore/ownedprofile"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,7 +138,7 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		t.Fatalf("managed pair add failed: %v", result)
 	}
 	profile, _ := storage.GetActiveProfile()
-	if len(profile.VPNSources) != 3 {
+	if len(profile.VPNSources) != 1 {
 		t.Fatal("missing independent managed ingress")
 	}
 	for _, s := range profile.VPNSources {
@@ -149,7 +152,7 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		out := raw.(map[string]interface{})
 		if out["tag"] == "auto-select" {
 			found = true
-			if reflect.ValueOf(out["outbounds"]).Len() != 3 {
+			if reflect.ValueOf(out["outbounds"]).Len() != 1 {
 				t.Fatal("reserve missing from selector")
 			}
 		}
@@ -157,18 +160,18 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 	if !found {
 		t.Fatal("source selector missing")
 	}
-	primary, reserve := profile.VPNSources[0].ID, profile.VPNSources[1].ID
+	primary := profile.VPNSources[0].ID
 	if result := app.SetVPNSourceEnabled(primary, false); result["success"] != true {
 		t.Fatalf("disable failed: %v", result)
 	}
 	profile, _ = storage.GetActiveProfile()
-	if !profile.VPNSources[0].Disabled || !profile.VPNSources[1].Disabled {
+	if !profile.VPNSources[0].Disabled {
 		t.Fatal("disabled primary left reserve active")
 	}
 	if result := app.SetVPNSourceEnabled(primary, true); result["success"] != true {
 		t.Fatalf("enable failed: %v", result)
 	}
-	if result := app.RemoveVPNSource(reserve); result["success"] != true {
+	if result := app.RemoveVPNSource(primary); result["success"] != true {
 		t.Fatalf("family remove failed: %v", result)
 	}
 	profile, _ = storage.GetActiveProfile()
@@ -215,7 +218,7 @@ func TestOwnedRestoreGuardsUIReferenceAndCredentialRotation(t *testing.T) {
 	if err := storage.UpdateProfileVPNSources(safe.ID, safe.VPNSources, safe.WireGuardConfigs); err != nil {
 		t.Fatal(err)
 	}
-	requireAPISuccess(t, app.RestoreManagedVPNSource(ownedprofile.Boost, boostFixture, safe.VPNSources[1].ID, ""))
+	requireAPISuccess(t, app.RestoreManagedVPNSource(ownedprofile.Boost, boostFixture, safe.VPNSources[0].ID, ""))
 	if app.RestoreManagedVPNSource(ownedprofile.Boost, boostFixture, "", "")["success"] == true {
 		t.Fatal("empty reference accepted")
 	}
@@ -266,6 +269,18 @@ func TestEnrollingBoostKeepsPreferredFreeRelay(t *testing.T) {
 	}
 }
 
+func TestWindowsOrphanMigrationRequiresVaultRestore(t *testing.T) {
+	p := ProfileData{VPNSources: []VPNSource{{ID: "old", Name: "legacy", PublicCatalogID: ownedprofile.BoostReserve, URI: ownedReserveFixture, Disabled: true}}}
+	normalizeProfileVPNSources(&p)
+	if len(p.VPNSources) != 1 {
+		t.Fatal("lost vault restore reference")
+	}
+	source := p.VPNSources[0]
+	if source.ID != "old" || !source.Disabled || source.PublicCatalogID != ownedprofile.Boost || source.URI != "" {
+		t.Fatal("orphaned reserve was promoted to a credential or lost its preference")
+	}
+}
+
 func TestWindowsLatviaMigrationAndEntitlement(t *testing.T) {
 	boost := strings.NewReplacer("%2Ffree", "%2Fboost", "expiry=0", "expiry=4102444800").Replace(ownedReserveFixture)
 	p := ProfileData{VPNSourceSelectionMode: "priority"}
@@ -275,65 +290,23 @@ func TestWindowsLatviaMigrationAndEntitlement(t *testing.T) {
 		}
 	}
 	p.VPNSources[0], p.VPNSources[3] = p.VPNSources[3], p.VPNSources[0]
-	original := append([]VPNSource(nil), p.VPNSources...)
-	for _, product := range []struct{ id, key string }{{ownedprofile.Free, ownedReserveFixture}, {ownedprofile.Boost, boost}} {
-		if err := upsertWindowsOwnedSources(&p, product.id, product.key); err != nil {
-			t.Fatal(err)
-		}
+	personal := VPNSource{ID: "import", Kind: VPNSourceDirect, URI: testVPNSourceOld, Name: "Private"}
+	p.VPNSources = append([]VPNSource{{ID: "old-fi", PublicCatalogID: ownedprofile.Free + "-fi-tcp"}, personal}, p.VPNSources...)
+	p.SingboxConfig = map[string]interface{}{"stale": true}
+	normalizeProfileVPNSources(&p)
+	if len(p.VPNSources) != 3 || p.VPNSources[0].PublicCatalogID != ownedprofile.Free || p.VPNSources[1].ID != personal.ID || p.VPNSources[2].PublicCatalogID != ownedprofile.Boost || p.SingboxConfig != nil {
+		t.Fatal("migration lost order, personal source or reused a stale graph")
 	}
-	if len(p.VPNSources) != 6 || !reflect.DeepEqual(original, p.VPNSources[:4]) {
-		t.Fatal("migration changed original four priorities")
-	}
-	for _, i := range []int{4, 5} {
-		source := p.VPNSources[i]
-		raw, err := windowsLatviaURI(source)
-		if err != nil {
-			t.Fatal(err)
-		}
-		node, err := (&SubscriptionFetcher{}).ParseSingleLink(raw)
-		if err != nil || node.Type != "hysteria2" || strings.Contains(raw, "11111111-2222-3333-4444-555555555555") {
-			t.Fatal("invalid transport or credential scope")
-		}
-		safe := settingsWithoutOwnedSecrets(&SettingsFile{Profiles: []ProfileData{p}})
-		bytes, _ := json.Marshal(safe)
-		if strings.Contains(string(bytes), "11111111-2222-3333-4444-555555555555") || safe.Profiles[0].VPNSources[i].URI != "" {
-			t.Fatal("managed credential persisted")
-		}
-	}
-	p.VPNSources[0], p.VPNSources[5] = p.VPNSources[5], p.VPNSources[0]
-	id := p.VPNSources[0].ID
-	p.VPNSources[0].Disabled = true
+	first := p.VPNSources[2].ID
+	p.VPNSources[2].Disabled = true
 	rotated := strings.ReplaceAll(boost, "11111111-2222-3333-4444-555555555555", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-	if err := upsertWindowsOwnedSources(&p, ownedprofile.Boost, rotated); err != nil {
-		t.Fatal(err)
+	if err := upsertWindowsOwnedSources(&p, ownedprofile.Boost, rotated); err != nil || p.VPNSources[2].ID != first || !p.VPNSources[2].Disabled {
+		t.Fatal("rotation changed manual or disabled preference")
 	}
-	if p.VPNSources[0].ID != id || !p.VPNSources[0].Disabled || p.VPNSources[0].URI != rotated {
-		t.Fatal("rotation lost manual preference")
-	}
-	expired := strings.ReplaceAll(boost, "4102444800", "1")
-	expiredSource := p.VPNSources[0]
-	expiredSource.URI = expired
-	if _, err := windowsLatviaURI(expiredSource); err == nil || len(publicVPNSources([]VPNSource{expiredSource})) != 0 {
-		t.Fatal("expired fast entitlement remains available")
-	}
-	if err := upsertWindowsOwnedSources(&p, ownedprofile.Boost, expired); err != nil {
-		t.Fatal(err)
-	}
-	if len(p.VPNSources) != 5 {
-		t.Fatal("expiry affected other sources or retained fast Boost")
-	}
-	var orphan []VPNSource
-	for _, source := range p.VPNSources {
-		if isLatviaProvider(source.PublicCatalogID) {
-			orphan = append(orphan, source)
-		}
-	}
-	if len(orphan) != 1 {
-		t.Fatal("remaining Free route missing")
-	}
-	normalizePublicVPNSourceMetadata(orphan)
-	if !isLatviaProvider(orphan[0].PublicCatalogID) || orphan[0].URI != "" {
-		t.Fatal("orphan retained a usable credential")
+	expired := p.VPNSources[2]
+	expired.URI = strings.ReplaceAll(rotated, "4102444800", "1")
+	if _, err := windowsRegionalURI(expired); err == nil || publicVPNSources([]VPNSource{expired})[0]["reference_only"] != true {
+		t.Fatal("expired Boost available")
 	}
 }
 
@@ -356,12 +329,10 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := []string{
-					"vpn-source-" + profile.VPNSources[0].ID,
-					"vpn-source-" + profile.VPNSources[1].ID,
-
-					"vpn-source-" + profile.VPNSources[2].ID,
+				if len(profile.VPNSources) != 1 {
+					t.Fatal("retired managed ingress configured")
 				}
+				want := []string{"vpn-source-" + profile.VPNSources[0].ID}
 				app.rememberRouteProbeResults([]routeProbeServiceResult{
 					{Tag: "openai", Success: true, MethodKind: "vpn", MethodTag: want[0]},
 				})
@@ -383,7 +354,11 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 				if got := interfaceStringSlice(selector["outbounds"]); !reflect.DeepEqual(got, want) || selector["type"] != "selector" || selector["default"] != want[0] {
 					t.Fatalf("runtime selector lost independent transports: %v", got)
 				}
-				for i, protocol := range []string{"socks", "socks", "hysteria2"} {
+				protocol := "hysteria2"
+				if tier.id == ownedprofile.Boost {
+					protocol = "socks"
+				}
+				for i := range want {
 					if getOutbound(config, want[i])["type"] != protocol {
 						t.Fatalf("unexpected runtime transport at position %d", i)
 					}
@@ -391,18 +366,123 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 						t.Fatalf("monitor cannot switch to candidate at position %d", i)
 					}
 				}
-				bridge, err := storage.GetProfileXrayConfig(profile.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, tag := range []string{"xray-out-0", "xray-out-1"} {
-					outbound := getOutbound(bridge, tag)
-					transport, _ := outbound["streamSettings"].(map[string]interface{})
-					if transport["network"] != "xhttp" {
-						t.Fatal("XHTTP ingress lost its Xray transport")
+				if tier.id == ownedprofile.Boost {
+					bridge, err := storage.GetProfileXrayConfig(profile.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					stream, _ := getOutbound(bridge, "xray-out-0")["streamSettings"].(map[string]any)
+					if stream["network"] != "tcp" {
+						t.Fatal("Finland REALITY missing")
+					}
+					fast := getOutbound(bridge, "xray-out-0-fi-fast")
+					if fast == nil || getOutbound(bridge, "fi-quic-"+profile.VPNSources[0].ID) == nil {
+						t.Fatal("fast Finnish route is missing")
+					}
+					balancers := bridge["routing"].(map[string]any)["balancers"].([]any)
+					bal := balancers[0].(map[string]any)
+					if bal["fallbackTag"] != "xray-out-0" || !reflect.DeepEqual(interfaceStringSlice(bal["selector"]), []string{"xray-out-0-fi-fast"}) {
+						t.Fatal("Finnish route lost its verified fallback")
+					}
+					if tags := interfaceStringSlice(bridge["observatory"].(map[string]any)["subjectSelector"]); !reflect.DeepEqual(tags, []string{"xray-out-0-fi-fast"}) {
+						t.Fatal("health probe did not use the complete fast path")
+					}
+					hosts := collectXrayEndpointHosts(bridge)
+					if !slices.Contains(hosts, "62.72.20.9") || !slices.Contains(hosts, ownedprofile.ReserveIPv4) || slices.Contains(hosts, "77.42.65.119") {
+						t.Fatal("only the two physical ingress addresses may bypass TUN")
+					}
+					if getOutbound(bridge, "fi-carrier-"+profile.VPNSources[0].ID) == nil {
+						t.Fatal("Finland HTTPS carrier missing")
 					}
 				}
 			})
 		}
 	}
+}
+
+// Reproduce the on-disk family shape used before regional tiers.
+func upsertOwnedVPNPair(profile *ProfileData, provider, raw string) error {
+	reserveID, reserve, err := ownedprofile.Pair(provider, raw)
+	if err != nil {
+		return fmt.Errorf("Некорректный профиль Dropo")
+	}
+	sources := append([]VPNSource(nil), profile.VPNSources...)
+	wasEmpty := len(sources) == 0
+	seen := map[string]bool{}
+	for _, s := range sources {
+		if s.PublicCatalogID == provider || s.PublicCatalogID == reserveID {
+			if seen[s.PublicCatalogID] {
+				return fmt.Errorf("Дублирующийся профиль Dropo")
+			}
+			seen[s.PublicCatalogID] = true
+		}
+	}
+	primaryIndex := -1
+	for _, item := range []struct{ id, uri string }{{provider, raw}, {reserveID, reserve}} {
+		index := -1
+		for i, s := range sources {
+			if s.PublicCatalogID == item.id {
+				index = i
+				break
+			}
+		}
+		var source VPNSource
+		if index >= 0 && sources[index].URI == item.uri {
+			source = sources[index]
+		} else {
+			source, err = newVPNSource(nextVPNSourceID(sources), ownedprofile.Name(item.id), item.uri)
+			if err != nil {
+				return fmt.Errorf("Некорректный профиль Dropo")
+			}
+			source.PublicCatalogID = item.id
+			if index >= 0 {
+				source.ID, source.Disabled, source.Name = sources[index].ID, sources[index].Disabled, sources[index].Name
+			}
+		}
+		if index >= 0 {
+			sources[index] = source
+		} else if item.id == reserveID {
+			source.Disabled = sources[primaryIndex].Disabled
+			index = primaryIndex + 1
+			sources = append(sources, VPNSource{})
+			copy(sources[index+1:], sources[index:])
+			sources[index] = source
+		} else {
+			// An orphan reserve still represents the user's product preference.
+			for _, sibling := range sources {
+				if sibling.PublicCatalogID == reserveID {
+					source.Disabled = sibling.Disabled
+					break
+				}
+			}
+			index = len(sources)
+			sources = append(sources, source)
+		}
+		if item.id == provider {
+			primaryIndex = index
+		}
+	}
+	var positions []int
+	var managed []VPNSource
+	for i, s := range sources {
+		if ownedprofile.IsProvider(s.PublicCatalogID) {
+			positions = append(positions, i)
+			managed = append(managed, s)
+		}
+	}
+	// Only a newly enrolled product gets the default product priority. Adding
+	// a missing reserve to an existing primary must preserve its saved order.
+	if !seen[provider] && !seen[reserveID] && profile.VPNSourceSelectionMode != "priority" {
+		sort.SliceStable(managed, func(i, j int) bool {
+			return ownedprofile.Priority(managed[i].PublicCatalogID) < ownedprofile.Priority(managed[j].PublicCatalogID)
+		})
+		for i, p := range positions {
+			sources[p] = managed[i]
+		}
+	}
+	profile.VPNSources = sources
+	if wasEmpty && profile.VPNSourceSelectionMode == "" {
+		profile.VPNSourceSelectionMode = "latency"
+	}
+	return nil
 }

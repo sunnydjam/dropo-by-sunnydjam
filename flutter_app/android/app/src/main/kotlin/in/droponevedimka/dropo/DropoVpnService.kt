@@ -607,7 +607,9 @@ class DropoVpnService :
                 networkCallbackRegistered = true
             }
         }) { "android: VPN session was cancelled" }
-        notifyDefaultInterfaceAsync()
+        // libbox needs its first physical interface before startup probes run.
+        // Their synchronous wait occupies the same executor as later callbacks.
+        notifyDefaultInterface(engineGeneration, initial = true)
     }
 
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) {
@@ -848,7 +850,7 @@ class DropoVpnService :
         }
     }
 
-    private fun notifyDefaultInterface(generation: Long) {
+    private fun notifyDefaultInterface(generation: Long, initial: Boolean = false) {
         val listener = interfaceUpdateListener ?: return
         val network = physicalNetwork()
         val linkProperties = network?.let { connectivity.getLinkProperties(it) }
@@ -862,8 +864,10 @@ class DropoVpnService :
                     physicalNetworkSignature = "offline"
                     setUnderlyingNetworks(emptyArray())
                     listener.updateDefaultInterface("", -1, false, false)
-                    runCatching { commandServer?.resetNetwork() }
-                    commandServer?.stopSourceSelection()
+                    if (!initial) {
+                        runCatching { commandServer?.resetNetwork() }
+                        commandServer?.stopSourceSelection()
+                    }
                 }
             }
             return
@@ -881,7 +885,7 @@ class DropoVpnService :
                 !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
                 !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED),
             )
-            if (changed) {
+            if (changed && !initial) {
                 commandServer?.setSourceNetwork(sourceNetworkIdentity(network))
                 runCatching { commandServer?.resetNetwork() }
                 runCatching {

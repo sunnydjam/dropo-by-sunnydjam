@@ -1,11 +1,68 @@
 package dnspolicy
 
 import (
+	"bytes"
+	"encoding/json"
 	"maps"
-	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 )
+
+// JSON round trips turn integral ports into float64. Compare the wire shape,
+// including every TLS and dial option, before reusing a managed transport.
+func sameServer(a, b map[string]any) bool {
+	left, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	right, err := json.Marshal(b)
+	return err == nil && bytes.Equal(left, right)
+}
+
+func finlandDoH(tag string, throughVPN bool) map[string]any {
+	server := Server(tag, throughVPN)
+	server["server"] = FinlandIPv4
+	server["tls"] = map[string]any{"enabled": true, "server_name": FinlandHostname}
+	return server
+}
+
+// EnsurePreferredDialResolver handles explicit lookups which bypass DNS routing
+// rules in sing-box. A duplicate or customized tag is left to its owner.
+func EnsurePreferredDialResolver(dns map[string]any, tag string) string {
+	if tag != "dns-direct" && tag != "dns-remote" {
+		return tag
+	}
+	servers, _ := dns["servers"].([]any)
+	var base, reserve map[string]any
+	for _, raw := range servers {
+		s, _ := raw.(map[string]any)
+		switch s["tag"] {
+		case tag:
+			if base != nil {
+				return tag
+			}
+			base = s
+		case tag + "-fi":
+			if reserve != nil {
+				return tag
+			}
+			reserve = s
+		}
+	}
+	viaVPN := base["detour"] == "proxy"
+	if !sameServer(base, Server(tag, viaVPN)) {
+		return tag
+	}
+	target := tag + "-fi"
+	expected := finlandDoH(target, viaVPN)
+	if reserve == nil {
+		dns["servers"] = append(slices.Clip(servers), expected)
+	} else if !sameServer(reserve, expected) {
+		return tag
+	}
+	return target
+}
 
 // ConfigureRuntimeFailover expands only verified built-ins. sing-box 1.14's
 // evaluate/respond rules bound each attempt and preserve the original detour.
@@ -36,7 +93,7 @@ func ConfigureRuntimeFailover(config map[string]interface{}) {
 			continue
 		}
 		reserves := []map[string]interface{}{
-			{"type": "https", "tag": tag + "-fi", "server": FinlandIPv4, "server_port": 443, "path": QueryPath, "tls": map[string]interface{}{"enabled": true, "server_name": FinlandHostname}},
+			finlandDoH(tag+"-fi", false),
 			{"type": "tls", "tag": tag + "-lv", "server": LatviaIPv4, "server_port": 853, "tls": map[string]interface{}{"enabled": true, "server_name": LatviaHostname}},
 		}
 		clash := false
@@ -44,7 +101,7 @@ func ConfigureRuntimeFailover(config map[string]interface{}) {
 			if detour, ok := server["detour"]; ok {
 				reserve["detour"] = detour
 			}
-			if existing := byTag[reserve["tag"].(string)]; existing != nil && !reflect.DeepEqual(existing, reserve) {
+			if existing := byTag[reserve["tag"].(string)]; existing != nil && !sameServer(existing, reserve) {
 				clash = true
 			}
 		}
@@ -65,7 +122,7 @@ func ConfigureRuntimeFailover(config map[string]interface{}) {
 	}
 	var expanded []interface{}
 	appendChain := func(rule map[string]interface{}, tag string) {
-		for _, suffix := range []string{"", "-fi"} {
+		for _, suffix := range []string{"-fi", ""} {
 			evaluation := maps.Clone(rule)
 			resultTag := "dropo-dns-" + strconv.Itoa(len(expanded))
 			evaluation["action"], evaluation["server"], evaluation["tag"], evaluation["timeout"] = "evaluate", tag+suffix, resultTag, "2s"

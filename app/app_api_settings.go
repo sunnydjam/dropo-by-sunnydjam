@@ -1119,7 +1119,7 @@ func normalizeRequestedFreeAccessServiceMethod(method string) (string, bool) {
 	requested := strings.TrimSpace(strings.ToLower(method))
 	switch requested {
 	case "", FreeAccessMethodAuto:
-		return FreeAccessMethodDirect, true
+		return FreeAccessMethodAuto, true
 	case FreeAccessMethodDirect, FreeAccessMethodVPN, FreeAccessMethodZapret, "subscription", "auto-select", "proxy", "bypass", "obhod":
 		return NormalizeFreeAccessServiceMethod(requested), true
 	}

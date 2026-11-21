@@ -3,6 +3,7 @@ package main
 import (
 	"dropocore/ownedprofile"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -12,7 +13,17 @@ const latviaSuffix = "-lv-quic"
 func isLatviaProvider(id string) bool {
 	return id == ownedprofile.Free+latviaSuffix || id == ownedprofile.Boost+latviaSuffix
 }
+
+const finlandSuffix = "-fi-tcp"
+
+func isRegionalProvider(id string) bool {
+	return isLatviaProvider(id) || ownedprofile.IsFinlandReserveID(id)
+}
+
 func windowsOwnedFamily(id string) string {
+	if ownedprofile.IsFinlandReserveID(id) {
+		return strings.TrimSuffix(id, finlandSuffix)
+	}
 	if isLatviaProvider(id) {
 		return strings.TrimSuffix(id, latviaSuffix)
 	}
@@ -23,61 +34,79 @@ func sameWindowsOwnedFamily(a, b string) bool {
 	return family != "" && family == windowsOwnedFamily(b)
 }
 
-// The vault owns the primary identity and expiry. Derive the scoped transport
-// credential only when building the native outbound; never send its parent UUID.
-func windowsLatviaURI(source VPNSource) (string, error) {
-	owner := windowsOwnedFamily(source.PublicCatalogID)
-	if !isLatviaProvider(source.PublicCatalogID) || ownedprofile.Expired(owner, source.URI, time.Now()) {
-		return "", fmt.Errorf("срок действия входа Dropo истёк или ключ недоступен")
+// The stored key authorizes the tier. Only its scoped regional transport may dial.
+func windowsRegionalURI(source VPNSource) (string, error) {
+	routes := ownedprofile.DirectReserves(source.PublicCatalogID, source.URI, time.Now())
+	if len(routes) != 1 {
+		return "", fmt.Errorf("региональный вход Dropo недоступен")
 	}
-	for _, route := range ownedprofile.DirectReserves(owner, source.URI, time.Now()) {
-		if route.ID == source.PublicCatalogID {
-			return route.URI, nil
-		}
-	}
-	return "", fmt.Errorf("не найден латвийский вход Dropo")
+	return routes[0].URI, nil
 }
 
-func latviaSourceCurrent(sources []VPNSource, owner, raw string) bool {
-	eligible := !ownedprofile.Expired(owner, raw, time.Now())
-	for _, s := range sources {
-		if s.PublicCatalogID == owner+latviaSuffix {
-			return eligible && s.URI == raw
-		}
-	}
-	return !eligible
-}
 func upsertWindowsOwnedSources(p *ProfileData, owner, raw string) error {
-	if err := upsertOwnedVPNPair(p, owner, raw); err != nil {
-		return err
+	if _, err := ownedprofile.Validate(owner, raw); err != nil || !ownedprofile.IsPrimary(owner) {
+		return fmt.Errorf("Некорректный профиль Dropo")
 	}
-	id := owner + latviaSuffix
-	// Expired entitlements must not advertise a selectable fast ingress.
-	if ownedprofile.Expired(owner, raw, time.Now()) {
-		kept := p.VPNSources[:0]
-		for _, s := range p.VPNSources {
-			if s.PublicCatalogID != id {
-				kept = append(kept, s)
-			}
-		}
-		p.VPNSources = kept
-		return nil
-	}
-	for i := range p.VPNSources {
-		s := &p.VPNSources[i]
-		if s.PublicCatalogID != id {
-			continue
-		}
-		if s.URI != raw {
-			*s = VPNSource{ID: s.ID, Name: s.Name, Kind: VPNSourceDirect, PublicCatalogID: id, Disabled: s.Disabled, URI: raw}
-		}
-		return nil
-	}
-	for _, primary := range p.VPNSources {
-		if primary.PublicCatalogID == owner {
-			p.VPNSources = append(p.VPNSources, VPNSource{ID: nextVPNSourceID(p.VPNSources), Name: ownedprofile.Name(owner) + " · Латвия", Kind: VPNSourceDirect, PublicCatalogID: id, Disabled: primary.Disabled, URI: raw})
+	for i, s := range p.VPNSources {
+		if s.PublicCatalogID == owner {
+			p.VPNSources[i] = VPNSource{ID: s.ID, URI: raw, PublicCatalogID: owner, Name: ownedprofile.RegionName(owner), Kind: VPNSourceDirect, Disabled: s.Disabled}
 			return nil
 		}
 	}
-	return fmt.Errorf("не найден основной профиль Dropo")
+	s := VPNSource{ID: nextVPNSourceID(p.VPNSources), URI: raw, PublicCatalogID: owner, Name: ownedprofile.RegionName(owner), Kind: VPNSourceDirect}
+	if owner == ownedprofile.Boost && p.VPNSourceSelectionMode != "priority" {
+		for i, old := range p.VPNSources {
+			if old.PublicCatalogID == ownedprofile.Free {
+				p.VPNSources = slices.Insert(p.VPNSources, i, s)
+				return nil
+			}
+		}
+	}
+	p.VPNSources = append(p.VPNSources, s)
+	return nil
+}
+
+// Old settings may put a regional or relay row ahead of its parent. Keep the
+// first family's position and the authoritative parent ID used by vault restore.
+func migrateRegionalWindowsSources(p *ProfileData) {
+	parents := map[string]VPNSource{}
+	legacy := false
+	for _, s := range p.VPNSources {
+		if ownedprofile.IsPrimary(s.PublicCatalogID) {
+			parents[s.PublicCatalogID] = s
+			if s.Name != ownedprofile.RegionName(s.PublicCatalogID) {
+				legacy = true
+			}
+		}
+		if isRegionalProvider(s.PublicCatalogID) || ownedprofile.IsReserve(s.PublicCatalogID) || s.PublicCatalogID == managedFreeVPNProviderID {
+			legacy = true
+		}
+	}
+	if !legacy {
+		return
+	}
+	inserted := make(map[string]bool, len(parents))
+	next := make([]VPNSource, 0, len(p.VPNSources))
+	for _, s := range p.VPNSources {
+		family := windowsOwnedFamily(s.PublicCatalogID)
+		if family == "" {
+			if s.PublicCatalogID != managedFreeVPNProviderID {
+				next = append(next, s)
+			}
+			continue
+		}
+		if inserted[family] {
+			continue
+		}
+		primary, ok := parents[family]
+		if !ok {
+			// Only the vault can restore the canonical key for an orphaned row.
+			primary = VPNSource{ID: s.ID, Disabled: s.Disabled}
+		}
+		next = append(next, VPNSource{ID: primary.ID, PublicCatalogID: family, Name: ownedprofile.RegionName(family), URI: primary.URI, Kind: VPNSourceDirect, Disabled: primary.Disabled})
+		inserted[family] = true
+	}
+	p.VPNSources = next
+	p.SingboxConfig, p.XrayConfig, p.XrayConfigReady = nil, nil, false
+	p.SubscriptionURL = ""
 }

@@ -119,6 +119,17 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 		}
 	}
 
+	if runtime.GOOS == "windows" {
+		settings := storage.GetAppSettings()
+		// Exercise a saved mixed policy independently of fresh-install defaults.
+		settings.FreeAccessMethods = DefaultFreeAccessServiceMethodState()
+		settings.FreeAccessMethods["openai"] = FreeAccessMethodVPN
+		settings.FreeAccessMethods["discord"] = FreeAccessMethodVPN
+		settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
+		if err := storage.UpdateAppSettings(settings); err != nil {
+			t.Fatal(err)
+		}
+	}
 	builder := NewConfigBuilderForStorage(storage)
 	if err := builder.BuildConfig(""); err != nil {
 		t.Fatalf("BuildConfig without subscription failed: %v", err)

@@ -119,14 +119,15 @@ func publicVPNTestBuilder(t *testing.T, body string) (*Storage, *ConfigBuilderFo
 
 func TestPublicVPNBuildKeepsPersonalXHTTPFirstAndOneNodePerSource(t *testing.T) {
 	storage, builder := publicVPNTestBuilder(t,
-		"vless://free-unsupported@free.example.com:443?type=kcp#unsupported\n"+
-			"vless://free-one@free.example.com:443?security=tls#first\n"+
+		"vless://free-one@free.example.com:443?security=tls#first\n"+
 			"vless://free-two@free2.example.com:443?security=tls#second")
 	personal, _ := newVPNSource("personal", "Personal", "vless://personal@personal.example.com:443?type=xhttp&security=tls#personal")
 	profile := ProfileData{VPNSources: []VPNSource{personal}}
-	if err := addManagedVPNSource(&profile, managedFreeVPNProviderID, "Dropo Free", managedFreeVPNTestURL, true); err != nil {
+	subscription, err := newVPNSource("imported", "Imported", managedFreeVPNTestURL)
+	if err != nil {
 		t.Fatal(err)
 	}
+	profile.VPNSources = append(profile.VPNSources, subscription)
 	if err := builder.BuildConfigForProfileSources(storage.GetActiveProfileID(), profile.VPNSources, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +156,7 @@ func TestPublicVPNOnlyProfileWorksAndCanRemoveLastSource(t *testing.T) {
 	storage, builder := publicVPNTestBuilder(t, "vless://test@free.example.com:443?security=tls#Free")
 	app := &App{storage: storage, configBuilder: builder, initialized: true}
 	app.initializedReady.Store(true)
-	result := app.AddManagedVPNSource(managedFreeVPNProviderID, "Dropo Free", managedFreeVPNTestURL, true)
+	result := app.AddVPNSource("Imported subscription", managedFreeVPNTestURL)
 	if result["success"] != true {
 		t.Fatalf("add failed: %v", result)
 	}
@@ -175,7 +176,11 @@ func TestPublicVPNOnlyProfileWorksAndCanRemoveLastSource(t *testing.T) {
 func TestPublicVPNOfflineRefreshShowsCacheWithoutClaimingFreshness(t *testing.T) {
 	storage, builder := publicVPNTestBuilder(t, "vless://test@free.example.com:443?security=tls#Free")
 	profile := ProfileData{}
-	_ = addManagedVPNSource(&profile, managedFreeVPNProviderID, "Dropo Free", managedFreeVPNTestURL, true)
+	imported, err := newVPNSource("imported", "Imported", managedFreeVPNTestURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.VPNSources = append(profile.VPNSources, imported)
 	if err := builder.BuildConfigForProfileSources(storage.GetActiveProfileID(), profile.VPNSources, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +203,7 @@ func TestPublicVPNCanBeDisabledAndMoveAbovePersonal(t *testing.T) {
 	storage, builder := publicVPNTestBuilder(t, "vless://test@free.example.com:443?security=tls#Free")
 	app := &App{storage: storage, configBuilder: builder, initialized: true}
 	app.initializedReady.Store(true)
-	if result := app.AddManagedVPNSource(managedFreeVPNProviderID, "Dropo Free", managedFreeVPNTestURL, true); result["success"] != true {
+	if result := app.AddVPNSource("Imported subscription", managedFreeVPNTestURL); result["success"] != true {
 		t.Fatalf("add failed: %v", result)
 	}
 	profile, _ := storage.GetActiveProfile()
@@ -256,7 +261,7 @@ func TestVPNSourceNodeChangeUsesIdentityFromDisplayedList(t *testing.T) {
 		"vless://one@one.example.com:443?security=tls#One\nvless://two@two.example.com:443?security=tls#Two")
 	app := &App{storage: storage, configBuilder: builder, initialized: true}
 	app.initializedReady.Store(true)
-	if result := app.AddManagedVPNSource(managedFreeVPNProviderID, "Dropo Free", managedFreeVPNTestURL, true); result["success"] != true {
+	if result := app.AddVPNSource("Imported subscription", managedFreeVPNTestURL); result["success"] != true {
 		t.Fatalf("add failed: %v", result)
 	}
 	profile, _ := storage.GetActiveProfile()
@@ -330,7 +335,7 @@ func TestManagedFreeSourceValidationAndNormalizationDoNotConvertPersonalSources(
 		t.Fatal(err)
 	}
 	normalizeProfileVPNSources(&profile)
-	if profile.VPNSourceSelectionMode != "priority" || profile.VPNSources[0].ID != "personal" || profile.VPNSources[1].PublicCatalogID != managedFreeVPNProviderID || profile.VPNSources[1].Name != "Dropo Free" {
+	if profile.VPNSourceSelectionMode != "priority" || profile.VPNSources[0].ID != "personal" || len(profile.VPNSources) != 1 {
 		t.Fatal("managed addition changed manual priority or lost explicit metadata")
 	}
 }
@@ -372,4 +377,29 @@ func TestManagedFreeFetchFailuresNeverExposeURIOrChangePersonalErrors(t *testing
 	if _, err := builder.fetchVPNSourceNodes(source); err == nil || !strings.Contains(err.Error(), failureDetail) {
 		t.Fatal("personal source errors unexpectedly changed")
 	}
+}
+
+// Legacy fixture for migration tests.
+func addManagedVPNSource(profile *ProfileData, providerID, name, uri string, consent bool) error {
+	if !consent {
+		return fmt.Errorf("подтвердите использование бесплатной подписки Dropo")
+	}
+	if providerID != managedFreeVPNProviderID {
+		return fmt.Errorf("неизвестный бесплатный VPN-источник")
+	}
+	if err := validateManagedFreeVPNURL(uri); err != nil {
+		return err
+	}
+	for _, source := range profile.VPNSources {
+		if source.PublicCatalogID == providerID || source.URI == strings.TrimSpace(uri) {
+			return fmt.Errorf("бесплатный источник уже добавлен; включите его в списке")
+		}
+	}
+	source, err := newVPNSource(nextVPNSourceID(profile.VPNSources), "Dropo Free", uri)
+	if err != nil {
+		return err
+	}
+	source.PublicCatalogID = providerID
+	profile.VPNSources = append(profile.VPNSources, source)
+	return nil
 }

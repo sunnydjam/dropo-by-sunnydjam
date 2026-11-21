@@ -77,12 +77,12 @@ func TestPinnedRuntimeDNSFailsOverOnTLSFailureAndSERVFAIL(t *testing.T) {
 		tlsOptions["server_name"] = "127.0.0.1"
 		tlsOptions["certificate"] = []string{certificate}
 		switch server["tag"] {
-		case tag:
-			// The first resolver points at the same local TLS listener as FI but
+		case tag + "-fi":
+			// Both DoH transports use the local listener. The first resolver fails because
 			// its trusted identity deliberately does not match the certificate.
 			server["server_port"] = doh.Listener.Addr().(*net.TCPAddr).Port
 			tlsOptions["server_name"] = "wrong.invalid"
-		case tag + "-fi":
+		case tag:
 			server["server_port"] = doh.Listener.Addr().(*net.TCPAddr).Port
 		case tag + "-lv":
 			server["server_port"] = listener.Addr().(*net.TCPAddr).Port

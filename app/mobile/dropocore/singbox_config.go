@@ -16,12 +16,16 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v16-managed-fi-reality"
+	androidConfigSchema     = "android-package-routing-v18-regional-tiers"
 )
 
 const androidSingBoxVersion = "1.14.4"
 
 var safeTagChars = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
+
+func androidIngressPlan(sources []androidVPNSource, now time.Time) []ownedprofile.Candidate {
+	return ownedprofile.Candidates(androidSourceInputs(sources), now)
+}
 
 func BuildSingBoxConfig() string {
 	mu.Lock()
@@ -36,6 +40,12 @@ func BuildSingBoxConfig() string {
 	androidBuildCancel = cancel
 	defer cancel()
 	migrateAndroidSourcesLocked()
+	for _, source := range current.VPNSources {
+		if ownedprofile.IsProvider(source.PublicCatalogID) && !source.Disabled && !ownedAndroidSourceExpired(source) {
+			mu.Unlock()
+			return buildPreparedAndroidSourcePool(buildCtx)
+		}
+	}
 	for _, candidate := range ownedprofile.Candidates(androidSourceInputs(current.VPNSources), time.Now()) {
 		if candidate.Index < 0 || len(current.VPNSources[candidate.Index].Nodes) > 0 {
 			mu.Unlock()
@@ -200,15 +210,8 @@ func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, 
 }
 
 func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string, adaptivePolicies ...map[string]string) (string, error) {
-	dnsServers := buildAndroidDNSServers(proxyTags)
-	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies)
 	finalOutbound := androidFinalOutbound(routingMode)
-	finalDNSServer := androidFinalDNSServer(routingMode)
-	dns := map[string]interface{}{
-		"servers": dnsServers, "rules": dnsRules, "final": finalDNSServer,
-		"strategy": "ipv4_only", "reverse_mapping": true, "independent_cache": true,
-	}
-	dnspolicy.ConfigureRuntimeFailover(dns)
+	dns := buildAndroidDNSPolicy(len(proxyTags) > 0, routingMode, hideRuTraffic, effectiveRoutePolicies)
 	config := map[string]interface{}{
 		"log": map[string]interface{}{
 			"level":     logLevel,
@@ -264,7 +267,7 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 		return androidSourceError("VPN configuration was cancelled")
 	}
 	sources := current.VPNSources
-	plan := ownedprofile.Candidates(androidSourceInputs(sources), time.Now())
+	plan := androidIngressPlan(sources, time.Now())
 	outbounds := make([]interface{}, 0, len(sources)+2)
 	proxyTags := make([]string, 0, len(sources))
 	candidates := make([]androidSourceCandidate, 0, len(sources))
@@ -288,7 +291,11 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 			return androidSourceError("Сохранённый XHTTP-сервер не поддерживается. Обновите источник или выберите другой сервер.")
 		}
 		node.Tag = "vpn-" + candidate.ID
-		outbounds = append(outbounds, proxyToSingBoxOutbound(node))
+		out := proxyToSingBoxOutbound(node)
+		if candidate.FinlandRelayURI != "" {
+			out["finland_relay"] = candidate.FinlandRelayURI
+		}
+		outbounds = append(outbounds, out)
 		proxyTags = append(proxyTags, node.Tag)
 		candidates = append(candidates, androidSourceCandidate{ID: candidate.ID, Tag: node.Tag, NodeID: androidNodeID(node), OwnerID: candidate.OwnerID})
 	}
@@ -570,11 +577,22 @@ func addTransport(out map[string]interface{}, proxy proxyConfig) {
 	out["transport"] = transport
 }
 
-func buildAndroidDNSServers(proxyTags []string) []interface{} {
+func buildAndroidDNSPolicy(throughVPN bool, routingMode string, hideRuTraffic bool, effectiveRoutePolicies map[string]string) map[string]interface{} {
+	dnsServers := buildAndroidDNSServers(throughVPN)
+	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies)
+	finalDNSServer := androidFinalDNSServer(routingMode)
+	dns := map[string]interface{}{
+		"servers": dnsServers, "rules": dnsRules, "final": finalDNSServer,
+		"strategy": "ipv4_only", "reverse_mapping": true, "independent_cache": true,
+	}
+	dnspolicy.ConfigureRuntimeFailover(dns)
+	return dns
+}
+
+func buildAndroidDNSServers(throughVPN bool) []interface{} {
 	// "direct" describes the application's traffic route, not the transport
 	// used to reach our encrypted resolver. A reachable VPN must also carry DNS
 	// for unselected domains when the resolver's public address is blocked.
-	throughVPN := len(proxyTags) > 0
 	return []interface{}{
 		map[string]interface{}{"type": "local", "tag": "dns-local"},
 		dnspolicy.Server("dns-bootstrap", false),

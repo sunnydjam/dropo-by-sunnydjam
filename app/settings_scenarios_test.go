@@ -1,7 +1,9 @@
 package main
 
 import (
+	"dropocore/dnspolicy"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -18,11 +20,12 @@ func TestWindowsServicePolicyAPIPersistsTheDisplayedChoices(t *testing.T) {
 			t.Fatalf("UI choice %q persisted as %q", method, got)
 		}
 	}
-	// Auto is migration input, not an offered Windows route. Automatic Zapret
-	// strategy selection is a separate API and must not change the route policy.
 	requireAPISuccess(t, app.SetFreeAccessServiceMethod("youtube", FreeAccessMethodAuto))
-	if got := FreeAccessServiceMethod(app.storage.GetAppSettings(), "youtube"); got != FreeAccessMethodDirect {
-		t.Fatalf("legacy auto persisted as %q, want direct", got)
+	if err := app.storage.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := FreeAccessServiceMethod(app.storage.GetAppSettings(), "youtube"); got != FreeAccessMethodAuto {
+		t.Fatalf("saved automatic policy = %q", got)
 	}
 	requireAPISuccess(t, app.SetFreeAccessServiceMethod("youtube", FreeAccessMethodZapret))
 	requireAPISuccess(t, app.SetZapretServiceStrategy("youtube", ZapretStrategyModeAuto, ""))
@@ -54,16 +57,9 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	if !settings.FreeAccessEnabled {
 		t.Fatal("free access state should remain enabled for legacy UI/API compatibility")
 	}
-	wantMethods := DefaultFreeAccessServiceMethodState()
-	if runtime.GOOS == "windows" {
-		wantMethods["youtube"] = FreeAccessMethodZapret
-		wantMethods["discord"] = FreeAccessMethodVPN
-		wantMethods["meta"] = FreeAccessMethodVPN
-		wantMethods["openai"] = FreeAccessMethodVPN
-	}
-	for _, service := range DefaultFreeAccessServices {
-		if got := FreeAccessServiceMethod(settings, service.Tag); got != wantMethods[service.Tag] {
-			t.Fatalf("default route policy for %s = %q, want %q", service.Tag, got, wantMethods[service.Tag])
+	for _, svc := range DefaultFreeAccessServices {
+		if settings.FreeAccessMethods[svc.Tag] != FreeAccessMethodAuto {
+			t.Fatalf("expected automatic route for %s", svc.Tag)
 		}
 	}
 	if !settings.Notifications {
@@ -93,6 +89,7 @@ func TestWindowsServiceRouteOptionsExposeExactThreePolicyContract(t *testing.T) 
 		tag   string
 		label string
 	}{
+		{FreeAccessMethodAuto, "Авто"},
 		{FreeAccessMethodDirect, "Напрямую"},
 		{FreeAccessMethodVPN, "Через VPN"},
 		{FreeAccessMethodZapret, "Обход (Zapret)"},
@@ -283,6 +280,40 @@ func TestPersistedFullVPNWithoutSourceCannotStartOrBuildDirectFallback(t *testin
 	}
 }
 
+func TestWindowsExplicitDialResolverUsesVerifiedRegionalTransport(t *testing.T) {
+	for _, tag := range []string{"dns-direct", "dns-remote"} {
+		primary := dnspolicy.Server(tag, tag == "dns-remote")
+		config := map[string]any{
+			"route": map[string]any{"default_domain_resolver": map[string]any{"server": tag, "strategy": "ipv4_only"}},
+			"dns":   map[string]any{"servers": []any{primary}, "final": tag, "rules": []any{map[string]any{"domain_suffix": []any{"corp.example"}, "server": "wg-dns"}}},
+		}
+		stored := cloneJSONMap(config)
+		runtime := windowsDialResolverConfig(stored)
+		resolver := runtime["route"].(map[string]any)["default_domain_resolver"].(map[string]any)
+		dns := runtime["dns"].(map[string]any)
+		if resolver["server"] != tag+"-fi" || resolver["strategy"] != "ipv4_only" || len(dns["servers"].([]any)) != 2 {
+			t.Fatal("cached configuration did not acquire a regional dial resolver")
+		}
+		reserve := dns["servers"].([]any)[1].(map[string]any)
+		if reserve["server"] != dnspolicy.FinlandIPv4 || reserve["tls"].(map[string]any)["server_name"] != dnspolicy.FinlandHostname || reserve["detour"] != primary["detour"] {
+			t.Fatal("explicit resolver changed DNS identity or detour")
+		}
+		if !reflect.DeepEqual(stored, cloneJSONMap(config)) || !reflect.DeepEqual(dns["rules"], stored["dns"].(map[string]any)["rules"]) {
+			t.Fatal("cached settings or private DNS rules changed")
+		}
+		// The runtime also accepts already persisted numeric ports (float64).
+		roundTrip := cloneJSONMap(runtime)
+		roundTrip["route"] = stored["route"]
+		if got := windowsDialResolverConfig(roundTrip)["route"].(map[string]any)["default_domain_resolver"].(map[string]any)["server"]; got != tag+"-fi" {
+			t.Fatal("existing regional resolver was ignored")
+		}
+		roundTrip["dns"].(map[string]any)["servers"].([]any)[1].(map[string]any)["detour"] = "corporate"
+		if got := windowsDialResolverConfig(roundTrip)["route"].(map[string]any)["default_domain_resolver"].(map[string]any)["server"]; got != tag {
+			t.Fatal("custom resolver was hijacked")
+		}
+	}
+}
+
 func TestAllTrafficDNSPreservesWorkNetworkResolver(t *testing.T) {
 	template := map[string]interface{}{
 		"dns": map[string]interface{}{
@@ -305,7 +336,7 @@ func TestAllTrafficDNSPreservesWorkNetworkResolver(t *testing.T) {
 	if len(rules) != 9 || rules[0].(map[string]interface{})["server"] != "wg-dns" || rules[1].(map[string]interface{})["server"] != "dns-local" {
 		t.Fatalf("full VPN DNS work/local exceptions = %#v", rules)
 	}
-	for i, tag := range map[int]string{2: "dns-remote", 5: "dns-remote-fi", 8: "dns-remote-lv"} {
+	for i, tag := range map[int]string{2: "dns-remote-fi", 5: "dns-remote", 8: "dns-remote-lv"} {
 		if rules[i].(map[string]interface{})["server"] != tag {
 			t.Fatalf("full VPN DNS resolver order at %d does not match %s", i, tag)
 		}
@@ -439,6 +470,12 @@ func TestFullVPNGeneratedConfigPassesBundledSingBoxCheck(t *testing.T) {
 
 func TestSettingsAPIsPersistFreeAccessPolicy(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
+	if runtime.GOOS == "windows" {
+		requireAPISuccess(t, app.SetFreeAccessServiceMethod("youtube", FreeAccessMethodZapret))
+		for _, tag := range []string{"discord", "meta", "openai"} {
+			requireAPISuccess(t, app.SetFreeAccessServiceMethod(tag, FreeAccessMethodVPN))
+		}
+	}
 
 	result := app.SetDisableFreeAccess(true)
 	requireAPISuccess(t, result)

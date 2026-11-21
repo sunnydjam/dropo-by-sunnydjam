@@ -728,31 +728,51 @@ class _HomeRouteServiceRow extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 5),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                if (_isMobileShell)
+            LayoutBuilder(
+              builder: (context, bounds) {
+                final options = [
                   _homeRouteButton(service, 'auto', 'Авто', selected),
-                _homeRouteButton(service, 'direct', 'Напрямую', selected),
-                _homeRouteButton(service, 'vpn', 'VPN', selected),
-                if (!_isMobileShell)
-                  _AccessibleDescription(
-                    message: service.zapretSupported
-                        ? service.tag == 'discord'
-                              ? 'Эксперимент: web/API могут работать, voice/video не гарантируются'
-                              : 'Встроенный обход блокировки'
-                        : 'Zapret недоступен для этого сервиса',
-                    child: _homeRouteButton(
-                      service,
-                      'zapret',
-                      service.tag == 'discord' ? 'Zapret (эксп.)' : 'Zapret',
-                      selected,
-                      supported: service.zapretSupported,
-                    ),
+                  _homeRouteButton(service, 'vpn', 'VPN', selected),
+                  _homeRouteButton(service, 'direct', 'Напрямую', selected),
+                ];
+                final stacked =
+                    bounds.maxWidth < 250 ||
+                    MediaQuery.textScalerOf(context).scale(13) > 18;
+                return Container(
+                  padding: const EdgeInsets.all(3),
+                  decoration: BoxDecoration(
+                    color: _atlasSurface,
+                    borderRadius: BorderRadius.circular(10),
                   ),
-              ],
+                  child: stacked
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: options,
+                        )
+                      : Row(
+                          children: [
+                            for (final option in options)
+                              Expanded(child: option),
+                          ],
+                        ),
+                );
+              },
             ),
+            if (!_isMobileShell)
+              _AccessibleDescription(
+                message: service.zapretSupported
+                    ? service.tag == 'discord'
+                          ? 'Эксперимент: web/API могут работать, voice/video не гарантируются'
+                          : 'Встроенный обход блокировки'
+                    : 'Zapret недоступен для этого сервиса',
+                child: _homeRouteButton(
+                  service,
+                  'zapret',
+                  service.tag == 'discord' ? 'Zapret (эксп.)' : 'Zapret',
+                  selected,
+                  supported: service.zapretSupported,
+                ),
+              ),
             const SizedBox(height: 8),
             Text(
               !statusKnown

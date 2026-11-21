@@ -287,3 +287,12 @@ for (const viewport of [{width:360,height:600},{width:320,height:600},{width:760
     assert.ok(bounds.width<=bounds.viewport);assert.ok(bounds.bottom<=bounds.height);
   });
 }
+
+test('embedded home leaves route settings to Flutter and keeps session controls visible', async t => {
+  const page = await pageFor(t, {viewport:{width:360,height:450}});
+  await update(page, {...idle, sharedRouteControls:true, connected:true, motion:false});
+  assert.equal(await page.locator('.dp-mode-service').isVisible(), false);
+  assert.equal(await page.locator('.dp-services').isVisible(), false);
+  const box = await page.locator('.dp-disconnect').boundingBox();
+  assert.ok(box && box.y >= 0 && box.y + box.height <= 450, 'Disconnect fits the compact hero');
+});

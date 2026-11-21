@@ -215,12 +215,8 @@ func TestAndroidPublicSourceConsentAndFiltering(t *testing.T) {
 	if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", false)["success"] == true || calls != 0 {
 		t.Fatal("managed source fetched without consent")
 	}
-	sourceSuccess(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", true)
-	if len(current.VPNSources[0].Nodes) != 1 {
-		t.Fatal("public private endpoints not filtered")
-	}
-	if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", true)["success"] == true {
-		t.Fatal("duplicate public source accepted")
+	if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", "https://free.example.com/sub/fixture", true)["success"] == true || calls != 0 {
+		t.Fatal("retired shared subscription accepted")
 	}
 }
 
@@ -230,6 +226,7 @@ func TestAndroidUpgradeRemovesOnlyRetiredPublicSource(t *testing.T) {
 	current.CachedSingBoxConfig = "old-runtime-config"
 	current.VPNSources = []androidVPNSource{
 		{ID: "old-public", URI: androidPublicSourceURL + "?ts=123"},
+		{ID: "retired-shared", PublicCatalogID: androidManagedFreeSourceID, URI: "https://free.example.com/sub/fixture"},
 		{ID: "personal", URI: sourceTestKey, PublicCatalogID: androidPublicSourceID},
 	}
 	if err := saveLocked(); err != nil {
@@ -257,18 +254,15 @@ func TestAndroidManagedSourceCatalogAndMetadataDoNotExposeOrReclassifyURI(t *tes
 	}
 	sourceSuccess(t, "AddVPNSource", "Own", "https://personal.example.com/sub/fixture")
 	sourceSuccess(t, "MoveVPNSource", "source-1", 0)
-	sourceSuccess(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Ignored", "https://free.example.com/sub/fixture", true)
-	if current.VPNSourceAutoSelect || current.VPNSources[0].PublicCatalogID != "" || current.VPNSources[1].PublicCatalogID != androidManagedFreeSourceID || current.VPNSources[1].Name != "Dropo Free" {
+	if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Ignored", "https://free.example.com/sub/fixture", true)["success"] == true {
+		t.Fatal("retired shared feed was accepted")
+	}
+	if current.VPNSourceAutoSelect || current.VPNSources[0].PublicCatalogID != "" || len(current.VPNSources) != 1 {
 		t.Fatal("managed source changed personal metadata/manual priority")
 	}
 	view := Call("GetVPNSources", "[]")
 	if strings.Contains(view, "/sub/fixture") || strings.Contains(view, "https://") {
 		t.Fatal("source view exposed private URL")
-	}
-	current.VPNSources[1].LastRefreshError = "Get " + current.VPNSources[1].URI + ": test-fixture-private-error"
-	view = Call("GetVPNSources", "[]")
-	if strings.Contains(view, "/sub/fixture") || strings.Contains(view, "test-fixture-private-error") {
-		t.Fatal("managed refresh error exposed private details")
 	}
 	for _, uri := range []string{"http://free.example.com/sub", "https://user:pass@free.example.com/sub", "vless://key@server.example.com:443"} {
 		if sourceCall(t, "AddManagedVPNSource", androidManagedFreeSourceID, "Dropo Free", uri, true)["success"] == true {

@@ -63,6 +63,7 @@ func Move(sources []Source, id string, to int) ([]int, bool) {
 }
 
 type Candidate struct {
+	FinlandRelayURI  string
 	ID, OwnerID, URI string
 	Index            int // -1 for a runtime-only direct reserve.
 }
@@ -78,20 +79,13 @@ func Candidates(sources []Source, now time.Time) []Candidate {
 		if primary.Disabled || Expired(primary.Provider, primary.URI, now) {
 			continue
 		}
-		result = append(result, Candidate{ID: primary.ID, OwnerID: primary.ID, URI: primary.URI, Index: group.Primary})
 		if !IsPrimary(primary.Provider) {
+			result = append(result, Candidate{ID: primary.ID, OwnerID: primary.ID, URI: primary.URI, Index: group.Primary})
 			continue
-		}
-		if group.Relay >= 0 {
-			relay := sources[group.Relay]
-			_, expected, err := Pair(primary.Provider, primary.URI)
-			if err == nil && relay.URI == expected {
-				result = append(result, Candidate{ID: relay.ID, OwnerID: primary.ID, URI: relay.URI, Index: group.Relay})
-			}
 		}
 		for _, direct := range DirectReserves(primary.Provider, primary.URI, now) {
 			if !occupied[direct.ID] {
-				result = append(result, Candidate{ID: direct.ID, OwnerID: primary.ID, URI: direct.URI, Index: -1})
+				result = append(result, Candidate{ID: direct.ID, OwnerID: primary.ID, URI: direct.URI, Index: -1, FinlandRelayURI: direct.FinlandRelayURI})
 			}
 		}
 	}

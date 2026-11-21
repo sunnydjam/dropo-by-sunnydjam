@@ -170,11 +170,11 @@ func TestFullVPNLastSourceRemovalAndDisablePersistUnreadyAcrossRestart(t *testin
 			app := &App{storage: storage, configBuilder: builder, initialized: true}
 			app.initializedReady.Store(true)
 			requireAPISuccess(t, app.SetRoutingMode(string(RoutingModeAllTraffic)))
-			if result := app.AddManagedVPNSource(managedFreeVPNProviderID, "Dropo Free", managedFreeVPNTestURL, false); result["success"] != false {
+			if result := app.AddManagedVPNSource("dropo-individual-free", "Dropo Free", ownedReserveFixture, false); result["success"] != false {
 				t.Fatal("missing consent accepted")
 			}
 			requireUnreadyFullVPN(t, app)
-			requireAPISuccess(t, app.AddManagedVPNSource(managedFreeVPNProviderID, "Dropo Free", managedFreeVPNTestURL, true))
+			requireAPISuccess(t, app.AddManagedVPNSource("dropo-individual-free", "Dropo Free", ownedReserveFixture, true))
 			profile, _ := storage.GetActiveProfile()
 			id := profile.VPNSources[0].ID
 			var result map[string]interface{}

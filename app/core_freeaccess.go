@@ -560,17 +560,9 @@ func DefaultFreeAccessServiceMethodState() map[string]string {
 }
 
 func FreshInstallFreeAccessServiceMethodState() map[string]string {
-	state := DefaultFreeAccessServiceMethodState()
-	// The Windows release starts with the smallest live-validated policy:
-	// YouTube uses the scoped native bypass; Discord, Instagram and ChatGPT use
-	// selective VPN routes; every unrelated service stays Direct.
-	// normalizeAppSettings preserves an existing explicit user choice, so this
-	// only affects a fresh settings file.
-	if runtime.GOOS == "windows" {
-		state["youtube"] = FreeAccessMethodZapret
-		state["discord"] = FreeAccessMethodVPN
-		state["meta"] = FreeAccessMethodVPN
-		state["openai"] = FreeAccessMethodVPN
+	state := make(map[string]string, len(DefaultFreeAccessServices))
+	for _, service := range DefaultFreeAccessServices {
+		state[service.Tag] = FreeAccessMethodAuto
 	}
 	return state
 }
@@ -708,6 +700,7 @@ func IsFreeAccessTransparentMethod(tag string) bool {
 
 func FreeAccessServiceMethodOptions() []map[string]string {
 	options := []map[string]string{
+		{"tag": FreeAccessMethodAuto, "value": FreeAccessMethodAuto, "label": "Авто"},
 		{"tag": FreeAccessMethodDirect, "value": FreeAccessMethodDirect, "label": "Напрямую"},
 		{"tag": FreeAccessMethodVPN, "value": FreeAccessMethodVPN, "label": "Через VPN"},
 	}

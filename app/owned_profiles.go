@@ -3,7 +3,6 @@ package main
 import (
 	"dropocore/ownedprofile"
 	"fmt"
-	"sort"
 	"time"
 )
 
@@ -32,8 +31,10 @@ func (a *App) applyOwnedVPNSource(provider, raw, expectedSourceID, expectedNodeI
 			if restore && (!ownedVPNRestoreReferenceMatches(observed, provider, expectedSourceID, expectedNodeID) || !ownedVPNRestoreCredentialsMatch(observed, provider, raw, reserveID, reserve)) {
 				return map[string]interface{}{"success": false, "error": "Профиль Dropo изменился. Повторите обновление источника."}
 			}
-			if ownedVPNPairCurrent(profile.VPNSources, provider, raw, reserveID, reserve) && latviaSourceCurrent(profile.VPNSources, provider, raw) {
-				return map[string]interface{}{"success": true}
+			for _, source := range profile.VPNSources {
+				if source.PublicCatalogID == provider && source.URI == raw && source.NodeCount == 1 {
+					return map[string]interface{}{"success": true}
+				}
 			}
 		}
 	}
@@ -52,7 +53,7 @@ func ownedVPNRestoreCredentialsMatch(sources []VPNSource, primary, key, reserve,
 		if source.URI == "" {
 			continue
 		}
-		if (source.PublicCatalogID == primary || source.PublicCatalogID == primary+latviaSuffix) && source.URI != key || source.PublicCatalogID == reserve && source.URI != reserveKey {
+		if (source.PublicCatalogID == primary || source.PublicCatalogID == primary+latviaSuffix || source.PublicCatalogID == primary+finlandSuffix) && source.URI != key || source.PublicCatalogID == reserve && source.URI != reserveKey {
 			return false
 		}
 	}
@@ -109,107 +110,6 @@ func ownedVPNFamilyUnchanged(before, after []VPNSource, provider string) bool {
 	return true
 }
 
-func ownedVPNPairCurrent(sources []VPNSource, primary, key, reserve, reserveKey string) bool {
-	primaryFound, reserveFound := 0, 0
-	for _, s := range sources {
-		if s.PublicCatalogID == primary && s.URI == key {
-			primaryFound++
-		}
-		if s.PublicCatalogID == reserve && s.URI == reserveKey {
-			reserveFound++
-		}
-	}
-	return primaryFound == 1 && reserveFound == 1
-}
-
-// The caller owns the source transaction. Prepare both entries before replacing
-// the list so a malformed member cannot leave a half-updated managed family.
-func upsertOwnedVPNPair(profile *ProfileData, provider, raw string) error {
-	reserveID, reserve, err := ownedprofile.Pair(provider, raw)
-	if err != nil {
-		return fmt.Errorf("Некорректный профиль Dropo")
-	}
-	sources := append([]VPNSource(nil), profile.VPNSources...)
-	wasEmpty := len(sources) == 0
-	seen := map[string]bool{}
-	for _, s := range sources {
-		if s.PublicCatalogID == provider || s.PublicCatalogID == reserveID {
-			if seen[s.PublicCatalogID] {
-				return fmt.Errorf("Дублирующийся профиль Dropo")
-			}
-			seen[s.PublicCatalogID] = true
-		}
-	}
-	primaryIndex := -1
-	for _, item := range []struct{ id, uri string }{{provider, raw}, {reserveID, reserve}} {
-		index := -1
-		for i, s := range sources {
-			if s.PublicCatalogID == item.id {
-				index = i
-				break
-			}
-		}
-		var source VPNSource
-		if index >= 0 && sources[index].URI == item.uri {
-			source = sources[index]
-		} else {
-			source, err = newVPNSource(nextVPNSourceID(sources), ownedprofile.Name(item.id), item.uri)
-			if err != nil {
-				return fmt.Errorf("Некорректный профиль Dropo")
-			}
-			source.PublicCatalogID = item.id
-			if index >= 0 {
-				source.ID, source.Disabled, source.Name = sources[index].ID, sources[index].Disabled, sources[index].Name
-			}
-		}
-		if index >= 0 {
-			sources[index] = source
-		} else if item.id == reserveID {
-			source.Disabled = sources[primaryIndex].Disabled
-			index = primaryIndex + 1
-			sources = append(sources, VPNSource{})
-			copy(sources[index+1:], sources[index:])
-			sources[index] = source
-		} else {
-			// An orphan reserve still represents the user's product preference.
-			for _, sibling := range sources {
-				if sibling.PublicCatalogID == reserveID {
-					source.Disabled = sibling.Disabled
-					break
-				}
-			}
-			index = len(sources)
-			sources = append(sources, source)
-		}
-		if item.id == provider {
-			primaryIndex = index
-		}
-	}
-	var positions []int
-	var managed []VPNSource
-	for i, s := range sources {
-		if ownedprofile.IsProvider(s.PublicCatalogID) {
-			positions = append(positions, i)
-			managed = append(managed, s)
-		}
-	}
-	// Only a newly enrolled product gets the default product priority. Adding
-	// a missing reserve to an existing primary must preserve its saved order.
-	if !seen[provider] && !seen[reserveID] && profile.VPNSourceSelectionMode != "priority" {
-		sort.SliceStable(managed, func(i, j int) bool {
-			return ownedprofile.Priority(managed[i].PublicCatalogID) < ownedprofile.Priority(managed[j].PublicCatalogID)
-		})
-		for i, p := range positions {
-			sources[p] = managed[i]
-		}
-	}
-	profile.VPNSources = sources
-	if wasEmpty && profile.VPNSourceSelectionMode == "" {
-		profile.VPNSourceSelectionMode = "latency"
-	}
-	return nil
-}
-
 func removeOwnedVPNFamily(sources []VPNSource, provider string) []VPNSource {
 	remaining := make([]VPNSource, 0, len(sources))
 	for _, s := range sources {
@@ -261,7 +161,7 @@ func settingsWithoutOwnedSecrets(settings *SettingsFile) *SettingsFile {
 	return &copySettings
 }
 func ownedSourceExpired(s VPNSource) bool {
-	if isLatviaProvider(s.PublicCatalogID) {
+	if isRegionalProvider(s.PublicCatalogID) {
 		return ownedprofile.Expired(windowsOwnedFamily(s.PublicCatalogID), s.URI, time.Now())
 	}
 	return ownedprofile.Expired(s.PublicCatalogID, s.URI, time.Now())

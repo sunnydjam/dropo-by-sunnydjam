@@ -483,3 +483,39 @@ func TestXHTTPConfigCheckHasNoNetworkOrInstancesAndSanitizesErrors(t *testing.T)
 		t.Fatal("insecure TLS accepted")
 	}
 }
+
+func TestFinlandCarrierDialIsScoped(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	session := newXHTTPSocketSession(func(int32) error { t.Fatal("the final hop tried to open a physical socket"); return nil }, nil)
+	defer session.close()
+	endpoint := listener.Addr().(*net.TCPAddr)
+	session.finlandTarget = endpoint.String()
+	session.finlandCarrier = &net.Dialer{}
+	dialer := protectedXHTTPDialer{}
+	addr := xnet.IPAddress(endpoint.IP)
+	dest := xnet.TCPDestination(addr, xnet.Port(endpoint.Port))
+	for _, bad := range []xnet.Destination{xnet.TCPDestination(addr, 1), xnet.UDPDestination(addr, dest.Port)} {
+		if conn, err := dialer.Dial(session.ctx, nil, bad, nil); err == nil {
+			conn.Close()
+			t.Fatal("accepted an unrelated relay destination")
+		}
+	}
+	conn, err := dialer.Dial(session.ctx, nil, dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	peer, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	session.resetPhysical()
+	if _, err := conn.Write([]byte{1}); err == nil {
+		t.Fatal("old transit connection survived network reset")
+	}
+}

@@ -91,7 +91,7 @@ func (a *App) vpnSourceProbeBinding(tag string) (vpnSourceProbeBinding, bool) {
 				}
 				nodeID = selectedID
 			}
-			if nodeID == "" && !isLatviaProvider(source.PublicCatalogID) && isDirectProxyLink(source.URI) {
+			if nodeID == "" && windowsOwnedFamily(source.PublicCatalogID) == "" && isDirectProxyLink(source.URI) {
 				if node, err := (&SubscriptionFetcher{}).ParseSingleLink(source.URI); err == nil && node.Server != "" {
 					nodeID = vpnNodeFingerprint(node)
 				}

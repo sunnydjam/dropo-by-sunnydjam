@@ -139,3 +139,8 @@ html,body { margin:0; width:100%; height:100%; background:#030908; overscroll-be
 #dropo-motion-preview .dp-setup .dp-disconnect-row,
 #dropo-motion-preview .dp-setup .dp-mode-note { display:none; }
 #dropo-motion-preview .dp-main[data-state="error"] .dp-message { top:36px; bottom:auto; max-height:90px; overflow:auto; }
+
+/* Flutter owns the same inline route settings on Android and Windows. */
+#dropo-motion-preview .shared-routes .dp-mode-row,
+#dropo-motion-preview .shared-routes .dp-services-row { display:none; }
+#dropo-motion-preview .dp-phone { min-height:0; }

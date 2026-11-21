@@ -145,7 +145,7 @@ func replaceAndroidRoutingPolicy(activeConfig string, change androidRoutingChang
 		return "", err
 	}
 	outbounds, hasOutbounds := config["outbounds"].([]interface{})
-	dns, hasDNS := config["dns"].(map[string]interface{})
+	_, hasDNS := config["dns"].(map[string]interface{})
 	route, hasRoute := config["route"].(map[string]interface{})
 	if !hasOutbounds || !hasDNS || !hasRoute {
 		return "", errors.New("incomplete active Android VPN configuration")
@@ -172,7 +172,7 @@ func replaceAndroidRoutingPolicy(activeConfig string, change androidRoutingChang
 	}
 	policies := androidEffectiveRoutePoliciesForMode(change.policies, hasProxy, change.mode)
 	config["outbounds"] = kept
-	dns["rules"], dns["final"] = buildAndroidDNSRules(change.mode, hideRU, policies), androidFinalDNSServer(change.mode)
+	config["dns"] = buildAndroidDNSPolicy(hasProxy, change.mode, hideRU, policies)
 	route["rules"], route["final"] = buildAndroidRouteRules(change.mode, hideRU, ruOutbound, policies), androidFinalOutbound(change.mode)
 	if change.mode == "blocked_only" {
 		addAndroidAdaptiveGraph(config, change.policies)

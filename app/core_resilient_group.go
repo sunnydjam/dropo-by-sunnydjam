@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // resilientGroupTestURL is a neutral health-check target used for choosing
 // between real bypass/VPN outbounds. Do not include direct in bypass-first
 // groups for blocked services: direct can win this check while still being
@@ -81,10 +83,24 @@ func buildVPNSourceFallbackOutbound(sourceTags []string) map[string]interface{} 
 			"outbounds": []string{"direct"}, "default": "direct",
 		}
 	}
-	return map[string]interface{}{
-		"type":      "selector",
-		"tag":       "auto-select",
-		"outbounds": append([]string(nil), sourceTags...),
-		"default":   sourceTags[0],
+	group := map[string]any{
+		"type": "selector", "tag": "auto-select",
+		"outbounds": append([]string(nil), sourceTags...), "default": sourceTags[0],
 	}
+	if multipleIndependentVPNSourceTags(sourceTags) {
+		group["interrupt_exist_connections"] = true
+	}
+	return group
+}
+
+func multipleIndependentVPNSourceTags(tags []string) bool {
+	if len(tags) < 2 {
+		return false
+	}
+	for _, tag := range tags {
+		if !strings.HasPrefix(tag, "vpn-source-") {
+			return false
+		}
+	}
+	return true
 }

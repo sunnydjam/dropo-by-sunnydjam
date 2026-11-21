@@ -98,20 +98,9 @@ func TestFreshWindowsSettingsUseReleaseRecommendedRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	methods := storage.GetAppSettings().FreeAccessMethods
-	if methods["youtube"] != FreeAccessMethodZapret {
-		t.Fatalf("fresh YouTube route = %q, want Zapret", methods["youtube"])
-	}
-	if methods["discord"] != FreeAccessMethodVPN {
-		t.Fatalf("fresh Discord route = %q, want VPN", methods["discord"])
-	}
-	for _, tag := range []string{"meta", "openai"} {
-		if methods[tag] != FreeAccessMethodVPN {
-			t.Fatalf("fresh %s route = %q, want VPN", tag, methods[tag])
-		}
-	}
-	for _, tag := range []string{"telegram", "twitch", "spotify"} {
-		if methods[tag] != FreeAccessMethodDirect {
-			t.Fatalf("fresh %s route = %q, want Direct", tag, methods[tag])
+	for _, service := range DefaultFreeAccessServices {
+		if got := methods[service.Tag]; got != FreeAccessMethodAuto {
+			t.Fatalf("fresh %s policy = %q", service.Tag, got)
 		}
 	}
 }

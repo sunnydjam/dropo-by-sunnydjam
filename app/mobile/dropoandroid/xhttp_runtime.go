@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"golang.org/x/net/proxy"
 	"io"
 	"net"
 	"sync"
@@ -92,6 +93,10 @@ type xhttpBridge struct {
 }
 
 func newXHTTPBridge(config *xcore.Config, protect func(int32) error, dnsServers func() []string, ownerEpochs ...uint64) (*xhttpBridge, error) {
+	return newRoutedXHTTPBridge(config, protect, dnsServers, nil, "", ownerEpochs...)
+}
+
+func newRoutedXHTTPBridge(config *xcore.Config, protect func(int32) error, dnsServers func() []string, carrier *xhttpBridge, target string, ownerEpochs ...uint64) (*xhttpBridge, error) {
 	epoch := currentXHTTPEpoch()
 	if len(ownerEpochs) > 0 {
 		epoch = ownerEpochs[0]
@@ -100,6 +105,19 @@ func newXHTTPBridge(config *xcore.Config, protect func(int32) error, dnsServers 
 		return nil, errors.New("Android XHTTP runtime session was cancelled")
 	}
 	session := newXHTTPSocketSession(protect, dnsServers)
+	if carrier != nil {
+		d, err := proxy.SOCKS5("tcp", carrier.listener.Addr().String(), &proxy.Auth{User: carrier.username, Password: carrier.password}, &net.Dialer{})
+		if err != nil {
+			session.close()
+			return nil, err
+		}
+		dialer, ok := d.(proxy.ContextDialer)
+		if !ok {
+			session.close()
+			return nil, errXHTTPConfig
+		}
+		session.finlandTarget, session.finlandCarrier = target, dialer
+	}
 	managed := splithttp.NewManagedSession(session.ctx)
 	session.ctx = splithttp.ContextWithManagedSession(session.ctx, managed)
 	instance, err := xcore.NewWithContext(session.ctx, config)
@@ -425,6 +443,7 @@ func normalizeXHTTPConfig(content string, platform PlatformInterface, start bool
 			Type         string          `json:"type"`
 			Tag          string          `json:"tag"`
 			XrayOutbound json.RawMessage `json:"xray_outbound"`
+			FinlandRelay string          `json:"finland_relay"`
 		}
 		if json.Unmarshal(raw, &placeholder) != nil || placeholder.Type != xhttpOutboundType {
 			continue
@@ -449,8 +468,25 @@ func normalizeXHTTPConfig(content string, platform PlatformInterface, start bool
 			return "", nil, err
 		}
 		port, username, password := 1, "dropo-check", "dropo-check"
+		var carrier *xhttpBridge
+		var target string
+		physicalDNS := func() []string { return physicalXHTTPDNSServers(platform) }
+		if placeholder.FinlandRelay != "" {
+			var carrierConfig *xcore.Config
+			carrierConfig, target, err = buildFinlandCarrier(placeholder.XrayOutbound, roots, placeholder.FinlandRelay)
+			if err != nil {
+				return "", nil, err
+			}
+			if start {
+				carrier, err = newXHTTPBridge(carrierConfig, platform.AutoDetectInterfaceControl, physicalDNS, ownerEpochs...)
+				if err != nil {
+					return "", nil, err
+				}
+				runtime.bridges = append(runtime.bridges, carrier)
+			}
+		}
 		if start {
-			bridge, err := newXHTTPBridge(built, platform.AutoDetectInterfaceControl, func() []string { return physicalXHTTPDNSServers(platform) }, ownerEpochs...)
+			bridge, err := newRoutedXHTTPBridge(built, platform.AutoDetectInterfaceControl, physicalDNS, carrier, target, ownerEpochs...)
 			if err != nil {
 				return "", nil, err
 			}

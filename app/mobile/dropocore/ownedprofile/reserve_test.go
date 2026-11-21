@@ -21,12 +21,12 @@ func TestManagedGroupsKeepPersonalSourcesAndOwnReserveOrder(t *testing.T) {
 		{ID: "turbo-relay", Provider: BoostReserve, URI: boostRelay},
 	}
 	plan := Candidates(sources, time.Unix(1000, 0))
-	want := []string{"personal", "turbo", "turbo-relay", Boost + "-fi-tcp", Boost + "-lv-quic", "free", "free-relay", Free + "-fi-tcp", Free + "-lv-quic"}
+	want := []string{"personal", Boost + "-fi-tcp", Free + "-lv-quic"}
 	if len(plan) != len(want) {
 		t.Fatalf("expected %d candidates, got %d", len(want), len(plan))
 	}
 	for i, candidate := range plan {
-		if candidate.ID != want[i] || (i > 0 && i < 5 && candidate.OwnerID != "turbo") || (i >= 5 && candidate.OwnerID != "free") {
+		if candidate.ID != want[i] || (i == 1 && candidate.OwnerID != "turbo") || (i == 2 && candidate.OwnerID != "free") {
 			t.Fatalf("incorrect candidate ownership or order at index %d", i)
 		}
 	}
@@ -44,18 +44,30 @@ func TestManagedGroupsKeepPersonalSourcesAndOwnReserveOrder(t *testing.T) {
 func TestDirectReserveCompatibilityWithController(t *testing.T) {
 	const fiKey = "cec3ca12-ad4b-4714-a401-a31c79362f07"
 	const lvKey = "iUhknX5NjVWE2kSZjzYHqxHCSZnivpjJfBZCuCKrbUM"
-	want := []struct{ scheme, port, key string }{{"vless", "2443", fiKey}, {"hysteria2", "2443", lvKey}}
-	candidates := DirectReserves(Free, reserveTestPrimary, time.Now())
+	want := []struct{ scheme, port, key string }{{"vless", "2444", fiKey}, {"hysteria2", "2443", lvKey}}
+	paid := strings.NewReplacer("%2Ffree", "%2Fboost", "expiry=0", "expiry=4102444800").Replace(reserveTestPrimary)
+	candidates := append(DirectReserves(Boost, paid, time.Now()), DirectReserves(Free, reserveTestPrimary, time.Now())...)
 	if len(candidates) != len(want) {
 		t.Fatal("expected both direct transports")
 	}
 	for i, candidate := range candidates {
 		link, err := url.Parse(candidate.URI)
-		if err != nil || link.Scheme != want[i].scheme || link.Port() != want[i].port || link.User.Username() != want[i].key {
+		if err != nil || (i == 0 && link.Hostname() != ReserveIPv4) || link.Scheme != want[i].scheme || link.Port() != want[i].port || link.User.Username() != want[i].key {
 			t.Fatalf("direct reserve %d does not match the backend contract", i)
 		}
 	}
 	boost := strings.ReplaceAll(strings.ReplaceAll(reserveTestPrimary, "%2Ffree", "%2Fboost"), "expiry=0", "expiry=2000")
+	if _, ok := FinlandRelayOutbound(candidates[0].FinlandRelayURI, fiKey, 2444, "test"); !ok {
+		t.Fatal("valid carrier missing")
+	}
+	for _, wrong := range []struct {
+		user string
+		port int
+	}{{"00000000-0000-4000-8000-000000000000", 2443}, {fiKey, 2443}, {fiKey, 443}} {
+		if _, ok := FinlandRelayOutbound(candidates[0].FinlandRelayURI, wrong.user, wrong.port, "test"); ok {
+			t.Fatal("cross-user or cross-tier relay accepted")
+		}
+	}
 	if len(DirectReserves(Boost, boost, time.Unix(2001, 0))) != 0 || len(DirectReserves("personal", reserveTestPrimary, time.Now())) != 0 {
 		t.Fatal("expired Boost or a personal source acquired a managed reserve")
 	}
@@ -147,5 +159,22 @@ func TestOwnedReserveTransportBudgetUsesOnlyExactEndpoint(t *testing.T) {
 		if ApplyXHTTPBudget(ReserveIPv4, 443, "tls", host, host, s) || len(s) != 1 {
 			t.Fatal("foreign transport changed")
 		}
+	}
+}
+
+func TestFinlandFastCarrierRequiresMatchingLiveBoost(t *testing.T) {
+	key := strings.NewReplacer("%2Ffree", "%2Fboost", "expiry=0", "expiry=4102444800").Replace(reserveTestPrimary)
+	u, _ := url.Parse(key)
+	uuid := finlandUUID(strings.ToLower(u.User.Username()))
+	if _, ok := FinlandQUICCarrier(key, uuid, "carrier"); !ok {
+		t.Fatal("live boost rejected")
+	}
+	for _, bad := range []string{reserveTestPrimary, strings.Replace(key, "4102444800", "1", 1), ""} {
+		if _, ok := FinlandQUICCarrier(bad, uuid, "carrier"); ok {
+			t.Fatal("ineligible key accepted")
+		}
+	}
+	if _, ok := FinlandQUICCarrier(key, "other", "carrier"); ok {
+		t.Fatal("mismatched Finnish credential accepted")
 	}
 }

@@ -22,11 +22,10 @@ class _HomeServicesAccordion extends StatefulWidget {
     required this.onExpandedChanged,
     this.onChanged,
     this.routeSnapshot,
-    this.showInFullMode = false,
   });
 
   final CoreBridge bridge;
-  final bool connected, enabled, expanded, showInFullMode;
+  final bool connected, enabled, expanded;
   final String routingMode;
   final ValueChanged<bool> onBusyChanged, onExpandedChanged;
   final VoidCallback? onChanged;
@@ -47,7 +46,6 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
   @override
   void initState() {
     super.initState();
-    if (widget.showInFullMode) pinnedOnly = false;
     if (widget.routeSnapshot != null) {
       services = widget.routeSnapshot!;
     } else {
@@ -174,8 +172,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
 
   @override
   Widget build(BuildContext context) {
-    final fullMode = widget.routingMode == 'all_traffic';
-    if (fullMode && !widget.showInFullMode) return const SizedBox.shrink();
+    if (widget.routingMode == 'all_traffic') return const SizedBox.shrink();
     final pinnedCount = services.where(_pinned).length;
     final available = widget.enabled && !busy && !loading && loadError.isEmpty;
     final filtered = _filtered;
@@ -250,14 +247,6 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
             ),
           ),
           if (widget.expanded) ...[
-            if (widget.showInFullMode)
-              const Padding(
-                padding: EdgeInsets.fromLTRB(4, 8, 4, 4),
-                child: Text(
-                  'Выберите сервис, затем укажите маршрут: автоматически, через VPN или напрямую.',
-                  style: TextStyle(color: _atlasMuted, height: 1.4),
-                ),
-              ),
             const SizedBox(height: 12),
             TextField(
               key: const ValueKey('service-search'),
@@ -348,19 +337,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
               ),
             for (final service in filtered)
               _service(service, available: available),
-            if (fullMode)
-              const Padding(
-                padding: EdgeInsets.only(top: 12),
-                child: Text(
-                  'Настройки применятся в режиме «По сервисам».',
-                  style: TextStyle(
-                    color: _atlasMuted,
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                ),
-              ),
-            if (!fullMode && !_isMobileShell && widget.connected)
+            if (!_isMobileShell && widget.connected)
               const Padding(
                 padding: EdgeInsets.only(top: 12),
                 child: Text(
@@ -460,7 +437,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
     final policy = _normalizedHomeRoutePolicy(service);
     final label = switch (policy) {
       'direct' => 'Напрямую',
-      'vpn' => widget.showInFullMode ? 'Через VPN' : 'VPN',
+      'vpn' => 'VPN',
       'zapret' => 'Zapret',
       _ => 'Авто',
     };

@@ -193,15 +193,17 @@ func (a *App) changeVPNSources(change func(*ProfileData) error) map[string]inter
 func publicVPNSources(sources []VPNSource) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(sources))
 	for _, source := range sources {
-		if isLatviaProvider(source.PublicCatalogID) && ownedSourceExpired(source) {
-			continue
+		referenceOnly := ownedprofile.IsPrimary(source.PublicCatalogID) && ownedSourceExpired(source)
+		name := source.Name
+		if ownedprofile.IsPrimary(source.PublicCatalogID) {
+			name = ownedprofile.RegionName(source.PublicCatalogID)
 		}
 		problem := source.LastError
 		if source.PublicCatalogID == managedFreeVPNProviderID && problem != "" {
 			problem = "Не удалось обновить Dropo Free. Используются сохранённые серверы, если они доступны."
 		}
 		result = append(result, map[string]interface{}{
-			"id": source.ID, "name": source.Name, "kind": source.Kind,
+			"id": source.ID, "name": name, "kind": source.Kind, "reference_only": referenceOnly,
 			"public_catalog_id": source.PublicCatalogID, "using_cache": source.UsingCache,
 			"disabled": source.Disabled, "selected_node": source.SelectedNode,
 			"selected_node_id": source.SelectedNodeID, "node_count": source.NodeCount,

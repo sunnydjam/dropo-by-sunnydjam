@@ -323,6 +323,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
     final payload = !active
         ? '{"active":false}'
         : jsonEncode({
+            'sharedRouteControls': true,
             'connected': widget.connected,
             'connectedAt': widget.connectedAt?.millisecondsSinceEpoch,
             'connecting': widget.connecting,

@@ -18,6 +18,7 @@ class VpnSourcesSnapshot {
       VpnSourcesSnapshot(
         sources: (json['sources'] as List? ?? const [])
             .map(_asMap)
+            .where((source) => source['reference_only'] != true)
             .map(VpnSourceInfo.fromJson)
             .toList(growable: false),
         autoSelect: json['autoSelect'] is bool
@@ -1175,11 +1176,12 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
         widget.running == true &&
         source.active &&
         !source.disabled;
-    final selected =
+    final manualFamily =
         widget.statusKnown &&
         widget.autoSelect == false &&
         widget.primary &&
         !source.disabled;
+    final selected = manualFamily;
     final missing =
         source.selectedNode < 0 || source.selectedNode >= source.nodeCount;
     final node =
@@ -1305,17 +1307,7 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (managed)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Text(
-                      _tr(
-                        context,
-                        'Автоматический выбор сервера',
-                        'Automatic server selection',
-                      ),
-                      style: const TextStyle(color: _atlasMuted, fontSize: 12),
-                    ),
-                  )
+                  const SizedBox.shrink()
                 else if (source.nodeCount > 1 ||
                     missing && source.nodeCount > 0)
                   TextButton.icon(
@@ -1385,11 +1377,12 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
               spacing: 8,
               runSpacing: 4,
               children: [
-                TextButton(
-                  key: ValueKey('rename-source-${source.id}'),
-                  onPressed: widget.busy ? null : widget.onRename,
-                  child: Text(_tr(context, 'Переименовать', 'Rename')),
-                ),
+                if (!managed)
+                  TextButton(
+                    key: ValueKey('rename-source-${source.id}'),
+                    onPressed: widget.busy ? null : widget.onRename,
+                    child: Text(_tr(context, 'Переименовать', 'Rename')),
+                  ),
                 TextButton(
                   onPressed: widget.busy ? null : widget.onRefresh,
                   child: Text(

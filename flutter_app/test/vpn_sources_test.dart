@@ -83,6 +83,7 @@ class _SourceBridge extends MockCoreBridge {
   bool failFavorite = false;
   String favoriteError = 'metadata unavailable';
   int refreshes = 0;
+  final List<List<Object?>> ingressChoices = [];
   final List<(String, String)> renames = [];
   final List<(String, String, bool)> favoriteChanges = [];
   final List<(String, int)> nodeChanges = [];
@@ -107,6 +108,10 @@ class _SourceBridge extends MockCoreBridge {
     List<Object?> args = const [],
     Duration timeout = const Duration(seconds: 12),
   }) async {
+    if (method == 'SetManagedIngress') {
+      ingressChoices.add(args);
+      return {'success': true};
+    }
     if (method == 'SetVPNSourceNodeByID') {
       final source = sources.firstWhere((source) => source.id == args[0]);
       final index = source.nodeIds.indexOf(args[1] as String);
@@ -374,6 +379,31 @@ Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  testWidgets('Free shows a single selectable Latvian route on mobile', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..running = false
+      ..autoSelect = true
+      ..sources = [
+        VpnSourceInfo.fromJson({
+          'id': 'free-id',
+          'name': 'Dropo Free · Латвия',
+          'public_catalog_id': 'dropo-individual-free',
+          'node_count': 1,
+          'selected_node': 0,
+        }),
+      ];
+    await _pumpEditor(tester, bridge, size: const Size(390, 800));
+    expect(find.text('Dropo Free · Латвия'), findsWidgets);
+    expect(find.textContaining('Финляндия'), findsNothing);
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('vpn-source-first-free-id')),
+    );
+    expect(bridge.moves, [('free-id', 0)]);
+  });
+
   testWidgets(
     'saved source with failed reload reports partial success and can recover',
     (tester) async {

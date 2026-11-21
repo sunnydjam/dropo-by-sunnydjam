@@ -38,7 +38,7 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 	if !decodeSuccess(BuildSingBoxConfig()) {
 		t.Fatal("cannot prepare managed failover")
 	}
-	wantIDs := []string{"old-owned", current.VPNSources[1].ID, ownedprofile.Free + "-fi-tcp", ownedprofile.Free + "-lv-quic"}
+	wantIDs := []string{ownedprofile.Free + "-lv-quic"}
 	if len(current.preparedSources) != len(wantIDs) {
 		t.Fatalf("expected four independent sources, got %d", len(current.preparedSources))
 	}
@@ -57,13 +57,13 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 		Generation int64 `json:"generation"`
 	}
 	json.Unmarshal([]byte(BeginAndroidSourceSession()), &plan)
-	reserve := current.preparedSources[1]
+	reserve := current.preparedSources[0]
 	selector := &testSourceSelector{}
 	if !CommitAndroidSourceProbeBatch(plan.Generation, sourceObservationJSON(reserve.ID, reserve.NodeID, plan.Generation, "ok", 40), reserve.ID, selector) {
 		t.Fatal("healthy reserve did not commit")
 	}
 	view := sourceCall(t, "GetVPNSources")["sources"].([]interface{})
-	if len(view) != 1 || view[0].(map[string]interface{})["id"] != "old-owned" || view[0].(map[string]interface{})["active"] != true {
+	if len(view) != 1 || view[0].(map[string]interface{})["id"] != "old-owned" || view[0].(map[string]interface{})["active"] != true || view[0].(map[string]interface{})["active_ingress"] != "latvia" {
 		t.Fatal("an active reserve must still display as the main profile")
 	}
 	CancelPendingSourceWork()
@@ -300,5 +300,26 @@ func TestAndroidOwnedOrphanReserveKeepsExistingOrder(t *testing.T) {
 	sourceSuccess(t, "RestoreManagedVPNSource", ownedprofile.Free, ownedReserveFixture, reserve.ID, androidNodeID(reserve.Nodes[0]))
 	if !reflect.DeepEqual(current.VPNSources[:3], before) {
 		t.Fatal("orphan reserve restoration reordered existing sources")
+	}
+}
+
+func TestAndroidManagedIngressChoiceSurvivesRestoreAndPreservesEntitlement(t *testing.T) {
+	resetOwnedReserveTest(t)
+	sourceSuccess(t, "AddVPNSource", "Personal", sourceTestKey)
+	sourceSuccess(t, "AddManagedVPNSource", ownedprofile.Free, "", ownedReserveFixture, true)
+	if sourceCall(t, "SetManagedIngress", "source-1", "latvia")["success"] == true {
+		t.Fatal("personal source acquired managed transport")
+	}
+	for _, retired := range []string{"main", "finland"} {
+		if sourceCall(t, "SetManagedIngress", ownedprofile.Free, retired)["success"] == true {
+			t.Fatal("retired preference accepted")
+		}
+	}
+	sourceSuccess(t, "SetManagedIngress", ownedprofile.Free, "latvia")
+	current.VPNSources[0].ManagedIngress = "finland" // persisted by the previous build
+	current = stateWithoutOwnedSecrets(current)
+	sourceSuccess(t, "RestoreManagedVPNSource", ownedprofile.Free, ownedReserveFixture, ownedprofile.Free, "")
+	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 2 || current.preparedSources[0].ID != ownedprofile.Free+"-lv-quic" || current.preparedSources[1].OwnerID == ownedprofile.Free {
+		t.Fatal("restored choice escaped its tier or displaced personal subscription")
 	}
 }

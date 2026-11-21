@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Android stores independent subscriptions, not a flattened list of servers.
@@ -19,6 +20,7 @@ type androidVPNSource struct {
 	Name             string        `json:"name"`
 	URI              string        `json:"uri"`
 	Disabled         bool          `json:"disabled"`
+	ManagedIngress   string        `json:"managed_ingress,omitempty"`
 	SelectedNodeID   string        `json:"selected_node_id,omitempty"`
 	FavoriteNodeIDs  []string      `json:"favorite_node_ids,omitempty"`
 	Nodes            []proxyConfig `json:"nodes,omitempty"`
@@ -83,7 +85,7 @@ func removeRetiredAndroidSourcesLocked() {
 	removed := isAndroidPublicSource(current.Subscription)
 	kept := current.VPNSources[:0]
 	for _, source := range current.VPNSources {
-		if isAndroidPublicSource(source.URI) {
+		if source.PublicCatalogID == androidManagedFreeSourceID || isAndroidPublicSource(source.URI) {
 			removed = true
 			continue
 		}
@@ -160,9 +162,22 @@ func androidSourcesViewLocked() map[string]interface{} {
 		if androidSelectedNode(source) < 0 {
 			problem = "Выбранный сервер исчез из подписки. Выберите другой сервер."
 		}
+		name := source.Name
+		activeIngress := ""
+		if ownedprofile.IsPrimary(publicID) {
+
+			name = ownedprofile.RegionName(publicID)
+			if active {
+				if publicID == ownedprofile.Free {
+					activeIngress = "latvia"
+				} else {
+					activeIngress = "finland"
+				}
+			}
+		}
 		views = append(views, map[string]interface{}{
-			"public_catalog_id": publicID,
-			"id":                source.ID, "name": ownedprofile.DisplayName(publicID, source.Name), "kind": kind, "disabled": source.Disabled,
+			"public_catalog_id": publicID, "reference_only": ownedprofile.IsPrimary(publicID) && ownedAndroidSourceExpired(source),
+			"id": source.ID, "name": name, "active_ingress": activeIngress, "kind": kind, "disabled": source.Disabled,
 			"selected_node": androidSelectedNode(source), "node_count": len(source.Nodes),
 			"node_names": names, "last_updated": source.UpdatedAt, "last_error": problem,
 			"node_ids": ids, "favorite_node_ids": append([]string{}, source.FavoriteNodeIDs...),
@@ -183,20 +198,11 @@ func changeAndroidSources(method string, args []interface{}) string {
 		}
 		return restoreOwnedAndroidSource(stringArg(args, 0, ""), stringArg(args, 1, ""), stringArg(args, 2, ""), stringArg(args, 3, ""))
 	}
-	managedProviderID := ""
 	if method == "AddManagedVPNSource" {
 		if provider := stringArg(args, 0, ""); ownedprofile.IsProvider(provider) {
 			return addOwnedAndroidSource(provider, stringArg(args, 2, ""), boolArg(args, 3, false))
 		}
-		if stringArg(args, 0, "") != androidManagedFreeSourceID || !boolArg(args, 3, false) {
-			return androidSourceError("Подтвердите использование бесплатной подписки Dropo.")
-		}
-		uri := strings.TrimSpace(stringArg(args, 2, ""))
-		if err := validateAndroidManagedFreeURL(uri); err != nil {
-			return androidSourceError(err.Error())
-		}
-		managedProviderID = androidManagedFreeSourceID
-		method, args = "AddVPNSource", []interface{}{"Dropo Free", uri}
+		return androidSourceError("Для Dropo Free нужен индивидуальный профиль Латвии.")
 	}
 	mu.Lock()
 	migrateAndroidSourcesLocked()
@@ -238,7 +244,7 @@ func changeAndroidSources(method string, args []interface{}) string {
 			return androidSourceError(err.Error())
 		}
 		for _, source := range sources {
-			if source.URI == uri || (managedProviderID != "" && source.PublicCatalogID == managedProviderID) {
+			if source.URI == uri {
 				return androidSourceError("Этот источник уже добавлен.")
 			}
 		}
@@ -250,9 +256,6 @@ func changeAndroidSources(method string, args []interface{}) string {
 			return androidSourceError("Используйте короткое название без ссылок и переносов строк.")
 		}
 		nodes, err := parseAndroidSource(uri)
-		if err == nil && managedProviderID != "" {
-			nodes, err = usableAndroidFreeNodes(nodes)
-		}
 		if err != nil || len(nodes) == 0 {
 			return androidSourceError(androidSubscriptionTestError)
 		}
@@ -262,7 +265,7 @@ func changeAndroidSources(method string, args []interface{}) string {
 				break
 			}
 		}
-		sources = append(sources, androidVPNSource{ID: id, PublicCatalogID: managedProviderID, Name: name, URI: uri, Nodes: nodes, UpdatedAt: currentTimeRFC3339()})
+		sources = append(sources, androidVPNSource{ID: id, Name: name, URI: uri, Nodes: nodes, UpdatedAt: currentTimeRFC3339()})
 	case "RefreshVPNSources":
 		// A failed refresh leaves the complete old pool and chosen nodes intact.
 		var workers sync.WaitGroup
@@ -297,11 +300,26 @@ func changeAndroidSources(method string, args []interface{}) string {
 		if len(failures) > 0 {
 			return androidSourceError("Не удалось обновить список серверов. Сохранённые источники не изменены.")
 		}
-	case "RemoveVPNSource", "SetVPNSourceEnabled", "SetVPNSourceNode", "SetVPNSourceNodeByID", "MoveVPNSource":
+	case "SetManagedIngress", "RemoveVPNSource", "SetVPNSourceEnabled", "SetVPNSourceNode", "SetVPNSourceNodeByID", "MoveVPNSource":
 		if index < 0 {
 			return androidSourceError("Источник не найден. Обновите список.")
 		}
 		switch method {
+		case "SetManagedIngress":
+			pref := stringArg(args, 1, "")
+			if len(args) != 2 || sources[index].Disabled || !(sources[index].PublicCatalogID == ownedprofile.Free && pref == "latvia" || sources[index].PublicCatalogID == ownedprofile.Boost && pref == "finland") || len(ownedprofile.DirectReserves(sources[index].PublicCatalogID, sources[index].URI, time.Now())) == 0 {
+				return androidSourceError("Этот вход сейчас недоступен.")
+			}
+			order, ok := ownedprofile.Move(androidSourceInputs(sources), id, 0)
+			if !ok {
+				return androidSourceError("Источник больше недоступен.")
+			}
+			sources[index].ManagedIngress = pref
+			reordered := make([]androidVPNSource, len(order))
+			for i, j := range order {
+				reordered[i] = sources[j]
+			}
+			sources, autoSelect = reordered, false
 		case "SetVPNSourceNodeByID":
 			nodeID := stringArg(args, 1, "")
 			if len(args) != 2 || !validAndroidFavoriteNodeID(nodeID) {

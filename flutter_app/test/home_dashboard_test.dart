@@ -226,7 +226,7 @@ class _PolicyContractBridge extends _HomeBridge {
     String method,
   ) async {
     policyWrites++;
-    savedPolicy = method == 'auto' && !mobile ? 'direct' : method;
+    savedPolicy = method;
     return {'success': true, 'method': savedPolicy};
   }
 }
@@ -1416,7 +1416,7 @@ void main() {
         }
         expect(
           find.byKey(const ValueKey('service-route-youtube-auto')),
-          mobile ? findsOneWidget : findsNothing,
+          findsOneWidget,
         );
         expect(
           find.byKey(const ValueKey('service-route-youtube-zapret')),

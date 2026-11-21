@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
+	"strconv"
 	"strings"
 
 	core "dropocore"
@@ -117,6 +119,36 @@ func buildXHTTPConfig(raw []byte, roots []string) (*xcore.Config, error) {
 		return nil, errXHTTPConfig
 	}
 	return built, nil
+}
+
+// Derive an encrypted first hop only for its matching managed Finnish credential.
+func buildFinlandCarrier(raw []byte, roots []string, relay string) (*xcore.Config, string, error) {
+	var o map[string]any
+	if json.Unmarshal(raw, &o) != nil {
+		return nil, "", errXHTTPConfig
+	}
+	stream, _ := o["streamSettings"].(map[string]any)
+	if !managedFinlandStream(o, stream) {
+		return nil, "", errXHTTPConfig
+	}
+	server := o["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
+	port := int(server["port"].(float64))
+	users, _ := server["users"].([]any)
+	if len(users) != 1 {
+		return nil, "", errXHTTPConfig
+	}
+	user, _ := users[0].(map[string]any)
+	id, _ := user["id"].(string)
+	firstHop, ok := ownedprofile.FinlandRelayOutbound(relay, id, port, "dropo-fi-carrier")
+	if !ok {
+		return nil, "", errXHTTPConfig
+	}
+	encoded, err := json.Marshal(firstHop)
+	if err != nil {
+		return nil, "", errXHTTPConfig
+	}
+	config, err := buildXHTTPConfig(encoded, roots)
+	return config, net.JoinHostPort(ownedprofile.ReserveIPv4, strconv.Itoa(port)), err
 }
 
 // The TCP exception accepts only the generated managed REALITY endpoint.

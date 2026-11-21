@@ -738,7 +738,7 @@ class _AtlasServiceRow extends StatelessWidget {
       _ => 'Авто',
     };
     final options = [
-      if (_isMobileShell) 'auto',
+      'auto',
       'direct',
       'vpn',
       if (!_isMobileShell && service.zapretSupported) 'zapret',

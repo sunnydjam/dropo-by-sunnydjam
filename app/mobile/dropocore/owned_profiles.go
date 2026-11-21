@@ -64,9 +64,6 @@ func applyOwnedAndroidSource(provider, raw, expectedSourceID, expectedNodeID str
 		return androidSourceError(err.Error())
 	}
 	current.VPNSources = sources
-	if len(old.VPNSources) == 0 {
-		current.VPNSourceAutoSelect = false
-	}
 	syncAndroidSubscriptionLocked()
 	clearCachedConfigLocked()
 	current.sourcesRevision++
@@ -169,6 +166,7 @@ func upsertOwnedAndroidPair(previous []androidVPNSource, primary, key string, no
 		} else {
 			source = androidVPNSource{ID: item.id, PublicCatalogID: item.id, Name: ownedprofile.Name(item.id), URI: item.uri, Nodes: item.nodes, UpdatedAt: currentTimeRFC3339()}
 			if index >= 0 {
+				source.ManagedIngress = sources[index].ManagedIngress
 				source.ID, source.Disabled, source.Name = sources[index].ID, sources[index].Disabled, sources[index].Name
 			}
 			if index < 0 {

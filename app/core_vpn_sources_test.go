@@ -34,12 +34,31 @@ func TestNormalizeProfileVPNSourcesRepairsRepeatedIDsWithoutLooping(t *testing.T
 
 func TestBuildVPNSourceFallbackOutboundKeepsSourceOrder(t *testing.T) {
 	outbound := buildVPNSourceFallbackOutbound([]string{"vpn-source-first", "vpn-source-second"})
-	if outbound["type"] != "selector" || outbound["default"] != "vpn-source-first" {
+	if outbound["type"] != "selector" || outbound["default"] != "vpn-source-first" || outbound["interrupt_exist_connections"] != true {
 		t.Fatalf("outbound = %#v", outbound)
 	}
 	values := outbound["outbounds"].([]string)
 	if len(values) != 2 || values[1] != "vpn-source-second" {
 		t.Fatalf("outbounds = %#v", values)
+	}
+}
+
+func TestWindowsSessionMigratesOnlyIndependentSourceStreams(t *testing.T) {
+	for _, tc := range []struct {
+		tags []string
+		want bool
+	}{
+		{[]string{"vpn-source-one", "vpn-source-two"}, true},
+		{[]string{"vpn-source-one"}, false},
+		{[]string{"vpn-source-one", "direct"}, false},
+	} {
+		old := map[string]any{"tag": "auto-select", "type": "selector", "outbounds": tc.tags}
+		cfg := map[string]any{"outbounds": []any{old}}
+		runtime := windowsSessionConfig(cfg)
+		out := runtime["outbounds"].([]any)[0].(map[string]any)
+		if (out["interrupt_exist_connections"] == true) != tc.want || old["interrupt_exist_connections"] != nil {
+			t.Fatal("incorrect cached source selector migration")
+		}
 	}
 }
 

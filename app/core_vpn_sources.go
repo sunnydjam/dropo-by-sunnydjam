@@ -127,6 +127,7 @@ func normalizeProfileVPNSources(profile *ProfileData) {
 		return
 	}
 	removeRetiredPublicVPNSource(profile)
+	migrateRegionalWindowsSources(profile)
 	if profile.VPNSourceSelectionMode != "latency" && profile.VPNSourceSelectionMode != "priority" {
 		// Old profiles never recorded whether their ordering was manual. Preserve
 		// an existing multi-source chain rather than overwrite possible user intent.

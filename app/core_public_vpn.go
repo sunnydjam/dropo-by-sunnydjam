@@ -83,7 +83,7 @@ func removeRetiredPublicVPNSource(profile *ProfileData) {
 func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 	for index := range sources {
 		source := &sources[index]
-		if isLatviaProvider(source.PublicCatalogID) || ownedprofile.IsReserve(source.PublicCatalogID) {
+		if isRegionalProvider(source.PublicCatalogID) || ownedprofile.IsReserve(source.PublicCatalogID) {
 			// Only a matching, validated primary may supply a managed fast route.
 			live := false
 			for _, parent := range sources {
@@ -92,7 +92,7 @@ func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 				}
 				_, relay, err := ownedprofile.Pair(parent.PublicCatalogID, parent.URI)
 				if err == nil {
-					if isLatviaProvider(source.PublicCatalogID) {
+					if isRegionalProvider(source.PublicCatalogID) {
 						live = source.URI == parent.URI
 					} else {
 						live = source.URI == relay
@@ -109,9 +109,10 @@ func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 			if source.URI == "" {
 				continue
 			} // Persisted reference; never a usable credential.
-			if _, err := ownedprofile.Validate(source.PublicCatalogID, source.URI); err == nil {
-				continue
+			if _, err := ownedprofile.Validate(source.PublicCatalogID, source.URI); err != nil {
+				source.URI, source.CachedNodes = "", nil
 			}
+			continue
 		}
 		if source.PublicCatalogID == managedFreeVPNProviderID && validateManagedFreeVPNURL(source.URI) == nil {
 			continue
@@ -142,30 +143,6 @@ func validateManagedFreeVPNURL(uri string) error {
 		return fmt.Errorf("бесплатный источник должен использовать публичный HTTPS-сервер")
 	}
 	return validateSubscriptionURL(uri)
-}
-
-func addManagedVPNSource(profile *ProfileData, providerID, name, uri string, consent bool) error {
-	if !consent {
-		return fmt.Errorf("подтвердите использование бесплатной подписки Dropo")
-	}
-	if providerID != managedFreeVPNProviderID {
-		return fmt.Errorf("неизвестный бесплатный VPN-источник")
-	}
-	if err := validateManagedFreeVPNURL(uri); err != nil {
-		return err
-	}
-	for _, source := range profile.VPNSources {
-		if source.PublicCatalogID == providerID || source.URI == strings.TrimSpace(uri) {
-			return fmt.Errorf("бесплатный источник уже добавлен; включите его в списке")
-		}
-	}
-	source, err := newVPNSource(nextVPNSourceID(profile.VPNSources), "Dropo Free", uri)
-	if err != nil {
-		return err
-	}
-	source.PublicCatalogID = providerID
-	profile.VPNSources = append(profile.VPNSources, source)
-	return nil
 }
 
 // Keep provider order, but do not offer transports this core cannot run or
@@ -211,14 +188,5 @@ func (a *App) AddManagedVPNSource(providerID, name, uri string, consent bool) ma
 	if ownedprofile.IsProvider(providerID) {
 		return a.addOwnedVPNSource(providerID, uri, consent)
 	}
-	// Validate before entering a transaction that might reconnect an active VPN.
-	if !consent || providerID != managedFreeVPNProviderID {
-		return map[string]interface{}{"success": false, "error": "подтвердите использование бесплатной подписки Dropo"}
-	}
-	if err := validateManagedFreeVPNURL(uri); err != nil {
-		return map[string]interface{}{"success": false, "error": err.Error()}
-	}
-	return a.changeVPNSources(func(profile *ProfileData) error {
-		return addManagedVPNSource(profile, providerID, name, uri, consent)
-	})
+	return map[string]interface{}{"success": false, "error": "Для Dropo Free нужен индивидуальный профиль Латвии."}
 }

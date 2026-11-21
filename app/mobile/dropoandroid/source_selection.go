@@ -269,27 +269,48 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 		var results []sourceObservation
 		var confirmedFailed sourceCandidate
 		chosen := ""
+		commitFirst := func(c sourceCandidate, r sourceObservation) bool {
+			if !s.commitSourceResults(cycleCtx, generation, coreGeneration, []sourceObservation{r}, c.ID, selector) {
+				return false
+			}
+			activeID = c.ID
+			if checked != nil {
+				checked <- true
+				checked = nil
+			}
+			return true
+		}
 		if initial && automatic {
 			s.sourceMu.Lock()
 			network := s.sourceNetwork
 			lastNetwork = network
 			s.sourceMu.Unlock()
 			preferred := core.PreferredAndroidNetworkSource(network, coreGeneration)
-			results = raceSourceCandidates(cycleCtx, candidates, preferred, probe, func(c sourceCandidate, r sourceObservation) bool {
-				if !s.commitSourceResults(cycleCtx, generation, coreGeneration, []sourceObservation{r}, c.ID, selector) {
-					return false
-				}
-				activeID = c.ID
-				if checked != nil {
-					checked <- true
-					checked = nil
-				}
-				return true
-			})
+			results = raceSourceCandidates(cycleCtx, candidates, preferred, probe, commitFirst)
 			// Publish the rest as observations only. An active healthy flow stays put.
 		} else if initial {
-			results = probeSourceCandidates(cycleCtx, candidates, probe)
-			chosen = chooseSourceCandidate(candidates, results, automatic)
+			first := candidates[0]
+			result := probe(cycleCtx, first)
+			results = []sourceObservation{result}
+			if result.State == "ok" {
+				chosen = first.ID
+			} else if cycleCtx.Err() == nil {
+				// Prefer another independently verified ingress of this plan before
+				// falling back to the user's next subscription.
+				end := 1
+				for end < len(candidates) && candidates[end].owner() == first.owner() {
+					end++
+				}
+				committed := false
+				results = append(results, raceSourceCandidates(cycleCtx, candidates[1:end], "", probe, func(c sourceCandidate, r sourceObservation) bool {
+					committed = commitFirst(c, r)
+					return committed
+				})...)
+				if !committed && cycleCtx.Err() == nil {
+					results = append(results, probeSourceCandidates(cycleCtx, candidates[end:], probe)...)
+					chosen = chooseSourceCandidate(candidates[end:], results, false)
+				}
+			}
 		} else {
 			var active sourceCandidate
 			for _, candidate := range candidates {

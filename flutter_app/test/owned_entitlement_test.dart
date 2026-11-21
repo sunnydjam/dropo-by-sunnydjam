@@ -12,6 +12,8 @@ class _Vault extends NativeAccountSessionStore {
   }
   _Vault.empty() : super(null, 'managed-vpn-v1');
   String? value;
+  int writes = 0;
+  bool failWrite = false;
   Map<String, dynamic> get record =>
       jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(value!))))
           as Map<String, dynamic>;
@@ -19,6 +21,8 @@ class _Vault extends NativeAccountSessionStore {
   Future<String?> read() async => value;
   @override
   Future<void> write(String token) async {
+    writes++;
+    if (failWrite) throw StateError('Protected storage unavailable');
     value = token;
   }
 
@@ -41,11 +45,17 @@ class _PrimaryVault extends NativeAccountSessionStore {
 
 class _Bridge extends MockCoreBridge {
   bool connected = false;
+  final busyState = <String, dynamic>{};
+  bool failStatus = false;
+  List<Map<String, dynamic>>? references;
   final added = <String>[];
   final removed = <String>[];
   @override
-  Future<CoreStatus> status() async =>
-      CoreStatus.fromJson({'connected': connected});
+  Future<CoreStatus> status() async {
+    if (failStatus) throw StateError('Native status unavailable');
+    return CoreStatus.fromJson({'connected': connected, ...busyState});
+  }
+
   @override
   Future<Map<String, dynamic>> callMap(
     String method, {
@@ -61,11 +71,13 @@ class _Bridge extends MockCoreBridge {
     }
     if (method == 'GetVPNSources') {
       return {
-        'sources': [
-          {'id': 'manual', 'public_catalog_id': ''},
-          {'id': 'free', 'public_catalog_id': 'dropo-individual-free'},
-          {'id': 'boost', 'public_catalog_id': 'dropo-individual-boost'},
-        ],
+        'sources':
+            references ??
+            [
+              {'id': 'manual', 'public_catalog_id': ''},
+              {'id': 'free', 'public_catalog_id': 'dropo-individual-free'},
+              {'id': 'boost', 'public_catalog_id': 'dropo-individual-boost'},
+            ],
       };
     }
     throw StateError('Unexpected bridge method $method');
@@ -344,6 +356,106 @@ void main() {
     expect(api.calls, isEmpty);
     expect(bridge.added, isEmpty);
   });
+  for (final busy in ['connected', 'running', 'connecting', 'disconnecting']) {
+    test(
+      'account refresh during $busy keeps pending Boost uncached and applies after restart',
+      () async {
+        bridge.busyState[busy] = true;
+        vault.failWrite = true;
+        final before = vault.value;
+        final identityBefore = Map<String, dynamic>.from(primary.record);
+        final deferred = await client.linkAccount(
+          bridge,
+          'registered-fixture',
+          true,
+          transport: api,
+        );
+        expect(deferred, {'success': true, 'deferred': true});
+        expect(vault.value, before);
+        expect(vault.writes, 0);
+        expect(primary.record, identityBefore);
+        expect(api.calls, isEmpty);
+        expect(bridge.added, isEmpty);
+        expect(bridge.removed, isEmpty);
+
+        bridge.busyState.clear();
+        vault.failWrite = false;
+        final restarted = OwnedVPNClient(
+          endpoint: 'https://api.droponevedimka.ru',
+          store: vault,
+          identityStore: identity,
+        );
+        final applied = await HttpOverrides.runWithHttpOverrides(
+          () => restarted.synchronizeEntitlement(
+            bridge,
+            'registered-fixture',
+            until,
+            transport: api,
+          ),
+          _HTTP(),
+        );
+        expect(applied['success'], true);
+        expect(applied['turboReady'], true);
+        expect(bridge.added, [
+          'dropo-individual-free',
+          'dropo-individual-boost',
+        ]);
+        expect(vault.record['boostKey'], contains('#boost'));
+        expect(vault.record['boostUntil'], api.until);
+        expect(
+          api.calls.where((call) => call == 'POST /v1/vpn/profile'),
+          hasLength(1),
+        );
+      },
+    );
+  }
+  test(
+    'unknown native state preserves cached keys and skips provisioning',
+    () async {
+      bridge.failStatus = true;
+      final before = vault.value;
+      final result = await client.linkAccount(
+        bridge,
+        'registered-fixture',
+        true,
+        transport: api,
+      );
+      expect(result['success'], false);
+      expect(result['error'], isNot(contains('Native status unavailable')));
+      expect(vault.value, before);
+      expect(vault.writes, 0);
+      expect(api.calls, isEmpty);
+      expect(bridge.added, isEmpty);
+    },
+  );
+  test(
+    'unchanged cached entitlement never recreates a manually removed Boost',
+    () async {
+      vault.value = base64UrlEncode(
+        utf8.encode(
+          jsonEncode({
+            ...vault.record,
+            'boostKey': 'cached-boost',
+            'boostUntil': api.until,
+          }),
+        ),
+      );
+      bridge.references = [
+        {'id': 'manual', 'public_catalog_id': ''},
+        {'id': 'free', 'public_catalog_id': 'dropo-individual-free'},
+      ];
+      final result = await client.synchronizeEntitlement(
+        bridge,
+        'registered-fixture',
+        until,
+        transport: api,
+      );
+      expect(result['unchanged'], true);
+      expect(api.calls, isEmpty);
+      expect(bridge.added, isEmpty);
+      expect(bridge.removed, isEmpty);
+    },
+  );
   test(
     'revocation removes only managed Boost and preserves Free and manual sources',
     () async {

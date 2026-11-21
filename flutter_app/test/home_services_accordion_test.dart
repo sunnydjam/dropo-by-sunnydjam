@@ -441,7 +441,7 @@ void main() {
       );
       expect(
         find.byKey(const ValueKey('service-route-youtube-auto')),
-        findsNothing,
+        findsOneWidget,
       );
 
       final vpn = find.byKey(const ValueKey('service-route-youtube-vpn'));

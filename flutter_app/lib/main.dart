@@ -884,6 +884,7 @@ class HttpCoreBridge implements CoreBridge {
     return _managedFreeSourceClient.add(
       id,
       consent,
+      requireIndividual: true,
       save: (providerId, name, uri, accepted) => callMap(
         'AddManagedVPNSource',
         args: [providerId, name, uri, accepted],
@@ -1621,7 +1622,7 @@ class ChannelCoreBridge implements CoreBridge {
       _managedFreeSourceClient.add(
         id,
         consent,
-        requireIndividual: _isAndroidPlatform,
+        requireIndividual: true,
         save: (providerId, name, uri, accepted) => callMap(
           'AddManagedVPNSource',
           args: [providerId, name, uri, accepted],
@@ -2866,6 +2867,8 @@ class VpnSourceInfo {
     required this.lastUpdated,
     required this.lastError,
     this.publicCatalogId = '',
+    this.managedIngress = '',
+    this.activeIngress = '',
     this.usingCache = false,
     this.active = false,
     this.nodeIds = const [],
@@ -2888,6 +2891,8 @@ class VpnSourceInfo {
   final String publicCatalogId;
   final bool usingCache;
   final bool active;
+  final String managedIngress;
+  final String activeIngress;
   bool get isPublic => publicCatalogId.isNotEmpty;
 
   factory VpnSourceInfo.fromJson(Map<String, dynamic> json) {
@@ -2904,6 +2909,8 @@ class VpnSourceInfo {
       lastUpdated: json['last_updated']?.toString() ?? '',
       lastError: json['last_error']?.toString() ?? '',
       publicCatalogId: json['public_catalog_id']?.toString() ?? '',
+      managedIngress: json['managed_ingress']?.toString() ?? '',
+      activeIngress: json['active_ingress']?.toString() ?? '',
       usingCache: json['using_cache'] == true,
       active: json['active'] == true,
       response: VpnResponseSnapshot.fromJson(_asMap(json['response'])),
@@ -3150,7 +3157,7 @@ String _homeRouteName(RouteService service) {
 String _normalizedHomeRoutePolicy(RouteService service) {
   switch (service.selectedMethod.trim().toLowerCase()) {
     case 'auto':
-      return _isMobileShell ? 'auto' : 'direct';
+      return 'auto';
     case 'vpn':
       return 'vpn';
     case 'zapret':
@@ -6486,7 +6493,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (controlsDisabled || connectionBusy) return;
     if (mode != appConfig.routingMode) await _setHomeRoutingMode(mode);
     if (mounted && mode == 'blocked_only' && appConfig.routingMode == mode) {
-      await _selectMenuSection('services');
+      setState(() => homeRoutesExpanded = true);
     }
   }
 
@@ -6517,6 +6524,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       setState(() {
         appConfig = appConfig.copyWith(routingMode: mode);
+        homeRoutesExpanded = mode == 'blocked_only';
         liveRoutesConfirmed = false;
         statusMessage = mode == 'all_traffic'
             ? 'Сохранён режим «Всё через VPN»'
@@ -6662,92 +6670,97 @@ class _DropoHomePageState extends State<DropoHomePage>
     // and host widget tests retain the native Flutter layout.
     if (Platform.isAndroid) {
       final source = homeSources.where((source) => source.active).firstOrNull;
-      return Column(
-        children: [
-          ?_buildUpdateNotice(),
-          Expanded(
-            child: _AndroidAnimatedHome(
-              connected: online && status.connected,
-              connectedAt: _androidConnectedAt,
-              connecting:
-                  (preparingFullVpnSource && !_androidAwaitingPermission) ||
-                  status.connecting ||
-                  busyTasks.containsKey('vpn-connect'),
-              disconnecting:
-                  _androidCancelPending ||
-                  status.disconnecting ||
-                  busyTasks.containsKey('vpn-disconnect'),
-              busy: isBusy || preparingFullVpnSource,
-              enabled: powerEnabled,
-              canCancel:
-                  online &&
-                  status.connecting &&
-                  !status.disconnecting &&
-                  !_androidCancelPending &&
-                  !preparingFullVpnSource &&
-                  !quitting &&
-                  !sectionBusy,
-              motionEnabled: !appConfig.reduceMotion,
-              visible: windowVisible && activeMenuSection == 'home',
-              responseMs: status.vpnResponse.current
-                  ? status.vpnResponse.latencyMs
-                  : null,
-              onPresented: () {
-                if (mounted && !_androidHomeVisible) {
-                  setState(() => _androidHomeVisible = true);
-                }
-              },
-              routingMode: appConfig.routingMode,
-              source: source?.name ?? '',
-              message: showHint ? normalizedHint : '',
-              error: hintDanger,
-              onConnectionRequested: (target) =>
-                  unawaited(_toggleConnection(requestedTarget: target)),
-              onCancel: () => unawaited(_cancelAndroidConnection()),
-              onMode: (mode) => unawaited(_chooseAndroidHomeMode(mode)),
-              onSources: () => unawaited(_openSubscription()),
-              onServices: () => unawaited(_selectMenuSection('services')),
-              onHelp: () => unawaited(_selectMenuSection('guided-help')),
-              fallback: ListView(
+      return LayoutBuilder(
+        builder: (context, bounds) => ListView(
+          key: const PageStorageKey('android-home-scroll'),
+          children: [
+            ?_buildUpdateNotice(),
+            SizedBox(
+              height: (bounds.maxHeight * .76).clamp(450.0, 640.0).toDouble(),
+              child: _AndroidAnimatedHome(
+                connected: online && status.connected,
+                connectedAt: _androidConnectedAt,
+                connecting:
+                    (preparingFullVpnSource && !_androidAwaitingPermission) ||
+                    status.connecting ||
+                    busyTasks.containsKey('vpn-connect'),
+                disconnecting:
+                    _androidCancelPending ||
+                    status.disconnecting ||
+                    busyTasks.containsKey('vpn-disconnect'),
+                busy: isBusy || preparingFullVpnSource,
+                enabled: powerEnabled,
+                canCancel:
+                    online &&
+                    status.connecting &&
+                    !status.disconnecting &&
+                    !_androidCancelPending &&
+                    !preparingFullVpnSource &&
+                    !quitting &&
+                    !sectionBusy,
+                motionEnabled: !appConfig.reduceMotion,
+                visible: windowVisible && activeMenuSection == 'home',
+                responseMs: status.vpnResponse.current
+                    ? status.vpnResponse.latencyMs
+                    : null,
+                onPresented: () {
+                  if (mounted && !_androidHomeVisible) {
+                    setState(() => _androidHomeVisible = true);
+                  }
+                },
+                routingMode: appConfig.routingMode,
+                source: source?.name ?? '',
+                message: showHint ? normalizedHint : '',
+                error: hintDanger,
+                onConnectionRequested: (target) =>
+                    unawaited(_toggleConnection(requestedTarget: target)),
+                onCancel: () => unawaited(_cancelAndroidConnection()),
+                onMode: (mode) => unawaited(_chooseAndroidHomeMode(mode)),
+                onSources: () => unawaited(_openSubscription()),
+                onServices: () =>
+                    setState(() => homeRoutesExpanded = !homeRoutesExpanded),
+                onHelp: () => unawaited(_selectMenuSection('guided-help')),
+                fallback: Column(
+                  children: [
+                    _HomeConnectionPanel(
+                      atlas: true,
+                      status: status,
+                      online: online,
+                      booting: booting,
+                      busy: isBusy,
+                      disconnecting: status.disconnecting,
+                      routingMode: appConfig.routingMode,
+                      enabled: powerEnabled,
+                      onPressed: _toggleConnection,
+                      motionEnabled: false,
+                    ),
+                    if (showHint)
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Text(normalizedHint),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Column(
                 children: [
-                  _HomeConnectionPanel(
-                    atlas: true,
-                    status: status,
-                    online: online,
-                    booting: booting,
-                    busy: isBusy,
-                    disconnecting: status.disconnecting,
-                    routingMode: appConfig.routingMode,
-                    enabled: powerEnabled,
-                    onPressed: _toggleConnection,
-                    motionEnabled: false,
-                  ),
-                  if (showHint)
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Text(normalizedHint),
-                    ),
                   _buildRouteControls(summaryOnly: true),
-                  if (appConfig.routingMode == 'blocked_only')
-                    TextButton.icon(
-                      onPressed: powerEnabled
-                          ? () => _selectMenuSection('services')
-                          : null,
-                      icon: const Icon(Icons.tune),
-                      label: const Text('Настроить сервисы'),
-                    ),
+                  _buildHomeServices(),
                 ],
               ),
             ),
-          ),
-          if (!online && !booting && !quitting)
-            TextButton.icon(
-              key: const ValueKey('home-retry-core'),
-              onPressed: () => unawaited(_bootstrap()),
-              icon: const Icon(Icons.refresh),
-              label: const Text('Повторить запуск Dropo'),
-            ),
-        ],
+            if (!online && !booting && !quitting)
+              TextButton.icon(
+                key: const ValueKey('home-retry-core'),
+                onPressed: () => unawaited(_bootstrap()),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Повторить запуск Dropo'),
+              ),
+          ],
+        ),
       );
     }
     return _AtlasHomeLayout(
@@ -6882,28 +6895,30 @@ class _DropoHomePageState extends State<DropoHomePage>
         children: [
           _buildRouteControls(summaryOnly: true),
           SizedBox(height: _compactDesktopHome(context) ? 6 : 12),
-          _HomeServicesAccordion(
-            key: const ValueKey('home-services'),
-            bridge: widget.bridge,
-            routeSnapshot: online ? routes : null,
-            connected: online && status.connected,
-            enabled:
-                online &&
-                !quitting &&
-                !uiBusy &&
-                !connectionBusy &&
-                !preparingFullVpnSource,
-            routingMode: appConfig.routingMode,
-            expanded: homeRoutesExpanded,
-            onExpandedChanged: (expanded) =>
-                setState(() => homeRoutesExpanded = expanded),
-            onBusyChanged: _setSectionBusy,
-            onChanged: () => unawaited(_refresh(all: true)),
-          ),
+          _buildHomeServices(),
         ],
       ),
     );
   }
+
+  Widget _buildHomeServices() => _HomeServicesAccordion(
+    key: const ValueKey('home-services'),
+    bridge: widget.bridge,
+    routeSnapshot: online ? routes : null,
+    connected: online && status.connected,
+    enabled:
+        online &&
+        !quitting &&
+        !uiBusy &&
+        !connectionBusy &&
+        !preparingFullVpnSource,
+    routingMode: appConfig.routingMode,
+    expanded: homeRoutesExpanded,
+    onExpandedChanged: (expanded) =>
+        setState(() => homeRoutesExpanded = expanded),
+    onBusyChanged: _setSectionBusy,
+    onChanged: () => unawaited(_refresh(all: true)),
+  );
 
   Widget? _buildUpdateNotice() {
     final info = updateInfo;
@@ -6951,21 +6966,6 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   Widget _buildMenuSectionContent() {
     switch (activeMenuSection) {
-      case 'android-services':
-        return SingleChildScrollView(
-          child: _HomeServicesAccordion(
-            bridge: widget.bridge,
-            routeSnapshot: online ? routes : null,
-            connected: online && status.connected,
-            enabled: !controlsDisabled && !connectionBusy,
-            routingMode: appConfig.routingMode,
-            showInFullMode: true,
-            expanded: true,
-            onExpandedChanged: (_) {},
-            onBusyChanged: _setSectionBusy,
-            onChanged: () => unawaited(_refresh(all: true)),
-          ),
-        );
       case 'settings':
       case 'advanced':
       case 'help':
@@ -7247,8 +7247,10 @@ class _DropoHomePageState extends State<DropoHomePage>
     }
     // Retired routes may remain in history; navigation must never change a
     // saved traffic mode merely to reveal service settings.
-    if (section == 'services' || section == 'service-settings') {
-      section = Platform.isAndroid ? 'android-services' : 'home';
+    if (section == 'services' ||
+        section == 'service-settings' ||
+        section == 'android-services') {
+      section = 'home';
       homeRoutesExpanded = true;
     }
     setState(() {

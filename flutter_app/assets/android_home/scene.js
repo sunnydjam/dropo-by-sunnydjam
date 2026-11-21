@@ -34,6 +34,13 @@
   let lastView = null, lastSpacePaint = -Infinity, haloKey = null;
   let retryArrow;
 
+  // Chromium can finish a failed stylesheet preload before bootstrap receives
+  // its error event. A scene without its layout cannot expose usable controls.
+  if (!getComputedStyle(phone).getPropertyValue('--dp-mint').trim()) {
+    send('failed');
+    return;
+  }
+
   const en = () => host.language === 'en';
   const text = (ru, english) => en() ? english : ru;
 
@@ -78,6 +85,7 @@
   }
 
   function syncControls() {
+    main.classList.toggle('shared-routes', host.sharedRouteControls === true);
     logicalState = connectionState();
     const resting = logicalState === 'idle' || logicalState === 'error';
     main.dataset.state = logicalState;
@@ -119,6 +127,11 @@
   }
   function layout(zoom) {
     const big = Math.min(322, w * .88);
+    if (host.sharedRouteControls) {
+      const diameter = Math.min(big, h * .56);
+      return {cx:w / 2, cy:mix(h * .50, h * .39, zoom),
+        d:mix(diameter, Math.min(diameter * .78, 220), zoom), big:diameter};
+    }
     return { cx: w / 2, cy: mix(Math.min(h * .43, h - 325), Math.min(236, h - 420), zoom),
       d: mix(big, Math.min(240, w * .66), zoom), big };
   }
@@ -389,9 +402,8 @@
       renderer.render(world,camera);
     }
     // Error/retry controls follow the resting globe, not the departing flight.
-    const resting = layout(0), hit = b.d*.86;
-    Object.assign(power.style,{left:resting.cx+'px',top:resting.cy+'px'});
-    Object.assign(hint.style,{left:resting.cx+'px',top:resting.cy+'px'});
+    const hit = b.d*.86;
+
     Object.assign(earthAction.style,{left:(b.cx-hit/2)+'px',top:(b.cy-hit/2)+'px',width:hit+'px',height:hit+'px'});
     updateTimer();
   }
@@ -405,7 +417,7 @@
     raf = 0;
     if (!ready || !hostReceived || !visible || !intersecting) return;
     if ((presented || resize()) &&
-        ((presented && !settings.motion) || now - lastPaint >= 1000 / 30 - 1)) {
+        ((presented && !settings.motion) || now - lastPaint >= 1000 / 60 - 1)) {
       lastPaint = now;
       draw(now);
       // A resize invalidates any frame Chromium prepared at the old viewport.
@@ -502,7 +514,7 @@
     const rect = scene.getBoundingClientRect(), bounds = phone.getBoundingClientRect();
     const valid = Math.min(innerWidth, innerHeight, rect.width, rect.height, bounds.width, bounds.height) > 0;
     const ratio = devicePixelRatio || 1;
-    const next = valid ? [innerWidth, innerHeight, rect.width, rect.height, bounds.width, bounds.height, ratio].join('/') : '';
+    const next = valid ? [innerWidth, innerHeight, rect.width, rect.height, bounds.width, bounds.height, ratio, Boolean(host.sharedRouteControls)].join('/') : '';
     if (!force && next === geometry) return valid;
     geometry = next;
     layoutRevision++;
@@ -510,7 +522,7 @@
     if (!presented) main.dataset.startup = 'loading';
     if (!valid) return false;
 
-    w = rect.width; h = rect.height; dpr = Math.min(ratio, 1.5);
+    w = rect.width; h = rect.height; dpr = Math.min(ratio, 2, Math.sqrt(1750000 / (w * h)));
     haloKey = null; lastSpacePaint = -Infinity;
     spaceW = bounds.width; spaceH = bounds.height;
     haloCanvas.width = Math.round(w * dpr); haloCanvas.height = Math.round(h * dpr);
@@ -523,6 +535,11 @@
       camera.left = -w / 2; camera.right = w / 2;
       camera.top = h / 2; camera.bottom = -h / 2;
       camera.updateProjectionMatrix();
+    }
+    const resting = layout(0);
+    for (const element of [power, hint]) {
+      element.style.left = resting.cx+'px';
+      element.style.top = resting.cy+'px';
     }
     details.style.top = (layout(1).cy + 116) + 'px';
     cancel.style.top = Math.min(h - 70, layout(0).cy + 195) + 'px';

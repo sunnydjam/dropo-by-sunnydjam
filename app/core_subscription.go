@@ -14,28 +14,30 @@ import (
 
 // ProxyConfig represents a parsed proxy configuration.
 type ProxyConfig struct {
-	Type        string `json:"type"`
-	Raw         string `json:"raw,omitempty"`
-	Tag         string `json:"tag"`
-	Server      string `json:"server"`
-	ServerPort  int    `json:"server_port"`
-	UUID        string `json:"uuid,omitempty"`     // VLESS/VMess/TUIC
-	Password    string `json:"password,omitempty"` // Trojan/SS/Hysteria2
-	Method      string `json:"method,omitempty"`   // Shadowsocks
-	Flow        string `json:"flow,omitempty"`     // VLESS
-	Network     string `json:"network,omitempty"`  // tcp/ws/grpc
-	Security    string `json:"security,omitempty"` // tls/reality
-	SNI         string `json:"sni,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
-	PublicKey   string `json:"public_key,omitempty"` // Reality
-	ShortID     string `json:"short_id,omitempty"`   // Reality
-	Path        string `json:"path,omitempty"`       // WebSocket/XHTTP
-	Host        string `json:"host,omitempty"`       // WebSocket/XHTTP
-	Mode        string `json:"mode,omitempty"`       // XHTTP
-	Extra       string `json:"extra,omitempty"`      // XHTTP JSON options
-	ALPN        string `json:"alpn,omitempty"`       // TLS ALPN list
-	HeaderType  string `json:"header_type,omitempty"`
-	Name        string `json:"name"` // Display name
+	finlandQUIC  map[string]any // Optional private carrier for the same managed Finnish exit.
+	finlandRelay map[string]any // Generated from the vault-backed owner. Never serialized.
+	Type         string         `json:"type"`
+	Raw          string         `json:"raw,omitempty"`
+	Tag          string         `json:"tag"`
+	Server       string         `json:"server"`
+	ServerPort   int            `json:"server_port"`
+	UUID         string         `json:"uuid,omitempty"`     // VLESS/VMess/TUIC
+	Password     string         `json:"password,omitempty"` // Trojan/SS/Hysteria2
+	Method       string         `json:"method,omitempty"`   // Shadowsocks
+	Flow         string         `json:"flow,omitempty"`     // VLESS
+	Network      string         `json:"network,omitempty"`  // tcp/ws/grpc
+	Security     string         `json:"security,omitempty"` // tls/reality
+	SNI          string         `json:"sni,omitempty"`
+	Fingerprint  string         `json:"fingerprint,omitempty"`
+	PublicKey    string         `json:"public_key,omitempty"` // Reality
+	ShortID      string         `json:"short_id,omitempty"`   // Reality
+	Path         string         `json:"path,omitempty"`       // WebSocket/XHTTP
+	Host         string         `json:"host,omitempty"`       // WebSocket/XHTTP
+	Mode         string         `json:"mode,omitempty"`       // XHTTP
+	Extra        string         `json:"extra,omitempty"`      // XHTTP JSON options
+	ALPN         string         `json:"alpn,omitempty"`       // TLS ALPN list
+	HeaderType   string         `json:"header_type,omitempty"`
+	Name         string         `json:"name"` // Display name
 	// Hysteria2/TUIC specific
 	Obfs              string `json:"obfs,omitempty"`               // Hysteria2 obfs type
 	ObfsPassword      string `json:"obfs_password,omitempty"`      // Hysteria2 obfs password
