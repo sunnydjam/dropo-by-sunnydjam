@@ -57,9 +57,13 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	if !settings.FreeAccessEnabled {
 		t.Fatal("free access state should remain enabled for legacy UI/API compatibility")
 	}
+	wantMethod := FreeAccessMethodDirect
+	if runtime.GOOS == "windows" || runtime.GOOS == "android" {
+		wantMethod = FreeAccessMethodAuto
+	}
 	for _, svc := range DefaultFreeAccessServices {
-		if settings.FreeAccessMethods[svc.Tag] != FreeAccessMethodAuto {
-			t.Fatalf("expected automatic route for %s", svc.Tag)
+		if got := settings.FreeAccessMethods[svc.Tag]; got != wantMethod {
+			t.Fatalf("fresh route for %s = %q, want %q", svc.Tag, got, wantMethod)
 		}
 	}
 	if !settings.Notifications {
