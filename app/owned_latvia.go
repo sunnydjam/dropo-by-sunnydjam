@@ -16,11 +16,17 @@ func isLatviaProvider(id string) bool {
 
 const finlandSuffix = "-fi-tcp"
 
+func isMainIngress(id string) bool {
+	return id == ownedprofile.Free+ownedprofile.MainSuffix || id == ownedprofile.Boost+ownedprofile.MainSuffix
+}
 func isRegionalProvider(id string) bool {
 	return isLatviaProvider(id) || ownedprofile.IsFinlandReserveID(id)
 }
 
 func windowsOwnedFamily(id string) string {
+	if isMainIngress(id) {
+		return strings.TrimSuffix(id, ownedprofile.MainSuffix)
+	}
 	if ownedprofile.IsFinlandReserveID(id) {
 		return strings.TrimSuffix(id, finlandSuffix)
 	}
@@ -44,6 +50,27 @@ func windowsRegionalURI(source VPNSource) (string, error) {
 }
 
 func upsertWindowsOwnedSources(p *ProfileData, owner, raw string) error {
+	if err := upsertWindowsRegionalSource(p, owner, raw); err != nil {
+		return err
+	}
+	catalogID := owner + ownedprofile.MainSuffix
+	for i, source := range p.VPNSources {
+		if source.PublicCatalogID == catalogID {
+			if source.URI != raw {
+				p.VPNSources[i] = VPNSource{ID: source.ID, Name: ownedprofile.Name(owner) + " · Основной", PublicCatalogID: catalogID, URI: raw, Kind: VPNSourceDirect, Disabled: source.Disabled}
+			}
+			return nil
+		}
+	}
+	for _, parent := range p.VPNSources {
+		if parent.PublicCatalogID == owner && !ownedprofile.Expired(owner, raw, time.Now()) {
+			p.VPNSources = append(p.VPNSources, VPNSource{ID: nextVPNSourceID(p.VPNSources), Name: ownedprofile.Name(owner) + " · Основной", PublicCatalogID: catalogID, URI: raw, Kind: VPNSourceDirect, Disabled: parent.Disabled})
+			break
+		}
+	}
+	return nil
+}
+func upsertWindowsRegionalSource(p *ProfileData, owner, raw string) error {
 	if _, err := ownedprofile.Validate(owner, raw); err != nil || !ownedprofile.IsPrimary(owner) {
 		return fmt.Errorf("Некорректный профиль Dropo")
 	}
@@ -88,6 +115,12 @@ func migrateRegionalWindowsSources(p *ProfileData) {
 	inserted := make(map[string]bool, len(parents))
 	next := make([]VPNSource, 0, len(p.VPNSources))
 	for _, s := range p.VPNSources {
+		if isMainIngress(s.PublicCatalogID) {
+			if _, ok := parents[windowsOwnedFamily(s.PublicCatalogID)]; ok {
+				next = append(next, s)
+			}
+			continue
+		}
 		family := windowsOwnedFamily(s.PublicCatalogID)
 		if family == "" {
 			if s.PublicCatalogID != managedFreeVPNProviderID {

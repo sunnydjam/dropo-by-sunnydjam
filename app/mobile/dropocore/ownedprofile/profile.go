@@ -13,6 +13,8 @@ const Free = "dropo-individual-free"
 const Boost = "dropo-individual-boost"
 const FreeReserve = "dropo-individual-free-reserve"
 const BoostReserve = "dropo-individual-boost-reserve"
+const PrimaryIPv4 = "109.120.152.117"
+const MainSuffix = "-main"
 const ReserveIPv4 = "91.229.239.99"
 const ReserveHostname = "ms-api.ordaflow.net"
 
@@ -102,7 +104,7 @@ func Validate(id, raw string) (int64, error) {
 		if u.Host != ReserveIPv4+":443" {
 			return 0, errors.New("untrusted owned reserve")
 		}
-	} else if u.Host != "cdn.droponevedimka.ru:443" && u.Host != "193.233.88.97:443" {
+	} else if u.Host != "cdn.droponevedimka.ru:443" && u.Host != PrimaryIPv4+":443" && u.Host != "193.233.88.97:443" {
 		return 0, errors.New("untrusted owned ingress")
 	}
 	credential := u.User.Username()
@@ -147,6 +149,18 @@ func Validate(id, raw string) (int64, error) {
 		return 0, errors.New("invalid owned lifetime")
 	}
 	return until, nil
+}
+
+// MainURI refreshes the dial address of both vaulted legacy keys and newly
+// issued keys. Validation binds the TLS name, HTTP authority, tier and expiry.
+func MainURI(id, raw string, now time.Time) (string, error) {
+	if !IsPrimary(id) || Expired(id, raw, now) {
+		return "", errors.New("managed primary unavailable")
+	}
+	u, _ := url.Parse(raw)
+	u.Host = PrimaryIPv4 + ":443"
+	u.Fragment = Name(id) + " · Основной"
+	return u.String(), nil
 }
 func Expired(id, raw string, now time.Time) bool {
 	if !IsProvider(id) {

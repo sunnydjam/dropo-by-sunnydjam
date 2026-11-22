@@ -27,7 +27,7 @@ void main() {
       OwnedHttpResource.account,
     );
     expect(api.map((r) => r.address?.address), [
-      '193.233.88.97',
+      '109.120.152.117',
       '91.229.239.99',
     ]);
     expect(
@@ -145,7 +145,7 @@ void main() {
         resource: OwnedHttpResource.account,
         dial: (uri, address) {
           calls.add('${uri.host}@${address.address}');
-          if (address.address == '193.233.88.97') {
+          if (address.address == '109.120.152.117') {
             throw const SocketException('unreachable');
           }
           expect(uri.host, 'ms-api.ordaflow.net');
@@ -195,7 +195,7 @@ void main() {
         'GET /dropo-api/v1/me',
       ]);
       expect(calls, [
-        'api.droponevedimka.ru@193.233.88.97',
+        'api.droponevedimka.ru@109.120.152.117',
         'ms-api.ordaflow.net@91.229.239.99',
         'ms-api.ordaflow.net@91.229.239.99',
       ]);
@@ -317,7 +317,7 @@ void main() {
       clock: () => now,
       dial: (uri, address) {
         calls.add(uri.host);
-        if (primaryFailed && address.address == '193.233.88.97') {
+        if (primaryFailed && address.address == '109.120.152.117') {
           throw const SocketException('unreachable');
         }
         return createPinnedTlsConnection(

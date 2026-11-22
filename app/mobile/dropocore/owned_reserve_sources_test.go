@@ -38,9 +38,9 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 	if !decodeSuccess(BuildSingBoxConfig()) {
 		t.Fatal("cannot prepare managed failover")
 	}
-	wantIDs := []string{ownedprofile.Free + "-lv-quic"}
+	wantIDs := []string{ownedprofile.Free + "-lv-quic", ownedprofile.Free + ownedprofile.MainSuffix}
 	if len(current.preparedSources) != len(wantIDs) {
-		t.Fatalf("expected four independent sources, got %d", len(current.preparedSources))
+		t.Fatalf("expected two independent sources, got %d", len(current.preparedSources))
 	}
 	for i, candidate := range current.preparedSources {
 		if candidate.ID != wantIDs[i] || candidate.Tag != "vpn-"+candidate.ID {
@@ -319,7 +319,7 @@ func TestAndroidManagedIngressChoiceSurvivesRestoreAndPreservesEntitlement(t *te
 	current.VPNSources[0].ManagedIngress = "finland" // persisted by the previous build
 	current = stateWithoutOwnedSecrets(current)
 	sourceSuccess(t, "RestoreManagedVPNSource", ownedprofile.Free, ownedReserveFixture, ownedprofile.Free, "")
-	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 2 || current.preparedSources[0].ID != ownedprofile.Free+"-lv-quic" || current.preparedSources[1].OwnerID == ownedprofile.Free {
+	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 3 || current.preparedSources[0].ID != ownedprofile.Free+"-lv-quic" || current.preparedSources[1].ID != ownedprofile.Free+ownedprofile.MainSuffix || current.preparedSources[2].OwnerID == ownedprofile.Free {
 		t.Fatal("restored choice escaped its tier or displaced personal subscription")
 	}
 }

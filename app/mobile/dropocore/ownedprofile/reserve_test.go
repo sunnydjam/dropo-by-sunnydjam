@@ -21,12 +21,12 @@ func TestManagedGroupsKeepPersonalSourcesAndOwnReserveOrder(t *testing.T) {
 		{ID: "turbo-relay", Provider: BoostReserve, URI: boostRelay},
 	}
 	plan := Candidates(sources, time.Unix(1000, 0))
-	want := []string{"personal", Boost + "-fi-tcp", Free + "-lv-quic"}
+	want := []string{"personal", Boost + "-fi-tcp", Boost + MainSuffix, Free + "-lv-quic", Free + MainSuffix}
 	if len(plan) != len(want) {
 		t.Fatalf("expected %d candidates, got %d", len(want), len(plan))
 	}
 	for i, candidate := range plan {
-		if candidate.ID != want[i] || (i == 1 && candidate.OwnerID != "turbo") || (i == 2 && candidate.OwnerID != "free") {
+		if candidate.ID != want[i] || ((i == 1 || i == 2) && candidate.OwnerID != "turbo") || (i >= 3 && candidate.OwnerID != "free") {
 			t.Fatalf("incorrect candidate ownership or order at index %d", i)
 		}
 	}
@@ -176,5 +176,23 @@ func TestFinlandFastCarrierRequiresMatchingLiveBoost(t *testing.T) {
 	}
 	if _, ok := FinlandQUICCarrier(key, "other", "carrier"); ok {
 		t.Fatal("mismatched Finnish credential accepted")
+	}
+}
+
+func TestMainIngressUpgradesLegacyAddressOnlyForCurrentTier(t *testing.T) {
+	now := time.Unix(1000, 0)
+	for _, host := range []string{"193.233.88.97", "cdn.droponevedimka.ru", PrimaryIPv4} {
+		raw := strings.Replace(reserveTestPrimary, "@193.233.88.97", "@"+host, 1)
+		want, _ := url.Parse(raw)
+		upgraded, err := MainURI(Free, raw, now)
+		u, _ := url.Parse(upgraded)
+		if err != nil || u.Host != PrimaryIPv4+":443" || u.RawQuery != want.RawQuery || u.User.String() != want.User.String() {
+			t.Fatal("invalid migration of current Free key")
+		}
+	}
+	for _, bad := range []string{"personal", FreeReserve, Boost} {
+		if _, err := MainURI(bad, reserveTestPrimary, now); err == nil {
+			t.Fatal("cross-tier or unowned credential accepted")
+		}
 	}
 }

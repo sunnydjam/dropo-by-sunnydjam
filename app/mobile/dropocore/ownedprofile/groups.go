@@ -88,6 +88,10 @@ func Candidates(sources []Source, now time.Time) []Candidate {
 				result = append(result, Candidate{ID: direct.ID, OwnerID: primary.ID, URI: direct.URI, Index: -1, FinlandRelayURI: direct.FinlandRelayURI})
 			}
 		}
+		id := primary.Provider + MainSuffix
+		if raw, err := MainURI(primary.Provider, primary.URI, now); err == nil && !occupied[id] {
+			result = append(result, Candidate{ID: id, OwnerID: primary.ID, URI: raw, Index: -1})
+		}
 	}
 	return result
 }
