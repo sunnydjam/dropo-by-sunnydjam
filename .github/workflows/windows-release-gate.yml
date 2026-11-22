@@ -156,7 +156,7 @@ jobs:
       - name: Preserve verified Windows packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: dropo-windows-packages
+          name: ${{ inputs.intent == 'release' && format('dropo-windows-release-{0}-{1}', github.run_id, github.run_attempt) || 'dropo-windows-packages' }}
           path: |
             release/dropo-*/dropo-Windows-Setup-x64.exe
             release/dropo-*/dropo-Windows-Setup-x64.exe.sha256

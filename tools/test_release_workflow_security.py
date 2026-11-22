@@ -102,6 +102,9 @@ class ReleaseTrust(unittest.TestCase):
         self.assertIn('PACKAGE_ID: ${{ github.event.workflow_run.id }}', text)
         self.assertIn('PACKAGE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}', text)
         self.assertIn('-ExpectedRunId $env:PACKAGE_ID -ExpectedAttempt $env:PACKAGE_ATTEMPT', text)
+        gate = WORKFLOW.with_name('windows-release-gate.yml').read_text(encoding='utf-8')
+        self.assertIn("format('dropo-windows-release-{0}-{1}', github.run_id, github.run_attempt)", gate)
+        self.assertIn('--name "dropo-windows-release-$env:PACKAGE_RUN_ID-$env:PACKAGE_ATTEMPT"', text)
 
 class FlutterActionPins(unittest.TestCase):
     def test_floating_nested_cache_is_rejected(self):

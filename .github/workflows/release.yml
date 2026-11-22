@@ -68,10 +68,13 @@ jobs:
       - name: Download verified Windows packages
         if: steps.readiness.outputs.ready == 'true'
         shell: pwsh
+        env:
+          PACKAGE_RUN_ID: ${{ steps.readiness.outputs.package_run_id }}
+          PACKAGE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
-          gh run download "${{ steps.readiness.outputs.package_run_id }}" `
+          gh run download "$env:PACKAGE_RUN_ID" `
             --repo "$env:GITHUB_REPOSITORY" `
-            --name "dropo-windows-packages" `
+            --name "dropo-windows-release-$env:PACKAGE_RUN_ID-$env:PACKAGE_ATTEMPT" `
             --dir "release-assets"
           if ($LASTEXITCODE -ne 0) { throw "Verified artifact download failed" }
           $installer = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Setup-x64.exe")
