@@ -26,5 +26,5 @@ only when Windows shows a valid publicly trusted Authenticode signature.
 - upstream binaries may be included and described by the SBOM, but are never
   re-signed as if they were authored by dropo.
 
-See the [privacy policy](PRIVACY.md), [MIT license](LICENSE), release SHA-256
+See the [privacy policy](../../PRIVACY.md), [MIT license](../../LICENSE), release SHA-256
 files, SPDX SBOM and build provenance included with each release.

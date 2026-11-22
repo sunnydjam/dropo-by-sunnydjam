@@ -1,5 +1,8 @@
 # Dropo Connect Booster
 
+[Начать разработку](docs/development/README.md) · [Контракт маршрутизации](docs/architecture/ROUTING_CONTRACT.md) · [Собрать и проверить выпуск](scripts/README.md)
+
+
 Твой интернет. Твои правила.
 
 Приложение для Windows и Android с двумя режимами подключения: всё устройство
@@ -12,7 +15,7 @@ Connect Booster — название приложения, а не обещан�
 Подробнее о публичном названии и описании для магазина:
 [Публичное позиционирование](docs/public-branding.md).
 
-[![CI](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml)
+[![CI](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sunnydjam/dropo-by-sunnydjam/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > [!IMPORTANT]
@@ -189,7 +192,7 @@ Dropo не запускает скачанные anti-DPI-скрипты, Lua/Cy
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Подробный контракт маршрутизации находится в
-[ROUTING_CONTRACT.md](ROUTING_CONTRACT.md).
+[ROUTING_CONTRACT.md](docs/architecture/ROUTING_CONTRACT.md).
 
 ## VPN-источники
 
@@ -207,18 +210,18 @@ Shadowsocks, Hysteria2, TUIC и WireGuard.
 подписки не меняется. Перемещение источников включает ручной приоритет, кнопка
 «Автовыбор по пингу» возвращает автоматический режим. Для существующих профилей
 с несколькими источниками старый порядок сохраняется до явного включения
-автовыбора. Подробности: [изменения интерфейса и автовыбор](UI_SHELL_REFINEMENT.md).
+автовыбора. Подробности: [изменения интерфейса и автовыбор](docs/archive/UI_SHELL_REFINEMENT.md).
 
 ### Бесплатный публичный VPN (по желанию)
 
 Бесплатный каталог доступен при первом подключении или через **Источники VPN →
 Подключить бесплатный источник**. Dropo Free добавляется только после согласия;
 без доступного backend можно использовать свою подписку. Подробнее:
-[Бесплатный источник](PUBLIC_VPN_SOURCES.md).
+[Бесплатный источник](docs/architecture/PUBLIC_VPN_SOURCES.md).
 Бесплатные и собственные источники участвуют в одной цепочке: по заданному
 приоритету либо по измеренному отклику, если включён автовыбор.
 Это сторонние серверы без гарантии доступности. Подробности, ограничения и
-инструкция: [Бесплатные VPN-источники](PUBLIC_VPN_SOURCES.md).
+инструкция: [Бесплатные VPN-источники](docs/architecture/PUBLIC_VPN_SOURCES.md).
 
 Dropo Boost пока только информационный блок: покупка подписок внутри приложения
 не запущена. Использование своих подписок не требует Boost.
@@ -250,7 +253,7 @@ Dropo Boost пока только информационный блок: пок�
 активным источником и двумя режимами. Состояния различаются текстом, а не только
 цветом; полный VPN не стирает сохранённые маршруты. В 3.0.30 эта основа сохранена,
 а расположение элементов упрощено. Подробности:
-[Улучшения интерфейса](UI_IMPROVEMENTS.md).
+[Улучшения интерфейса](docs/archive/UI_IMPROVEMENTS.md).
 
 ### Минималистичный интерфейс — 3.0.30
 
@@ -330,7 +333,7 @@ GitHub SHA-256 точного installer asset, выполняет тихое о�
 
 До появления доверенной Authenticode-подписи тестовые Windows-артефакты будут
 отмечаться как unsigned. Отключать Defender или добавлять исключения не нужно.
-Политика описана в [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
+Политика описана в [CODE_SIGNING_POLICY.md](docs/release/CODE_SIGNING_POLICY.md).
 
 ## Сборка Windows
 
@@ -427,7 +430,7 @@ Android Preview APK и подписанный Play AAB. `scripts/build/build.ps1
 обычная очистка `release/` его не затрагивает. Ключи хранятся отдельно вне Git и
 не входят в архив сборок. Подготовка AAB не означает одобрение магазина. Команды
 сборки, публикации APK и первый Play rollout:
-[ANDROID_GOOGLE_PLAY_RELEASE.md](ANDROID_GOOGLE_PLAY_RELEASE.md).
+[ANDROID_GOOGLE_PLAY_RELEASE.md](docs/release/ANDROID_GOOGLE_PLAY_RELEASE.md).
 
 ## Диагностика
 

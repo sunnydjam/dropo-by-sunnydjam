@@ -19,7 +19,11 @@ release/
 /build/
 
 # Local development documentation
-/docs/
+/docs/*
+!/docs/architecture/
+!/docs/release/
+!/docs/development/
+!/docs/archive/
 
 # Executable dependencies remain a local verified build cache. The reviewed
 # routing catalogs are the one exception: they are versioned in GitHub and
