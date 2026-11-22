@@ -34,6 +34,7 @@ class ReleaseTrust(unittest.TestCase):
     def setUp(self):
         self.event = {
             'github.repository': 'owner/project',
+            'github.event.workflow_run.display_title': 'Prepare Dropo release',
             'github.event.workflow_run.head_repository.full_name': 'owner/project',
             'github.event.workflow_run.event': 'workflow_dispatch',
             'github.event.workflow_run.conclusion': 'success',
@@ -42,6 +43,10 @@ class ReleaseTrust(unittest.TestCase):
 
     def test_trusted_main_dispatch(self):
         self.assertTrue(accepted(self.event))
+
+    def test_validation_dispatch_cannot_publish(self):
+        self.event['github.event.workflow_run.display_title'] = 'Validate Windows packages'
+        self.assertFalse(accepted(self.event))
 
     def test_fork_same_branch(self):
         self.event['github.event.workflow_run.head_repository.full_name']='attacker/fork';self.assertFalse(accepted(self.event))
@@ -83,7 +88,8 @@ class ReleaseTrust(unittest.TestCase):
         text=WORKFLOW.with_name('windows-release-gate.yml').read_text(encoding='utf-8')
         events=text.split('\npermissions:',1)[0]
         self.assertIn('  pull_request:\n    branches: [develop, main]',events)
-        self.assertIn('  workflow_dispatch: {}',events)
+        self.assertIn('default: validate',events)
+        self.assertIn("inputs.intent == 'release'",text)
         self.assertNotIn('  push:',events)
         self.assertIn("if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'",text)
         self.assertNotRegex(events,r'(?m)^\s+(paths|paths-ignore):')

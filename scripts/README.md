@@ -34,3 +34,7 @@ A configured backend cannot be combined with `-ReuseFlutterWindowsOutput`:
 compile Flutter afresh so a previous origin cannot enter the new package.
 `tools/test-account-build-endpoint.ps1` validates these rules without building,
 packaging, fetching dependencies or reading credentials.
+
+## Проверка и выпуск
+
+Ручной запуск Windows package release gate по умолчанию использует `intent=validate`. Для запуска издателя выберите `intent=release` из main. Конфигурация `build.releaseChannel` определяет черновик или стабильный выпуск.

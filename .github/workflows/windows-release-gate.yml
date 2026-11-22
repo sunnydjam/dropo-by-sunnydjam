@@ -1,7 +1,14 @@
 name: Windows package release gate
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.intent == 'release' && 'Prepare Dropo release' || 'Validate Windows packages' }}
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      intent:
+        description: Choose package validation or the release publisher
+        type: choice
+        default: validate
+        options: [validate, release]
   # Required checks must also run before merge, including documentation-only
   # changes; a path-filtered skipped workflow leaves protected PRs pending.
   pull_request:
