@@ -4,6 +4,12 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.22 — 2026-11-23
+
+- Windows release assets are tied to the specific build run and attempt that passed validation.
+- Android builds isolate the toolchain mappings of different working copies.
+- Documentation links, Windows packaging and bootstrap checks run in CI.
+
 ## 3.1.13 — 2026-11-19
 
 - Android opens service routing from the home screen before connecting and supports live route edits.
