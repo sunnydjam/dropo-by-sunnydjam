@@ -1,0 +1,3799 @@
+part of 'main.dart';
+
+enum _AccountPhase {
+  loading,
+  signedOut,
+  pendingAuth,
+  signedIn,
+  offline,
+  deletionCleanup,
+}
+
+/// Server expiry is authoritative, but a broken/missing response cannot keep
+/// the client waiting forever. These are UI bounds, not a server TTL change.
+@visibleForTesting
+Duration accountAuthWaitDuration(Object? expiresAt, {required DateTime now}) {
+  final expiry = expiresAt is String ? DateTime.tryParse(expiresAt) : null;
+  if (expiry == null) return const Duration(minutes: 5);
+  final remaining = expiry.difference(now);
+  if (remaining <= Duration.zero) return Duration.zero;
+  return remaining > const Duration(minutes: 10)
+      ? const Duration(minutes: 10)
+      : remaining;
+}
+
+/// Real account sessions never use a local server mock or plain HTTP in release.
+bool accountEndpointAvailable(
+  String endpoint, {
+  bool allowLocalDevelopment = kDebugMode,
+}) {
+  final uri = Uri.tryParse(endpoint);
+  if (uri == null ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasQuery ||
+      uri.hasFragment ||
+      (uri.path.isNotEmpty && uri.path != '/')) {
+    return false;
+  }
+  final host = uri.host.toLowerCase();
+  final local =
+      host == 'localhost' ||
+      (InternetAddress.tryParse(host)?.isLoopback ?? false);
+  return uri.scheme == 'https' && !local ||
+      allowLocalDevelopment && local && uri.scheme == 'http';
+}
+
+/// These two deployment origins are owned by the same account service. This
+/// trust is compiled into the client, never accepted from server capabilities.
+@visibleForTesting
+String accountCredentialOrigin(String endpoint) {
+  final uri = Uri.tryParse(endpoint);
+  if (uri == null || !accountEndpointAvailable(endpoint)) return endpoint;
+  final origin = uri.origin;
+  if (origin == 'https://dropo.fun' ||
+      origin == 'https://api.droponevedimka.ru') {
+    return 'https://dropo.fun';
+  }
+  return origin;
+}
+
+// Purchases require a separate, explicit build AND server opt-in. They remain
+// off while no real premium VPN provisioning is available.
+const _accountPurchasesEnabled =
+    !_playDistribution &&
+    bool.fromEnvironment('DROPO_PURCHASES_ENABLED', defaultValue: false);
+
+@visibleForTesting
+AccountTransport? debugAccountTransport;
+
+@visibleForTesting
+String? debugAccountSessionToken;
+
+class _AccountRecord {
+  const _AccountRecord({
+    required this.id,
+    required this.displayName,
+    required this.maskedPhone,
+    required this.plan,
+    required this.telegramUsername,
+    this.authMethod = 'telegram',
+    this.demoAccount = false,
+    this.username = '',
+    this.speedBoostUntil,
+  });
+
+  factory _AccountRecord.fromJson(Map<String, dynamic> json) => _AccountRecord(
+    id: json['id']?.toString() ?? '',
+    displayName: json['displayName']?.toString() ?? 'Пользователь Dropo',
+    maskedPhone: json['maskedPhone']?.toString() ?? '',
+    plan: json['plan']?.toString() ?? 'Dropo Free',
+    telegramUsername: json['telegramUsername']?.toString() ?? '',
+    authMethod: json['authMethod'] == 'guest'
+        ? 'guest'
+        : json['authMethod'] == 'password'
+        ? 'password'
+        : 'telegram',
+    demoAccount: json['demoAccount'] == true,
+    username: json['username']?.toString() ?? '',
+    speedBoostUntil: DateTime.tryParse(
+      json['speedBoostUntil']?.toString() ?? '',
+    ),
+  );
+
+  final String id, displayName, maskedPhone, plan, telegramUsername;
+  final String authMethod, username;
+  final bool demoAccount;
+  bool get passwordAccount => authMethod == 'password';
+  bool get guestAccount => authMethod == 'guest';
+  final DateTime? speedBoostUntil;
+}
+
+/// Presentation-only public account details. Credentials and private profile
+/// fields never enter the shell, semantics, logs, or avatar image requests.
+class AccountDisplaySnapshot {
+  const AccountDisplaySnapshot({
+    required this.displayName,
+    this.telegramUsername = '',
+    this.turboUntil,
+    this.registered = true,
+  });
+
+  factory AccountDisplaySnapshot.fromJson(Map<String, dynamic> json) {
+    final raw = json['displayName']?.toString() ?? '';
+    final clean = raw
+        .replaceAll(
+          RegExp(r'[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]'),
+          '',
+        )
+        .trim();
+    final name = String.fromCharCodes(clean.runes.take(80));
+    final username = json['telegramUsername']?.toString() ?? '';
+    return AccountDisplaySnapshot(
+      displayName: name.isEmpty ? 'Аккаунт' : name,
+      turboUntil: DateTime.tryParse(json['speedBoostUntil']?.toString() ?? ''),
+      telegramUsername: RegExp(r'^[A-Za-z0-9_]{1,32}$').hasMatch(username)
+          ? username
+          : '',
+      registered: json['authMethod'] != 'guest' && json['guestAccount'] != true,
+    );
+  }
+
+  final String displayName, telegramUsername;
+  final DateTime? turboUntil;
+  final bool registered;
+}
+
+/// A bounded background read of an already stored session, never an automatic
+/// sign-in. It is independent of the VPN ready gate and cannot clear a token.
+class _AccountDisplayController extends ValueNotifier<AccountDisplaySnapshot?> {
+  _AccountDisplayController({
+    required this.endpoint,
+    required this.available,
+    required bool persistSession,
+    this.transport,
+    String? initialToken,
+  }) : _vault = _AccountTokenVault(
+         endpoint: endpoint,
+         enabled: persistSession,
+         initialToken: initialToken,
+       ),
+       super(null);
+
+  final String endpoint;
+  final bool available;
+  final AccountTransport? transport;
+  final _AccountTokenVault _vault;
+  AccountTransport? _ownedApi;
+  int _generation = 0;
+  bool _disposed = false;
+
+  void publish(AccountDisplaySnapshot? snapshot) {
+    if (_disposed) return;
+    ++_generation;
+    value = snapshot;
+  }
+
+  Future<void> restore() async {
+    if (!available || _disposed) return;
+    final generation = ++_generation;
+    try {
+      final token = await _vault.read().timeout(const Duration(seconds: 3));
+      if (_disposed ||
+          generation != _generation ||
+          token == null ||
+          token.isEmpty) {
+        return;
+      }
+      // A saved account remains identifiable when the server is offline. The
+      // actual public name replaces this neutral label only after validation.
+      value = const AccountDisplaySnapshot(
+        displayName: 'Аккаунт',
+        registered: false,
+      );
+      final api = transport ?? (_ownedApi = _AccountApi(endpoint));
+      final response = await api
+          .request('GET', '/v1/me', token: token)
+          .timeout(const Duration(seconds: 8));
+      if (_disposed || generation != _generation) return;
+      value = AccountDisplaySnapshot.fromJson(_asMap(response['account']));
+    } catch (_) {
+      // AccountPage alone owns authentication, expiry and local sign-out.
+      // An offline backend must not interrupt VPN or remove a stored session.
+    } finally {
+      _ownedApi?.close();
+      _ownedApi = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    ++_generation;
+    _ownedApi?.close();
+    _ownedApi = null;
+    super.dispose();
+  }
+}
+
+int? _positiveStarsAmount(Object? value) =>
+    value is num && value.isFinite && value > 0 && value == value.toInt()
+    ? value.toInt()
+    : null;
+
+class _AccountProduct {
+  const _AccountProduct({
+    required this.id,
+    required this.name,
+    required this.description,
+    required this.stars,
+    required this.durationDays,
+  });
+
+  factory _AccountProduct.fromJson(Map<String, dynamic> json) {
+    final id = json['id']?.toString() ?? '';
+    final stars = json['stars'];
+    final days = json['durationDays'];
+    if (id.isEmpty ||
+        stars is! num ||
+        days is! num ||
+        !stars.isFinite ||
+        !days.isFinite ||
+        stars <= 0 ||
+        days <= 0 ||
+        stars != stars.toInt() ||
+        days != days.toInt()) {
+      throw const FormatException('Unavailable purchase terms');
+    }
+    return _AccountProduct(
+      id: id,
+      name: json['name']?.toString() ?? 'Ускорение VPN',
+      description:
+          json['description']?.toString() ??
+          'Приоритетные быстрые маршруты Dropo на ${days.toInt()} дней.',
+      stars: stars.toInt(),
+      durationDays: days.toInt(),
+    );
+  }
+
+  final String id, name, description;
+  final int stars, durationDays;
+}
+
+class _AccountSession {
+  const _AccountSession({
+    required this.deviceName,
+    required this.lastSeenAt,
+    required this.current,
+  });
+
+  factory _AccountSession.fromJson(Map<String, dynamic> json) =>
+      _AccountSession(
+        deviceName: json['deviceName']?.toString() ?? 'Dropo',
+        lastSeenAt: DateTime.tryParse(json['lastSeenAt']?.toString() ?? ''),
+        current: json['current'] == true,
+      );
+
+  final String deviceName;
+  final DateTime? lastSeenAt;
+  final bool current;
+}
+
+class AccountApiException implements Exception {
+  const AccountApiException(this.message, {this.code = '', this.status = 0});
+  final String message, code;
+  final int status;
+  @override
+  String toString() => message;
+}
+
+abstract class AccountTransport {
+  Future<Map<String, dynamic>> request(
+    String method,
+    String path, {
+    String? token,
+    Map<String, dynamic>? body,
+  });
+
+  void close();
+}
+
+@visibleForTesting
+AccountTransport createAccountTransportForTesting(
+  String endpoint, {
+  Duration responseTimeout = const Duration(seconds: 8),
+  OwnedHttpTransport? connectionTransport,
+}) => _AccountApi(
+  endpoint,
+  responseTimeout: responseTimeout,
+  connectionTransport: connectionTransport,
+);
+
+class _AccountApi implements AccountTransport {
+  _AccountApi(
+    this.endpoint, {
+    this.responseTimeout = const Duration(seconds: 8),
+    OwnedHttpTransport? connectionTransport,
+  }) : _transport =
+           connectionTransport ??
+           OwnedHttpTransport(resource: OwnedHttpResource.account);
+
+  final String endpoint;
+  final Duration responseTimeout;
+  final OwnedHttpTransport _transport;
+  String? _playProjectNumber;
+
+  Future<String> _requestPlayProof(String body) async {
+    final project =
+        _playProjectNumber ??
+        (await request('GET', '/v1/capabilities'))['playIntegrityProjectNumber']
+            as String?;
+    if (project == null || (int.tryParse(project) ?? 0) <= 0) {
+      throw const AccountApiException(
+        'Проверка Google Play временно недоступна.',
+        code: 'play_integrity_unavailable',
+      );
+    }
+    _playProjectNumber = project;
+    try {
+      final proof = await const MethodChannel('dropo/core')
+          .invokeMethod<String>('requestPlayIntegrity', {
+            'projectNumber': project,
+            'body': body,
+          })
+          .timeout(const Duration(seconds: 40));
+      if (proof != null && proof.isNotEmpty && proof.length <= 12 * 1024) {
+        return proof;
+      }
+    } on Exception {
+      _playProjectNumber = null;
+    }
+    throw const AccountApiException(
+      'Не удалось подтвердить установку из Google Play.',
+      code: 'play_integrity_required',
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> request(
+    String method,
+    String path, {
+    String? token,
+    Map<String, dynamic>? body,
+  }) async {
+    if (!accountEndpointAvailable(endpoint)) {
+      throw const AccountApiException('Сервис аккаунтов пока не настроен.');
+    }
+    final encodedBody = body == null ? null : jsonEncode(body);
+    final needsPlayProof =
+        _isPlayDistribution &&
+        method == 'POST' &&
+        path == '/v1/auth/guest' &&
+        encodedBody != null;
+    final proof = needsPlayProof ? await _requestPlayProof(encodedBody) : null;
+    if (proof != null) path = '/v1/auth/guest/play';
+    final base = Uri.parse(endpoint);
+    final target = base.resolve(path);
+    final publicCatalog = path == '/public/v1/catalog' && method == 'GET';
+    if ((!path.startsWith('/v1/') && !publicCatalog) ||
+        target.origin != base.origin ||
+        (!target.path.startsWith('/v1/') && !publicCatalog) ||
+        (publicCatalog && (token != null || body != null))) {
+      throw const AccountApiException('Некорректный запрос аккаунта.');
+    }
+    final acquired = await _transport.open(method, target);
+    final request = acquired.request;
+    try {
+      request.followRedirects = false;
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      if (token != null && token.isNotEmpty) {
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      }
+      if (proof != null) {
+        request.headers.set('X-Dropo-Play-Integrity', proof);
+      }
+      if (encodedBody != null) {
+        request.headers.contentType = ContentType.json;
+        request.add(utf8.encode(encodedBody));
+      }
+      late final HttpClientResponse response;
+      late final String raw;
+      try {
+        response = await request.close().timeout(responseTimeout);
+        raw = await _readBody(response).timeout(responseTimeout);
+      } catch (_) {
+        request.abort();
+        rethrow;
+      }
+      Map<String, dynamic> decoded = const {};
+      if (raw.trim().isNotEmpty) {
+        Object? value;
+        try {
+          value = jsonDecode(raw);
+        } on FormatException {
+          throw AccountApiException(
+            'Сервис вернул некорректный ответ.',
+            code: 'invalid_response',
+            status: response.statusCode,
+          );
+        }
+        if (value is Map) decoded = Map<String, dynamic>.from(value);
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final error = _asMap(decoded['error']);
+        throw AccountApiException(
+          error['message']?.toString() ??
+              'Сервис аккаунтов временно недоступен.',
+          code: error['code']?.toString() ?? '',
+          status: response.statusCode,
+        );
+      }
+      return decoded;
+    } finally {
+      acquired.close();
+    }
+  }
+
+  Future<String> _readBody(HttpClientResponse response) async {
+    const maxBytes = 256 * 1024;
+    if (response.contentLength > maxBytes) {
+      throw const AccountApiException('Сервис вернул слишком большой ответ.');
+    }
+    final bytes = <int>[];
+    await for (final chunk in response) {
+      if (bytes.length + chunk.length > maxBytes) {
+        throw const AccountApiException('Сервис вернул слишком большой ответ.');
+      }
+      bytes.addAll(chunk);
+    }
+    return utf8.decode(bytes);
+  }
+
+  @override
+  void close() => _transport.close();
+}
+
+class _AccountTokenVault {
+  _AccountTokenVault({
+    required this.endpoint,
+    this.enabled = true,
+    String? initialToken,
+  }) : _memoryFallback = initialToken;
+
+  static final _volatileSessions = <String, String>{};
+  final String endpoint;
+  final bool enabled;
+  final _store = NativeAccountSessionStore();
+  String? _memoryFallback;
+  bool previousCredentialMayRemain = false;
+  String get _credentialOrigin => accountCredentialOrigin(endpoint);
+
+  Future<String?> read({bool registeredOnly = false}) async {
+    if (!enabled) return _memoryFallback;
+    if (_volatileSessions.containsKey(_credentialOrigin)) {
+      return _volatileSessions[_credentialOrigin];
+    }
+    try {
+      final stored = await _store.read();
+      if (stored == null) return _memoryFallback;
+      final record = jsonDecode(stored);
+      if (record is! Map ||
+          record['endpoint'] is! String ||
+          accountCredentialOrigin(record['endpoint'] as String) !=
+              _credentialOrigin ||
+          record['token'] is! String) {
+        return _memoryFallback;
+      }
+      if (registeredOnly && record['accountKind'] == 'guest') return null;
+      final token = record['token'] as String;
+      return token.isEmpty ? _memoryFallback : token;
+    } catch (_) {
+      return _memoryFallback;
+    }
+  }
+
+  Future<bool> write(String token) async {
+    previousCredentialMayRemain = false;
+    _memoryFallback = token;
+    if (!enabled) return true;
+    _volatileSessions[_credentialOrigin] = token;
+    try {
+      // Bind a credential to its issuing backend; a differently configured
+      // client must never send the previous server's token to a new origin.
+      await _store.write(
+        jsonEncode({'endpoint': _credentialOrigin, 'token': token}),
+      );
+      _volatileSessions.remove(_credentialOrigin);
+      return true;
+    } catch (_) {
+      // Never fall back to a plaintext file. Explain the memory-only login.
+      try {
+        await _store.clear();
+      } catch (_) {
+        previousCredentialMayRemain = true;
+      }
+      return false;
+    }
+  }
+
+  Future<bool> clear() async {
+    _memoryFallback = null;
+    if (!enabled) return true;
+    try {
+      await _store.clear();
+      _volatileSessions.remove(_credentialOrigin);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+class AccountPage extends StatefulWidget {
+  const AccountPage({
+    super.key,
+    required this.endpoint,
+    required this.onOpenExternal,
+    this.available = true,
+    this.persistSession = true,
+    this.transport,
+    this.initialToken,
+    this.onDisplayChanged,
+    this.identity,
+    this.onVPNProfile,
+    this.onDeleteGuestVPN,
+    this.onForgetVPNProfile,
+    this.showTurbo = false,
+    this.onBackToAccount,
+  });
+
+  final String endpoint;
+  final bool showTurbo;
+  final VoidCallback? onBackToAccount;
+  final Future<void> Function(String url) onOpenExternal;
+  final bool persistSession;
+  final bool available;
+  final AccountTransport? transport;
+  final String? initialToken;
+  final ValueChanged<AccountDisplaySnapshot?>? onDisplayChanged;
+  final GuestIdentityCoordinator? identity;
+  final Future<Map<String, dynamic>> Function(String token, bool linkConsent)?
+  onVPNProfile;
+  final Future<Map<String, dynamic>> Function()? onDeleteGuestVPN;
+  final Future<Map<String, dynamic>> Function(bool preserveStandaloneGuest)?
+  onForgetVPNProfile;
+
+  @override
+  State<AccountPage> createState() => _AccountPageState();
+}
+
+class _AccountPageState extends State<AccountPage> with WidgetsBindingObserver {
+  late final AccountTransport _api =
+      widget.transport ?? _AccountApi(widget.endpoint);
+  late final _vault = _AccountTokenVault(
+    endpoint: widget.endpoint,
+    enabled: widget.persistSession,
+    initialToken: widget.initialToken,
+  );
+  Timer? _authPoll;
+  Timer? _authDeadlineTimer;
+  DateTime? _authDeadline;
+  _AccountPhase _phase = _isAndroidPlatform
+      ? _AccountPhase.signedOut
+      : _AccountPhase.loading;
+  Future<void>? _capabilitiesRequest;
+  _AccountRecord? _account;
+  _AccountProduct _product = const _AccountProduct(
+    id: '',
+    name: 'Ускорение VPN',
+    description: 'Приоритетные быстрые маршруты Dropo.',
+    stars: 0,
+    durationDays: 0,
+  );
+  String? _token, _challengeToken, _telegramUrl;
+  String _authPurpose = 'login';
+  String _message = '';
+  bool _busy = false;
+  bool _profileSyncing = false;
+  bool _registrationAvailable = false;
+  bool _passwordLoginAvailable = false;
+  bool _passwordDialogOpen = false;
+  bool _purchasingAvailable = false;
+  bool _accountDeletionAvailable = false;
+  bool _development = false;
+  int? _pollingGeneration;
+  bool _openingTelegram = false;
+  bool _authOpenFailed = false;
+  bool _authCheckFailed = false;
+  bool _authRetryAvailable = false;
+  int _authGeneration = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    widget.identity?.addListener(_identityUpdated);
+    if (_isAndroidPlatform && widget.identity?.account != null) {
+      _identityUpdated();
+    }
+    unawaited(_restore());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.identity?.removeListener(_identityUpdated);
+    _stopAuthTimers();
+    _authGeneration++;
+    if (widget.transport == null) _api.close();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _phase == _AccountPhase.pendingAuth &&
+        !_expireAuthIfNeeded()) {
+      unawaited(_pollAuth());
+    }
+  }
+
+  Future<void> _restore() async {
+    if (!widget.available) {
+      setState(() => _phase = _AccountPhase.signedOut);
+      widget.onDisplayChanged?.call(null);
+      return;
+    }
+    final generation = _authGeneration;
+    await _checkCapabilities();
+    if (!mounted || generation != _authGeneration) return;
+    // A pending background profile request must not hide local logout. Once a
+    // credential is restored, this page can perform its own bounded refresh.
+    if (widget.identity?.token == null) await widget.identity?.restore();
+    if (!mounted || generation != _authGeneration) return;
+    final token = widget.identity != null
+        ? widget.identity!.token
+        : await _vault.read();
+    if (!mounted || generation != _authGeneration) return;
+    if (token == null || token.isEmpty) {
+      final identity = widget.identity;
+      if (identity?.state == 'storage_error') {
+        setState(() {
+          _phase = _AccountPhase.offline;
+          _message =
+              'Не удалось прочитать защищённый профиль. Новый профиль не создан. VPN продолжает работать.';
+        });
+        return;
+      }
+      if (mounted) setState(() => _phase = _AccountPhase.signedOut);
+      if (mounted) widget.onDisplayChanged?.call(null);
+      return;
+    }
+    _token = token;
+    try {
+      await _refreshAccount();
+    } catch (error) {
+      if (!mounted || generation != _authGeneration || token != _token) return;
+      final invalid =
+          error is AccountApiException &&
+          (error.status == 401 || error.code == 'invalid_session');
+      if (invalid) {
+        if (widget.identity != null) {
+          await widget.identity!.logout();
+        } else {
+          await _vault.clear();
+        }
+        _token = null;
+        if (mounted) widget.onDisplayChanged?.call(null);
+      }
+      if (mounted) {
+        setState(() {
+          _phase = invalid ? _AccountPhase.signedOut : _AccountPhase.offline;
+          _message = invalid
+              ? 'Сессия завершена. Войдите в аккаунт снова.'
+              : 'Сервис аккаунтов временно недоступен. Сохранённая сессия не удалена; VPN продолжает работать независимо от аккаунта.';
+        });
+      }
+    }
+  }
+
+  Future<void> _checkCapabilities() =>
+      _capabilitiesRequest ??= _loadCapabilities().whenComplete(() {
+        _capabilitiesRequest = null;
+        if (mounted && _isAndroidPlatform) setState(() {});
+      });
+
+  Future<void> _loadCapabilities() async {
+    _message = '';
+    _registrationAvailable = false;
+    _passwordLoginAvailable = false;
+    _purchasingAvailable = false;
+    _accountDeletionAvailable = false;
+    _development = false;
+    try {
+      final response = await _api.request('GET', '/v1/capabilities');
+      _development = response['development'] == true;
+      _registrationAvailable =
+          response['registrationAvailable'] == true &&
+          response['phoneRequired'] == false &&
+          response['authMode'] == 'telegram_bot';
+      _purchasingAvailable =
+          _accountPurchasesEnabled && response['purchasingAvailable'] == true;
+      _accountDeletionAvailable = response['accountDeletionAvailable'] == true;
+      _passwordLoginAvailable = response['passwordLoginAvailable'] == true;
+      if (!_registrationAvailable && !_passwordLoginAvailable) {
+        _message = 'Вход через Telegram пока не настроен на сервере.';
+      }
+      if (_purchasingAvailable) await _loadProduct();
+    } catch (error) {
+      _message = _accountError(error);
+    }
+  }
+
+  Future<_AccountProduct> _fetchProduct() async {
+    final response = await _api.request('GET', '/v1/products');
+    final products = response['products'];
+    if (products is! List || products.isEmpty || products.first is! Map) {
+      throw const FormatException('Unavailable purchase terms');
+    }
+    return _AccountProduct.fromJson(
+      Map<String, dynamic>.from(products.first as Map),
+    );
+  }
+
+  Future<void> _loadProduct() async {
+    try {
+      _product = await _fetchProduct();
+    } catch (_) {
+      // Do not request consent to an invented price while the catalog is offline.
+      _purchasingAvailable = false;
+    }
+  }
+
+  Future<void> _refreshAccount() async {
+    final token = _token;
+    final generation = _authGeneration;
+    final response = await _api.request('GET', '/v1/me', token: token);
+    if (!mounted || generation != _authGeneration || token != _token) return;
+    setState(() {
+      _account = _AccountRecord.fromJson(_asMap(response['account']));
+      _phase = _AccountPhase.signedIn;
+      _message = '';
+    });
+    widget.onDisplayChanged?.call(
+      AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
+    );
+    unawaited(_syncOwnedVPN(token, generation));
+  }
+
+  Future<void> _syncOwnedVPN(String? token, int generation) async {
+    final action = widget.onVPNProfile;
+    if (token == null ||
+        action == null ||
+        _development ||
+        _profileSyncing ||
+        _account?.guestAccount == true ||
+        _account?.passwordAccount == true ||
+        _account?.demoAccount == true) {
+      return;
+    }
+    _profileSyncing = true;
+    try {
+      final result = await action(token, true);
+      if (!mounted || token != _token || generation != _authGeneration) return;
+      if (result['success'] != true) {
+        setState(
+          () => _message =
+              result['error']?.toString() ??
+              'Вход выполнен. Профиль VPN пока не обновлён; повторите обновление в разделе Турбо. Сохранённый VPN доступен.',
+        );
+      }
+    } catch (_) {
+      if (mounted && token == _token && generation == _authGeneration) {
+        setState(
+          () => _message =
+              'Профиль VPN пока не обновлён. Повторите обновление в разделе Турбо.',
+        );
+      }
+    } finally {
+      _profileSyncing = false;
+    }
+  }
+
+  void _identityUpdated() {
+    if (!mounted || _busy || _phase == _AccountPhase.pendingAuth) return;
+    final identity = widget.identity;
+    if (identity == null) return;
+    final account = identity.account;
+    setState(() {
+      _token = identity.token;
+      _account = account == null ? null : _AccountRecord.fromJson(account);
+      if (account != null && _token != null) _phase = _AccountPhase.signedIn;
+      if (identity.suppressed) _phase = _AccountPhase.signedOut;
+    });
+  }
+
+  Future<bool> _acceptSession(
+    String token,
+    Map<String, dynamic> account,
+  ) async {
+    if (widget.identity == null) return _vault.write(token);
+    try {
+      await widget.identity!.acceptRegisteredSession(token, account);
+      return true;
+    } catch (_) {
+      await _discardUnclaimedAccountSession(_api, token);
+      rethrow;
+    }
+  }
+
+  Future<void> _startPasswordSignIn() async {
+    if (_busy ||
+        !_passwordLoginAvailable ||
+        widget.identity?.deletionPending == true) {
+      return;
+    }
+    _stopAuthTimers();
+    final generation = ++_authGeneration;
+    setState(() {
+      _busy = true;
+      _passwordDialogOpen = true;
+      _message = '';
+    });
+    try {
+      final response = await showDialog<Map<String, dynamic>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) =>
+            _PasswordSignInDialog(api: _api, deviceName: _deviceName()),
+      );
+      if (response == null) return;
+      final token = response['accessToken'] as String;
+      if (!mounted || generation != _authGeneration) {
+        await _discardUnclaimedAccountSession(_api, token);
+        return;
+      }
+      // A native secure write cannot be cancelled once started. Fence it before
+      // entry and keep all competing authentication actions disabled until done.
+      final persisted = await _acceptSession(
+        token,
+        _asMap(response['account']),
+      );
+      _token = token;
+      if (!mounted || generation != _authGeneration) return;
+      setState(() {
+        _account = _AccountRecord.fromJson(_asMap(response['account']));
+        _phase = _AccountPhase.signedIn;
+        _authRetryAvailable = false;
+        _message = persisted
+            ? ''
+            : _vault.previousCredentialMayRemain
+            ? 'Вход сохранён только до закрытия приложения. Не удалось очистить прежнюю защищённую сессию. Повторите выход из аккаунта.'
+            : 'Вход выполнен, но защищённое хранилище недоступно. Сессия сохранена только до закрытия приложения.';
+      });
+      widget.onDisplayChanged?.call(
+        AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
+      );
+      unawaited(_syncOwnedVPN(token, generation));
+    } catch (error) {
+      if (mounted && generation == _authGeneration) {
+        setState(() => _message = _accountError(error));
+      }
+    } finally {
+      if (mounted && generation == _authGeneration) {
+        setState(() {
+          _busy = false;
+          _passwordDialogOpen = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _startAuth({String purpose = 'login'}) async {
+    if (_busy ||
+        !_registrationAvailable ||
+        widget.identity?.deletionPending == true) {
+      return;
+    }
+    _androidHaptic();
+    _stopAuthTimers();
+    final generation = ++_authGeneration;
+    setState(() {
+      _busy = true;
+      _message = '';
+      _authPurpose = purpose;
+      _authRetryAvailable = false;
+      _authOpenFailed = false;
+      _authCheckFailed = false;
+      _openingTelegram = false;
+    });
+    try {
+      final response = await _api.request(
+        'POST',
+        '/v1/auth/challenges',
+        body: {'purpose': purpose},
+      );
+      if (!mounted || generation != _authGeneration) return;
+      _challengeToken = response['challengeToken']?.toString();
+      _telegramUrl = response['telegramUrl']?.toString();
+      if (_challengeToken == null ||
+          !RegExp(r'^[A-Za-z0-9_-]{8,256}$').hasMatch(_challengeToken!) ||
+          !_validAuthLink(_telegramUrl, _challengeToken!, purpose)) {
+        throw const AccountApiException('Сервис вернул неполную заявку входа.');
+      }
+      final now = DateTime.now();
+      final wait = accountAuthWaitDuration(response['expiresAt'], now: now);
+      if (wait == Duration.zero) {
+        _finishAuthAttempt('Время подтверждения истекло. Повторите вход.');
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _phase = _AccountPhase.pendingAuth;
+        _busy = false;
+      });
+      _setAuthDeadline(now.add(wait), generation);
+      _scheduleAuthPoll();
+      await _openAuthLink();
+    } catch (error) {
+      if (!mounted || generation != _authGeneration) return;
+      _finishAuthAttempt(_accountError(error));
+    }
+  }
+
+  bool _validAuthLink(String? value, String challenge, String purpose) {
+    final uri = value == null ? null : Uri.tryParse(value);
+    if (uri == null || uri.userInfo.isNotEmpty || uri.hasFragment) return false;
+    if (uri.scheme == 'https' &&
+        uri.host == 't.me' &&
+        (!uri.hasPort || uri.port == 443) &&
+        uri.pathSegments.length == 1 &&
+        RegExp(
+          r'^[A-Za-z][A-Za-z0-9_]{4,31}$',
+        ).hasMatch(uri.pathSegments.first)) {
+      final prefix = purpose == 'recovery' ? 'recover_' : 'login_';
+      return '$prefix$challenge'.length <= 64 &&
+          uri.queryParametersAll.length == 1 &&
+          uri.queryParametersAll['start']?.length == 1 &&
+          uri.queryParameters['start'] == '$prefix$challenge';
+    }
+    final endpoint = Uri.tryParse(widget.endpoint);
+    return _development &&
+        kDebugMode &&
+        endpoint != null &&
+        accountEndpointAvailable(widget.endpoint) &&
+        endpoint.scheme == 'http' &&
+        uri.scheme == 'http' &&
+        uri.origin == endpoint.origin &&
+        !uri.hasQuery &&
+        uri.path == '/dev/telegram/$challenge';
+  }
+
+  void _cancelAuth() {
+    _finishAuthAttempt('', retry: false);
+  }
+
+  void _stopAuthTimers() {
+    _authPoll?.cancel();
+    _authPoll = null;
+    _authDeadlineTimer?.cancel();
+    _authDeadlineTimer = null;
+    _authDeadline = null;
+  }
+
+  void _setAuthDeadline(DateTime deadline, int generation) {
+    _authDeadline = deadline;
+    _authDeadlineTimer?.cancel();
+    _authDeadlineTimer = Timer(deadline.difference(DateTime.now()), () {
+      if (mounted &&
+          generation == _authGeneration &&
+          _phase == _AccountPhase.pendingAuth) {
+        _finishAuthAttempt('Время подтверждения истекло. Повторите вход.');
+      }
+    });
+  }
+
+  bool _expireAuthIfNeeded() {
+    final deadline = _authDeadline;
+    if (deadline == null || DateTime.now().isBefore(deadline)) return false;
+    _finishAuthAttempt('Время подтверждения истекло. Повторите вход.');
+    return true;
+  }
+
+  void _finishAuthAttempt(String message, {bool retry = true}) {
+    _authGeneration++;
+    _stopAuthTimers();
+    _challengeToken = null;
+    _telegramUrl = null;
+    if (!mounted) return;
+    setState(() {
+      _phase = _account == null
+          ? _AccountPhase.signedOut
+          : _AccountPhase.signedIn;
+      _busy = false;
+      _openingTelegram = false;
+      _authOpenFailed = false;
+      _authCheckFailed = false;
+      _authRetryAvailable = retry;
+      _message = message;
+    });
+  }
+
+  Future<void> _openAuthLink() async {
+    final url = _telegramUrl;
+    final generation = _authGeneration;
+    if (_openingTelegram ||
+        _busy ||
+        url == null ||
+        _phase != _AccountPhase.pendingAuth ||
+        _expireAuthIfNeeded()) {
+      return;
+    }
+    setState(() => _openingTelegram = true);
+    try {
+      await widget.onOpenExternal(url).timeout(const Duration(seconds: 6));
+      if (!mounted ||
+          generation != _authGeneration ||
+          _phase != _AccountPhase.pendingAuth) {
+        return;
+      }
+      setState(() {
+        _authOpenFailed = false;
+        if (!_authCheckFailed) _message = '';
+      });
+    } catch (_) {
+      if (mounted &&
+          generation == _authGeneration &&
+          _phase == _AccountPhase.pendingAuth) {
+        setState(() {
+          _authOpenFailed = true;
+          _message = _development
+              ? 'Не удалось открыть тестовую страницу. Повторите открытие или отмените вход.'
+              : 'Не удалось открыть Telegram. Повторите открытие или отмените вход. Проверьте, что Telegram установлен.';
+        });
+      }
+    } finally {
+      if (mounted &&
+          generation == _authGeneration &&
+          _phase == _AccountPhase.pendingAuth) {
+        setState(() => _openingTelegram = false);
+      }
+    }
+  }
+
+  void _scheduleAuthPoll() {
+    _authPoll?.cancel();
+    _authPoll = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_pollAuth()),
+    );
+    unawaited(_pollAuth());
+  }
+
+  Future<void> _pollAuth() async {
+    final challenge = _challengeToken;
+    final generation = _authGeneration;
+    if (challenge == null ||
+        _busy ||
+        _pollingGeneration == generation ||
+        !mounted ||
+        _phase != _AccountPhase.pendingAuth) {
+      return;
+    }
+    if (_expireAuthIfNeeded()) return;
+    _pollingGeneration = generation;
+    try {
+      final response = await _api.request(
+        'GET',
+        '/v1/auth/challenges/$challenge',
+      );
+      if (!mounted ||
+          generation != _authGeneration ||
+          _phase != _AccountPhase.pendingAuth) {
+        return;
+      }
+      final serverExpiry = response['expiresAt'];
+      final parsedExpiry = serverExpiry is String
+          ? DateTime.tryParse(serverExpiry)
+          : null;
+      if (parsedExpiry != null &&
+          _authDeadline != null &&
+          parsedExpiry.isBefore(_authDeadline!)) {
+        _setAuthDeadline(parsedExpiry, generation);
+      }
+      if (_expireAuthIfNeeded()) return;
+      if (_authCheckFailed) {
+        setState(() {
+          _authCheckFailed = false;
+          if (!_authOpenFailed) _message = '';
+        });
+      }
+      final status = response['status']?.toString();
+      if (status == 'approved') {
+        _authPoll?.cancel();
+        await _exchangeAuth(challenge, generation);
+      } else if (status == 'denied' || status == 'expired') {
+        _finishAuthAttempt(
+          status == 'expired'
+              ? 'Время подтверждения истекло. Повторите вход.'
+              : 'Вход отклонён в Telegram. Можно повторить вход.',
+        );
+      }
+    } catch (error) {
+      if (mounted &&
+          generation == _authGeneration &&
+          _phase == _AccountPhase.pendingAuth) {
+        if (error is AccountApiException &&
+            (error.status == 404 || error.status == 410)) {
+          _finishAuthAttempt('Заявка входа больше недоступна. Повторите вход.');
+        } else {
+          setState(() {
+            _authCheckFailed = true;
+            if (!_authOpenFailed) {
+              _message =
+                  'Нет связи с сервером аккаунтов. Проверьте интернет. Проверка повторится автоматически; вход можно отменить.';
+            }
+          });
+        }
+      }
+    } finally {
+      if (_pollingGeneration == generation) _pollingGeneration = null;
+    }
+  }
+
+  Future<void> _exchangeAuth(String challenge, int generation) async {
+    setState(() => _busy = true);
+    try {
+      final response = await _api.request(
+        'POST',
+        '/v1/auth/challenges/$challenge/exchange',
+        body: {'deviceName': _deviceName()},
+      );
+      if (!mounted ||
+          generation != _authGeneration ||
+          _phase != _AccountPhase.pendingAuth ||
+          _expireAuthIfNeeded()) {
+        return;
+      }
+      final token = response['accessToken']?.toString() ?? '';
+      if (token.isEmpty) {
+        throw const AccountApiException('Не удалось получить сессию Dropo.');
+      }
+      // A started native secure write cannot be cancelled. The approved
+      // exchange is fenced before it starts; the UI remains busy until done.
+      _stopAuthTimers();
+      final persisted = await _acceptSession(
+        token,
+        _asMap(response['account']),
+      );
+      _token = token;
+      if (!mounted || generation != _authGeneration) return;
+      setState(() {
+        _account = _AccountRecord.fromJson(_asMap(response['account']));
+        _phase = _AccountPhase.signedIn;
+        _busy = false;
+        _authRetryAvailable = false;
+        _message = !persisted
+            ? _vault.previousCredentialMayRemain
+                  ? 'Новый вход сохранён только до закрытия приложения. Не удалось очистить прежнюю защищённую сессию: после перезапуска может восстановиться предыдущий аккаунт. Повторите выход из аккаунта.'
+                  : 'Вход выполнен, но защищённое хранилище недоступно. Сессия сохранена только до закрытия приложения.'
+            : _authPurpose == 'recovery'
+            ? 'Доступ восстановлен. Остальные сессии завершены.'
+            : '';
+      });
+      widget.onDisplayChanged?.call(
+        AccountDisplaySnapshot.fromJson(_asMap(response['account'])),
+      );
+      unawaited(_syncOwnedVPN(token, generation));
+    } catch (error) {
+      if (!mounted || generation != _authGeneration) return;
+      _finishAuthAttempt(_accountError(error));
+    }
+  }
+
+  String _deviceName() {
+    if (Platform.isAndroid) return 'Dropo · Android';
+    if (Platform.isWindows) return 'Dropo · Windows';
+    if (Platform.isMacOS) return 'Dropo · macOS';
+    return 'Dropo · ${Platform.operatingSystem}';
+  }
+
+  Future<void> _logout() async {
+    _stopAuthTimers();
+    _authGeneration++;
+    final token = _token;
+    setState(() => _busy = true);
+    bool identityCleared = false;
+    try {
+      if (widget.identity != null) {
+        await widget.identity!.logout();
+        identityCleared = true;
+      } else if (token != null) {
+        await _api.request('DELETE', '/v1/sessions/current', token: token);
+      }
+    } catch (_) {
+      // Local sign-out still removes the credential when the backend is down.
+    }
+    final cleared = widget.identity != null
+        ? identityCleared
+        : await _vault.clear();
+    _authPoll?.cancel();
+    if (!mounted) return;
+    if (!cleared) {
+      setState(() {
+        _busy = false;
+        _phase = _AccountPhase.offline;
+        _message =
+            'Не удалось очистить защищённое хранилище. Повторите выход из аккаунта.';
+      });
+      return;
+    }
+    setState(() {
+      _token = null;
+      _account = null;
+      _phase = _AccountPhase.signedOut;
+      _busy = false;
+      _message = '';
+    });
+    widget.onDisplayChanged?.call(null);
+  }
+
+  Future<void> _deleteAccount() async {
+    final token = _token;
+    if (_busy || token == null || !_accountDeletionAvailable) return;
+    setState(() => _busy = true);
+    final deleted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _DeleteAccountDialog(
+        api: _api,
+        token: token,
+        endpoint: widget.endpoint,
+        development: _development,
+        passwordAccount: _account?.passwordAccount == true,
+        demoAccount: _account?.demoAccount == true,
+        onOpenExternal: widget.onOpenExternal,
+      ),
+    );
+    if (deleted == true) {
+      // Erasure has already revoked every server session. Even if navigation
+      // disposes this page, still attempt to remove the local credential.
+      _stopAuthTimers();
+      _authGeneration++;
+      _account = null;
+      widget.onDisplayChanged?.call(null);
+      await _finishDeletionCleanup();
+    } else if (mounted) {
+      setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _finishDeletionCleanup() async {
+    if (mounted) setState(() => _busy = true);
+    var cleared = false;
+    try {
+      final result = await widget.onForgetVPNProfile?.call(true);
+      cleared = result == null || result['success'] == true;
+    } catch (_) {}
+    if (cleared && widget.identity != null) {
+      try {
+        await widget.identity!.logout(forgetInstallation: true);
+        cleared = true;
+      } catch (_) {
+        cleared = false;
+      }
+    } else if (cleared) {
+      cleared = await _vault.clear();
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _phase = cleared
+          ? _AccountPhase.signedOut
+          : _AccountPhase.deletionCleanup;
+      if (cleared) _token = null;
+      _message = cleared
+          ? 'Аккаунт удалён, все сессии завершены. Личные VPN-источники и настройки на устройстве сохранены.'
+          : 'Аккаунт на сервере удалён, все сессии завершены. Не удалось очистить все сохранённые данные аккаунта и ключи Dropo. Повторите очистку на этом устройстве.';
+    });
+  }
+
+  Future<void> _openPurchase() async {
+    if (!_purchasingAvailable || !_accountPurchasesEnabled) return;
+    final token = _token;
+    final generation = _authGeneration;
+    if (token == null || _busy) return;
+    // Validate this installation before taking payment. An independent Free
+    // profile must never be silently merged or discarded.
+    if (!_development && widget.onVPNProfile != null) {
+      setState(() {
+        _busy = true;
+        _message = 'Проверяем профиль перед оплатой…';
+      });
+      try {
+        final result = await widget.onVPNProfile!(token, true);
+        if (!mounted || token != _token || generation != _authGeneration) {
+          return;
+        }
+        if (result['success'] != true) {
+          setState(
+            () => _message =
+                result['error']?.toString() ??
+                'Обновите профиль VPN перед покупкой.',
+          );
+          return;
+        }
+      } catch (_) {
+        if (mounted) {
+          setState(
+            () => _message =
+                'Не удалось проверить профиль. Повторите перед оплатой.',
+          );
+        }
+        return;
+      } finally {
+        if (mounted) setState(() => _busy = false);
+      }
+    }
+    if (!mounted || token != _token || generation != _authGeneration) return;
+    setState(() => _busy = true);
+    try {
+      // Each reopened dialog gets fresh terms, including after an invoice
+      // changed while the previous consent was open.
+      final product = await _fetchProduct();
+      if (!mounted || token != _token || generation != _authGeneration) return;
+      _product = product;
+    } catch (_) {
+      if (mounted && token == _token && generation == _authGeneration) {
+        setState(
+          () =>
+              _message = 'Не удалось обновить тариф. Повторите перед оплатой.',
+        );
+      }
+      return;
+    } finally {
+      if (mounted && token == _token && generation == _authGeneration) {
+        setState(() => _busy = false);
+      }
+    }
+    _androidHaptic();
+    setState(() => _message = '');
+    await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _SpeedBoostPurchaseDialog(
+        api: _api,
+        token: token,
+        product: _product,
+        onOpenExternal: widget.onOpenExternal,
+        onActivate: () async {
+          if (!mounted || token != _token || generation != _authGeneration) {
+            throw const AccountIdentityChanged();
+          }
+          if (_development) return {'success': true};
+          final apply = widget.onVPNProfile;
+          if (apply == null) {
+            return {
+              'success': false,
+              'error': 'Откройте Dropo на устройстве и обновите профиль VPN.',
+            };
+          }
+          return apply(token, true);
+        },
+      ),
+    );
+    if (mounted && token == _token && generation == _authGeneration) {
+      try {
+        await _refreshAccount();
+      } catch (_) {
+        if (mounted) {
+          setState(
+            () => _message =
+                'Статус покупки сохранён на сервере. Обновите аккаунт при восстановлении связи.',
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _startRecoveryDialog() async {
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Восстановить доступ'),
+        content: const Text(
+          'Подтвердите тот же Telegram-аккаунт. После восстановления другие сессии Dropo будут завершены. Номер телефона, пароль и коды Telegram не нужны.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Продолжить в Telegram'),
+          ),
+        ],
+      ),
+    );
+    if (approved == true && mounted) await _startAuth(purpose: 'recovery');
+  }
+
+  Future<void> _showSessions() async {
+    final token = _token;
+    if (_busy || token == null) return;
+    final generation = _authGeneration;
+    setState(() => _busy = true);
+    try {
+      final response = await _api.request('GET', '/v1/sessions', token: token);
+      final raw = response['sessions'];
+      final sessions = raw is List
+          ? raw
+                .whereType<Map>()
+                .map(
+                  (item) =>
+                      _AccountSession.fromJson(Map<String, dynamic>.from(item)),
+                )
+                .toList()
+          : <_AccountSession>[];
+      if (!mounted || generation != _authGeneration || _token != token) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => _SessionsDialog(
+          sessions: sessions,
+          api: _api,
+          token: token,
+          passwordAccount: _account?.passwordAccount == true,
+          onOpenExternal: widget.onOpenExternal,
+        ),
+      );
+    } catch (error) {
+      if (mounted && generation == _authGeneration) {
+        setState(() => _message = _accountError(error));
+      }
+    } finally {
+      if (mounted && generation == _authGeneration) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _retryAccount() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _phase = _AccountPhase.loading;
+    });
+    try {
+      await _restore();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _offlineAccount() => _page(
+    Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Аккаунт временно недоступен',
+          style: TextStyle(
+            color: _atlasText,
+            fontSize: 26,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 16),
+        _AccountNotice(message: _message),
+        const SizedBox(height: 20),
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            FilledButton.icon(
+              key: const ValueKey('account-retry'),
+              onPressed: _busy ? null : _retryAccount,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Повторить'),
+            ),
+            if (_account?.guestAccount == false ||
+                widget.identity?.accountKind == 'registered')
+              TextButton(
+                onPressed: _busy ? null : _logout,
+                child: Text(
+                  _tr(
+                    context,
+                    'Выйти на этом устройстве',
+                    'Sign out on this device',
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.available) {
+      return _page(
+        const Column(
+          key: ValueKey('account-unavailable'),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.person_outline_rounded, size: 40, color: _atlasMint),
+            SizedBox(height: 20),
+            Text(
+              'Вход пока недоступен',
+              style: TextStyle(
+                color: _atlasText,
+                fontSize: 28,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            SizedBox(height: 12),
+            Text(
+              'Для подключения VPN аккаунт не нужен. Используйте свою подписку или бесплатный VPN.',
+              style: TextStyle(color: _atlasMuted, fontSize: 15, height: 1.5),
+            ),
+            SizedBox(height: 28),
+            Text(
+              'Dropo Boost · скоро',
+              style: TextStyle(color: _atlasText, fontSize: 18),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Здесь появятся подписки Dropo и управление покупками.',
+              style: TextStyle(color: _atlasMuted, fontSize: 14, height: 1.5),
+            ),
+          ],
+        ),
+      );
+    }
+    return switch (_phase) {
+      _AccountPhase.loading => const Center(
+        child: CircularProgressIndicator(strokeWidth: 2.5),
+      ),
+      _AccountPhase.signedOut => TickerMode(
+        enabled: !_passwordDialogOpen,
+        child: _signedOut(),
+      ),
+      _AccountPhase.pendingAuth => _pendingAuth(),
+      _AccountPhase.signedIn =>
+        widget.showTurbo
+            ? _account?.guestAccount == true
+                  ? TickerMode(
+                      enabled: !_passwordDialogOpen,
+                      child: _signedOut(),
+                    )
+                  : _turboPage()
+            : _signedIn(),
+      _AccountPhase.offline => _offlineAccount(),
+      _AccountPhase.deletionCleanup => _page(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Завершите очистку устройства',
+              style: TextStyle(color: _atlasText, fontSize: 24),
+            ),
+            const SizedBox(height: 16),
+            _AccountNotice(message: _message),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              key: const ValueKey('account-delete-cleanup-retry'),
+              onPressed: _busy ? null : _finishDeletionCleanup,
+              icon: const Icon(Icons.delete_outline),
+              label: Text(_busy ? 'Удаляем токен…' : 'Повторить очистку'),
+            ),
+            const SizedBox(height: 16),
+            _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+          ],
+        ),
+      ),
+    };
+  }
+
+  Widget _page(Widget child) => Align(
+    alignment: Alignment.topCenter,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 960),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+        child: child,
+      ),
+    ),
+  );
+
+  Widget _signedOut() =>
+      _page(_isAndroidPlatform ? _androidSignIn() : _legacySignIn());
+
+  bool _confirmingTelegram = false;
+
+  Widget _telegramIcon(Color color) => SvgPicture.asset(
+    'assets/service-telegram.svg',
+    width: 22,
+    height: 22,
+    colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+    excludeFromSemantics: true,
+  );
+
+  Future<void> _confirmTelegramSignIn() async {
+    if (_busy || _confirmingTelegram) return;
+    setState(() => _confirmingTelegram = true);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          _tr(context, 'Вход через Telegram', 'Sign in with Telegram'),
+        ),
+        content: Text(
+          _tr(
+            context,
+            'Dropo получает ID аккаунта и чата Telegram, имя и имя пользователя. После подтверждения эти данные используются для входа и безопасности. VPN-трафик и личные подписки не передаются сервису аккаунтов.',
+            'Dropo receives your Telegram account and chat IDs, name, and username for sign-in and security. VPN traffic and personal subscriptions are not sent to the account service.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_tr(context, 'Отмена', 'Cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_tr(context, 'Продолжить', 'Continue')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _capabilitiesRequest;
+    if (!mounted) return;
+    setState(() => _confirmingTelegram = false);
+    if (confirmed == true &&
+        !_busy &&
+        widget.identity?.deletionPending != true) {
+      await _startAuth(purpose: 'login');
+    }
+  }
+
+  Widget _androidSignIn() {
+    final guest =
+        _account?.guestAccount == true ||
+        widget.identity?.accountKind == 'guest';
+    final canSignIn =
+        !_busy &&
+        !_confirmingTelegram &&
+        widget.identity?.deletionPending != true;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          _tr(context, 'Войти в Dropo', 'Sign in to Dropo'),
+          style: const TextStyle(
+            color: _atlasText,
+            fontSize: 32,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 20),
+        FilledButton.icon(
+          key: const ValueKey('account-submit'),
+          onPressed:
+              canSignIn &&
+                  (_registrationAvailable || _capabilitiesRequest != null)
+              ? _confirmTelegramSignIn
+              : null,
+          icon: _telegramIcon(_atlasBackground),
+          label: Text(
+            _tr(context, 'Войти через Telegram', 'Sign in with Telegram'),
+          ),
+          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(50)),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          _tr(
+            context,
+            'Подтвердите вход в боте Dropo. Для бесплатного VPN вход не нужен.',
+            'Confirm sign-in in the Dropo bot. Free VPN does not require sign-in.',
+          ),
+          style: const TextStyle(color: _atlasMuted),
+        ),
+        if (_confirmingTelegram && _capabilitiesRequest != null)
+          const LinearProgressIndicator(),
+        if (!_registrationAvailable && _capabilitiesRequest == null)
+          TextButton.icon(
+            key: const ValueKey('account-retry'),
+            onPressed: _busy ? null : _retryAccount,
+            icon: const Icon(Icons.refresh),
+            label: Text(
+              _tr(context, 'Повторить проверку сервиса', 'Check service again'),
+            ),
+          ),
+        if (_message.isNotEmpty) _AccountNotice(message: _message),
+        const SizedBox(height: 14),
+        ExpansionTile(
+          key: const ValueKey('account-extra-actions'),
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: EdgeInsets.zero,
+          title: Text(
+            _tr(context, 'Дополнительные возможности', 'Additional options'),
+          ),
+          expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_passwordLoginAvailable)
+              OutlinedButton.icon(
+                key: const ValueKey('account-password-open'),
+                onPressed: canSignIn ? _startPasswordSignIn : null,
+                icon: const Icon(Icons.password_outlined),
+                label: Text(
+                  _tr(
+                    context,
+                    'Войти по логину и паролю',
+                    'Sign in with username and password',
+                  ),
+                ),
+              ),
+            if (guest && widget.identity != null)
+              TextButton.icon(
+                key: const ValueKey('guest-delete'),
+                onPressed: _busy ? null : _deleteGuestProfile,
+                icon: const Icon(Icons.delete_outline),
+                label: Text(
+                  _tr(context, 'Удалить мои данные', 'Delete my data'),
+                ),
+              ),
+            _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _legacySignIn() => LayoutBuilder(
+    builder: (context, constraints) {
+      final compact = constraints.maxWidth < 700;
+      final form = _AuthForm(
+        busy: _busy,
+        available:
+            _registrationAvailable && widget.identity?.deletionPending != true,
+        development: _development,
+        recovery: _authPurpose == 'recovery',
+        retry: _authRetryAvailable,
+        message: _message,
+        onOpenExternal: widget.onOpenExternal,
+        onSubmit: () => _startAuth(purpose: _authPurpose),
+        onToggleRecovery: () => setState(() {
+          _authPurpose = _authPurpose == 'login' ? 'recovery' : 'login';
+          _message = '';
+          _authRetryAvailable = false;
+        }),
+      );
+      const steps = _TelegramAuthSteps();
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Войти в Dropo',
+            style: TextStyle(
+              color: _atlasText,
+              fontSize: 32,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (widget.identity?.suppressed == true) ...[
+            Text(
+              widget.identity!.deletionPending
+                  ? 'Удаление бесплатного профиля ожидает соединения с сервером. Автоматическое создание нового профиля отключено.'
+                  : 'Автоматическое создание бесплатного профиля отключено после выхода или удаления.',
+            ),
+            const SizedBox(height: 12),
+            if (!widget.identity!.deletionPending &&
+                widget.identity!.guestAvailable)
+              OutlinedButton(
+                key: const ValueKey('guest-create-new'),
+                onPressed: _busy
+                    ? null
+                    : () async {
+                        setState(() => _busy = true);
+                        try {
+                          await widget.identity!.createNewGuest();
+                          await _restore();
+                        } catch (_) {
+                          if (mounted) {
+                            setState(
+                              () => _message =
+                                  'Не удалось создать профиль. Повторите позже.',
+                            );
+                          }
+                        } finally {
+                          if (mounted) setState(() => _busy = false);
+                        }
+                      },
+                child: const Text('Создать новый бесплатный профиль'),
+              ),
+            if (widget.identity!.deletionPending)
+              TextButton(
+                onPressed: _busy ? null : _retryAccount,
+                child: const Text('Повторить удаление'),
+              ),
+            const SizedBox(height: 16),
+          ],
+          if (widget.identity?.accountKind == 'guest') ...[
+            TextButton(
+              onPressed: _busy
+                  ? null
+                  : widget.showTurbo
+                  ? widget.onBackToAccount
+                  : _retryAccount,
+              child: const Text('Вернуться к бесплатному профилю'),
+            ),
+            const SizedBox(height: 12),
+          ],
+          Text(
+            _passwordLoginAvailable
+                ? 'Выберите способ входа: Telegram или выданный логин и пароль. Бесплатный VPN работает и без входа.'
+                : 'Войдите через Telegram. При первом подтверждении аккаунт создаётся автоматически. Бесплатный VPN работает и без входа.',
+            style: const TextStyle(color: _atlasMuted, fontSize: 15),
+          ),
+          const SizedBox(height: 28),
+          if (_passwordLoginAvailable) ...[
+            OutlinedButton.icon(
+              key: const ValueKey('account-password-open'),
+              onPressed: _busy || widget.identity?.deletionPending == true
+                  ? null
+                  : _startPasswordSignIn,
+              icon: const Icon(Icons.password_outlined),
+              label: const Text('Войти по логину и паролю'),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Для аккаунтов с выданными данными входа. Telegram не требуется.',
+              style: TextStyle(color: _atlasMuted, height: 1.4),
+            ),
+            const SizedBox(height: 28),
+          ],
+          if (_development) ...[
+            const _AccountNotice(
+              message:
+                  'Локальная проверка: подтверждение имитируется в браузере. Это не настоящий вход через Telegram.',
+            ),
+            const SizedBox(height: 20),
+          ],
+          if (!_registrationAvailable) ...[
+            TextButton.icon(
+              key: const ValueKey('account-retry'),
+              onPressed: _busy ? null : _retryAccount,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Повторить проверку сервиса'),
+            ),
+            const SizedBox(height: 16),
+          ],
+          if (compact) ...[
+            form,
+            const SizedBox(height: 28),
+            steps,
+          ] else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(flex: 6, child: form),
+                const SizedBox(width: 48),
+                const Expanded(flex: 5, child: _TelegramAuthSteps()),
+              ],
+            ),
+          if (widget.onDeleteGuestVPN != null && !_development) ...[
+            const SizedBox(height: 24),
+            TextButton.icon(
+              key: const ValueKey('delete-guest-vpn'),
+              onPressed: _busy ? null : _deleteGuestVPN,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Удалить бесплатный профиль этого устройства'),
+            ),
+          ],
+        ],
+      );
+    },
+  );
+
+  Widget _pendingAuth() => _page(
+    Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          _authPurpose == 'recovery'
+              ? _tr(context, 'Восстановление доступа', 'Recover access')
+              : _tr(context, 'Подтвердите вход', 'Confirm sign-in'),
+          style: const TextStyle(
+            color: _atlasText,
+            fontSize: 30,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 24),
+        Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: _atlasSurface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: _atlasBorder),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: _authOpenFailed || _authCheckFailed
+                        ? const Icon(
+                            Icons.warning_amber_rounded,
+                            color: Colors.orangeAccent,
+                          )
+                        : const CircularProgressIndicator(strokeWidth: 2.7),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Text(
+                      _authOpenFailed
+                          ? 'Не удалось открыть ${_development ? 'страницу' : 'Telegram'}'
+                          : _authCheckFailed
+                          ? 'Не удалось проверить подтверждение'
+                          : _development
+                          ? 'Ожидаем локальное подтверждение'
+                          : _tr(
+                              context,
+                              'Ожидаем подтверждение в Telegram',
+                              'Waiting for confirmation in Telegram',
+                            ),
+                      style: const TextStyle(
+                        color: _atlasText,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _tr(
+                  context,
+                  'После подтверждения вернитесь в Dropo. Если время заявки истечёт, можно повторить вход.',
+                  'Return to Dropo after confirming. If the request expires, you can start again.',
+                ),
+                style: const TextStyle(color: _atlasMuted, height: 1.5),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                _development
+                    ? 'Подтвердите тестовый вход на локальной странице в браузере. Это имитация: настоящий Telegram-бот не используется.'
+                    : _tr(
+                        context,
+                        'Откройте бота и подтвердите вход. Передавать контакт или вводить коды Telegram не нужно. Статус обновится автоматически.',
+                        'Open the bot and confirm sign-in. The status updates automatically.',
+                      ),
+                style: const TextStyle(color: _atlasMuted, height: 1.5),
+              ),
+              if (_message.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _message,
+                  style: const TextStyle(color: Colors.orangeAccent),
+                ),
+              ],
+              const SizedBox(height: 22),
+              Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    key: const ValueKey('account-reopen-telegram'),
+                    onPressed: _telegramUrl == null || _busy || _openingTelegram
+                        ? null
+                        : () => unawaited(_openAuthLink()),
+                    icon: const Icon(Icons.send_outlined),
+                    label: Text(
+                      _development
+                          ? 'Открыть тестовую страницу'
+                          : _tr(
+                              context,
+                              'Открыть Telegram снова',
+                              'Reopen Telegram',
+                            ),
+                    ),
+                  ),
+                  OutlinedButton(
+                    onPressed: _busy ? null : _cancelAuth,
+                    child: Text(_tr(context, 'Отменить', 'Cancel')),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Future<void> _deleteGuestProfile() async {
+    final identity = widget.identity;
+    if (_busy || identity == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          _tr(context, 'Удалить бесплатный профиль?', 'Delete Free profile?'),
+        ),
+        content: Text(
+          _tr(
+            context,
+            'Будут удалены данные этой установки, её сессии и выданные ей ключи Dropo Free.',
+            'This deletes this installation’s profile, sessions, and Dropo Free keys.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            key: const ValueKey('guest-delete-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      // The current identity may be a new guest while a separate Free profile
+      // from an earlier password session still belongs to another guest.
+      final cleanup = await widget.onForgetVPNProfile?.call(true);
+      if (cleanup != null && cleanup['success'] != true) {
+        if (mounted) {
+          setState(
+            () => _message =
+                cleanup['error']?.toString() ??
+                'Не удалось удалить ключи Dropo. Повторите удаление.',
+          );
+        }
+        return;
+      }
+      await identity.deleteGuest();
+      if (!mounted) return;
+      setState(() {
+        _token = null;
+        _account = null;
+        _phase = _AccountPhase.signedOut;
+      });
+      widget.onDisplayChanged?.call(null);
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _message =
+              'Не удалось сохранить запрос удаления. Повторите попытку.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _showGuestWebDeletion() async {
+    final identity = widget.identity;
+    if (_busy || identity == null || identity.accountKind != 'guest') return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => GuestWebDeletionDialog(
+        identity: identity,
+        onOpenExternal: widget.onOpenExternal,
+      ),
+    );
+  }
+
+  Widget _guestProfile() => _page(
+    Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Бесплатный профиль',
+          key: ValueKey('guest-profile-title'),
+          style: TextStyle(
+            color: _atlasText,
+            fontSize: 28,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Dropo Free · Telegram и пароль не нужны. Профиль сохранён на этом устройстве. Чтобы удалить его через сайт после удаления приложения, заранее сохраните код удаления.',
+          style: TextStyle(color: _atlasMuted, height: 1.5),
+        ),
+        const SizedBox(height: 24),
+        if (_message.isNotEmpty) ...[
+          _AccountNotice(message: _message),
+          const SizedBox(height: 16),
+        ],
+        const Text(
+          'Уже есть аккаунт?',
+          style: TextStyle(
+            color: _atlasText,
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'По желанию войдите в свой аккаунт. Бесплатный профиль будет привязан только после подтверждения входа.',
+          style: TextStyle(color: _atlasMuted, height: 1.5),
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            if (_registrationAvailable)
+              OutlinedButton.icon(
+                key: const ValueKey('guest-link-telegram'),
+                onPressed: _busy ? null : () => _startAuth(purpose: 'login'),
+                icon: const Icon(Icons.send_outlined),
+                label: const Text('Войти через Telegram'),
+              ),
+            if (_passwordLoginAvailable)
+              OutlinedButton.icon(
+                key: const ValueKey('account-password-open'),
+                onPressed: _busy ? null : _startPasswordSignIn,
+                icon: const Icon(Icons.password_outlined),
+                label: const Text('Войти по логину и паролю'),
+              ),
+          ],
+        ),
+        const SizedBox(height: 24),
+        if (widget.identity != null) ...[
+          OutlinedButton.icon(
+            key: const ValueKey('guest-web-delete'),
+            onPressed: _busy ? null : _showGuestWebDeletion,
+            icon: const Icon(Icons.key_outlined),
+            label: const Text('Удаление на сайте'),
+          ),
+          const SizedBox(height: 24),
+        ],
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            TextButton(
+              key: const ValueKey('guest-delete'),
+              onPressed: _busy ? null : _deleteGuestProfile,
+              child: const Text('Удалить бесплатный профиль'),
+            ),
+            if (widget.onDeleteGuestVPN != null)
+              TextButton(
+                key: const ValueKey('delete-standalone-guest-vpn'),
+                onPressed: _busy ? null : _deleteGuestVPN,
+                child: const Text('Удалить отдельный бесплатный профиль'),
+              ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+      ],
+    ),
+  );
+
+  Future<void> _deleteGuestVPN() async {
+    if (_busy || widget.onDeleteGuestVPN == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить бесплатный профиль?'),
+        content: const Text(
+          'VPN будет отключён. Гостевой профиль этого устройства и его ключи будут удалены с сервера. Свои подписки сохранятся. Для нового бесплатного подключения потребуется создать новый профиль.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Удалить профиль'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final result = await widget.onDeleteGuestVPN!();
+      if (result['success'] == true &&
+          result['independentGuest'] != true &&
+          result['unchanged'] != true &&
+          widget.identity?.accountKind != 'registered') {
+        await widget.identity?.logout(forgetInstallation: true);
+      }
+      if (mounted) {
+        setState(
+          () => _message = result['success'] == true
+              ? 'Бесплатный гостевой профиль удалён.'
+              : result['error']?.toString() ??
+                    'Удаление пока не подтверждено. Повторите позже.',
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _message = 'Удаление пока не подтверждено. Повторите позже.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _refreshOwnedVPN() async {
+    final token = _token;
+    final action = widget.onVPNProfile;
+    if (_busy || token == null || action == null) return;
+    setState(() => _busy = true);
+    try {
+      var result = await action(token, false);
+      if (!mounted) return;
+      if (result['requiresLink'] == true) {
+        final consent = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Привязать бесплатный профиль?'),
+            content: const Text(
+              'Индивидуальный VPN-профиль этого устройства будет связан с текущим аккаунтом Dropo. После привязки для управления профилем потребуется этот аккаунт.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Отмена'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Привязать'),
+              ),
+            ],
+          ),
+        );
+        if (consent != true) return;
+        result = await action(token, true);
+      }
+      if (mounted) {
+        setState(
+          () => _message = result['success'] == true
+              ? 'Профиль VPN обновлён. Free доступен без покупки; Boost применяется при действующей подписке.'
+              : result['error']?.toString() ??
+                    'Профиль пока не готов. Повторите позже.',
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _message =
+              'Не удалось обновить профиль VPN. Сохранённые источники доступны.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _turboPage() => _page(
+    Column(
+      key: const ValueKey('turbo-page'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (widget.onBackToAccount != null)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: widget.onBackToAccount,
+              icon: const Icon(Icons.arrow_back),
+              label: const Text('В аккаунт'),
+            ),
+          ),
+        const Text(
+          'Турбо',
+          style: TextStyle(
+            color: _atlasText,
+            fontSize: 32,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 16),
+        _PlanPanel(account: _account!),
+        const SizedBox(height: 16),
+        _BoostPanel(
+          product: _product,
+          available: _purchasingAvailable,
+          enabled: !_busy,
+          onBuy: _openPurchase,
+          onTerms: () => _showTextDialog(
+            context,
+            'Условия Турбо',
+            'Покупка оплачивается Telegram Stars и привязывается к вашему аккаунту. Срок и статус появятся здесь после подтверждения. Бесплатный VPN остаётся доступен без покупки.',
+          ),
+        ),
+        if (widget.onVPNProfile != null) ...[
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: _busy ? null : _refreshOwnedVPN,
+            icon: const Icon(Icons.sync),
+            label: const Text('Обновить профиль VPN'),
+          ),
+        ],
+        if (_message.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          _AccountNotice(message: _message),
+        ],
+      ],
+    ),
+  );
+
+  Widget _signedIn() {
+    final account = _account!;
+    if (account.guestAccount) {
+      return _isAndroidPlatform
+          ? TickerMode(enabled: !_passwordDialogOpen, child: _signedOut())
+          : _guestProfile();
+    }
+    return _page(
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_development && !account.passwordAccount) ...[
+            const _AccountNotice(
+              message:
+                  'Локальный тестовый аккаунт. Это имитация регистрации; настоящий Telegram не подключён.',
+            ),
+            const SizedBox(height: 20),
+          ],
+          if (account.demoAccount) ...[
+            const _AccountNotice(
+              message:
+                  'Тестовый аккаунт на сервере. Подключение и действия с сессиями настоящие. '
+                  'Удаление стирает профиль и завершает все сессии. Следующий вход выданными '
+                  'данными создаст новый пустой тестовый профиль без восстановления удалённых данных.',
+            ),
+            const SizedBox(height: 20),
+          ],
+          Row(
+            children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _atlasMint.withValues(alpha: 0.12),
+                  border: Border.all(color: _atlasMint.withValues(alpha: 0.45)),
+                ),
+                child: Icon(
+                  account.passwordAccount
+                      ? Icons.person_outline
+                      : Icons.send_rounded,
+                  color: _atlasMint,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      account.displayName,
+                      style: const TextStyle(
+                        color: _atlasText,
+                        fontSize: 21,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      account.passwordAccount
+                          ? account.username.isEmpty
+                                ? 'Вход по паролю'
+                                : account.username
+                          : _development
+                          ? 'Telegram не подключён'
+                          : account.telegramUsername.isNotEmpty
+                          ? '@${account.telegramUsername}'
+                          : 'Telegram подключён',
+                      style: const TextStyle(color: _atlasMuted),
+                    ),
+                  ],
+                ),
+              ),
+              OutlinedButton(
+                onPressed: _busy ? null : _logout,
+                child: Text(_tr(context, 'Выйти', 'Sign out')),
+              ),
+            ],
+          ),
+          if (_message.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _AccountNotice(message: _message),
+          ],
+          if (widget.onVPNProfile != null && !_development) ...[
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _refreshOwnedVPN,
+              icon: const Icon(Icons.vpn_key_outlined),
+              label: const Text('Обновить профиль VPN'),
+            ),
+          ],
+          if (widget.onDeleteGuestVPN != null && !_development) ...[
+            const SizedBox(height: 12),
+            TextButton.icon(
+              key: const ValueKey('delete-standalone-guest-vpn'),
+              onPressed: _busy ? null : _deleteGuestVPN,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Удалить отдельный бесплатный профиль'),
+            ),
+          ],
+          const SizedBox(height: 26),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 700;
+              final plan = _PlanPanel(account: account);
+              final boost = _BoostPanel(
+                product: _product,
+                available: _purchasingAvailable,
+                enabled: !_busy,
+                onBuy: _openPurchase,
+                onTerms: () => _showTextDialog(
+                  context,
+                  'Условия покупки',
+                  'Оплата цифровой услуги проводится в Telegram Stars. Ускорение активируется только после успешного платежа и действует ${_product.durationDays} дней. По вопросам оплаты используйте /paysupport в боте.',
+                ),
+              );
+              if (compact) {
+                return Column(
+                  children: [plan, const SizedBox(height: 16), boost],
+                );
+              }
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: plan),
+                  const SizedBox(width: 16),
+                  Expanded(child: boost),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 28),
+          const Text(
+            'Безопасность аккаунта',
+            style: TextStyle(
+              color: _atlasText,
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Container(
+            decoration: BoxDecoration(
+              color: _atlasSurface.withValues(alpha: 0.82),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _atlasBorder),
+            ),
+            child: Column(
+              children: [
+                _AccountActionRow(
+                  icon: Icons.shield_outlined,
+                  title: 'Подтверждение действий',
+                  detail: account.passwordAccount
+                      ? 'Чувствительные действия подтверждаются паролем Dropo'
+                      : _development
+                      ? 'Подтверждения имитируются на локальной странице'
+                      : 'Вход и завершение сессий подтверждаются в Telegram',
+                  onTap: () => _showTextDialog(
+                    context,
+                    'Подтверждение действий',
+                    account.passwordAccount
+                        ? 'Повторный ввод пароля Dropo подтверждает удаление аккаунта и завершение других сессий. Пароль Telegram не требуется.'
+                        : _development
+                        ? 'Это локальная проверка интерфейса, а не реальная авторизация. Для настоящего входа нужно настроить Telegram-бота и HTTPS backend.'
+                        : 'Dropo никогда не запрашивает код входа или пароль Telegram. Подтверждайте действие только в официальном боте после запуска из приложения.',
+                  ),
+                ),
+                if (!account.passwordAccount) ...[
+                  const Divider(height: 1),
+                  _AccountActionRow(
+                    icon: Icons.key_outlined,
+                    title: 'Восстановить доступ',
+                    detail: 'Подтвердить Telegram и завершить другие сессии',
+                    onTap: _busy ? null : _startRecoveryDialog,
+                  ),
+                ],
+                const Divider(height: 1),
+                _AccountActionRow(
+                  icon: Icons.devices_outlined,
+                  title: 'Управление сессиями',
+                  detail: 'Просмотр устройств и безопасный выход',
+                  onTap: _busy ? null : _showSessions,
+                ),
+                const Divider(height: 1),
+                _AccountActionRow(
+                  key: const ValueKey('account-delete'),
+                  icon: Icons.delete_outline,
+                  title: 'Удалить аккаунт',
+                  detail: _accountDeletionAvailable
+                      ? 'Безвозвратно удалить данные аккаунта и завершить все сессии'
+                      : 'Удаление через приложение временно недоступно — откройте страницу ниже',
+                  onTap: _busy || !_accountDeletionAvailable
+                      ? null
+                      : _deleteAccount,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            '«Выйти» завершает сессию только на этом устройстве и не удаляет аккаунт.',
+            style: TextStyle(color: _atlasMuted, height: 1.4),
+          ),
+          const SizedBox(height: 8),
+          _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeleteAccountDialog extends StatefulWidget {
+  const _DeleteAccountDialog({
+    required this.api,
+    required this.token,
+    required this.endpoint,
+    required this.development,
+    required this.onOpenExternal,
+    this.passwordAccount = false,
+    this.demoAccount = false,
+  });
+
+  final AccountTransport api;
+  final String token, endpoint;
+  final bool development;
+  final bool passwordAccount, demoAccount;
+  final Future<void> Function(String) onOpenExternal;
+
+  @override
+  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
+}
+
+class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  final _password = TextEditingController();
+  String? _confirmation, _telegramUrl;
+  DateTime? _deadline;
+  String _message = '';
+  Timer? _poll, _expiry;
+  bool _working = false, _checking = false, _openingTelegram = false;
+  bool _uncertainResult = false;
+  bool _expired = false;
+  int _generation = 0;
+
+  @override
+  void dispose() {
+    ++_generation;
+    _stopTimers();
+    _password.clear();
+    _password.dispose();
+    super.dispose();
+  }
+
+  void _stopTimers() {
+    _poll?.cancel();
+    _poll = null;
+    _expiry?.cancel();
+    _expiry = null;
+  }
+
+  bool _validConfirmationLink(String value, String confirmation) {
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.userInfo.isNotEmpty || uri.hasFragment) return false;
+    if (uri.scheme == 'https' &&
+        uri.host == 't.me' &&
+        (!uri.hasPort || uri.port == 443) &&
+        !uri.hasQuery &&
+        uri.pathSegments.length == 1 &&
+        RegExp(
+          r'^[A-Za-z][A-Za-z0-9_]{4,31}$',
+        ).hasMatch(uri.pathSegments.first)) {
+      return true;
+    }
+    final endpoint = Uri.tryParse(widget.endpoint);
+    return widget.development &&
+        kDebugMode &&
+        endpoint != null &&
+        endpoint.scheme == 'http' &&
+        accountEndpointAvailable(widget.endpoint) &&
+        uri.scheme == 'http' &&
+        uri.origin == endpoint.origin &&
+        !uri.hasQuery &&
+        uri.path == '/dev/action/$confirmation';
+  }
+
+  Future<void> _createConfirmation() async {
+    if (_working) return;
+    final password = _password.text;
+    if (widget.passwordAccount && password.isEmpty) {
+      setState(
+        () => _message = 'Введите пароль Dropo для подтверждения удаления.',
+      );
+      return;
+    }
+    _password.clear();
+    _stopTimers();
+    final generation = ++_generation;
+    setState(() {
+      _working = true;
+      _message = '';
+      _expired = false;
+    });
+    try {
+      final response = await widget.api
+          .request(
+            'POST',
+            widget.passwordAccount
+                ? '/v1/action-confirmations/password'
+                : '/v1/action-confirmations',
+            token: widget.token,
+            body: {
+              'action': 'account.delete',
+              if (widget.passwordAccount) 'password': password,
+            },
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted || generation != _generation) return;
+      if (widget.passwordAccount) {
+        final confirmation = _approvedPasswordConfirmation(response);
+        setState(() {
+          _confirmation = confirmation;
+          _deadline = DateTime.tryParse(response['expiresAt'] as String);
+        });
+        await _consumeConfirmation(confirmation, generation);
+        return;
+      }
+      final confirmation = response['confirmationToken'];
+      final link = response['telegramUrl'];
+      final rawExpiry = response['expiresAt'];
+      final expiry = rawExpiry is String ? DateTime.tryParse(rawExpiry) : null;
+      if (confirmation is! String ||
+          !RegExp(r'^[A-Za-z0-9_-]{8,256}$').hasMatch(confirmation) ||
+          link is! String ||
+          !_validConfirmationLink(link, confirmation) ||
+          response['status'] != 'pending' ||
+          expiry == null ||
+          !expiry.isAfter(DateTime.now())) {
+        throw const AccountApiException(
+          'Сервер вернул некорректное подтверждение удаления. Аккаунт не удалён.',
+        );
+      }
+      final wait = accountAuthWaitDuration(rawExpiry, now: DateTime.now());
+      setState(() {
+        _confirmation = confirmation;
+        _telegramUrl = link;
+        _deadline = DateTime.now().add(wait);
+        _working = false;
+      });
+      _expiry = Timer(wait, () {
+        if (!mounted || generation != _generation || _working) return;
+        _stopTimers();
+        setState(() {
+          _expired = true;
+          _message =
+              'Время подтверждения истекло. Закройте окно и начните заново. Удаление аккаунта не подтверждено.';
+        });
+      });
+      _poll = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => unawaited(_checkConfirmation()),
+      );
+      await _openTelegram();
+      if (mounted && generation == _generation) {
+        unawaited(_checkConfirmation());
+      }
+    } catch (error) {
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _working = false;
+        _message = _accountError(error);
+      });
+    }
+  }
+
+  Future<void> _openTelegram() async {
+    final link = _telegramUrl;
+    if (_openingTelegram || link == null) return;
+    final generation = _generation;
+    setState(() => _openingTelegram = true);
+    try {
+      await widget.onOpenExternal(link).timeout(const Duration(seconds: 6));
+    } catch (_) {
+      if (mounted && generation == _generation) {
+        setState(() {
+          _message = widget.development
+              ? 'Не удалось открыть тестовую страницу. Повторите открытие или отмените удаление.'
+              : 'Не удалось открыть Telegram. Повторите открытие или отмените удаление.';
+        });
+      }
+    } finally {
+      if (mounted && generation == _generation) {
+        setState(() => _openingTelegram = false);
+      }
+    }
+  }
+
+  Future<void> _checkConfirmation() async {
+    final confirmation = _confirmation;
+    if (_checking || _working || confirmation == null) return;
+    // A lost consume response can be checked through its deletion receipt even
+    // after the original Telegram challenge expires. Never create a new action
+    // while the result of a previously submitted deletion is unknown.
+    if (!_uncertainResult &&
+        (_expired ||
+            _deadline != null && !DateTime.now().isBefore(_deadline!))) {
+      return;
+    }
+    final generation = _generation;
+    _checking = true;
+    try {
+      final response = await widget.api
+          .request(
+            'GET',
+            '/v1/action-confirmations/$confirmation',
+            token: widget.token,
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted || generation != _generation) return;
+      final status = response['status'];
+      if (status == 'approved' ||
+          status == 'exchanged' &&
+              response['deleted'] == true &&
+              response['sessionsRevoked'] == true) {
+        if (!_uncertainResult &&
+            (_expired ||
+                _deadline != null && !DateTime.now().isBefore(_deadline!))) {
+          return;
+        }
+        await _consumeConfirmation(confirmation, generation);
+      } else if (status == 'denied' || status == 'expired') {
+        _stopTimers();
+        setState(() {
+          _message = status == 'denied'
+              ? 'Удаление отклонено в Telegram. Аккаунт сохранён.'
+              : 'Подтверждение истекло. Начните удаление заново.';
+        });
+      } else if (status != 'pending') {
+        throw const AccountApiException(
+          'Не удалось подтвердить статус удаления. Повторите проверку.',
+        );
+      }
+    } catch (error) {
+      if (mounted && generation == _generation) {
+        setState(() => _message = _accountError(error));
+      }
+    } finally {
+      _checking = false;
+    }
+  }
+
+  Future<void> _consumeConfirmation(String confirmation, int generation) async {
+    _stopTimers();
+    setState(() {
+      _working = true;
+      _message = '';
+      _uncertainResult = true;
+    });
+    try {
+      final response = await widget.api
+          .request(
+            'POST',
+            '/v1/action-confirmations/$confirmation/consume',
+            token: widget.token,
+            body: const {},
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted || generation != _generation) return;
+      if (response['success'] != true ||
+          response['deleted'] != true ||
+          response['sessionsRevoked'] != true) {
+        throw const AccountApiException(
+          'Сервер не подтвердил полное удаление аккаунта и завершение сессий.',
+        );
+      }
+      Navigator.pop(context, true);
+    } catch (error) {
+      if (mounted && generation == _generation) {
+        setState(() {
+          _working = false;
+          final detail = error is AccountApiException ? error.message : '';
+          const resultMessage =
+              'Не удалось подтвердить результат удаления. Сохранённый токен пока не удалён. Нажмите «Проверить результат»; не начинайте новое удаление.';
+          _message = detail.isEmpty ? resultMessage : '$detail\n$resultMessage';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+    canPop: !_working,
+    child: AlertDialog(
+      title: const Text('Удалить аккаунт Dropo?'),
+      scrollable: true,
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.passwordAccount
+                  ? 'Будут безвозвратно удалены профиль, сессии устройств и связанные данные аккаунта. Все устройства выйдут из аккаунта. Это не обычный выход из приложения.'
+                  : 'Будут безвозвратно удалены Telegram-привязка, профиль, сессии устройств и связанные данные аккаунта. Все устройства выйдут из аккаунта. Это не обычный выход из приложения.',
+              style: const TextStyle(height: 1.45),
+            ),
+            if (widget.demoAccount) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'Выданные тестовые данные входа останутся действительными. Следующий вход создаст новый пустой профиль; удалённые данные не восстановятся.',
+              ),
+            ],
+            const SizedBox(height: 12),
+            const Text(
+              'Личные VPN-источники, подписки, настройки и локальные журналы на устройствах останутся. Их можно удалить отдельно в приложении или очистить его хранилище.',
+              style: TextStyle(color: _atlasMuted, height: 1.45),
+            ),
+            const SizedBox(height: 12),
+            _PrivacyActions(onOpenExternal: widget.onOpenExternal),
+            if (widget.passwordAccount && _confirmation == null) ...[
+              const SizedBox(height: 16),
+              _AccountPasswordField(
+                fieldKey: const ValueKey('account-delete-password'),
+                controller: _password,
+                enabled: !_working,
+                onSubmitted: _createConfirmation,
+              ),
+            ],
+            if (_confirmation != null && !widget.passwordAccount) ...[
+              const SizedBox(height: 12),
+              Text(
+                widget.development
+                    ? 'Локальная имитация: подтвердите удаление на тестовой странице. Настоящий Telegram не используется.'
+                    : 'Подтвердите именно удаление аккаунта в боте Dropo и вернитесь сюда. После подтверждения приложение завершит удаление.',
+                style: const TextStyle(height: 1.45),
+              ),
+            ],
+            if (_message.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Text(
+                _message,
+                style: const TextStyle(color: Colors.orangeAccent),
+              ),
+            ],
+            if (_working) ...[
+              const SizedBox(height: 16),
+              const LinearProgressIndicator(),
+              const SizedBox(height: 8),
+              Text(
+                _uncertainResult
+                    ? 'Удаляем аккаунт и завершаем сессии…'
+                    : 'Создаём подтверждение…',
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('account-delete-cancel'),
+          onPressed: _working ? null : () => Navigator.pop(context, false),
+          child: const Text('Закрыть'),
+        ),
+        if (_confirmation == null)
+          FilledButton(
+            key: const ValueKey('account-delete-confirm'),
+            onPressed: _working ? null : _createConfirmation,
+            child: Text(
+              widget.passwordAccount
+                  ? 'Удалить аккаунт'
+                  : widget.development
+                  ? 'Подтвердить в локальном тесте'
+                  : 'Подтвердить удаление в Telegram',
+            ),
+          )
+        else ...[
+          if (!_uncertainResult && !widget.passwordAccount)
+            OutlinedButton(
+              key: const ValueKey('account-delete-open-telegram'),
+              onPressed: _working || _openingTelegram ? null : _openTelegram,
+              child: Text(
+                widget.development
+                    ? 'Открыть тестовую страницу'
+                    : 'Открыть Telegram',
+              ),
+            ),
+          FilledButton(
+            key: const ValueKey('account-delete-check'),
+            onPressed: _working ? null : _checkConfirmation,
+            child: Text(
+              _uncertainResult
+                  ? 'Проверить результат'
+                  : 'Проверить подтверждение',
+            ),
+          ),
+        ],
+      ],
+    ),
+  );
+}
+
+class _AuthForm extends StatelessWidget {
+  const _AuthForm({
+    required this.busy,
+    required this.available,
+    required this.development,
+    required this.recovery,
+    required this.retry,
+    required this.message,
+    required this.onSubmit,
+    required this.onToggleRecovery,
+    required this.onOpenExternal,
+  });
+  final bool busy, recovery, available, development, retry;
+  final String message;
+  final VoidCallback onSubmit, onToggleRecovery;
+  final Future<void> Function(String) onOpenExternal;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Text(
+        recovery
+            ? 'Восстановите доступ через привязанный Telegram.'
+            : 'Без номера телефона и пароля. Нажмите кнопку и подтвердите вход в боте Dropo.',
+        style: const TextStyle(color: _atlasMuted, fontSize: 15, height: 1.5),
+      ),
+      const SizedBox(height: 20),
+      const Text(
+        'При входе через Telegram сервер Dropo получает Telegram ID аккаунта и чата, имя и имя пользователя (если указаны). После подтверждения хранит профиль, сессии устройств и события действий с аккаунтом. Бесплатный профиль этого устройства привяжется к аккаунту; действующий Турбо и подарки применятся при обновлении профиля VPN. Эти данные нужны для входа и безопасности. VPN-трафик и личные подписки в сервис аккаунтов не отправляются. Вход необязателен; аккаунт можно удалить.',
+        key: ValueKey('account-auth-disclosure'),
+        style: TextStyle(color: _atlasMuted, height: 1.45),
+      ),
+      const SizedBox(height: 4),
+      _PrivacyActions(onOpenExternal: onOpenExternal),
+      const SizedBox(height: 12),
+      if (message.isNotEmpty) _AccountNotice(message: message),
+      const SizedBox(height: 14),
+      FilledButton.icon(
+        key: const ValueKey('account-submit'),
+        onPressed: busy || !available ? null : onSubmit,
+        icon: busy
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.send_outlined),
+        label: Text(
+          development
+              ? 'Проверить локальный вход'
+              : retry
+              ? 'Повторить ${recovery ? 'восстановление' : 'вход'} через Telegram'
+              : recovery
+              ? 'Восстановить через Telegram'
+              : 'Войти через Telegram',
+        ),
+        style: FilledButton.styleFrom(
+          minimumSize: const Size.fromHeight(50),
+          backgroundColor: _atlasMint,
+          foregroundColor: _atlasBackground,
+          textStyle: const TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+      const SizedBox(height: 12),
+      TextButton(
+        onPressed: busy ? null : onToggleRecovery,
+        child: Text(recovery ? 'Вернуться ко входу' : 'Восстановить доступ'),
+      ),
+      const SizedBox(height: 18),
+      const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.shield_outlined, color: _atlasMuted, size: 20),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Dropo никогда не запрашивает коды или пароль Telegram.',
+              style: TextStyle(color: _atlasMuted, fontSize: 13, height: 1.45),
+            ),
+          ),
+        ],
+      ),
+    ],
+  );
+}
+
+class _TelegramAuthSteps extends StatelessWidget {
+  const _TelegramAuthSteps();
+  static const _steps = [
+    ('Откройте Telegram', 'Нажмите «Войти через Telegram» в приложении.'),
+    (
+      'Подтвердите вход',
+      'В боте нажмите «Подтвердить». Контакт и коды не нужны.',
+    ),
+    (
+      'Вернитесь в Dropo',
+      'Аккаунт появится автоматически после подтверждения.',
+    ),
+  ];
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      for (var index = 0; index < _steps.length; index++)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 20),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: _atlasBorder),
+                ),
+                child: Text(
+                  '${index + 1}',
+                  style: const TextStyle(color: _atlasText),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _steps[index].$1,
+                      style: const TextStyle(
+                        color: _atlasText,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      _steps[index].$2,
+                      style: const TextStyle(color: _atlasMuted, height: 1.4),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+    ],
+  );
+}
+
+class _PlanPanel extends StatelessWidget {
+  const _PlanPanel({required this.account});
+  final _AccountRecord account;
+  @override
+  Widget build(BuildContext context) => _AccountPanel(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Текущий тариф', style: TextStyle(color: _atlasMuted)),
+        const SizedBox(height: 12),
+        Text(
+          account.speedBoostUntil?.isAfter(DateTime.now()) == true
+              ? 'Dropo Турбо'
+              : 'Dropo Free',
+          style: const TextStyle(
+            color: _atlasText,
+            fontSize: 26,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          account.speedBoostUntil?.isAfter(DateTime.now()) != true
+              ? 'Бесплатный доступ'
+              : 'Активно до ${_dateLabel(account.speedBoostUntil!)}',
+          style: TextStyle(
+            color: account.speedBoostUntil?.isAfter(DateTime.now()) == true
+                ? _atlasMint
+                : _atlasMuted,
+            fontSize: 15,
+          ),
+        ),
+        const SizedBox(height: 20),
+        const Divider(),
+        const SizedBox(height: 14),
+        const Text(
+          'Основные функции VPN остаются доступными независимо от тарифа.',
+          style: TextStyle(color: _atlasMuted, height: 1.45),
+        ),
+      ],
+    ),
+  );
+}
+
+class _BoostPanel extends StatelessWidget {
+  const _BoostPanel({
+    required this.product,
+    required this.available,
+    required this.enabled,
+    required this.onBuy,
+    required this.onTerms,
+  });
+  final _AccountProduct product;
+  final bool enabled, available;
+  final VoidCallback onBuy, onTerms;
+  @override
+  Widget build(BuildContext context) => _AccountPanel(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          available ? product.name : 'Турбо по приглашению',
+          style: const TextStyle(
+            color: _atlasText,
+            fontSize: 22,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          available
+              ? product.description
+              : 'Покупки пока отключены. Турбо по подарочной ссылке или от администратора уже работает и закрепляется за аккаунтом.',
+          style: const TextStyle(color: _atlasMuted, height: 1.45),
+        ),
+        const SizedBox(height: 18),
+        if (available) _StarsAmount(amount: product.stars, fontSize: 26),
+        const SizedBox(height: 14),
+        FilledButton.icon(
+          key: const ValueKey('account-buy-speed'),
+          onPressed: available && enabled ? onBuy : null,
+          icon: const Icon(Icons.send_outlined),
+          label: Text(
+            available ? 'Оплатить в Telegram' : 'Покупки пока недоступны',
+          ),
+          style: FilledButton.styleFrom(
+            backgroundColor: _atlasMint,
+            foregroundColor: _atlasBackground,
+            minimumSize: const Size.fromHeight(48),
+          ),
+        ),
+        if (available)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: onTerms,
+              child: const Text('Условия покупки'),
+            ),
+          ),
+      ],
+    ),
+  );
+}
+
+class _AccountPanel extends StatelessWidget {
+  const _AccountPanel({required this.child});
+  final Widget child;
+  @override
+  Widget build(BuildContext context) => Container(
+    constraints: const BoxConstraints(minHeight: 280),
+    padding: const EdgeInsets.all(24),
+    decoration: BoxDecoration(
+      color: _atlasSurface.withValues(alpha: 0.88),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: _atlasBorder),
+    ),
+    child: child,
+  );
+}
+
+class _AccountActionRow extends StatelessWidget {
+  const _AccountActionRow({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.detail,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String title, detail;
+  final VoidCallback? onTap;
+  @override
+  Widget build(BuildContext context) => Material(
+    color: Colors.transparent,
+    child: ListTile(
+      minTileHeight: 68,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 4),
+      leading: Icon(icon, color: _atlasText),
+      title: Text(
+        title,
+        style: const TextStyle(color: _atlasText, fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(detail, style: const TextStyle(color: _atlasMuted)),
+      trailing: const Icon(Icons.chevron_right, color: _atlasMuted),
+      onTap: onTap,
+    ),
+  );
+}
+
+class _AccountNotice extends StatelessWidget {
+  const _AccountNotice({required this.message});
+  final String message;
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    decoration: BoxDecoration(
+      color: _atlasMint.withValues(alpha: 0.08),
+      border: Border.all(color: _atlasMint.withValues(alpha: 0.3)),
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: Text(message, style: const TextStyle(color: _atlasText)),
+  );
+}
+
+class _SpeedBoostPurchaseDialog extends StatefulWidget {
+  const _SpeedBoostPurchaseDialog({
+    required this.api,
+    required this.token,
+    required this.product,
+    required this.onOpenExternal,
+    required this.onActivate,
+  });
+  final AccountTransport api;
+  final String token;
+  final _AccountProduct product;
+  final Future<void> Function(String) onOpenExternal;
+  final Future<Map<String, dynamic>> Function() onActivate;
+  @override
+  State<_SpeedBoostPurchaseDialog> createState() =>
+      _SpeedBoostPurchaseDialogState();
+}
+
+class _SpeedBoostPurchaseDialogState extends State<_SpeedBoostPurchaseDialog> {
+  bool accepted = false, busy = false, pending = false, polling = false;
+  bool paid = false, terminal = false;
+  String message = '', orderId = '', invoiceUrl = '';
+  int? orderAmountStars;
+  Timer? poll;
+
+  @override
+  void dispose() {
+    poll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _createOrder() async {
+    if (!accepted || busy) return;
+    setState(() {
+      busy = true;
+      message = '';
+    });
+    try {
+      final response = await widget.api.request(
+        'POST',
+        '/v1/orders',
+        token: widget.token,
+        body: {'productId': widget.product.id, 'termsAccepted': true},
+      );
+      orderAmountStars = _positiveStarsAmount(response['amountStars']);
+      orderId = response['orderId']?.toString() ?? '';
+      invoiceUrl = response['invoiceUrl']?.toString() ?? '';
+      if (orderId.isEmpty || invoiceUrl.isEmpty || orderAmountStars == null) {
+        throw const AccountApiException(
+          'Не удалось подтвердить сумму счёта Telegram.',
+        );
+      }
+      if (orderAmountStars != widget.product.stars) {
+        throw const AccountApiException(
+          'Цена изменилась. Закройте окно и обновите тариф перед оплатой.',
+        );
+      }
+      final quotedProduct = response['product'];
+      if (quotedProduct is! Map ||
+          quotedProduct['id'] != widget.product.id ||
+          quotedProduct['durationDays'] != widget.product.durationDays ||
+          quotedProduct['stars'] != widget.product.stars) {
+        throw const AccountApiException(
+          'Условия тарифа изменились или не подтверждены. Закройте окно и обновите тариф перед оплатой.',
+        );
+      }
+      if (!mounted) return;
+      setState(() {
+        busy = false;
+        pending = true;
+      });
+      poll = Timer.periodic(
+        const Duration(seconds: 3),
+        (_) => unawaited(_poll()),
+      );
+      unawaited(_poll());
+      await widget.onOpenExternal(invoiceUrl);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          message = _accountError(error);
+        });
+      }
+    }
+  }
+
+  Future<void> _poll() async {
+    if (!mounted || busy || polling || terminal || orderId.isEmpty) return;
+    polling = true;
+    try {
+      final response = await widget.api.request(
+        'GET',
+        '/v1/orders/$orderId',
+        token: widget.token,
+      );
+      if (!mounted) return;
+      final status = response['status']?.toString();
+      final amount = _positiveStarsAmount(response['amountStars']);
+      if (amount != null) orderAmountStars = amount;
+      if (status == 'refunded') {
+        poll?.cancel();
+        setState(() {
+          terminal = true;
+          paid = false;
+          message =
+              '${orderAmountStars == null ? 'Оплата возвращена' : '$orderAmountStars Stars возвращены'} в Telegram. Остаток этого заказа снят; Free и другие начисления сохранены.';
+        });
+      } else if (status == 'paid') {
+        setState(() {
+          paid = true;
+          message = 'Оплата получена. Готовим премиальный профиль…';
+        });
+        final activation = response['activation']?.toString();
+        if (activation == 'expired') {
+          poll?.cancel();
+          setState(() {
+            terminal = true;
+            message =
+                'Срок этого доступа завершён. Автопродления и повторного списания нет.';
+          });
+          return;
+        }
+        if (activation != 'ready') return;
+        final result = await widget.onActivate();
+        if (!mounted) return;
+        if (result['success'] == true) {
+          poll?.cancel();
+          Navigator.pop(context, true);
+        } else {
+          setState(
+            () => message =
+                'Оплата сохранена. ${result['error'] ?? 'Профиль пока не применён. Повторим автоматически; повторно платить не нужно.'}',
+          );
+        }
+      }
+    } catch (error) {
+      if (mounted) setState(() => message = _accountError(error));
+    } finally {
+      polling = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(
+      terminal
+          ? 'Статус покупки'
+          : paid
+          ? 'Активируем Турбо'
+          : pending
+          ? 'Ждём подтверждение Telegram'
+          : 'Подтвердите покупку',
+    ),
+    content: SizedBox(
+      width: 410,
+      child: SingleChildScrollView(
+        child: pending
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!terminal)
+                    const SizedBox(
+                      width: 46,
+                      height: 46,
+                      child: CircularProgressIndicator(strokeWidth: 3),
+                    ),
+                  const SizedBox(height: 22),
+                  const Text(
+                    'Статус обновляется автоматически. Покупка сохранится на аккаунте, даже если закрыть окно.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: _atlasMuted, height: 1.45),
+                  ),
+                  if (message.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      message,
+                      style: const TextStyle(color: Colors.orangeAccent),
+                    ),
+                  ],
+                ],
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: _atlasBorder),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.bolt_rounded,
+                          color: _atlasMint,
+                          size: 30,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                widget.product.name,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                '${widget.product.durationDays} дней',
+                                style: const TextStyle(color: _atlasMuted),
+                              ),
+                            ],
+                          ),
+                        ),
+                        _StarsAmount(
+                          amount: widget.product.stars,
+                          fontSize: 18,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    '${widget.product.stars} Stars за ${widget.product.durationDays} дней. Разовая оплата через Telegram, без автопродления. После оплаты приложение подготовит и применит премиальный профиль.',
+                    style: const TextStyle(color: _atlasMuted, height: 1.45),
+                  ),
+                  const SizedBox(height: 12),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: accepted,
+                    onChanged: busy
+                        ? null
+                        : (value) => setState(() => accepted = value == true),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Я принимаю условия покупки'),
+                  ),
+                  TextButton(
+                    onPressed: () =>
+                        widget.onOpenExternal('https://dropo.fun/terms'),
+                    child: const Text('Условия покупки и возврата'),
+                  ),
+                  if (message.isNotEmpty)
+                    Text(
+                      message,
+                      style: const TextStyle(color: Colors.orangeAccent),
+                    ),
+                ],
+              ),
+      ),
+    ),
+    actions: [
+      if (pending && !paid && !terminal)
+        OutlinedButton(
+          onPressed: invoiceUrl.isEmpty
+              ? null
+              : () => widget.onOpenExternal(invoiceUrl),
+          child: const Text('Открыть счёт снова'),
+        ),
+      TextButton(
+        onPressed: busy ? null : () => Navigator.pop(context, false),
+        child: Text(pending ? 'Закрыть' : 'Отмена'),
+      ),
+      if (!pending)
+        FilledButton(
+          key: const ValueKey('purchase-confirm'),
+          onPressed: accepted && !busy ? _createOrder : null,
+          child: Text(busy ? 'Создаём счёт…' : 'Перейти к оплате'),
+        ),
+    ],
+  );
+}
+
+class _StarsAmount extends StatelessWidget {
+  const _StarsAmount({required this.amount, required this.fontSize});
+
+  final int amount;
+  final double fontSize;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text(
+        '$amount',
+        style: TextStyle(
+          color: _atlasText,
+          fontSize: fontSize,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+      const SizedBox(width: 5),
+      const Icon(Icons.star_rounded, color: Color(0xFFFFC857), size: 22),
+    ],
+  );
+}
+
+class _SessionsDialog extends StatefulWidget {
+  const _SessionsDialog({
+    required this.sessions,
+    required this.api,
+    required this.token,
+    required this.onOpenExternal,
+    this.passwordAccount = false,
+  });
+  final List<_AccountSession> sessions;
+  final AccountTransport api;
+  final String token;
+  final bool passwordAccount;
+  final Future<void> Function(String) onOpenExternal;
+  @override
+  State<_SessionsDialog> createState() => _SessionsDialogState();
+}
+
+class _SessionsDialogState extends State<_SessionsDialog> {
+  final _password = TextEditingController();
+  int _generation = 0;
+  bool busy = false;
+  String message = '';
+  Timer? poll;
+
+  @override
+  void dispose() {
+    ++_generation;
+    poll?.cancel();
+    _password.clear();
+    _password.dispose();
+    super.dispose();
+  }
+
+  Future<void> _revokeOthers() async {
+    if (busy) return;
+    final password = _password.text;
+    if (widget.passwordAccount && password.isEmpty) {
+      setState(
+        () => message = 'Введите пароль Dropo для завершения других сессий.',
+      );
+      return;
+    }
+    _password.clear();
+    final generation = ++_generation;
+    setState(() {
+      busy = true;
+      message = '';
+    });
+    try {
+      final response = await widget.api.request(
+        'POST',
+        widget.passwordAccount
+            ? '/v1/action-confirmations/password'
+            : '/v1/action-confirmations',
+        token: widget.token,
+        body: {
+          'action': 'sessions.revoke_others',
+          if (widget.passwordAccount) 'password': password,
+        },
+      );
+      if (!mounted || generation != _generation) return;
+      if (widget.passwordAccount) {
+        final confirmation = _approvedPasswordConfirmation(response);
+        final result = await widget.api.request(
+          'POST',
+          '/v1/action-confirmations/$confirmation/consume',
+          token: widget.token,
+          body: const {},
+        );
+        if (!mounted || generation != _generation) return;
+        if (result['success'] != true) {
+          throw const AccountApiException(
+            'Сервер не подтвердил завершение сессий. Обновите список устройств.',
+          );
+        }
+        Navigator.pop(context);
+        return;
+      }
+      final confirmation = response['confirmationToken']?.toString() ?? '';
+      final url = response['telegramUrl']?.toString() ?? '';
+      if (confirmation.isEmpty) {
+        throw const AccountApiException('Подтверждение не создано.');
+      }
+      if (url.isNotEmpty) await widget.onOpenExternal(url);
+      if (!mounted || generation != _generation) return;
+      poll = Timer.periodic(const Duration(seconds: 2), (_) async {
+        try {
+          final status = await widget.api.request(
+            'GET',
+            '/v1/action-confirmations/$confirmation',
+            token: widget.token,
+          );
+          if (status['status']?.toString() == 'approved') {
+            poll?.cancel();
+            await widget.api.request(
+              'POST',
+              '/v1/action-confirmations/$confirmation/consume',
+              token: widget.token,
+              body: const {},
+            );
+            if (mounted) Navigator.pop(context);
+          }
+        } catch (error) {
+          if (mounted) setState(() => message = _accountError(error));
+        }
+      });
+    } catch (error) {
+      if (mounted && generation == _generation) {
+        setState(() {
+          busy = false;
+          message = _accountError(error);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+    canPop: !busy,
+    child: AlertDialog(
+      title: const Text('Активные сессии'),
+      scrollable: true,
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final session in widget.sessions)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  session.current
+                      ? Icons.laptop_windows
+                      : Icons.devices_outlined,
+                  color: session.current ? _atlasMint : _atlasMuted,
+                ),
+                title: Text(session.deviceName),
+                subtitle: Text(
+                  session.lastSeenAt == null
+                      ? 'Время неизвестно'
+                      : 'Активность: ${_dateTimeLabel(session.lastSeenAt!)}',
+                ),
+                trailing: session.current
+                    ? const Text('Текущая', style: TextStyle(color: _atlasMint))
+                    : null,
+              ),
+            if (message.isNotEmpty)
+              Text(message, style: const TextStyle(color: Colors.orangeAccent)),
+            if (widget.passwordAccount &&
+                widget.sessions.any((item) => !item.current)) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'Для завершения остальных сессий введите пароль Dropo.',
+              ),
+              const SizedBox(height: 8),
+              _AccountPasswordField(
+                fieldKey: const ValueKey('account-sessions-password'),
+                controller: _password,
+                enabled: !busy,
+                onSubmitted: _revokeOthers,
+              ),
+            ],
+            if (busy) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(),
+              const SizedBox(height: 8),
+              Text(
+                widget.passwordAccount
+                    ? 'Завершаем другие сессии…'
+                    : 'Подтвердите действие в Telegram.',
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: busy ? null : () => Navigator.pop(context),
+          child: const Text('Закрыть'),
+        ),
+        if (widget.sessions.where((item) => !item.current).isNotEmpty)
+          FilledButton(
+            key: const ValueKey('account-sessions-revoke'),
+            onPressed: busy ? null : _revokeOthers,
+            child: const Text('Завершить остальные'),
+          ),
+      ],
+    ),
+  );
+}
+
+Future<void> _showTextDialog(BuildContext context, String title, String body) =>
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(body, style: const TextStyle(height: 1.5)),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Понятно'),
+          ),
+        ],
+      ),
+    );
+
+String _accountError(Object error) {
+  if (error is AccountApiException) return error.message;
+  if (error is SocketException || error is TimeoutException) {
+    return 'Нет связи с сервером аккаунтов. Проверьте интернет и повторите попытку.';
+  }
+  return 'Не удалось выполнить действие. Повторите позже.';
+}
+
+String _dateLabel(DateTime value) {
+  const months = [
+    'января',
+    'февраля',
+    'марта',
+    'апреля',
+    'мая',
+    'июня',
+    'июля',
+    'августа',
+    'сентября',
+    'октября',
+    'ноября',
+    'декабря',
+  ];
+  final local = value.toLocal();
+  return '${local.day} ${months[local.month - 1]} ${local.year}';
+}
+
+String _dateTimeLabel(DateTime value) {
+  final local = value.toLocal();
+  String two(int item) => item.toString().padLeft(2, '0');
+  return '${two(local.day)}.${two(local.month)}.${local.year} '
+      '${two(local.hour)}:${two(local.minute)}';
+}

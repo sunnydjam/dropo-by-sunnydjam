@@ -1,0 +1,2769 @@
+package main
+
+// VPN control methods for dropo.
+// This file contains VPN start/stop/toggle operations
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// getActiveConfigPath writes active config to file and returns the path.
+// This is needed because sing-box requires a file path, but we store configs in settings.json.
+func (a *App) getActiveConfigPath() (string, error) {
+	if a.storage == nil {
+		return "", fmt.Errorf("storage not initialized")
+	}
+	return a.storage.WriteActiveConfigToFile()
+}
+
+// GetStatus returns current VPN status
+func (a *App) GetStatus() map[string]interface{} {
+	// Wait for initialization if not completed
+	a.waitForInit()
+
+	a.mu.Lock()
+	running := a.isRunning
+	starting := a.isStarting
+	singboxPath := a.singboxPath
+	logPath := a.logPath
+	tempLogPath := a.tempLogPath
+	a.mu.Unlock()
+	reconnect := a.vpnReconnectSnapshot()
+	connecting := starting || reconnect.Active
+	disconnecting := a.vpnStopping.Load()
+	vpnState := "stopped"
+	switch {
+	case disconnecting:
+		vpnState = "disconnecting"
+	case reconnect.Active:
+		vpnState = "reconnecting"
+	case starting:
+		vpnState = "starting"
+	case running:
+		vpnState = "connected"
+	case a.hasError.Load():
+		vpnState = "failed"
+	}
+
+	configPath := ""
+	hasConfig := false
+	routingMode := DefaultRoutingMode
+	if a.storage != nil {
+		configPath = a.storage.ActiveConfigFilePath()
+		hasConfig = a.storage.ActiveProfileHasConfig()
+		routingMode = NormalizeRoutingMode(a.storage.GetAppSettings().RoutingMode)
+		if running && fileExists(configPath) {
+			hasConfig = true
+		}
+	}
+	networkMode := a.currentNetworkModeStatus()
+	healthKnown, sourceAvailable, sourceError := a.vpnSourceAvailabilitySnapshot()
+	verification := ""
+	if running {
+		switch {
+		case healthKnown && sourceAvailable:
+			verification = "ok"
+		case healthKnown:
+			verification = "failed"
+		case len(a.configuredVPNSourceTags()) > 0:
+			verification = "pending"
+		}
+	}
+	fullVPNSourceFailed, fullVPNError := fullVPNSourceFailure(
+		running,
+		routingMode,
+		healthKnown,
+		sourceAvailable,
+		sourceError,
+	)
+	coreHasError := !reconnect.Active && a.hasError.Load()
+	if coreHasError && fullVPNError == "" {
+		fullVPNError = reconnect.Error
+	}
+	hasError := coreHasError || fullVPNSourceFailed
+	serviceMessage := ""
+	if reconnect.Active {
+		serviceMessage = fmt.Sprintf("Переподключение %d/%d", reconnect.Attempt, reconnect.Total)
+		if reconnect.Attempt == 0 {
+			serviceMessage = "Готовим переподключение"
+		}
+	} else if coreHasError && reconnect.Error != "" {
+		serviceMessage = reconnect.Error
+	}
+
+	return map[string]interface{}{
+		"running":                   running,
+		"connected":                 running,
+		"connecting":                connecting,
+		"disconnecting":             disconnecting,
+		"vpnState":                  vpnState,
+		"serviceMessage":            serviceMessage,
+		"desiredConnected":          a.desiredConnected.Load(),
+		"sessionGeneration":         reconnect.Generation,
+		"reconnectAttempt":          reconnect.Attempt,
+		"reconnectTotal":            reconnect.Total,
+		"reconnectReason":           reconnect.Reason,
+		"reconnectProtected":        false,
+		"vpnProtection":             currentVPNProtectionStatus(routingMode),
+		"hasError":                  hasError,
+		"error":                     fullVPNError,
+		"routingMode":               string(routingMode),
+		"sourceVerification":        verification,
+		"vpnSourceHealthKnown":      healthKnown,
+		"vpnSourceAvailable":        sourceAvailable,
+		"vpnResponse":               a.vpnResponseSnapshot(running, time.Now()),
+		"configPath":                configPath,
+		"singboxPath":               singboxPath,
+		"configExists":              hasConfig,
+		"singboxExists":             singboxPath != "" && fileExists(singboxPath),
+		"logPath":                   logPath,
+		"tempLogPath":               tempLogPath,
+		"networkMode":               string(networkMode.Active),
+		"requestedNetworkMode":      string(networkMode.Requested),
+		"networkModeFallback":       networkMode.Fallback,
+		"networkModeFallbackReason": networkMode.FallbackReason,
+		"networkModeLabel":          networkMode.Label,
+		"networkModeDescription":    networkMode.Description,
+	}
+}
+
+// Start records the user's connected intent and serializes the transition with
+// Stop and internal reconnects. Repeated Start calls for the same active intent
+// are coalesced instead of invalidating and restarting the in-flight attempt.
+func (a *App) Start() map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": false, "error": "VPN application is not initialized"}
+	}
+	if a.isShuttingDown() {
+		return map[string]interface{}{"success": false, "error": "Приложение завершает работу"}
+	}
+
+	a.vpnIntentMu.Lock()
+	if a.desiredConnected.Load() {
+		a.mu.Lock()
+		running := a.isRunning
+		a.mu.Unlock()
+		generation := a.vpnIntentGeneration.Load()
+		if running {
+			a.vpnIntentMu.Unlock()
+			return map[string]interface{}{
+				"success":    true,
+				"running":    true,
+				"unchanged":  true,
+				"generation": generation,
+			}
+		}
+		if a.activeStartIntent != 0 {
+			a.vpnIntentMu.Unlock()
+			return map[string]interface{}{
+				"success":    true,
+				"running":    false,
+				"connecting": true,
+				"unchanged":  true,
+				"generation": generation,
+			}
+		}
+	}
+	if a.sourcePrepareCancel != nil {
+		a.sourcePrepareCancel()
+	}
+	intentGeneration := a.vpnIntentGeneration.Add(1)
+	a.desiredConnected.Store(true)
+	a.activeStartIntent = intentGeneration
+	a.vpnIntentMu.Unlock()
+	defer func() {
+		a.vpnIntentMu.Lock()
+		if a.activeStartIntent == intentGeneration {
+			a.activeStartIntent = 0
+		}
+		a.vpnIntentMu.Unlock()
+	}()
+
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	if a.vpnIntentGeneration.Load() != intentGeneration || !a.desiredConnected.Load() {
+		return map[string]interface{}{"success": false, "cancelled": true, "superseded": true, "error": "Подключение заменено более новой командой"}
+	}
+	// A settings/source transaction may have completed its internal restart
+	// while this public Start was waiting for the lifecycle lock. Treat the
+	// already-restored session as the successful result of the same intent.
+	if a.isVPNRunning() {
+		return map[string]interface{}{
+			"success":    true,
+			"running":    true,
+			"unchanged":  true,
+			"generation": intentGeneration,
+		}
+	}
+	// Transaction markers are created while holding this same lifecycle lock.
+	// The check is a defensive guard for callers that expose a reconnect phase
+	// without immediately entering startVPN.
+	if a.vpnTransactionalReconnectActive() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "VPN уже переподключается после изменения настроек",
+		}
+	}
+	a.cancelVPNReconnect(false)
+	if !a.desiredConnected.Load() || a.isShuttingDown() {
+		return map[string]interface{}{"success": false, "cancelled": true, "error": "Подключение отменено"}
+	}
+	return a.startVPN(intentGeneration)
+}
+
+func (a *App) vpnStartIntentCurrent(expected uint64) bool {
+	return a != nil &&
+		a.vpnIntentGeneration.Load() == expected &&
+		a.desiredConnected.Load() &&
+		!a.isShuttingDown()
+}
+
+func cancelledVPNStartResult() map[string]interface{} {
+	return map[string]interface{}{
+		"success":   false,
+		"cancelled": true,
+		"error":     "Подключение отменено более новой командой",
+	}
+}
+
+// cancelStartedVPNAttempt tears down a process that was created before a newer
+// user intent became visible. The process waiter has not been started yet at
+// this point, so this function owns Wait and clears the published identity.
+func (a *App) cancelStartedVPNAttempt(cmd *exec.Cmd) {
+	if a == nil || cmd == nil {
+		return
+	}
+	if a.trafficEngine != nil {
+		a.trafficEngine.Stop()
+	}
+	a.stopVPNSourceMonitor()
+	if cmd.Process != nil {
+		if runtime.GOOS == "windows" {
+			terminateProcessTree(cmd)
+		} else {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}
+	a.mu.Lock()
+	if a.cmd == cmd {
+		a.cmd = nil
+		a.cmdDone = nil
+		a.isRunning = false
+	}
+	a.mu.Unlock()
+	a.closeLogFile()
+}
+
+// startVPN performs one serialized start attempt. Callers must hold
+// vpnLifecycleMu and must have checked the active connection intent.
+func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
+	// Wait for initialization
+	a.waitForInit()
+
+	busyID := a.beginBusyTagged("vpn-connect", "Подготовка подключения...")
+	defer a.endBusy(busyID)
+
+	a.updateBusy(busyID, "Проверяем состояние приложения...")
+	// The Defender-compatible VPN core is fetched only after the user presses
+	// Connect. Opening dropo must never download or extract native tools. The
+	// separate local DPI-bypass package is never installed from this path.
+	depsStatus := a.DependenciesStatus()
+	if depsStatus.Managed {
+		if !depsStatus.Ready {
+			a.updateBusy(busyID, "Загружаем безопасное VPN-ядро...")
+			if err := a.DownloadDependencies(); err != nil {
+				return map[string]interface{}{
+					"success": false,
+					"error":   err.Error(),
+				}
+			}
+			depsStatus = a.DependenciesStatus()
+			if !depsStatus.Ready {
+				return map[string]interface{}{
+					"success": false,
+					"error":   "Безопасное VPN-ядро не установлено. Повторите подключение после проверки сети.",
+				}
+			}
+		}
+		a.refreshSingBoxPath()
+	}
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return cancelledVPNStartResult()
+	}
+	singboxPath := a.singBoxPathSnapshot()
+	a.mu.Lock()
+	if a.isRunning {
+		a.mu.Unlock()
+		return map[string]interface{}{
+			"success": false,
+			"error":   "VPN уже запущен",
+		}
+	}
+	if a.isStarting {
+		a.mu.Unlock()
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Подключение уже выполняется",
+		}
+	}
+	a.isStarting = true
+
+	a.mu.Unlock()
+	if a.reconnecting.Load() {
+		a.emitVPNLifecycleState("reconnecting", a.reconnectGeneration.Load(), 0, "Запускаем VPN заново")
+	} else {
+		a.emitVPNLifecycleState("starting", a.reconnectGeneration.Load(), 0, "Запускаем VPN")
+	}
+	defer func() {
+		a.mu.Lock()
+		a.isStarting = false
+		a.mu.Unlock()
+	}()
+
+	// Fresh VPN session: clear per-service maintenance cooldowns and queued jobs.
+	a.resetRouteStrategySession()
+	a.tgProxyPromptedSession.Store(false)
+
+	startupSucceeded := false
+	defer func() {
+		if startupSucceeded {
+			return
+		}
+		a.stopNativeWireGuardTunnels()
+		a.stopDiscordRealtimeMonitor()
+		a.stopFreeAccess()
+		a.stopXrayBridge()
+		a.cleanupDropoRuntimeResidue("failed start")
+	}()
+
+	if startupRouteProbeDiscoveryEnabled && a.isRouteProbeDiscoveryRunning() {
+		a.updateBusy(busyID, "Завершаем фоновый подбор методов...")
+		a.writeLog("[RouteProbe] VPN start is waiting for background discovery to finish")
+		if !a.waitForRouteProbeDiscovery(30 * time.Second) {
+			a.hasError.Store(true)
+			UpdateTrayIcon("error")
+			return map[string]interface{}{
+				"success": false,
+				"error":   "Идет фоновый подбор бесплатных методов. Повторите запуск через несколько секунд.",
+			}
+		}
+	}
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return cancelledVPNStartResult()
+	}
+
+	a.cleanupDropoRuntimeResidue("before start")
+
+	a.updateBusy(busyID, "Готовим активный конфиг...")
+	if err := a.autoUpdateSubscriptionBeforeStart(busyID); err != nil {
+		a.writeLog(fmt.Sprintf("[Subscription] auto-update before start failed: %v", err))
+		a.AddToLogBuffer(fmt.Sprintf("Автообновление подписки не удалось: %v", err))
+	}
+	if err := a.ensureActiveConfigForStart(); err != nil {
+		a.hasError.Store(true)
+		UpdateTrayIcon("error")
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Не удалось подготовить конфиг: %v", err),
+		}
+	}
+
+	a.updateBusy(busyID, "Сохраняем рабочий конфиг...")
+	configPath, err := a.getActiveConfigPath()
+	if err != nil || configPath == "" {
+		a.hasError.Store(true)
+		UpdateTrayIcon("error")
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Конфиг не найден. Проверьте настройки бесплатного доступа или подписки.",
+		}
+	}
+	selectiveWindowsSession := false
+	selectiveProtocolEvidence := false
+	selectiveCaptureCatalog := nativeSelectiveCaptureCatalog()
+	a.logFreeMethodOptOutRoute(configPath)
+	networkMode := a.currentNetworkModeStatus()
+	a.writeLog(fmt.Sprintf("[NetworkMode] requested=%s active=%s fallback=%t reason=%s", networkMode.Requested, networkMode.Active, networkMode.Fallback, networkMode.FallbackReason))
+	if networkMode.Fallback && a.ctx != nil {
+		a.emitEvent("network-mode-fallback", networkModeStatusPayload(networkMode))
+	}
+
+	// Open log file
+	if err := a.openLogFile(); err != nil {
+		a.writeLog(fmt.Sprintf("Warning: could not open log file: %v", err))
+	}
+
+	// Get log level from settings and update config file. Default to info: trace
+	// multiplies sing-box log I/O and logOutput work for no benefit unless the
+	// user is actively diagnosing. See review.md §2.3.
+	logLevel := string(LogLevelInfo)
+	if a.storage != nil {
+		settings := a.storage.GetAppSettings()
+		if settings.LogLevel != "" {
+			logLevel = string(settings.LogLevel)
+		}
+	}
+
+	// Update log level in config file
+	if err := a.updateConfigLogLevel(configPath, logLevel); err != nil {
+		a.writeLog(fmt.Sprintf("Warning: could not update log level in config: %v", err))
+	}
+
+	a.writeLog(fmt.Sprintf("Network config: %s", configPath))
+	a.writeLog(fmt.Sprintf("Log level: %s", logLevel))
+
+	// Start local helpers before sing-box so local outbounds are already
+	// reachable when sing-box performs its first group health checks.
+	a.updateBusy(busyID, "Запускаем бесплатные методы обхода...")
+	activeFreeAccessTags := a.startFreeAccessForConfig(configPath)
+	a.updateBusy(busyID, "Оставляем в конфиге только активные методы...")
+	if err := a.filterActiveFreeAccessOutbounds(configPath, activeFreeAccessTags); err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] failed to filter active free-access outbounds: %v", err))
+	}
+	a.updateBusy(busyID, "Применяем сохранённые стратегии бесплатного доступа...")
+	if runtime.GOOS == "windows" {
+		a.writeLog("[FreeAccess] legacy global strategy store skipped: Windows Unified uses service_strategy_cache.json")
+	} else {
+		if changed, err := a.applyStoredFreeAccessStrategiesToConfig(configPath, activeFreeAccessTags); err != nil {
+			a.writeLog(fmt.Sprintf("[FreeAccess] failed to apply stored strategies: %v", err))
+		} else if changed {
+			a.writeLog("[FreeAccess] stored/default strategies applied before start")
+		} else {
+			a.writeLog("[FreeAccess] stored/default strategies did not require config changes")
+		}
+	}
+	a.updateBusy(busyID, "Сравниваем бесплатные методы с VPN/VLESS подпиской...")
+	cacheApplied, cacheFresh := false, false
+	if hasVPNCandidates, err := configHasVPNProbeCandidates(configPath); err != nil {
+		a.writeLog(fmt.Sprintf("[RouteProbe] failed to inspect VPN candidates before start: %v", err))
+	} else if !hasVPNCandidates {
+		a.writeLog("[RouteProbe] startup VPN comparison skipped: no VPN/VLESS subscription candidates")
+	} else if startupVPNRouteComparisonEnabled {
+		a.writeLog("[RouteProbe] VPN/VLESS candidates found; comparing them with free strategies before start")
+		report, err := a.runRouteProbeAndApply(configPath, activeFreeAccessTags, "startup vpn comparison")
+		if err != nil {
+			a.writeLog(fmt.Sprintf("[RouteProbe] startup VPN comparison failed: %v", err))
+		} else {
+			cacheApplied = true
+			cacheFresh = true
+			if err := a.saveRouteProbeCache(report); err != nil {
+				a.writeLog(fmt.Sprintf("[RouteProbe] failed to save startup comparison cache: %v", err))
+			}
+			a.writeLog(fmt.Sprintf("[RouteProbe] startup VPN comparison applied: %d/%d service(s) have a route",
+				routeProbeSuccessCount(report.Services), len(report.Services)))
+		}
+	} else {
+		a.writeLog("[RouteProbe] VPN/VLESS candidates found; full comparison is disabled, per-service startup validation will be used")
+	}
+	if startupRouteProbeCacheApplyEnabled && !cacheApplied {
+		a.updateBusy(busyID, "Применяем сохраненный подбор маршрутов...")
+		var cacheErr error
+		cacheApplied, cacheFresh, cacheErr = a.applyCachedRouteProbeToConfig(configPath, true, activeFreeAccessTags)
+		if cacheErr != nil {
+			a.writeLog(fmt.Sprintf("[RouteProbe] failed to apply discovery cache: %v", cacheErr))
+		} else if cacheApplied {
+			if cacheFresh {
+				a.writeLog("[RouteProbe] fresh discovery cache applied before start")
+			} else {
+				a.writeLog("[RouteProbe] stale discovery cache applied before start")
+			}
+		} else {
+			a.writeLog("[RouteProbe] no discovery cache available; starting with resilient outbound groups")
+		}
+	}
+	a.updateBusy(busyID, "Проверяем, что выбранные бесплатные методы всё ещё активны...")
+	if runtime.GOOS == "windows" {
+		if changed, bootstrapErr := a.applyWindowsUnifiedBootstrapRoutesToConfig(configPath); bootstrapErr != nil {
+			a.writeLog(fmt.Sprintf("[FreeAccess] failed to prepare safe Windows Unified bootstrap routes: %v", bootstrapErr))
+		} else if changed {
+			a.writeLog("[FreeAccess] safe bootstrap routes applied: proven cache -> direct, unproven automatic services -> VPN/direct fallback")
+		}
+	}
+	liveFreeAccessTags := liveFreeAccessProxyTags(activeFreeAccessTags)
+	if err := a.filterActiveFreeAccessOutbounds(configPath, liveFreeAccessTags); err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] failed to re-check live free-access outbounds: %v", err))
+	}
+	if cacheApplied {
+		if err := a.requireWorkingRouteAfterProbe(configPath); err != nil {
+			a.hasError.Store(true)
+			UpdateTrayIcon("error")
+			a.writeLog(fmt.Sprintf("[RouteProbe] startup blocked: %v", err))
+			return map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			}
+		}
+	} else {
+		a.writeLog("[RouteProbe] startup route gate skipped because discovery cache is not available yet")
+	}
+	if depsStatus.Degraded {
+		changed, fallbackErr := a.forceSubscriptionFallbackForTransparentRuntime(configPath)
+		if fallbackErr != nil {
+			a.writeLog(fmt.Sprintf("[Security][Defender] failed to prepare subscription-only fallback: %v", fallbackErr))
+		} else if changed {
+			a.writeLog(fmt.Sprintf("[Security][Defender] optional component(s) %v are unavailable; blocked-service groups were pinned to the trusted VPN/VLESS subscription", depsStatus.BlockedComponents))
+		} else {
+			a.writeLog(fmt.Sprintf("[Security][Defender] optional component(s) %v are unavailable and no VPN/VLESS subscription fallback exists", depsStatus.BlockedComponents))
+		}
+	}
+	if runtime.GOOS == "windows" && a.storage != nil {
+		settings := a.storage.GetAppSettings()
+		// Selected-services mode must not install a default TUN route. Hide-RU
+		// and all-traffic policies intentionally keep complete TUN coverage.
+		if shouldUseSelectiveWindowsSession(settings) {
+			// With free-access packet strategies disabled, selected services use
+			// only PAC/fake-DNS VPN routing. Avoid capturing unrelated application
+			// TLS/QUIC handshakes (notably Steam's CEF store) in that mode.
+			// Zapret browser/Electron domains use the scoped in-process CONNECT
+			// relay. Its fixed source-port range is the only TCP evidence captured;
+			// unrelated Steam/game TLS and QUIC stay entirely in the kernel path.
+			selectiveProtocolEvidence = false
+			selectiveCaptureCatalog = nativeSelectiveCaptureCatalogForSettings(settings)
+			proxyConfigPath, proxyErr := a.writeDeepWindowsProxyFallbackConfig(configPath)
+			if proxyErr != nil {
+				a.hasError.Store(true)
+				UpdateTrayIcon("error")
+				return map[string]interface{}{
+					"success": false,
+					"error":   fmt.Sprintf("Не удалось подготовить selective Windows конфигурацию: %v", proxyErr),
+				}
+			}
+			configPath = proxyConfigPath
+			selectiveWindowsSession = true
+		}
+	}
+	a.logActiveConfigDiagnostics(configPath)
+
+	if selectiveWindowsSession {
+		a.writeLog("[NetworkMode] Windows selective startup: proxy-only sing-box + one narrow in-process WinDivert traffic engine")
+	} else {
+		a.writeLog("[NetworkMode] Windows Unified startup: sing-box TUN + one in-process WinDivert traffic engine")
+	}
+
+	a.updateBusy(busyID, "Проверяем sing-box...")
+	if singboxPath == "" || !fileExists(singboxPath) {
+		a.hasError.Store(true)
+		UpdateTrayIcon("error")
+		return map[string]interface{}{
+			"success": false,
+			"error":   "sing-box не найден. Он обязателен для единого режима Windows Unified.",
+		}
+	}
+
+	a.updateBusy(busyID, "Запускаем Xray bridge...")
+	if err := a.startXrayBridge(); err != nil {
+		a.hasError.Store(true)
+		UpdateTrayIcon("error")
+		a.writeLog(fmt.Sprintf("ERROR: Failed to start Xray bridge: %v", err))
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка запуска Xray bridge для xhttp: %v", err),
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("Starting sing-box: %s", singboxPath))
+	a.writeLog(fmt.Sprintf("Config: %s", configPath))
+	a.writeLog(fmt.Sprintf("Log level: %s", logLevel))
+
+	// Start sing-box with config for current profile
+	a.updateBusy(busyID, "Запускаем sing-box...")
+	cmd := exec.Command(singboxPath, "run", "-c", configPath)
+
+	// WireGuard is now handled by Native WireGuard Manager, not sing-box
+	// No need for ENABLE_DEPRECATED_WIREGUARD_OUTBOUND
+
+	// Get stdout and stderr for logging
+	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
+
+	configureBackgroundCommand(cmd)
+
+	// Set working directory to resources folder
+	if a.storage != nil {
+		cmd.Dir = a.storage.GetResourcesPath()
+	} else {
+		cmd.Dir = a.basePath
+	}
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return cancelledVPNStartResult()
+	}
+
+	if err := cmd.Start(); err != nil {
+		a.stopFreeAccess()
+		a.stopXrayBridge()
+		a.hasError.Store(true)
+		UpdateTrayIcon("error")
+		a.writeLog(fmt.Sprintf("ERROR: Failed to start: %v", err))
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка запуска: %v", err),
+		}
+	}
+
+	attachManagedCmdToJob(cmd, "sing-box", a.writeLog)
+
+	cmdDone := make(chan error, 1)
+	a.mu.Lock()
+	a.cmd = cmd
+	a.cmdDone = cmdDone
+	a.isRunning = true
+	a.hasError.Store(false)
+	a.mu.Unlock()
+	// Drain logs immediately. The connected-session strategy validator runs in
+	// the background and must never fill child-process pipes or stall the runtime.
+	go a.logOutput(stdout, "sing-box/out")
+	go a.logOutput(stderr, "sing-box/log")
+	a.updateBusy(busyID, "Проверяем цепочку VPN-источников...")
+	a.startVPNSourceMonitor()
+	if runtime.GOOS == "windows" && a.trafficEngine != nil {
+		if selectiveWindowsSession {
+			if !waitForLoopbackPort(defaultDropoMixedProxyPort, 5*time.Second) {
+				terminateProcessTree(cmd)
+				_ = cmd.Wait()
+				a.mu.Lock()
+				if a.cmd == cmd {
+					a.cmd = nil
+					a.cmdDone = nil
+					a.isRunning = false
+				}
+				a.mu.Unlock()
+				return map[string]interface{}{"success": false, "error": "Локальный selective VPN proxy не запустился"}
+			}
+			proxyAddress := fmt.Sprintf("127.0.0.1:%d", defaultDropoMixedProxyPort)
+			if err := a.trafficEngine.ConfigureSelectiveSession(proxyAddress, selectiveCaptureCatalog, selectiveProtocolEvidence); err != nil {
+				terminateProcessTree(cmd)
+				_ = cmd.Wait()
+				a.mu.Lock()
+				if a.cmd == cmd {
+					a.cmd = nil
+					a.cmdDone = nil
+					a.isRunning = false
+				}
+				a.mu.Unlock()
+				return map[string]interface{}{"success": false, "error": fmt.Sprintf("Не удалось настроить selective redirector: %v", err)}
+			}
+		} else if err := a.trafficEngine.ConfigureTUNSession(); err != nil {
+			terminateProcessTree(cmd)
+			_ = cmd.Wait()
+			a.mu.Lock()
+			if a.cmd == cmd {
+				a.cmd = nil
+				a.cmdDone = nil
+				a.isRunning = false
+			}
+			a.mu.Unlock()
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Не удалось настроить TUN traffic engine: %v", err)}
+		}
+	}
+
+	// Windows Unified: sing-box owns TUN routing and the native packet engine
+	// owns one WinDivert handle. Every enabled service validates its
+	// current strategy; failing services advance in ranked order.
+	// Camouflage must be installed before native WireGuard sends its first
+	// initiation packet. It remains a sidecar; WireGuard owns the tunnel.
+	a.resetWireGuardCamouflageSession()
+	a.prepareDiscordRealtimeSession()
+	a.updateBusy(busyID, "Запускаем быстрые маршруты для заблокированных сервисов...")
+	if err := a.startComposedTransparentEngine(busyID); err != nil {
+		a.writeLog(fmt.Sprintf("[NetworkMode] native traffic engine failed to start: %v", err))
+		// A proxy-only selective session has no TUN fallback. Leaving sing-box
+		// alive here would report a connected state while selected services are
+		// not redirected at all. Fail the whole startup instead.
+		if selectiveWindowsSession {
+			if a.trafficEngine != nil {
+				a.trafficEngine.Stop()
+			}
+			a.stopVPNSourceMonitor()
+			terminateProcessTree(cmd)
+			_ = cmd.Wait()
+			a.mu.Lock()
+			if a.cmd == cmd {
+				a.cmd = nil
+				a.cmdDone = nil
+				a.isRunning = false
+			}
+			a.hasError.Store(true)
+			a.mu.Unlock()
+			UpdateTrayIcon("error")
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Windows selective routing failed to start safely: %v", err),
+			}
+		}
+		_, _ = a.forceSubscriptionFallbackForTransparentRuntime(configPath)
+		switched := a.activateSubscriptionFallbackForTransparentRuntime(a.currentRouteStrategySession())
+		if switched > 0 {
+			a.writeLog(fmt.Sprintf("[NetworkMode] kept sing-box running and switched %d blocked-service group(s) to the ordered VPN-source fallback", switched))
+			a.AddToLogBuffer("Локальный движок трафика недоступен. Заблокированные сервисы временно направлены через VPN-источник.")
+		} else {
+			terminateProcessTree(cmd)
+			_ = cmd.Wait()
+			a.mu.Lock()
+			if a.cmd == cmd {
+				a.cmd = nil
+				a.cmdDone = nil
+				a.isRunning = false
+			}
+			a.hasError.Store(true)
+			a.mu.Unlock()
+			UpdateTrayIcon("error")
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Windows Unified: не удалось запустить локальный движок и отсутствует доступный VPN fallback: %v", err),
+			}
+		}
+	}
+	// Start Native WireGuard tunnels only after strictly-scoped handshake
+	// transformations are active.
+	if a.nativeWG != nil && a.nativeWG.IsInstalled() {
+		a.updateBusy(busyID, "Запускаем рабочие WireGuard-сети...")
+		a.startNativeWireGuardTunnels()
+	}
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		a.cancelStartedVPNAttempt(cmd)
+		return cancelledVPNStartResult()
+	}
+
+	// Start user-visible session accounting as soon as the base VPN and immutable
+	// bootstrap traffic plan are ready. Service probes continue in the background.
+	if a.trafficStats != nil {
+		a.trafficStats.StartSession()
+		a.startTrafficStatsPolling()
+	}
+
+	// Publish the connected state before service validation. Slow remote probes
+	// must never keep a usable TUN/VPN session behind the connecting spinner.
+	// Do this before the waiter starts so an immediate process exit always
+	// overwrites it with the final disconnected/error state.
+	UpdateTrayIcon("connected")
+	a.setRestoreVPNOnStartup(true)
+	a.writeLog("VPN started successfully; service strategies are validating in the background")
+	a.AddToLogBuffer("VPN запущен; стратегии сервисов проверяются в фоне")
+	startupSucceeded = true
+	deferDiscordMonitor := false
+	if runtime.GOOS == "windows" && a.storage != nil {
+		settings := a.storage.GetAppSettings()
+		deferDiscordMonitor = FreeAccessServiceUsesZapret(settings, "discord")
+	}
+	// Monitor process in goroutine
+	go func(cmd *exec.Cmd, done chan error) {
+		err := cmd.Wait()
+		a.mu.Lock()
+		wasStoppedManually := a.stoppedManually
+		isCurrentProcess := a.cmd == cmd
+		if !isCurrentProcess || wasStoppedManually {
+			a.mu.Unlock()
+			if isCurrentProcess && a.trafficStats != nil {
+				a.trafficStats.EndSession()
+				a.trafficStats.Save()
+			}
+			done <- err
+			close(done)
+			return
+		}
+		// Signal process completion immediately so an already queued manual Stop
+		// never waits for the lifecycle lock while holding that same lock itself.
+		// Keep the process marked current until cleanup owns vpnLifecycleMu: a
+		// concurrent Start will then see an existing session instead of starting a
+		// new sing-box that this stale watcher could subsequently terminate.
+		a.mu.Unlock()
+		done <- err
+		close(done)
+
+		a.vpnLifecycleMu.Lock()
+		defer a.vpnLifecycleMu.Unlock()
+
+		// Stop may have won the lifecycle lock after Wait returned and completed
+		// all cleanup itself. Revalidate identity under the lock before touching
+		// any process-wide runtime or scheduling recovery for this generation.
+		a.mu.Lock()
+		isCurrentProcess = a.cmd == cmd
+		wasStoppedManually = a.stoppedManually
+		if !isCurrentProcess || wasStoppedManually {
+			a.mu.Unlock()
+			return
+		}
+		a.isRunning = false
+		a.stoppedManually = false
+		a.cmd = nil
+		a.cmdDone = nil
+		if a.trafficStats != nil {
+			a.trafficStats.EndSession()
+			a.trafficStats.Save()
+		}
+		shouldReconnect := a.desiredConnected.Load() && !a.isShuttingDown()
+		reason := "VPN-процесс завершился неожиданно"
+		if err != nil {
+			reason = fmt.Sprintf("VPN-процесс завершился с ошибкой: %v", err)
+		}
+
+		// ALWAYS stop WireGuard tunnels when VPN process exits
+		// This prevents orphaned tunnels that block user's native WireGuard
+		a.mu.Unlock() // Unlock before calling stopNativeWireGuardTunnels to avoid deadlock
+		if shouldReconnect {
+			// Publish the reconnecting state before potentially slow native cleanup.
+			// The worker cannot start a replacement process until this watcher
+			// releases vpnLifecycleMu, so cleanup remains strictly ordered.
+			a.hasError.Store(false)
+			a.writeLog("[Reconnect] " + reason)
+			a.AddToLogBuffer("Соединение прервано. dropo выполняет переподключение.")
+			a.scheduleVPNReconnect(reason)
+		}
+		a.invalidateRouteStrategySession()
+		a.stopNativeWireGuardTunnels()
+		a.stopVPNSourceMonitor()
+		a.stopDiscordRealtimeMonitor()
+		a.stopFreeAccess()
+		a.stopXrayBridge()
+		a.cleanupDropoRuntimeResidue("process exit")
+		if shouldReconnect {
+			a.closeLogFile()
+			return
+		}
+
+		a.mu.Lock()
+		if err != nil {
+			a.hasError.Store(true)
+			a.writeLog(fmt.Sprintf("VPN process exited with error: %v", err))
+			a.AddToLogBuffer(fmt.Sprintf("VPN завершился с ошибкой: %v", err))
+			UpdateTrayIcon("error")
+		} else {
+			a.writeLog("VPN process exited normally")
+			a.AddToLogBuffer("VPN завершил работу")
+			UpdateTrayIcon("disconnected")
+		}
+		a.closeLogFile()
+		a.mu.Unlock()
+		// Notify frontend about status change
+		if a.ctx != nil {
+			a.emitVPNLifecycleState(map[bool]string{true: "failed", false: "stopped"}[err != nil], a.reconnectGeneration.Load(), 0, "")
+		}
+	}(cmd, cmdDone)
+	if !deferDiscordMonitor {
+		a.startDiscordRealtimeMonitor()
+	}
+	if runtime.GOOS == "windows" {
+		a.startWindowsUnifiedServiceValidationAsync(deferDiscordMonitor)
+	}
+	a.updateBusy(busyID, "Подключение запущено")
+	a.emitVPNLifecycleState("connected", a.reconnectGeneration.Load(), 0, "VPN работает")
+	return map[string]interface{}{
+		"success": true,
+		"running": true,
+	}
+}
+
+func (a *App) writeDeepWindowsProxyFallbackConfig(activeConfigPath string) (string, error) {
+	config, err := readJSONConfig(activeConfigPath)
+	if err != nil {
+		return "", err
+	}
+
+	removedTun := removeTunInbounds(config)
+	if removedTun == 0 {
+		a.writeLog("[NetworkMode] proxy-only fallback config had no TUN inbound to remove")
+	} else {
+		a.writeLog(fmt.Sprintf("[NetworkMode] proxy-only fallback config removed %d TUN inbound(s)", removedTun))
+	}
+	// Never enable this listener as an unconditional Windows proxy: that would
+	// also redirect unrelated applications such as Steam. The selective runtime
+	// may publish a bounded PAC file whose default is DIRECT and whose only PROXY
+	// entries are domains explicitly assigned to VPN.
+	if !enableMixedInboundLocalProxy(config) {
+		return "", fmt.Errorf("mixed inbound is not available for proxy fallback")
+	}
+	if a.pruneProxyFallbackVPNCandidates(config) {
+		a.writeLog("[NetworkMode] proxy-only fallback pruned inactive VPN candidates using route probe results")
+	}
+	if err := pinSelectiveVPNInbound(config); err != nil {
+		return "", err
+	}
+
+	resourcesPath := a.basePath
+	if a.storage != nil {
+		resourcesPath = a.storage.GetResourcesPath()
+	}
+	if resourcesPath == "" {
+		return "", fmt.Errorf("resources path is not available")
+	}
+	if err := os.MkdirAll(resourcesPath, 0755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(resourcesPath, "deep_windows_proxy_config.json")
+	if err := writeJSONConfig(path, config); err != nil {
+		return "", err
+	}
+	a.writeLog(fmt.Sprintf("[NetworkMode] proxy-only fallback config written: %s", path))
+	return path, nil
+}
+
+func removeTunInbounds(config map[string]interface{}) int {
+	inbounds, ok := config["inbounds"].([]interface{})
+	if !ok {
+		return 0
+	}
+	filtered := make([]interface{}, 0, len(inbounds))
+	removed := 0
+	for _, inbound := range inbounds {
+		inboundMap, ok := inbound.(map[string]interface{})
+		if ok && inboundMap["type"] == "tun" {
+			removed++
+			continue
+		}
+		filtered = append(filtered, inbound)
+	}
+	config["inbounds"] = filtered
+	return removed
+}
+
+func enableMixedInboundLocalProxy(config map[string]interface{}) bool {
+	inbounds, ok := config["inbounds"].([]interface{})
+	if !ok {
+		return false
+	}
+	enabled := false
+	for _, inbound := range inbounds {
+		inboundMap, ok := inbound.(map[string]interface{})
+		if !ok || inboundMap["type"] != "mixed" {
+			continue
+		}
+		inboundMap["listen"] = "127.0.0.1"
+		inboundMap["set_system_proxy"] = false
+		if enabled {
+			continue
+		}
+		inboundMap["listen_port"] = float64(defaultDropoMixedProxyPort)
+		inboundTag, _ := inboundMap["tag"].(string)
+		if strings.TrimSpace(inboundTag) == "" {
+			inboundMap["tag"] = "dropo-selective-vpn-in"
+		}
+		enabled = true
+	}
+	return enabled
+}
+
+func pinSelectiveVPNInbound(config map[string]interface{}) error {
+	inbounds, ok := config["inbounds"].([]interface{})
+	if !ok {
+		return fmt.Errorf("selective inbounds are unavailable")
+	}
+	inboundTag := ""
+	for _, raw := range inbounds {
+		inbound, ok := raw.(map[string]interface{})
+		if !ok || inbound["type"] != "mixed" {
+			continue
+		}
+		value, _ := inbound["tag"].(string)
+		inboundTag = strings.TrimSpace(value)
+		if inboundTag != "" {
+			break
+		}
+	}
+	if inboundTag == "" {
+		return fmt.Errorf("selective mixed inbound tag is unavailable")
+	}
+	outbounds, _ := config["outbounds"].([]interface{})
+	terminal := "direct"
+	if outboundTagExists(outbounds, "auto-select") {
+		terminal = "auto-select"
+	}
+	route, ok := config["route"].(map[string]interface{})
+	if !ok {
+		route = make(map[string]interface{})
+		config["route"] = route
+	}
+	rules, _ := route["rules"].([]interface{})
+	filtered := make([]interface{}, 0, len(rules))
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]interface{})
+		if ok && containsStringValue(interfaceStringSlice(rule["inbound"]), inboundTag) {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	pinned := map[string]interface{}{
+		"inbound":  []interface{}{inboundTag},
+		"outbound": terminal,
+	}
+	route["rules"] = append([]interface{}{pinned}, filtered...)
+	return nil
+}
+
+func waitForLoopbackPort(port int, timeout time.Duration) bool {
+	if port < 1 || port > 65535 || timeout <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if loopbackPortReady(port, 150*time.Millisecond) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		<-timer.C
+	}
+}
+
+func shouldUseSelectiveWindowsSession(settings GlobalAppSettings) bool {
+	return NormalizeRoutingMode(settings.RoutingMode) != RoutingModeAllTraffic && !settings.HideRuTraffic
+}
+
+func (a *App) pruneProxyFallbackVPNCandidates(config map[string]interface{}) bool {
+	outbounds, ok := config["outbounds"].([]interface{})
+	if !ok {
+		return false
+	}
+	available := map[string]bool{}
+	for _, outbound := range outbounds {
+		outboundMap, ok := outbound.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		tag, _ := outboundMap["tag"].(string)
+		if tag == "auto-select" && outboundMap["type"] == "selector" {
+			for _, candidate := range interfaceStringSlice(outboundMap["outbounds"]) {
+				if strings.HasPrefix(candidate, "vpn-source-") {
+					// The source monitor switches this selector at runtime. A
+					// cached service probe cannot retire an independent source.
+					return false
+				}
+			}
+		}
+		if tag != "" {
+			available[tag] = true
+		}
+	}
+
+	workingTags := a.workingVPNTagsFromRouteProbe()
+	if len(workingTags) == 0 {
+		return false
+	}
+	keep := make([]string, 0, len(workingTags))
+	for _, tag := range workingTags {
+		if available[tag] {
+			keep = append(keep, tag)
+		}
+	}
+	keep = uniqueStrings(keep)
+	if len(keep) == 0 {
+		return false
+	}
+
+	changed := false
+	for _, outbound := range outbounds {
+		outboundMap, ok := outbound.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		tag, _ := outboundMap["tag"].(string)
+		switch tag {
+		case "auto-select":
+			if setVPNFallbackAutoSelectCandidates(outboundMap, keep) {
+				changed = true
+			}
+		case "proxy":
+			selectorCandidates := append([]string{"auto-select"}, keep...)
+			selectorCandidates = append(selectorCandidates, "direct")
+			if !stringSetEqual(interfaceStringSlice(outboundMap["outbounds"]), selectorCandidates) {
+				outboundMap["outbounds"] = selectorCandidates
+				changed = true
+			}
+			if outboundMap["default"] != "auto-select" {
+				outboundMap["default"] = "auto-select"
+				changed = true
+			}
+		}
+	}
+	if changed {
+		a.writeLog(fmt.Sprintf("[NetworkMode] proxy-only fallback active VPN candidates: %s", strings.Join(keep, ",")))
+	}
+	return changed
+}
+
+func (a *App) workingVPNTagsFromRouteProbe() []string {
+	results := a.routeProbeResultsSnapshot()
+	if len(results) == 0 {
+		cache, err := a.loadRouteProbeCache()
+		if err == nil && routeProbeCacheFresh(cache) {
+			results = cache.Services
+		}
+	}
+	tags := make([]string, 0)
+	for _, result := range results {
+		if result.Success && result.MethodKind == "vpn" && result.MethodTag != "" {
+			tags = append(tags, result.MethodTag)
+		}
+	}
+	return uniqueStrings(tags)
+}
+
+func setVPNFallbackAutoSelectCandidates(outboundMap map[string]interface{}, candidates []string) bool {
+	if len(candidates) == 0 {
+		return false
+	}
+	changed := false
+	current := interfaceStringSlice(outboundMap["outbounds"])
+	if !stringSetEqual(current, candidates) {
+		outboundMap["outbounds"] = candidates
+		changed = true
+	}
+	if len(candidates) == 1 {
+		if outboundMap["type"] != "selector" {
+			outboundMap["type"] = "selector"
+			changed = true
+		}
+		if outboundMap["default"] != candidates[0] {
+			outboundMap["default"] = candidates[0]
+			changed = true
+		}
+		for _, key := range []string{"url", "interval", "tolerance", "interrupt_exist_connections"} {
+			if _, ok := outboundMap[key]; ok {
+				delete(outboundMap, key)
+				changed = true
+			}
+		}
+		return changed
+	}
+
+	if outboundMap["type"] != "urltest" {
+		outboundMap["type"] = "urltest"
+		changed = true
+	}
+	if _, ok := outboundMap["default"]; ok {
+		delete(outboundMap, "default")
+		changed = true
+	}
+	defaults := map[string]interface{}{
+		"url":                         resilientGroupTestURL,
+		"interval":                    "5m",
+		"tolerance":                   50,
+		"interrupt_exist_connections": false,
+	}
+	for key, value := range defaults {
+		if outboundMap[key] != value {
+			outboundMap[key] = value
+			changed = true
+		}
+	}
+	return changed
+}
+
+func stringSetEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, item := range a {
+		counts[item]++
+	}
+	for _, item := range b {
+		if counts[item] == 0 {
+			return false
+		}
+		counts[item]--
+	}
+	return true
+}
+
+func (a *App) startSingBoxProxyFallback(configPath, logLevel string) error {
+	singboxPath := a.singBoxPathSnapshot()
+	a.writeLog(fmt.Sprintf("Starting sing-box proxy fallback: %s", singboxPath))
+	a.writeLog(fmt.Sprintf("Proxy fallback config: %s", configPath))
+	a.writeLog(fmt.Sprintf("Log level: %s", logLevel))
+
+	cmd := exec.Command(singboxPath, "run", "-c", configPath)
+	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
+	configureBackgroundCommand(cmd)
+	if a.storage != nil {
+		cmd.Dir = a.storage.GetResourcesPath()
+	} else {
+		cmd.Dir = a.basePath
+	}
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	attachManagedCmdToJob(cmd, "sing-box proxy fallback", a.writeLog)
+
+	cmdDone := make(chan error, 1)
+	a.mu.Lock()
+	a.cmd = cmd
+	a.cmdDone = cmdDone
+	a.mu.Unlock()
+
+	go a.logOutput(stdout, "sing-box/out")
+	go a.logOutput(stderr, "sing-box/log")
+	a.startVPNSourceMonitor()
+	go a.monitorSingBoxProcess(cmd, cmdDone)
+	return nil
+}
+
+func (a *App) monitorSingBoxProcess(cmd *exec.Cmd, done chan error) {
+	err := cmd.Wait()
+	a.mu.Lock()
+	wasStoppedManually := a.stoppedManually
+	isCurrentProcess := a.cmd == cmd
+	if !isCurrentProcess || wasStoppedManually {
+		a.mu.Unlock()
+		if isCurrentProcess && a.trafficStats != nil {
+			a.trafficStats.EndSession()
+			a.trafficStats.Save()
+		}
+		done <- err
+		close(done)
+		return
+	}
+	// Wake an in-flight manual Stop before contending for vpnLifecycleMu. Keep
+	// the process identity intact until the lifecycle lock is owned so a newer
+	// Start cannot be damaged by this waiter's cleanup.
+	a.mu.Unlock()
+	done <- err
+	close(done)
+
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	a.mu.Lock()
+	isCurrentProcess = a.cmd == cmd
+	wasStoppedManually = a.stoppedManually
+	if !isCurrentProcess || wasStoppedManually {
+		a.mu.Unlock()
+		return
+	}
+	a.isRunning = false
+	a.stoppedManually = false
+	a.cmd = nil
+	a.cmdDone = nil
+	if a.trafficStats != nil {
+		a.trafficStats.EndSession()
+		a.trafficStats.Save()
+	}
+	shouldReconnect := a.desiredConnected.Load() && !a.isShuttingDown()
+	reason := "VPN-процесс завершился неожиданно"
+	if err != nil {
+		reason = fmt.Sprintf("VPN-процесс завершился с ошибкой: %v", err)
+	}
+	a.mu.Unlock()
+	if shouldReconnect {
+		a.hasError.Store(false)
+		a.writeLog("[Reconnect] " + reason)
+		a.AddToLogBuffer("Соединение прервано. dropo выполняет переподключение.")
+		a.scheduleVPNReconnect(reason)
+	}
+	a.invalidateRouteStrategySession()
+	a.stopNativeWireGuardTunnels()
+	a.stopVPNSourceMonitor()
+	a.stopDiscordRealtimeMonitor()
+	a.stopFreeAccess()
+	a.stopXrayBridge()
+	a.cleanupDropoRuntimeResidue("process exit")
+	if shouldReconnect {
+		a.closeLogFile()
+		return
+	}
+
+	a.mu.Lock()
+	if err != nil {
+		a.hasError.Store(true)
+		a.writeLog(fmt.Sprintf("VPN process exited with error: %v", err))
+		a.AddToLogBuffer(fmt.Sprintf("VPN завершился с ошибкой: %v", err))
+		UpdateTrayIcon("error")
+	} else {
+		a.writeLog("VPN process exited normally")
+		a.AddToLogBuffer("VPN завершил работу")
+		UpdateTrayIcon("disconnected")
+	}
+	a.closeLogFile()
+	a.mu.Unlock()
+	if a.ctx != nil {
+		a.emitVPNLifecycleState(map[bool]string{true: "failed", false: "stopped"}[err != nil], a.reconnectGeneration.Load(), 0, "")
+	}
+}
+
+// ensureActiveConfigForStart builds a usable sing-box config for a fresh
+// profile before the first connection attempt. A subscription is optional:
+// with Free Access enabled the generated config routes supported services
+// through the local ByeDPI outbound and leaves everything else direct.
+func (a *App) ensureActiveConfigForStart() error {
+	if a.storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	if a.configBuilder == nil {
+		return fmt.Errorf("config builder not initialized")
+	}
+	// Allocate the endpoint immediately before generating the config. Keeping a
+	// port chosen at application initialization would leave a long window in
+	// which another process could claim it before sing-box starts listening.
+	access := newClashAPIAccess()
+	if err := access.validate(); err != nil {
+		return err
+	}
+	a.configBuilder.clashAPI = access
+
+	profile, err := a.storage.GetActiveProfile()
+	if err != nil || profile == nil {
+		return fmt.Errorf("active profile not found")
+	}
+	appSettings := a.storage.GetAppSettings()
+	if NormalizeRoutingMode(appSettings.RoutingMode) == RoutingModeAllTraffic && !hasConfiguredVPNSource(profile) {
+		return fmt.Errorf("для режима «Всё через VPN» выберите и включите VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
+	}
+
+	// The subscription URL can live on the profile OR in global settings
+	// (SetVPNSubscription / GenerateAndSaveConfig write settings.SubscriptionURL).
+	// If the active profile has none, fall back to the global one so the VLESS
+	// VPN is still built into the config and usable as the fallback outbound —
+	// otherwise vpn_candidates=false and VPN-needing services are routed direct.
+	subscriptionURL := profile.SubscriptionURL
+	if subscriptionURL == "" {
+		if settings, serr := a.storage.GetUserSettings(); serr == nil && settings.SubscriptionURL != "" {
+			subscriptionURL = settings.SubscriptionURL
+			a.writeLog("Active profile has no subscription URL; using the global subscription for the VPN fallback")
+		}
+	}
+
+	config, err := a.storage.GetProfileConfig(profile.ID)
+	if err == nil && len(config) > 0 {
+		// Rebuild if the cached config predates Xray support, or if a subscription
+		// is configured but the cached config has no VPN candidates (e.g. it was
+		// built before the subscription was added → VPN would never be used).
+		needsRebuild := subscriptionURL != "" && !profile.XrayConfigReady
+		if !needsRebuild && hasLegacyFinlandOutbound(config) {
+			a.writeLog("Rebuilding cached managed Finland REALITY transport")
+			needsRebuild = true
+		}
+		if !needsRebuild && !configSupportsDiscordRealtimeRouting(config) {
+			a.writeLog("Active config predates Discord realtime routing; rebuilding before start")
+			needsRebuild = true
+		}
+		if !needsRebuild && configNeedsBlockedOnlyContractMigration(config, appSettings.RoutingMode) {
+			a.writeLog("Active config predates final-direct blocked-only routing; rebuilding before start")
+			needsRebuild = true
+		}
+		if !needsRebuild && configNeedsScopedBlockedCatalogMigration(config, appSettings.RoutingMode) {
+			a.writeLog("Active config predates domain-first blocked catalog routing; rebuilding before start")
+			needsRebuild = true
+		}
+		if !needsRebuild && configNeedsIdentityScopedServiceIPMigration(config) {
+			a.writeLog("Active config contains an unscoped service IP route; rebuilding before start")
+			needsRebuild = true
+		}
+		if !needsRebuild && configNeedsLatencySensitiveDirectMigration(config, appSettings.RoutingMode) {
+			a.writeLog("Active config predates latency-sensitive game direct routing; rebuilding before start")
+			needsRebuild = true
+		}
+		if !needsRebuild && configNeedsAllTrafficTunnelMigration(config, appSettings.RoutingMode) {
+			a.writeLog("Active config predates full-tunnel selector/DNS isolation; rebuilding before start")
+			needsRebuild = true
+		}
+		if !needsRebuild && a.configBuilder.filterManager != nil &&
+			migrateRuntimeRuleSetPaths(config, a.configBuilder.filterManager.GetFiltersPath()) {
+			// Only the Dropo-owned absolute paths need changing here. Rebuilding the
+			// whole profile would unnecessarily contact the subscription provider and
+			// could make an otherwise usable cached VPN fail during an offline update.
+			a.writeLog("Active config referenced a previous dependency runtime; updated local rule-set paths before start")
+		}
+		if !needsRebuild && subscriptionURL != "" {
+			// The runtime file still describes the previous session until start
+			// writes this profile. Inspect the newly committed config, otherwise
+			// adding a first source would fetch it again after disconnecting.
+			if len(collectVPNProbeCandidateSpecs(config)) == 0 {
+				a.writeLog("Active config has no VPN candidates but a subscription is configured; rebuilding so the VPN fallback works")
+				needsRebuild = true
+			}
+		}
+		if needsRebuild {
+			return a.configBuilder.BuildConfigForProfile(profile.ID, subscriptionURL, profile.WireGuardConfigs)
+		}
+		// Clash API credentials are intentionally start-local. Refresh a cached
+		// profile on every sing-box launch so the server and in-process clients use
+		// the same newly allocated endpoint and bearer secret.
+		if err := a.configBuilder.addExperimentalAPI(config); err != nil {
+			return fmt.Errorf("refresh local Clash API access: %w", err)
+		}
+		return a.storage.UpdateProfileConfig(profile.ID, config)
+	}
+
+	a.writeLog("Active profile has no generated config, building it before start")
+	return a.configBuilder.BuildConfigForProfile(profile.ID, subscriptionURL, profile.WireGuardConfigs)
+}
+
+// migrateRuntimeRuleSetPaths rewrites cached local filter paths left behind by
+// an application update. Protected Windows runtimes are installed into
+// versioned directories and the previous directory is removed; reusing one of
+// those absolute paths makes sing-box fail before it can open its local proxy.
+// Only Dropo-owned rule-set tags participate, so an unrelated local rule-set is
+// never rewritten as part of this migration.
+func migrateRuntimeRuleSetPaths(config map[string]interface{}, currentFiltersPath string) bool {
+	currentFiltersPath = strings.TrimSpace(currentFiltersPath)
+	if currentFiltersPath == "" {
+		return false
+	}
+
+	expectedByTag := make(map[string]string, len(FilterFiles))
+	for _, filter := range FilterFiles {
+		expectedByTag[filter.Tag] = filepath.Join(currentFiltersPath, filter.Name)
+	}
+
+	route, ok := config["route"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	ruleSets, ok := route["rule_set"].([]interface{})
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, raw := range ruleSets {
+		ruleSet, ok := raw.(map[string]interface{})
+		if !ok || ruleSet["type"] != "local" {
+			continue
+		}
+		tag, _ := ruleSet["tag"].(string)
+		expectedPath, managed := expectedByTag[tag]
+		if !managed {
+			continue
+		}
+		configuredPath, _ := ruleSet["path"].(string)
+		if !sameRuntimeRuleSetPath(configuredPath, expectedPath) {
+			ruleSet["path"] = expectedPath
+			changed = true
+		}
+	}
+	return changed
+}
+
+func sameRuntimeRuleSetPath(configuredPath, expectedPath string) bool {
+	configuredPath = strings.TrimSpace(configuredPath)
+	expectedPath = strings.TrimSpace(expectedPath)
+	if configuredPath == "" || expectedPath == "" {
+		return false
+	}
+	configuredAbs, configuredErr := filepath.Abs(configuredPath)
+	expectedAbs, expectedErr := filepath.Abs(expectedPath)
+	if configuredErr != nil || expectedErr != nil {
+		return false
+	}
+	configuredAbs = filepath.Clean(configuredAbs)
+	expectedAbs = filepath.Clean(expectedAbs)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(configuredAbs, expectedAbs)
+	}
+	return configuredAbs == expectedAbs
+}
+
+func configNeedsAllTrafficTunnelMigration(config map[string]interface{}, mode RoutingMode) bool {
+	if NormalizeRoutingMode(mode) != RoutingModeAllTraffic {
+		return false
+	}
+	outbounds, _ := config["outbounds"].([]interface{})
+	selector := configOutboundByTag(outbounds, "proxy")
+	if selector == nil || stringSliceContains(interfaceStringSlice(selector["outbounds"]), "direct") {
+		return true
+	}
+	dns, _ := config["dns"].(map[string]interface{})
+	if dns == nil || dns["final"] != "dns-remote" {
+		return true
+	}
+	remoteDNS := false
+	if servers, ok := dns["servers"].([]interface{}); ok {
+		for _, raw := range servers {
+			server, _ := raw.(map[string]interface{})
+			if server["tag"] == "dns-remote" {
+				remoteDNS = server["type"] == "https" && server["detour"] == "proxy"
+				break
+			}
+		}
+	}
+	if !remoteDNS {
+		return true
+	}
+	if rules, ok := dns["rules"].([]interface{}); ok {
+		for _, raw := range rules {
+			rule, _ := raw.(map[string]interface{})
+			if rule["server"] == "dns-direct" {
+				return true
+			}
+		}
+	}
+	route, _ := config["route"].(map[string]interface{})
+	resolver, _ := route["default_domain_resolver"].(map[string]interface{})
+	if resolver["server"] != "dns-direct" {
+		return true
+	}
+	experimental, _ := config["experimental"].(map[string]interface{})
+	cacheFile, _ := experimental["cache_file"].(map[string]interface{})
+	return cacheFile["path"] != "cache-all-traffic.db"
+}
+
+// configSupportsDiscordRealtimeRouting is the structural migration gate for
+// cached profile configs. Profile configs intentionally survive application
+// updates, so new runtime selectors and rules must be required explicitly;
+// otherwise a new binary can start an old active_config.json and every Clash
+// selector switch will fail with HTTP 404.
+func configSupportsDiscordRealtimeRouting(config map[string]interface{}) bool {
+	outbounds, ok := config["outbounds"].([]interface{})
+	if !ok {
+		return false
+	}
+	realtime := configOutboundByTag(outbounds, discordRealtimeGroupTag)
+	if realtime == nil || !stringSliceContains(interfaceStringSlice(realtime["outbounds"]), "direct") {
+		return false
+	}
+	if outboundTagExists(outbounds, "auto-select") {
+		vpn := configOutboundByTag(outbounds, discordVPNGroupTag)
+		if vpn == nil || len(interfaceStringSlice(vpn["outbounds"])) == 0 ||
+			!stringSliceContains(interfaceStringSlice(realtime["outbounds"]), discordVPNGroupTag) {
+			return false
+		}
+	}
+	route, ok := config["route"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	rules, ok := route["rules"].([]interface{})
+	if !ok {
+		return false
+	}
+	hasUDPProcessRule := false
+	hasVoiceGatewayRule := false
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]interface{})
+		if !ok || rule["outbound"] != discordRealtimeGroupTag {
+			continue
+		}
+		networks := interfaceStringSlice(rule["network"])
+		if stringSliceContains(networks, "udp") && stringSliceContains(interfaceStringSlice(rule["process_name"]), "Discord.exe") {
+			hasUDPProcessRule = true
+		}
+		if stringSliceContains(networks, "tcp") && stringSliceContains(interfaceStringSlice(rule["domain_suffix"]), "discord.media") {
+			hasVoiceGatewayRule = true
+		}
+	}
+	return hasUDPProcessRule && hasVoiceGatewayRule
+}
+
+func configNeedsBlockedOnlyContractMigration(config map[string]interface{}, routingMode RoutingMode) bool {
+	if NormalizeRoutingMode(routingMode) == RoutingModeAllTraffic {
+		return false
+	}
+	route, ok := config["route"].(map[string]interface{})
+	if !ok || route["final"] != "direct" {
+		return true
+	}
+	dns, ok := config["dns"].(map[string]interface{})
+	return !ok || dns["final"] != "dns-direct"
+}
+
+func configNeedsScopedBlockedCatalogMigration(config map[string]interface{}, routingMode RoutingMode) bool {
+	if NormalizeRoutingMode(routingMode) == RoutingModeAllTraffic {
+		return false
+	}
+	route, ok := config["route"].(map[string]interface{})
+	if !ok {
+		return true
+	}
+	rules, ok := route["rules"].([]interface{})
+	if !ok {
+		return true
+	}
+	domainRuleIndex := -1
+	ipRuleIndex := -1
+	knownDomainDirectIndex := -1
+	for index, raw := range rules {
+		rule, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ruleSets := interfaceStringSlice(rule["rule_set"])
+		if stringSliceContains(ruleSets, "discord-ips") {
+			return true
+		}
+		hasDomainCatalog := stringSliceContains(ruleSets, "refilter-domains")
+		hasIPCatalog := stringSliceContains(ruleSets, "refilter-ips")
+		if hasDomainCatalog && hasIPCatalog {
+			return true
+		}
+		if hasDomainCatalog && domainRuleIndex == -1 {
+			domainRuleIndex = index
+		}
+		if hasIPCatalog && ipRuleIndex == -1 {
+			ipRuleIndex = index
+		}
+		if rule["outbound"] == "direct" && stringSliceContains(interfaceStringSlice(rule["domain_regex"]), blockedOnlyKnownDomainRegex) {
+			knownDomainDirectIndex = index
+		}
+	}
+	if ipRuleIndex == -1 {
+		return false
+	}
+	if knownDomainDirectIndex == -1 || knownDomainDirectIndex >= ipRuleIndex {
+		return true
+	}
+	return domainRuleIndex >= 0 && domainRuleIndex >= knownDomainDirectIndex
+}
+
+// configNeedsIdentityScopedServiceIPMigration rejects cached configurations
+// from releases that emitted a named service CIDR as an independent route.
+// Profile configs survive upgrades, so without this structural gate an updated
+// binary could keep routing an unrelated game on a shared address through a
+// stale bypass/VPN rule indefinitely.
+func configNeedsIdentityScopedServiceIPMigration(config map[string]interface{}) bool {
+	route, ok := config["route"].(map[string]interface{})
+	if !ok {
+		return true
+	}
+	rules, ok := route["rules"].([]interface{})
+	if !ok {
+		return true
+	}
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]interface{})
+		if !ok || len(interfaceStringSlice(rule["ip_cidr"])) == 0 || len(interfaceStringSlice(rule["process_name"])) > 0 {
+			continue
+		}
+		outbound, _ := rule["outbound"].(string)
+		for _, service := range DefaultFreeAccessServices {
+			if outbound != "direct" && outbound != "auto-select" && outbound != VpnOrDirectGroupTag && outbound != ServiceBypassGroupTag(service.Tag) {
+				continue
+			}
+			for _, cidr := range service.IPCIDRs {
+				if stringSliceContains(interfaceStringSlice(rule["ip_cidr"]), cidr) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func configNeedsLatencySensitiveDirectMigration(config map[string]interface{}, routingMode RoutingMode) bool {
+	if NormalizeRoutingMode(routingMode) == RoutingModeAllTraffic {
+		return false
+	}
+
+	route, ok := config["route"].(map[string]interface{})
+	if !ok {
+		return true
+	}
+	rules, ok := route["rules"].([]interface{})
+	if !ok {
+		return true
+	}
+	hasDirectDomains := false
+	hasDirectProcesses := false
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]interface{})
+		if !ok || rule["outbound"] != "direct" {
+			continue
+		}
+		if stringSliceContainsAll(interfaceStringSlice(rule["domain_suffix"]), DirectDomainSuffixes) {
+			hasDirectDomains = true
+		}
+		if stringSliceContainsAll(interfaceStringSlice(rule["process_name"]), DirectProcessNames) {
+			hasDirectProcesses = true
+		}
+	}
+
+	dns, ok := config["dns"].(map[string]interface{})
+	if !ok {
+		return true
+	}
+	dnsRules, ok := dns["rules"].([]interface{})
+	if !ok {
+		return true
+	}
+	hasDirectDNS := false
+	for _, raw := range dnsRules {
+		rule, ok := raw.(map[string]interface{})
+		if ok && rule["server"] == "dns-direct" &&
+			stringSliceContainsAll(interfaceStringSlice(rule["domain_suffix"]), DirectDomainSuffixes) {
+			hasDirectDNS = true
+			break
+		}
+	}
+
+	return !hasDirectDomains || !hasDirectProcesses || !hasDirectDNS
+}
+
+func configOutboundByTag(outbounds []interface{}, tag string) map[string]interface{} {
+	for _, raw := range outbounds {
+		outbound, ok := raw.(map[string]interface{})
+		if ok && outbound["tag"] == tag {
+			return outbound
+		}
+	}
+	return nil
+}
+
+func (a *App) logFreeMethodOptOutRoute(configPath string) {
+	if a.storage == nil {
+		return
+	}
+
+	settings := a.storage.GetAppSettings()
+	if FreeMethodsAllowed(settings) || AnyFreeAccessServiceUsesZapret(settings) {
+		return
+	}
+
+	config, err := readJSONConfig(configPath)
+	if err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] cannot inspect opt-out fallback candidates: %v", err))
+		return
+	}
+	if len(collectVPNProbeCandidateSpecs(config)) > 0 {
+		a.writeLog("[FreeAccess] free methods disabled; VPN/subscription candidate is available")
+		return
+	}
+
+	userSettings, err := a.storage.GetUserSettings()
+	if err == nil && userSettings != nil && len(userSettings.WireGuardConfigs) > 0 {
+		a.writeLog(fmt.Sprintf("[FreeAccess] free methods disabled; WireGuard-only mode allowed with %d config(s)", len(userSettings.WireGuardConfigs)))
+		return
+	}
+
+	a.writeLog("[FreeAccess] free methods disabled and no VPN subscription is available; automatic blocked services remain direct")
+}
+
+func (a *App) autoUpdateSubscriptionBeforeStart(busyID string) error {
+	if a.storage == nil || a.configBuilder == nil {
+		return nil
+	}
+	// Transactions have already prepared their config before stopping. Their
+	// restart and rollback must use that exact snapshot without another fetch.
+	if a.vpnTransactionalReconnectActive() {
+		return nil
+	}
+
+	settings := a.storage.GetAppSettings()
+	if !settings.AutoUpdateSub {
+		return nil
+	}
+
+	interval := time.Duration(settings.SubUpdateInterval) * time.Hour
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	if !settings.LastSubUpdate.IsZero() && time.Since(settings.LastSubUpdate) < interval {
+		a.writeLog("[Subscription] auto-update skipped: interval has not elapsed")
+		return nil
+	}
+
+	profile, err := a.storage.GetActiveProfile()
+	if err != nil || profile == nil || profile.SubscriptionURL == "" {
+		return nil
+	}
+
+	a.updateBusy(busyID, "Обновляем подписку перед подключением...")
+	a.writeLog("[Subscription] auto-update before start: refreshing active profile")
+	if err := a.configBuilder.BuildConfigForProfile(profile.ID, profile.SubscriptionURL, profile.WireGuardConfigs); err != nil {
+		return err
+	}
+
+	settings.LastSubUpdate = time.Now()
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return err
+	}
+	a.writeLog("[Subscription] auto-update before start completed")
+	return nil
+}
+
+// logOutput reads and logs process output
+func (a *App) logOutput(reader io.Reader, prefix string) {
+	a.writeLog(fmt.Sprintf("[%s] Log reader started", prefix))
+
+	// Read the logging preference once up front instead of per line: sing-box at
+	// trace level emits thousands of lines/sec, and GetAppSettings takes an RLock
+	// and copies the whole settings struct (incl. maps) each call. A toggle mid
+	// session takes effect on the next connect. See review.md §1.2.
+	loggingEnabled := true
+	if a.storage != nil {
+		loggingEnabled = a.storage.GetAppSettings().EnableLogging
+	}
+
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if loggingEnabled {
+			a.writeLog(fmt.Sprintf("[%s] %s", prefix, line))
+		} else {
+			a.AddToLogBuffer(fmt.Sprintf("[%s] %s", prefix, line))
+		}
+
+		// Check for critical errors only (not normal network errors)
+		lineLower := strings.ToLower(line)
+
+		// Определяем действительно критические ошибки
+		isCriticalError := strings.Contains(lineLower, "fatal") &&
+			// Но не ошибки rule-set (можно продолжить без них)
+			!strings.Contains(lineLower, "rule-set")
+
+		// Игнорируем обычные сетевые ошибки (не критичны):
+		// - IPv6 unreachable (нет IPv6 - норма)
+		// - DNS resolution failures
+		// - Connection refused/timeout
+		// - Network unreachable для отдельных соединений
+		isIgnorableError := strings.Contains(lineLower, "unreachable network") ||
+			strings.Contains(lineLower, "dns: exchange failed") ||
+			strings.Contains(lineLower, "context deadline exceeded") ||
+			strings.Contains(lineLower, "connection refused") ||
+			strings.Contains(lineLower, "i/o timeout") ||
+			strings.Contains(lineLower, "network is unreachable") ||
+			strings.Contains(lineLower, "no route to host") ||
+			strings.Contains(lineLower, "connectex:")
+
+		if isCriticalError && !isIgnorableError {
+			a.mu.Lock()
+			a.hasError.Store(true)
+			a.mu.Unlock()
+			UpdateTrayIcon("error")
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		a.writeLog(fmt.Sprintf("[%s] Log reader error: %v", prefix, err))
+	} else {
+		a.writeLog(fmt.Sprintf("[%s] Log reader finished", prefix))
+	}
+}
+
+// Stop clears the user's connected intent before waiting for an in-flight
+// Start. This guarantees that a timed-out or stale start cannot resurrect the
+// session after an explicit disconnect.
+func (a *App) Stop() map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": true, "running": false}
+	}
+	a.vpnIntentMu.Lock()
+	if a.sourcePrepareCancel != nil {
+		a.sourcePrepareCancel()
+	}
+	intentGeneration := a.vpnIntentGeneration.Add(1)
+	a.desiredConnected.Store(false)
+	a.vpnIntentMu.Unlock()
+	a.cancelVPNReconnect(false)
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	if a.vpnIntentGeneration.Load() != intentGeneration || a.desiredConnected.Load() {
+		return map[string]interface{}{
+			"success":    true,
+			"superseded": true,
+			"running":    a.isVPNRunning(),
+		}
+	}
+	a.emitVPNLifecycleState("disconnecting", a.reconnectGeneration.Load(), 0, "Отключаем VPN")
+	return a.stopVPN(false)
+}
+
+// stopVPNForReconnect tears down one session without changing the persisted
+// restore flag or the user's connected intent. The caller must hold
+// vpnLifecycleMu for the complete config transaction, including rollback.
+func (a *App) stopVPNForReconnect() map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": false, "error": "VPN application is not initialized"}
+	}
+	generation := a.reconnectGeneration.Load()
+	result := a.stopVPN(true)
+	result["generation"] = generation
+	result["protectionHeld"] = false
+	return result
+}
+
+// startVPNForReconnect starts one internal transition without creating a new
+// user intent. The caller must hold vpnLifecycleMu; a manual Stop records its
+// intent before waiting for that lock, so it still cancels this restart.
+func (a *App) startVPNForReconnect() map[string]interface{} {
+	if a == nil {
+		return map[string]interface{}{"success": false, "error": "VPN application is not initialized"}
+	}
+	generation := a.reconnectGeneration.Load()
+	expectedIntent := a.vpnIntentGeneration.Load()
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return map[string]interface{}{"success": false, "cancelled": true, "error": "Переподключение отменено"}
+	}
+	result := a.startVPN(expectedIntent)
+	result["generation"] = generation
+	result["protectionHeld"] = false
+	return result
+}
+
+// stopVPN performs one serialized stop. preserveIntent is true only for a
+// transactional reconnect and keeps RestoreVPNOnStartup unchanged.
+func (a *App) stopVPN(preserveIntent bool) map[string]interface{} {
+	busyID := a.beginBusyTagged("vpn-disconnect", "Отключаем VPN...")
+	defer a.endBusy(busyID)
+
+	a.vpnStopping.Store(true)
+	defer a.vpnStopping.Store(false)
+	a.invalidateRouteStrategySession()
+
+	a.writeLog("VPN stop requested")
+	manualStop := !preserveIntent && !a.isShuttingDown()
+	if manualStop {
+		a.setRestoreVPNOnStartup(false)
+	}
+
+	a.mu.Lock()
+	cmd := a.cmd
+	done := a.cmdDone
+
+	if !a.isRunning || a.cmd == nil || a.cmd.Process == nil {
+		a.updateBusy(busyID, "Останавливаем фоновые методы...")
+		a.isRunning = false
+		a.stoppedManually = false
+		a.cmd = nil
+		a.cmdDone = nil
+		a.hasError.Store(false)
+		a.mu.Unlock()
+		// Also stop Native WireGuard tunnels and free access process
+		a.stopNativeWireGuardTunnels()
+		a.stopVPNSourceMonitor()
+		a.stopDiscordRealtimeMonitor()
+		a.stopFreeAccess()
+		a.stopXrayBridge()
+		a.updateBusy(busyID, "Проверяем и закрываем фоновые процессы dropo...")
+		a.cleanupDropoRuntimeResidue("stop without main process")
+		if a.trafficStats != nil {
+			a.trafficStats.EndSession()
+			a.trafficStats.Save()
+		}
+		a.writeLog("VPN stopped successfully")
+		a.closeLogFile()
+		UpdateTrayIcon("disconnected")
+		state := "stopped"
+		message := "VPN остановлен"
+		if preserveIntent {
+			state = "reconnecting"
+			message = "Применяем изменения перед повторным запуском"
+		}
+		a.emitVPNLifecycleState(state, a.reconnectGeneration.Load(), 0, message)
+		return map[string]interface{}{
+			"success": true,
+		}
+	}
+
+	a.stoppedManually = true
+	a.hasError.Store(false)
+	a.mu.Unlock()
+
+	a.writeLog("Stopping VPN...")
+	a.updateBusy(busyID, "Восстанавливаем системный proxy...")
+	a.resetDropoSystemProxy("pre-stop")
+
+	// Close the only Dropo-owned packet handle and its relays before the local
+	// proxy disappears. This prevents captured packets from being redirected to
+	// a dead endpoint during selective shutdown. stopFreeAccess remains
+	// idempotent and performs the rest of the shared cleanup below.
+	if a.trafficEngine != nil {
+		a.trafficEngine.Stop()
+	}
+
+	// Terminate sing-box after selective interception has stopped. In TUN mode
+	// this still releases the interface immediately afterward.
+	if runtime.GOOS == "windows" {
+		a.updateBusy(busyID, "Завершаем sing-box и освобождаем TUN-интерфейс...")
+		terminateProcessTree(cmd)
+	} else {
+		a.updateBusy(busyID, "Завершаем sing-box...")
+		cmd.Process.Signal(syscall.SIGTERM)
+	}
+
+	a.updateBusy(busyID, "Ждем завершения сетевого процесса...")
+	processExited := waitForProcessDone(done, 3*time.Second)
+	if !processExited {
+		a.writeLog("Timed out waiting for sing-box to exit; continuing shutdown cleanup")
+	}
+
+	a.updateBusy(busyID, "Останавливаем WireGuard-сети...")
+	a.stopNativeWireGuardTunnels()
+	a.stopVPNSourceMonitor()
+	a.updateBusy(busyID, "Останавливаем бесплатные методы обхода...")
+	a.stopDiscordRealtimeMonitor()
+	a.stopFreeAccess()
+	a.updateBusy(busyID, "Останавливаем Xray bridge...")
+	a.stopXrayBridge()
+
+	if !processExited {
+		a.updateBusy(busyID, "Закрываем зависшие фоновые процессы dropo...")
+		a.cleanupDropoRuntimeResidue("stop timeout")
+	} else {
+		a.updateBusy(busyID, "Проверяем и закрываем фоновые процессы dropo...")
+		a.cleanupDropoRuntimeResidue("post-stop")
+	}
+	a.writeLog("VPN stopped successfully")
+
+	a.mu.Lock()
+	if a.cmd == cmd {
+		a.cmd = nil
+		a.cmdDone = nil
+	}
+	a.isRunning = false
+	a.stoppedManually = false
+	a.hasError.Store(false)
+	a.mu.Unlock()
+	UpdateTrayIcon("disconnected")
+	a.closeLogFile()
+	state := "stopped"
+	message := "VPN остановлен"
+	if preserveIntent {
+		state = "reconnecting"
+		message = "Применяем изменения перед повторным запуском"
+	}
+	a.emitVPNLifecycleState(state, a.reconnectGeneration.Load(), 0, message)
+
+	return map[string]interface{}{
+		"success": true,
+		"running": false,
+	}
+}
+
+// Toggle toggles VPN state
+func (a *App) Toggle() map[string]interface{} {
+	if a.isVPNRunning() {
+		return a.Stop()
+	}
+	return a.Start()
+}
+
+// CanModifyVPN checks if VPN settings can be modified
+func (a *App) CanModifyVPN() map[string]interface{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return map[string]interface{}{
+		"canModify": !a.isRunning,
+		"message":   "Сначала отключите VPN для изменения настроек",
+	}
+}
+
+// updateConfigLogLevel updates the log level in the config file
+func (a *App) updateConfigLogLevel(configPath, logLevel string) error {
+	// Read config file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config: %w", err)
+	}
+
+	// Parse JSON
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	// Update log level
+	if logSection, ok := config["log"].(map[string]interface{}); ok {
+		logSection["level"] = logLevel
+	} else {
+		// Create log section if not exists
+		config["log"] = map[string]interface{}{
+			"level": logLevel,
+		}
+	}
+
+	// Write back
+	newData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, newData, 0600); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) filterActiveFreeAccessOutbounds(configPath string, activeFreeAccessTags []string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return err
+	}
+
+	freeTags := make(map[string]bool, len(FreeAccessMethodTags()))
+	for _, tag := range FreeAccessMethodTags() {
+		freeTags[tag] = true
+	}
+	activeTags := make(map[string]bool, len(activeFreeAccessTags))
+	for _, tag := range activeFreeAccessTags {
+		activeTags[tag] = true
+	}
+
+	outbounds, ok := config["outbounds"].([]interface{})
+	if !ok {
+		return nil
+	}
+
+	filteredOutbounds := make([]interface{}, 0, len(outbounds)+1)
+	removedFreeOutbounds := make([]string, 0)
+	needsNoRouteOutbound := false
+	for _, outbound := range outbounds {
+		outboundMap, ok := outbound.(map[string]interface{})
+		if !ok {
+			filteredOutbounds = append(filteredOutbounds, outbound)
+			continue
+		}
+
+		tag, _ := outboundMap["tag"].(string)
+		if freeTags[tag] && !activeTags[tag] {
+			removedFreeOutbounds = append(removedFreeOutbounds, tag)
+			continue
+		}
+
+		if candidates := interfaceStringSlice(outboundMap["outbounds"]); len(candidates) > 0 {
+			filtered := make([]string, 0, len(candidates))
+			for _, candidate := range candidates {
+				if freeTags[candidate] && !activeTags[candidate] {
+					continue
+				}
+				filtered = append(filtered, candidate)
+			}
+			if len(filtered) == 0 {
+				if tag == SmartBypassGroupTag || strings.HasPrefix(tag, "bypass-") {
+					fallback := a.emptyBypassGroupFallbackOutbound()
+					filtered = []string{fallback}
+					if fallback == NoRouteOutboundTag {
+						needsNoRouteOutbound = true
+					}
+				} else {
+					filtered = []string{"direct"}
+				}
+			}
+			outboundMap["outbounds"] = filtered
+			if defaultValue, ok := outboundMap["default"].(string); ok && !stringSliceContains(filtered, defaultValue) {
+				outboundMap["default"] = filtered[0]
+			}
+		}
+
+		filteredOutbounds = append(filteredOutbounds, outboundMap)
+	}
+	if needsNoRouteOutbound && !outboundTagExists(filteredOutbounds, NoRouteOutboundTag) {
+		filteredOutbounds = append(filteredOutbounds, map[string]interface{}{
+			"type": "block",
+			"tag":  NoRouteOutboundTag,
+		})
+	}
+
+	config["outbounds"] = filteredOutbounds
+	encoded, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(configPath, encoded, 0600); err != nil {
+		return err
+	}
+
+	if len(removedFreeOutbounds) > 0 {
+		a.writeLog(fmt.Sprintf("[Migration] removed inactive legacy strategy outbounds from config: %s", strings.Join(removedFreeOutbounds, ",")))
+	}
+	return nil
+}
+
+func (a *App) emptyBypassGroupFallbackOutbound() string {
+	if a != nil {
+		status := a.currentNetworkModeStatus()
+		if status.Active == NetworkModeWindowsUnified {
+			a.writeLog("[FreeAccess] empty bypass group fallback: direct via the native Windows traffic engine")
+			return "direct"
+		}
+	}
+	return NoRouteOutboundTag
+}
+
+func stringSliceContains(items []string, needle string) bool {
+	for _, item := range items {
+		if item == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceContainsAll(items, required []string) bool {
+	for _, needle := range required {
+		if !stringSliceContains(items, needle) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) logActiveConfigDiagnostics(configPath string) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		a.writeLog(fmt.Sprintf("[Diag] failed to read active config: %v", err))
+		return
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		a.writeLog(fmt.Sprintf("[Diag] failed to parse active config: %v", err))
+		return
+	}
+
+	if a.storage != nil {
+		settings := a.storage.GetAppSettings()
+		a.writeLog(fmt.Sprintf("[Diag] routing_mode=%s free_methods_allowed=%v disable_free_access=%v hide_ru=%v",
+			settings.RoutingMode, FreeMethodsAllowed(settings), settings.DisableFreeAccess, settings.HideRuTraffic))
+	}
+
+	outbounds, _ := config["outbounds"].([]interface{})
+	outboundLabels := make([]string, 0, len(outbounds))
+	for _, outbound := range outbounds {
+		outboundMap, ok := outbound.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		tag, _ := outboundMap["tag"].(string)
+		outboundType, _ := outboundMap["type"].(string)
+		if tag == "" {
+			continue
+		}
+		outboundLabels = append(outboundLabels, fmt.Sprintf("%s:%s", tag, outboundType))
+
+		if tag == SmartBypassGroupTag || tag == VpnOrDirectGroupTag || tag == RuRouteGroupTag || tag == "proxy" || tag == "auto-select" || strings.HasPrefix(tag, "bypass-") {
+			a.writeLog(fmt.Sprintf("[Diag] outbound %s candidates=%s", tag, strings.Join(interfaceStringSlice(outboundMap["outbounds"]), ",")))
+		}
+		if tag == "direct" {
+			a.writeLog(fmt.Sprintf("[Diag] outbound direct bind_interface=%v", outboundMap["bind_interface"]))
+		}
+	}
+	a.writeLog(fmt.Sprintf("[Diag] outbounds=%s", strings.Join(outboundLabels, ",")))
+
+	if inbounds, ok := config["inbounds"].([]interface{}); ok {
+		for _, inbound := range inbounds {
+			inboundMap, ok := inbound.(map[string]interface{})
+			if !ok || inboundMap["type"] != "tun" {
+				continue
+			}
+			a.writeLog(fmt.Sprintf("[Diag] tun auto_route=%v strict_route=%v stack=%v interface=%v address=%v",
+				inboundMap["auto_route"], inboundMap["strict_route"], inboundMap["stack"], inboundMap["interface_name"], inboundMap["address"]))
+		}
+	}
+
+	route, _ := config["route"].(map[string]interface{})
+	if route == nil {
+		a.writeLog("[Diag] route section missing")
+		return
+	}
+	a.writeLog(fmt.Sprintf("[Diag] route auto_detect_interface=%v default_interface=%v default_domain_resolver=%v",
+		route["auto_detect_interface"], route["default_interface"], route["default_domain_resolver"]))
+
+	rules, _ := route["rules"].([]interface{})
+	ruleSets, _ := route["rule_set"].([]interface{})
+	routeCounts := map[string]int{}
+	for _, rule := range rules {
+		ruleMap, ok := rule.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		outbound, _ := ruleMap["outbound"].(string)
+		if outbound != "" {
+			routeCounts[outbound]++
+		}
+	}
+
+	serviceRoutes := 0
+	for outbound, count := range routeCounts {
+		if strings.HasPrefix(outbound, "bypass-") {
+			serviceRoutes += count
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("[Diag] route final=%v rules=%d rule_sets=%d routes smart-bypass=%d service-bypass=%d vpn-or-direct=%d direct=%d proxy=%d",
+		route["final"], len(rules), len(ruleSets), routeCounts[SmartBypassGroupTag], serviceRoutes, routeCounts[VpnOrDirectGroupTag], routeCounts["direct"], routeCounts["proxy"]))
+}
+
+func interfaceStringSlice(value interface{}) []string {
+	switch items := value.(type) {
+	case string:
+		if items == "" {
+			return nil
+		}
+		return []string{items}
+	case []string:
+		return append([]string(nil), items...)
+	case []interface{}:
+		result := make([]string, 0, len(items))
+		for _, item := range items {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+// startNativeWireGuardTunnels starts all configured Native WireGuard tunnels
+func (a *App) startNativeWireGuardTunnels() {
+	a.writeLog("[WireGuard] startNativeWireGuardTunnels called")
+
+	if a.nativeWG == nil {
+		a.writeLog("[WireGuard] nativeWG is nil, skipping")
+		return
+	}
+
+	if a.storage == nil {
+		a.writeLog("[WireGuard] storage is nil, skipping")
+		return
+	}
+
+	settings, err := a.storage.GetUserSettings()
+	if err != nil {
+		a.writeLog(fmt.Sprintf("[WireGuard] Error getting user settings: %v", err))
+		return
+	}
+
+	a.writeLog(fmt.Sprintf("[WireGuard] Found %d WireGuard config(s)", len(settings.WireGuardConfigs)))
+
+	if len(settings.WireGuardConfigs) == 0 {
+		a.writeLog("[WireGuard] No WireGuard configs found, skipping")
+		return
+	}
+
+	a.writeLog(fmt.Sprintf("Starting %d Native WireGuard tunnel(s)...", len(settings.WireGuardConfigs)))
+
+	// Set up restart callback for health check
+	a.nativeWG.SetTunnelRestartCallback(func(configID int) {
+		a.writeLog(fmt.Sprintf("[WireGuard] Tunnel %d was restarted by health check", configID))
+		a.AddToLogBuffer(fmt.Sprintf("WireGuard туннель %d: переподключен", configID))
+		// Emit event to frontend
+		a.emitEvent("wireguard-tunnel-restarted", configID)
+	})
+	a.nativeWG.SetTunnelUnhealthyCallback(func(configID int) {
+		a.disableWireGuardCamouflageForSession(configID)
+	})
+
+	started := 0
+	for i, wg := range settings.WireGuardConfigs {
+		a.writeLog(fmt.Sprintf("[WireGuard] Processing config %d: tag=%s, name=%s, endpoint=%s, allowedIPs=%v",
+			i, wg.Tag, wg.Name, wg.Endpoint, wg.AllowedIPs))
+
+		nativeConfig := wg.ToWireGuardConfig()
+		a.writeLog(fmt.Sprintf("[WireGuard] Native config: Address=%v, DNS=%s, Peers=%d",
+			nativeConfig.Address, nativeConfig.DNS, len(nativeConfig.Peers)))
+
+		if err := a.nativeWG.StartTunnel(i, nativeConfig); err != nil {
+			a.writeLog(fmt.Sprintf("[WireGuard] Failed to start %s: %v", wg.Tag, err))
+			a.AddToLogBuffer(fmt.Sprintf("WireGuard %s: ошибка запуска", wg.Name))
+		} else {
+			started++
+			a.AddToLogBuffer(fmt.Sprintf("WireGuard %s: подключен", wg.Name))
+		}
+	}
+
+	if started > 0 {
+		a.writeLog(fmt.Sprintf("[WireGuard] Started %d/%d tunnels", started, len(settings.WireGuardConfigs)))
+
+		// Start health check monitoring
+		a.nativeWG.StartHealthCheck()
+		a.writeLog("[WireGuard] Health check monitoring started")
+	}
+}
+
+// stopNativeWireGuardTunnels stops all Native WireGuard tunnels
+func (a *App) stopNativeWireGuardTunnels() {
+	if a.nativeWG == nil {
+		return
+	}
+
+	// Stop health check first
+	a.nativeWG.StopHealthCheck()
+
+	a.writeLog("Stopping Native WireGuard tunnels...")
+	a.nativeWG.StopAllTunnels()
+	a.writeLog("Native WireGuard tunnels stopped")
+}
+
+func (a *App) startXrayBridge() error {
+	if a.xrayBridge == nil || a.storage == nil {
+		return nil
+	}
+
+	config, hasConfig, err := a.storage.ActiveXrayConfig()
+	if err != nil {
+		return err
+	}
+	// Remove only the old generated runtime copy. Stored sources, settings and
+	// native protected profiles are preserved; no legacy server is involved.
+	oldRuntime := filepath.Join(a.storage.GetResourcesPath(), XrayBridgeConfigFileName)
+	if err := os.Remove(oldRuntime); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("cannot clear obsolete generated Xray configuration: %w", err)
+	}
+	if !hasConfig {
+		a.writeLog("[Xray] no xhttp bridge config for active profile")
+		return nil
+	}
+	a.writeLog("[Xray] active xhttp bridge config supplied in memory")
+	return a.xrayBridge.Start(config)
+}
+
+func (a *App) stopXrayBridge() {
+	if a.xrayBridge == nil {
+		return
+	}
+	a.xrayBridge.Stop()
+}
+
+// startFreeAccess starts the ByeDPI process if the "Free access" feature is
+// enabled in settings and the bundled binary is available. Best-effort: a
+// failure here does not block VPN startup, it just means the "smart-bypass"
+// outbound group will fail its health-check and fall back to VPN/direct.
+func (a *App) startFreeAccessForConfig(configPath string) []string {
+	config, err := readJSONConfig(configPath)
+	if err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] failed to inspect active config before starting helpers: %v", err))
+	}
+	return a.startFreeAccess(config)
+}
+
+func (a *App) startFreeAccess(activeConfig map[string]interface{}) []string {
+	if a.storage == nil {
+		return nil
+	}
+
+	settings := a.storage.GetAppSettings()
+	if !FreeMethodsAllowed(settings) {
+		a.writeLog("[FreeAccess] free methods are disabled by settings")
+		return nil
+	}
+
+	activeTags := []string{}
+	if a.trafficEngine != nil {
+		a.trafficEngine.Stop()
+	}
+	if runtime.GOOS == "windows" {
+		a.writeLog("[FreeAccess] Windows Unified uses the native in-process traffic engine; legacy proxy helpers are disabled")
+		return activeTags
+	}
+	if a.freeProxySidecarsCapturedByActiveNetwork(activeConfig) {
+		a.writeLog("[FreeAccess] legacy proxy helpers skipped: TUN auto_route captures helper traffic; native strategies or VPN sources will be used")
+		return activeTags
+	}
+	if runtime.GOOS == "windows" && tunAutoRouteEnabled(activeConfig) {
+		a.writeLog("[FreeAccess] Windows TUN auto_route detected; proxy helpers are allowed by process-direct route rules")
+	}
+
+	if a.byeDPI == nil {
+		a.writeLog("[LegacyProxy] manager is not initialized")
+	} else if !a.byeDPI.IsInstalled() {
+		a.writeLog("[LegacyProxy] helper is not bundled and is unavailable this session")
+	}
+
+	if a.byeDPI != nil && a.byeDPI.IsInstalled() {
+		if err := a.byeDPI.Start(); err != nil {
+			a.writeLog(fmt.Sprintf("[LegacyProxy] failed to start: %v", err))
+			a.AddToLogBuffer("Бесплатный доступ: не удалось запустить старый proxy helper")
+		} else {
+			tags := a.byeDPI.WaitForActiveTags(byeDPIStartupWait)
+			activeTags = append(activeTags, tags...)
+			a.writeLog(fmt.Sprintf("[LegacyProxy] free access helper started (%d/%d strategy/strategies active: %s)",
+				len(tags), len(DefaultByeDPIStrategies), strings.Join(tags, ",")))
+		}
+	}
+
+	a.startTelegramProxyIfNeeded(activeConfig)
+
+	return activeTags
+}
+
+// telegram transport decisions returned by resolveTelegramTransport.
+const (
+	telegramTransportFree = "free" // local MTProto sidecar (WS bypass) is the primary path
+	telegramTransportVPN  = "vpn"  // route Telegram straight through the subscription, no sidecar/injection
+	telegramTransportNone = "none" // no usable path (e.g. Telegram not proxy-handled, or free disabled and no VPN)
+)
+
+// resolveTelegramTransport decides how Telegram traffic is carried. The default
+// (auto) keeps the free MTProto sidecar primary even when a subscription is
+// present — the VPN stays as the per-service backstop route. Choosing the "VPN
+// подписка" method for Telegram (FreeAccessMethods["telegram"]=vpn) switches to
+// a clean VPN-only path that never injects a proxy into Telegram.
+func resolveTelegramTransport(settings GlobalAppSettings, hasVPN bool) string {
+	if serviceBlockType("telegram") != "proxy" {
+		return telegramTransportNone
+	}
+	if FreeAccessServiceMethod(settings, "telegram") == FreeAccessMethodVPN {
+		if hasVPN {
+			return telegramTransportVPN
+		}
+		return telegramTransportNone
+	}
+	if !FreeMethodsAllowed(settings) {
+		if hasVPN {
+			return telegramTransportVPN
+		}
+		return telegramTransportNone
+	}
+	return telegramTransportFree
+}
+
+// startTelegramProxyIfNeeded launches (or stops) the tg-ws-proxy MTProto sidecar
+// according to the Telegram transport policy.
+//
+//   - free (default/auto): sidecar primary; its egress goes DIRECT (its WS
+//     obfuscation works there, free) via the process-direct route rule.
+//   - vpn: sidecar kept ALIVE but its egress is routed through the subscription
+//     (config omits it from the direct rule, so its DC traffic falls to
+//     bypass-telegram→VPN). Needs a non-RU exit to actually reach Telegram.
+//   - none: stop the sidecar.
+//
+// The tg://proxy link is offered at most once per VPN session. Telegram exposes
+// no API to inspect or remove saved proxies, so repeated prompts are intrusive.
+func (a *App) startTelegramProxyIfNeeded(activeConfig map[string]interface{}) {
+	// Windows routes Telegram with the ordinary Direct/VPN service policy.
+	// Never start the legacy MTProto sidecar or open tg://proxy there: the
+	// external proxy UI and repeated deep-link prompts interfere with Telegram.
+	if runtime.GOOS == "windows" {
+		if a.tgwsproxy != nil {
+			a.tgwsproxy.Stop()
+		}
+		return
+	}
+	if a.tgwsproxy == nil || !a.tgwsproxy.IsInstalled() {
+		return
+	}
+
+	var settings GlobalAppSettings
+	if a.storage != nil {
+		settings = a.storage.GetAppSettings()
+	}
+	hasVPN := len(collectVPNProbeCandidateSpecs(activeConfig)) > 0
+	transport := resolveTelegramTransport(settings, hasVPN)
+
+	if transport == telegramTransportNone {
+		a.tgwsproxy.Stop()
+		return
+	}
+
+	// Always keep the sidecar ALIVE when Telegram is proxy-handled, in BOTH free
+	// and vpn transport. Telegram may already have the local proxy saved (even on
+	// a fresh portable extract, where the injected flag is reset); if the sidecar
+	// is not listening, Telegram is stuck on "соединение…". The egress is routed
+	// by the config: DIRECT for free/auto (the WS bypass that actually unblocks
+	// Telegram), or through the VPN when Telegram is set to the subscription.
+	if err := a.tgwsproxy.Start(); err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] Telegram MTProto proxy failed to start: %v", err))
+		return
+	}
+	// The sidecar ran this session, so a proxy may be (re)injected into Telegram —
+	// the exit cleanup notice is relevant. If the user never starts the VPN this
+	// session, the notice is not shown (nothing was touched).
+	a.tgProxyStartedSession.Store(true)
+	if transport == telegramTransportVPN {
+		a.writeLog("[Telegram] MTProto sidecar alive; egress routed through the VPN subscription (needs a non-RU exit to reach Telegram)")
+	} else {
+		a.writeLog("[Telegram] MTProto sidecar active (free WS bypass primary)")
+	}
+
+	// Give an already-saved proxy a short grace period to connect, then offer the
+	// tg://proxy link once if Telegram is running and not connected to the local
+	// sidecar. We do not keep re-opening Telegram mid-session.
+	go a.telegramProxyInitialPromptOnce()
+}
+
+// reAddTelegramProxyIfMissing opens the tg://proxy link when Telegram is running
+// but not currently connected to our local sidecar. Returns true if a link was
+// opened. Logged so the decision is visible in client logs.
+func (a *App) reAddTelegramProxyIfMissing(reason string) bool {
+	if a.tgwsproxy == nil || !a.tgwsproxy.IsInstalled() || !a.tgwsproxy.IsRunning() {
+		return false
+	}
+	if serviceBlockType("telegram") != "proxy" {
+		return false
+	}
+	if os.Getenv(tgProxyAutoConnectEnv) == "0" {
+		return false
+	}
+	if !isProcessRunningByName(TelegramProcessName) {
+		a.writeLog(fmt.Sprintf("[Telegram] presence check (%s): Telegram not running — skip", reason))
+		return false
+	}
+	port := TgWsProxyDefaultPort
+	if cfg, ok := a.tgwsproxy.readConfig(); ok {
+		cfg = normalizeTgWsProxyConfig(cfg)
+		if cfg.Port > 0 && cfg.Port <= 65535 {
+			port = cfg.Port
+		}
+	}
+	if telegramProxyHasActiveConnection(uint16(port)) {
+		a.writeLog(fmt.Sprintf("[Telegram] presence check (%s): proxy already in use — nothing to do", reason))
+		return false
+	}
+	a.writeLog(fmt.Sprintf("[Telegram] presence check (%s): no active proxy connection — opening tg://proxy once", reason))
+	a.tgwsproxy.AutoConnectTelegram()
+	return true
+}
+
+// telegramProxyInitialPromptOnce runs once per VPN start: after a short grace
+// period (so an already-saved proxy has time to connect) it offers the proxy if
+// missing. It never repeats within the same VPN session.
+func (a *App) telegramProxyInitialPromptOnce() {
+	time.Sleep(3 * time.Second)
+	if a.isShuttingDown() {
+		return
+	}
+	if !a.tgProxyPromptedSession.CompareAndSwap(false, true) {
+		return
+	}
+	if a.reAddTelegramProxyIfMissing("vpn-start") {
+		a.markTelegramProxyInjected()
+	}
+}
+
+// markTelegramProxyInjected persists that dropo manages a Telegram proxy, so the
+// cleanup notice on exit knows one may be saved inside Telegram. Idempotent.
+func (a *App) markTelegramProxyInjected() {
+	if a.storage == nil {
+		return
+	}
+	settings := a.storage.GetAppSettings()
+	if settings.TelegramProxyInjected {
+		return
+	}
+	settings.TelegramProxyInjected = true
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		a.writeLog(fmt.Sprintf("[Telegram] failed to persist proxy-injected flag: %v", err))
+	}
+}
+
+// TelegramProxyStatusInfo is returned to the frontend so it can show the cleanup
+// banner/button for the local MTProto proxy saved inside Telegram.
+type TelegramProxyStatusInfo struct {
+	Injected         bool   `json:"injected"`         // dropo opened the tg://proxy link at least once
+	RecommendRemove  bool   `json:"recommendRemove"`  // Telegram is now carried by the VPN, so the saved proxy should be removed
+	ProxyLink        string `json:"proxyLink"`        // the tg://proxy link (for re-adding / reference)
+	ActiveConnection bool   `json:"activeConnection"` // Telegram is actively connected to the local proxy port
+	ShowNotice       bool   `json:"showNotice"`       // show the exit cleanup notice
+}
+
+// TelegramProxyStatus reports whether a local Telegram proxy was injected and
+// whether the user should now remove it (because Telegram moved to the VPN).
+func (a *App) TelegramProxyStatus() TelegramProxyStatusInfo {
+	info := TelegramProxyStatusInfo{}
+	if a.storage != nil {
+		info.Injected = a.storage.GetAppSettings().TelegramProxyInjected
+	}
+	if runtime.GOOS == "windows" {
+		// Current Windows builds never create or launch the legacy sidecar. A
+		// persisted flag therefore means an older build may have left Telegram
+		// Desktop pointed at its localhost proxy. Keep this as an explicit,
+		// user-driven migration: report the action, but never open Telegram or
+		// alter Telegram's own settings automatically.
+		info.RecommendRemove = info.Injected
+		return info
+	}
+	if a.tgwsproxy != nil {
+		if link, ok := a.tgwsproxy.TelegramProxyLink(); ok {
+			info.ProxyLink = link
+		}
+		if cfg, ok := a.tgwsproxy.readConfig(); ok {
+			cfg = normalizeTgWsProxyConfig(cfg)
+			if cfg.Port > 0 && cfg.Port <= 65535 {
+				info.ActiveConnection = telegramProxyHasActiveConnection(uint16(cfg.Port))
+			}
+		}
+	}
+	// Recommend removal when a proxy is saved in Telegram but the sidecar is no
+	// longer the chosen transport (VPN carries Telegram, or free is disabled).
+	info.RecommendRemove = info.Injected && (info.ActiveConnection || (a.tgwsproxy != nil && !a.tgwsproxy.IsRunning()))
+	return info
+}
+
+// OpenTelegramProxySettings opens Telegram's settings only after an explicit UI
+// action. Dropo never edits or deletes Telegram's own settings.
+func (a *App) OpenTelegramProxySettings() map[string]interface{} {
+	if err := openExternalURL("tg://settings"); err != nil {
+		a.writeLog(fmt.Sprintf("[Telegram] could not open Telegram settings: %v", err))
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("не удалось открыть настройки Telegram: %v", err),
+		}
+	}
+	return map[string]interface{}{"success": true}
+}
+
+// AcknowledgeTelegramProxyRemoved clears the injected flag after the user has
+// removed the proxy inside Telegram, so the cleanup hint stops appearing.
+func (a *App) AcknowledgeTelegramProxyRemoved() map[string]interface{} {
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "хранилище настроек не инициализировано",
+		}
+	}
+	settings := a.storage.GetAppSettings()
+	if !settings.TelegramProxyInjected {
+		return map[string]interface{}{"success": true, "unchanged": true}
+	}
+	settings.TelegramProxyInjected = false
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		a.writeLog(fmt.Sprintf("[Telegram] failed to clear proxy-injected flag: %v", err))
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("не удалось сохранить подтверждение: %v", err),
+		}
+	}
+	a.writeLog("[Telegram] legacy proxy cleanup acknowledged by user")
+	return map[string]interface{}{"success": true}
+}
+
+func liveFreeAccessProxyTags(tags []string) []string {
+	live := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		port, ok := freeAccessProxyPort(tag)
+		if !ok {
+			continue
+		}
+		if loopbackPortReady(port, 250*time.Millisecond) {
+			live = append(live, tag)
+		}
+	}
+	return live
+}
+
+func freeAccessProxyPort(tag string) (int, bool) {
+	for _, strategy := range DefaultByeDPIStrategies {
+		if strategy.Tag == tag {
+			return strategy.Port, true
+		}
+	}
+	return 0, false
+}
+
+// stopFreeAccess stops the ByeDPI process, if running.
+func (a *App) stopFreeAccess() {
+	if a.byeDPI != nil {
+		a.byeDPI.Stop()
+	}
+	if a.trafficEngine != nil {
+		a.trafficEngine.Stop()
+	}
+	if a.tgwsproxy != nil {
+		a.tgwsproxy.Stop()
+	}
+	a.cleanupDropoRuntimeResidue("free access stop")
+}

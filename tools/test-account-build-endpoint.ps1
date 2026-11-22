@@ -1,0 +1,137 @@
+$ErrorActionPreference = 'Stop'
+$buildScript = Join-Path $PSScriptRoot '../scripts/build/build.ps1'
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path -LiteralPath $buildScript).Path, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -gt 0) { throw 'Build script PowerShell parsing failed.' }
+
+# Import only the pure helpers, never the build script's SDK/download/package
+# entry point. Fixtures do not read process environment, credentials or DNS.
+$helperNames = @('Test-DropoPublicAccountHost', 'Resolve-DropoAccountEndpoint', 'Get-DropoAccountBuildArguments', 'Get-DropoAndroidBundleBuildArguments')
+$definitions = @($ast.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $helperNames
+}, $true))
+if ($definitions.Count -ne $helperNames.Count) { throw 'Expected build endpoint helpers not found.' }
+foreach ($definition in $definitions) { . ([ScriptBlock]::Create($definition.Extent.Text)) }
+
+function Assert-Endpoint([string]$Value, [string]$Expected, [string]$EnvironmentValue = '') {
+    $actual = Resolve-DropoAccountEndpoint -Endpoint $Value -EnvironmentEndpoint $EnvironmentValue
+    if ($actual -cne $Expected) { throw "Endpoint normalization fixture failed: expected '$Expected', got '$actual'." }
+}
+function Assert-Rejected([string]$Value, [string]$EnvironmentValue = '', [switch]$Reuse) {
+    $rejected = $false
+    try { $null = Resolve-DropoAccountEndpoint -Endpoint $Value -EnvironmentEndpoint $EnvironmentValue -ReuseWindowsOutput:$Reuse }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw 'Unsafe or stale endpoint fixture accepted.' }
+}
+
+Assert-Endpoint '' ''
+Assert-Endpoint '  ' ''
+Assert-Endpoint 'https://accounts.example.com' 'https://accounts.example.com'
+Assert-Endpoint ' HTTPS://ACCOUNTS.EXAMPLE.COM/ ' 'https://accounts.example.com'
+Assert-Endpoint 'https://accounts.example.com:8443/' 'https://accounts.example.com:8443'
+Assert-Endpoint 'https://8.8.8.8' 'https://8.8.8.8'
+Assert-Endpoint 'https://[2001:4860:4860::8888]:8443/' 'https://[2001:4860:4860::8888]:8443'
+Assert-Endpoint '' 'https://ci.example.com' 'https://ci.example.com/'
+Assert-Endpoint 'https://explicit.example.com' 'https://explicit.example.com' 'http://unsafe.example.com'
+foreach ($value in @(
+    'http://accounts.example.com', 'https://user:secret@accounts.example.com', 'https://@accounts.example.com',
+    'https://accounts.example.com?token=fixture', 'https://accounts.example.com#fragment', 'https://accounts.example.com/v1',
+    'https://accounts.example.com//', 'https://accounts.example.com\', 'https://accounts.example.com:0', 'https://accounts.example.com:99999',
+    'https://localhost', 'https://LOCALHOST.', 'https://vpn.local', 'https://vpn.localdomain', 'https://vpn.internal', 'https://vpn.lan', 'https://vpn.home.arpa', 'https://server',
+    'https://127.0.0.1', 'https://127.1', 'https://2130706433', 'https://10.0.0.1', 'https://172.16.0.1', 'https://192.168.1.1',
+    'https://100.64.0.1', 'https://169.254.1.1', 'https://0.1.2.3', 'https://224.0.0.1',
+    'https://[::]', 'https://[::1]', 'https://[fd00::1]', 'https://[fe80::1]', 'https://[fec0::1]', 'https://[ff02::1]', 'https://[::ffff:192.168.1.1]',
+    'https://bad..example.com', 'https://-bad.example.com'
+)) { Assert-Rejected $value }
+Assert-Rejected '' 'http://ci.example.com'
+Assert-Rejected 'https://accounts.example.com' -Reuse
+Assert-Rejected '' 'https://ci.example.com' -Reuse
+if ((Resolve-DropoAccountEndpoint -ReuseWindowsOutput) -ne '') { throw 'Unconfigured legacy reuse behavior changed.' }
+
+$configuredArgs = @(Get-DropoAccountBuildArguments 'https://accounts.example.com')
+if ($configuredArgs.Count -ne 2 -or $configuredArgs[0] -ne '--dart-define' -or
+    $configuredArgs[1] -ne 'DROPO_ACCOUNT_ENDPOINT=https://accounts.example.com') {
+    throw 'Endpoint Dart define is not passed as a single value.'
+}
+if (@(Get-DropoAccountBuildArguments '').Count -ne 0) { throw 'Unconfigured build should not add a Dart define.' }
+if (@($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'AccountEndpoint' }).Count -ne 1) {
+    throw 'AccountEndpoint build parameter missing.'
+}
+$argumentCalls = @($ast.FindAll({ param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-DropoAccountBuildArguments'
+}, $true))
+function Get-ContainingFunctionName($Node) {
+    $current = $Node.Parent
+    while ($null -ne $current) {
+        if ($current -is [Management.Automation.Language.FunctionDefinitionAst]) { return $current.Name }
+        $current = $current.Parent
+    }
+    return ''
+}
+$expectedEndpointConsumers = @{
+    'Build-Application' = '$AccountEndpoint'
+    'Build-AndroidApplication' = '$AccountEndpoint'
+    'Get-DropoAndroidBundleBuildArguments' = '$Endpoint'
+}
+if ($argumentCalls.Count -ne $expectedEndpointConsumers.Count) {
+    throw 'Unexpected build endpoint consumer; Windows, Android APK and Play AAB must each receive it once.'
+}
+foreach ($entry in $expectedEndpointConsumers.GetEnumerator()) {
+    $calls = @($argumentCalls | Where-Object { (Get-ContainingFunctionName $_) -ceq $entry.Key })
+    if ($calls.Count -ne 1 -or $calls[0].Extent.Text -cne "Get-DropoAccountBuildArguments -Endpoint $($entry.Value)") {
+        throw "Endpoint wiring missing or changed for $($entry.Key)."
+    }
+}
+
+# Evaluate only real argument assignments, never native builds or the full
+# script. This catches dropped/misbound defines beyond checking call counts.
+$platformFixtures = @(
+    @{ Function = 'Build-Application'; Arguments = '$flutterBuildArguments'; Mode = 'release' },
+    @{ Function = 'Build-AndroidApplication'; Arguments = '$androidBuildArguments'; Mode = 'release' },
+    @{ Function = 'Build-AndroidApplication'; Arguments = '$androidBuildArguments'; Mode = 'profile' },
+    @{ Function = 'Build-AndroidAppBundle'; Arguments = '$androidBundleArguments'; Mode = 'release' }
+)
+$AppVersion = '3.0.47'
+$BuildHash = 'abcdef0'
+$buildNumber = 30047
+$AndroidFlutterTargetPlatform = 'android-arm,android-arm64'
+foreach ($case in $platformFixtures) {
+    $function = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $case.Function
+    }, $true))
+    if ($function.Count -ne 1) { throw "Build endpoint fixture function missing: $($case.Function)" }
+    $assignments = @($function[0].Body.FindAll({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq $case.Arguments -and
+            ($node.Operator -eq [Management.Automation.Language.TokenKind]::Equals -or
+                $node.Right.Extent.Text.Contains('Get-DropoAccountBuildArguments'))
+    }, $true) | Sort-Object { $_.Extent.StartOffset })
+    $expectedAssignments = if ($case.Function -ceq 'Build-AndroidAppBundle') { 1 } else { 2 }
+    if ($assignments.Count -ne $expectedAssignments) { throw "Build endpoint argument construction changed: $($case.Function)" }
+    if ($case.Function -ceq 'Build-AndroidAppBundle' -and
+        -not $assignments[0].Extent.Text.Contains('-Endpoint $AccountEndpoint')) {
+        throw 'Play bundle must forward the same normalized public endpoint into its argument helper.'
+    }
+    foreach ($AccountEndpoint in @('', 'https://accounts.example.com')) {
+        $androidBuildMode = $case.Mode
+        foreach ($assignment in $assignments) { . ([ScriptBlock]::Create($assignment.Extent.Text)) }
+        $arguments = Get-Variable -Name $case.Arguments.TrimStart('$') -ValueOnly
+        $endpointIndexes = @(for ($index = 0; $index -lt $arguments.Count; $index++) {
+            if ([string]$arguments[$index] -like 'DROPO_ACCOUNT_ENDPOINT=*') { $index }
+        })
+        $expectedCount = if ($AccountEndpoint) { 1 } else { 0 }
+        if ($endpointIndexes.Count -ne $expectedCount) {
+            throw "Endpoint define count incorrect for $($case.Function)/$($case.Mode)."
+        }
+        if ($AccountEndpoint) {
+            $index = $endpointIndexes[0]
+            if ($index -lt 1 -or $arguments[$index - 1] -cne '--dart-define' -or
+                $arguments[$index] -cne "DROPO_ACCOUNT_ENDPOINT=$AccountEndpoint") {
+                throw "Endpoint not passed as one normalized Dart value for $($case.Function)/$($case.Mode)."
+            }
+        }
+    }
+}
+Write-Host 'Account build endpoint fixtures passed (HTTPS origin, environment precedence, Windows/APK/AAB argument execution and fail-closed reuse).'

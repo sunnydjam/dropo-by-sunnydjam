@@ -1,0 +1,8 @@
+{
+  "name": "dropo-android-scene-tests",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": { "test": "node --test scene.test.cjs" },
+  "devDependencies": { "playwright": "1.62.1" },
+  "engines": { "node": ">=20" }
+}

@@ -1,0 +1,32 @@
+name: Feature request
+description: Предложить сервис или улучшение маршрутизации
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Тип предложения
+      options:
+        - Добавить сервис
+        - Улучшить VPN-маршрутизацию
+        - Улучшить экспериментальный обход
+        - Интерфейс
+        - Диагностика
+        - Другое
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какая проблема решается
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое поведение
+      description: Для сервиса укажите публичные домены и тип приложения, но не публикуйте приватные ключи.
+    validations:
+      required: true

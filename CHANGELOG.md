@@ -1,0 +1,561 @@
+# Changelog
+
+Significant changes in the `Dropo by sunnydjam` fork are documented here.
+
+## Unreleased
+
+## 3.1.22 — 2026-11-23
+
+- Windows release assets are tied to the specific build run and attempt that passed validation.
+- Android builds isolate the toolchain mappings of different working copies.
+- Documentation links, Windows packaging and bootstrap checks run in CI.
+
+## 3.1.13 — 2026-11-19
+
+- Android opens service routing from the home screen before connecting and supports live route edits.
+- Connection feedback follows verified outbound health. The Android scene shows controls immediately after verification and reduces background rendering.
+- Managed Free and Boost Finland TCP connections use the bundled Xray transport on Windows and Android. Cached profiles migrate automatically.
+
+## 3.1.12 — 2026-11-19
+
+- Apply Android routing mode and service policy changes while the VPN service
+  is active. Preserve the selected source, including an active reserve, and
+  restore the previous configuration if reloading fails.
+- Keep all independent Windows VPN sources in the runtime selector, including
+  when the cached service probe only recorded the primary source.
+- Remove the retired VPN Checker catalog and invalidate configurations that
+  still reference it. Keep custom subscriptions and managed Dropo reserves.
+- Windows VM testing verified Free failover to the HTTPS relay and LV QUIC
+  with HTTPS and UDP DNS. The primary XHTTP and FI REALITY traffic checks
+  failed from the test network.
+
+## 3.1.11 — 2026-11-18
+
+- Show Dropo Free and Turbo as one connection each. Use each profile's own
+  reserves automatically and keep personal subscriptions independently selectable.
+- Check every managed reserve in the Windows source monitor and retain the
+  active profile label when either client switches to an internal route.
+- Ship the updated Android VPN scene and launcher icon, connection widget,
+  clearer account sign-in, system language selection and optional haptics.
+
+## 3.1.10 — 2026-11-18
+
+- Add independent Finnish TCP/REALITY and Latvian Hysteria 2 reserves for
+  Dropo Free and Boost, after the primary ingress and existing HTTPS relay.
+- Fail over encrypted public DNS from Moscow DoH to Finnish DoH and Latvian
+  DoT while preserving local and work-network DNS routing.
+
+## 3.1.5 — 2026-11-07
+
+- Keep Android adaptive direct routing in service mode and fence stale-session
+  probe scheduling; full VPN never acquires adaptive direct exceptions.
+- Bound managed profile downloads, clean managed credentials on account deletion,
+  and prevent stale profiles from crossing account/logout transitions.
+- Keep ordinary guest Free available after password sign-in, with separate
+  deletion and no shared-account installation binding or hidden privilege grants.
+- Enforce the exact Flutter lockfile in CI and release builds; pin nested cache
+  actions without weakening the repository SHA requirement.
+- Run the Windows package gate before pull-request merge; preserve the existing
+  public-signature requirement and pilot channel until publication prerequisites.
+- Update privacy/release documentation for individual profiles, own DoH and backups;
+  refresh bundled blocked catalogs to 07112026.
+
+## 3.1.4 — 2026-11-06
+
+- Use the official Google Play In-App Review API automatically in the Play build,
+  without a preliminary dialog, forced store fallback or repeat launches. Preserve
+  the existing three-cycle/24-hour thresholds and one-time flag across updates.
+- Add a manual review link in About; open the Google Play app first, with a browser
+  fallback when the store is unavailable. Keep the documented listing URL.
+
+## 3.1.3 — 2026-11-06
+
+- Ask Android users for a Google Play review once, after three completed successful
+  VPN cycles or one uninterrupted 24-hour session. Failed starts and interrupted
+  sessions do not count; background eligibility waits for the foreground home screen.
+- Persist the one-time decision before showing the optional dialog, including
+  dismissal, Back and unsuccessful store navigation. No account or review SDK is required.
+
+## 3.0.47 — 2026-10-12
+
+- support VLESS XHTTP and the `splithttp` alias on Android with bundled
+  in-process Xray, verified TLS and session-scoped transport cleanup;
+- retain provider transport options, manual node selection, independent-source
+  fallback and both routing modes; Windows traffic handling is unchanged;
+- remove the automatic Android cloning suggestion while keeping Dropo Space
+  available through Settings > Advanced;
+- include Xray's full license and corresponding modified transport source in
+  the APK; no first-run executable downloads are introduced.
+- fix XHTTP upload byte accounting before buffer ownership transfer and retain
+  full client/session race coverage with an isolated synthetic test server.
+
+## 3.0.46 — 2026-10-12
+
+- open Android account approval in Telegram first, using the same issued login
+  challenge; fall back to its validated HTTPS link only when no Telegram handler exists;
+- bound approval waiting, show actionable timeout and launch errors, and offer
+  explicit retry without silently creating a second login request;
+- retain the existing Android Preview package, profile build and signing identity
+  so the compatible universal ARM APK updates the installed Preview in place;
+- preserve both routing modes, saved sources, Direct/private-network precedence,
+  the traffic engine and user-confirmed updates; purchases remain disabled.
+
+## 3.0.45 — 2026-10-11
+
+- offer Android the shared first-connection source wizard in both routing modes,
+  with explicit Free consent, optional registration and no silent mode changes;
+- add guided help for internet, service and update issues; use bounded read-only
+  checks that never restore engines, retune strategies or change saved routes;
+- preview an allowlisted local support summary before copying, without raw logs,
+  subscription addresses, keys, account identifiers or automatic uploads;
+- clarify pending, failed and stale HTTP source observations without turning a
+  background measurement into a connection-wide error or gaming-ping claim;
+- keep Android status and shutdown responsive during manual network checks;
+- prevent service edits and duplicate starts while preparing a VPN source;
+- refresh bundled blocked catalogs to 11102026 with existing scoped IP guards;
+- document a voluntary, manually reported beta without analytics or telemetry.
+
+## 3.0.44 — 2026-10-11
+
+- anchor the optional account control at the bottom-left of the desktop rail
+  and mobile footer; show only a safe public profile name outside Account;
+- make the connected Earth action transparent, enlarge the planet and keep
+  its size stable when switching routing modes or expanding Services;
+- use equal-sized routing segments and a stable service summary without
+  changing saved policies, sources or the two routing modes;
+- replace Android's browser-only APK update link with a user-confirmed native
+  download, byte progress, integrity checks and the system package installer;
+- keep Preview updates within the existing package and signer, handle the
+  per-app installation permission and retain the VPN during download;
+- preserve manual update confirmation on both platforms; Android installation
+  still requires system approval and does not promise an automatic restart.
+
+## 3.0.43 — 2026-10-09
+
+- replace the clipped, nested update notification with a responsive overlay:
+  readable version, explicit update/download action and accessible dismissal;
+  preserve the dashboard layout and user-confirmed Windows installation;
+- connect both Windows and Android builds to the live HTTPS Telegram account
+  service; register without a phone number and keep all purchases disabled;
+- protect device sessions with Windows DPAPI and Android Keystore, bind saved
+  credentials to their account-service origin and retain sessions on temporary
+  server failures without a plaintext storage fallback;
+- replace the offered public VPN aggregators with the optional managed Dropo Free
+  source, fetched after consent; preserve personal subscriptions and existing
+  saved sources without silently deleting user data;
+- publish a compatible universal ARM Android Preview with the existing Preview
+  package and signing identity; Android installation remains user-confirmed;
+- verify account build origins, Android version overrides and offline builds;
+  configure the public account origin in the clean Windows packaging workflow
+  and require a fresh reproducible Flutter rebuild;
+- reserve 3.0.42 for the local test builds; publish 3.0.43 so those clients also
+  receive the update through the normal version check.
+
+## 3.0.41 — 2026-10-08
+
+- move service routing to one expandable section on Home, visible only in
+  selective mode; keep saved policies and pins when switching to full VPN;
+- add service search, Quick/All lists and bundled local icons for every service;
+  remove duplicate Services navigation without changing the two routing modes;
+- preserve desktop Zapret controls and safe reconnect feedback, and keep Android
+  route editing locked during an active VPN session;
+- bring Android source management to the shared interface: independent saved
+  subscriptions, optional public-source consent, automatic source selection,
+  priorities and session-bound truthful health measurements;
+- strengthen Android session cancellation, native logging and protection-state
+  reporting; retain private/work-network precedence and manual subscription nodes;
+- keep Android updates within the installed stable/Preview package family and
+  offer universal ARM builds before architecture-specific compatible packages;
+- add the Dropo account section with Telegram passwordless authentication,
+  recovery, session management and Telegram Stars purchase confirmation;
+- keep the account backend in the separate private `DropoVPN-Backend`
+  repository and make its endpoint configurable at build time;
+- add widget coverage for the login, approval, purchase and entitlement flow;
+- do not collect VPN traffic, DNS queries or browsing history as account audit
+  data.
+
+## 3.0.40 — 2026-09-29
+
+- pin the VPN-source add action above long lists and expose automatic/manual
+  selection as an explicit mode switch;
+- make source rows more compact, with selected server, HTTP response and distinct
+  connected/selected/disabled states; expose server selection directly in the row;
+- move fallback ordering into a separate manual-mode section and keep enable,
+  removal and diagnostic details under the labelled More action;
+- offer personal subscriptions and the optional public catalog through one add
+  flow; empty profiles start with two clear choices, without an unsolicited form;
+- retain explicit public-source consent, input validation, failure recovery and
+  truthful stale/offline measurements; keep Boost secondary and unavailable;
+- preserve the shared star field, both routing modes, independent-source fallback,
+  user-selected subscription nodes and user-confirmed application updates;
+- cover selection failure, disabled priorities, actual fallback status, cancellation,
+  long-list access, Android onboarding and narrow/enlarged-text layouts in UI tests.
+
+## 3.0.39 — 2026-09-28
+
+- put saved VPN sources first, with selected server, active status, real HTTP
+  response and explicit source selection; expose automatic/manual selection mode;
+- reuse existing session/profile/node-bound measurements without extra probes;
+  hide latency for expired, failed, disabled and disconnected sources;
+- collapse server selection, priority and removal controls under source settings;
+  keep public sources optional and move the upcoming Boost offer below the list;
+- remove tinted nested-window panels from embedded pages. Sources and services
+  use flat divider-separated rows over the same black star field as the home page;
+- preserve readable neutral modal surfaces, reduced-motion behavior and source
+  fallback semantics. Improve diagnostics/statistics layout at enlarged text sizes;
+- retain both VPN modes, saved subscriptions/routes and user-confirmed updates.
+
+## 3.0.38 — 2026-09-28
+
+- remove visual tooltips while retaining accessible control names; move Dropo
+  into the left navigation header and extend the star field throughout the shell;
+- remove the home VPN-source card and duplicate settings link; retain source
+  management in primary navigation;
+- add bounded, session-cancellable lowest-HTTP-latency selection between independent
+  Windows VPN sources. Preserve chosen subscription nodes, manual priorities and
+  existing multi-source profile order; expose an explicit return to automatic mode.
+- keep healthy sessions stable and use the ranked source chain for failure recovery.
+  The larger source-page/Boost redesign is deferred.
+
+## 3.0.37 — 2026-09-27
+
+### Visible, verifiable Windows updates
+
+- show a dedicated update overlay across all pages with download percentage and
+  bytes, verification, VPN shutdown and installer hand-off stages; failures stay
+  visible and do not trigger automatic retries or close the UI;
+- show the native installer progress and errors, including progress and failure
+  notices for older clients that still request very-silent installation;
+- register Flutter DLLs and AOT snapshots with Restart Manager, and reject a
+  locked runtime before copying application payload files. This prevents the
+  observed partial update with new version metadata and the old interface;
+- keep exactly one post-install launcher invocation, preserve user settings,
+  and serialize update requests. Download events are rate-limited;
+- use Windows command-line quoting for the autostart entry instead of Go string
+  escaping, and verify the resolved launcher path after the core starts;
+- strengthen the clean-Windows gate to upgrade a running UI and compare every
+  installed payload file against the verified portable package after both passes.
+
+## 3.0.36 — 2026-09-27
+
+### Cosmic dashboard and night Earth
+
+- replaced the dark-green background with a near-black star field, slow subtle
+  twinkling and an occasional warm sunrise at the lower edge of the home screen;
+- added a detailed rotating night Earth with a bundled artistic texture,
+  terrain, clouds and warm city lights while connected. The complete globe
+  remains green online, gray offline, red on error and amber while connecting;
+- city lights fade in on connection and turn off immediately on disconnect or
+  error. Status textures are cached once; no network texture downloads are used;
+- decorative animations pause when hidden or covered, respect reduced motion
+  and the existing preference, now named "Анимации интерфейса";
+- added rendering, status-transition, animation and responsive-layout tests.
+  VPN modes, routing, source priorities and user-controlled updates are unchanged.
+
+## 3.0.35 — 2026-09-23
+
+### Planet surface color hotfix
+
+- the globe now uses separate precolored geographic textures: green land and
+  ocean while connected, neutral gray while disconnected, red on error and
+  amber during a connection operation. Surface color no longer depends on a
+  color filter applied to a grayscale mesh;
+- the base sphere follows the same palette, with lighter shading so the state
+  remains visible across the globe. Rotation, reduced motion and fixed-button
+  behavior are preserved; all four textures are cached once, not regenerated
+  on animation frames or VPN status refreshes;
+- added pixel-level texture and rendered-surface regressions, including state
+  transitions. VPN routing, subscriptions and user-controlled updates are
+  unchanged from 3.0.34.
+
+## 3.0.34 — 2026-09-23
+
+### Windows dashboard and user-controlled updates
+
+- removed the redundant home heading; added a compact monospace VPN response
+  indicator with measurement age and an explanation of what it measures;
+- response data reuses the existing background HTTP probe, is fenced to the
+  current source/node/profile/session and never substitutes a stale or failed
+  result for a live latency. This is not ICMP or per-game latency;
+- the planet now rotates its geographic surface, with gray idle, green online,
+  red error and amber busy states. Decorative repaint is capped at 30 fps;
+  hidden/modal/reduced-motion states pause it without resetting the rotation;
+- a per-user animation preference persists without restarting or reconfiguring
+  the VPN. Existing network settings, modes, source order and routing stay intact;
+- the bottom-right metadata version opens a shared About dialog with developer
+  attribution, upstream credit, repository, release, issue and license links;
+- background update checks only notify. Download and installation require an
+  explicit user action and confirmation; the dialog warns about interruption
+  of an active VPN connection. Older clients retain their old update policy
+  until this version is installed;
+- regression coverage includes small windows, 200% text, animation lifecycle,
+  source/session freshness, presentation preference persistence, and every
+  manual update entry point. Android APK is not part of this Windows release.
+
+## 3.0.33 — 2026-09-23
+
+### Windows interface and first connection
+
+- persistent adaptive navigation for connection, services, VPN sources, settings
+  and help; overlays no longer shift page layout and remain accessible;
+- DPI-aware client window sizing and per-user normal placement restoration,
+  with work-area clamping and compact/large-text layout regression tests;
+- the connection button and planet now distinguish idle, connecting, connected
+  and failed states without a duplicate large status heading; click cursors and
+  accessible state announcements are retained;
+- one VPN source page with optional public sources, personal subscriptions,
+  editable shared priority and a non-purchasable Boost coming-soon section;
+- public sources no longer override saved order. Failover remains between
+  independent sources, never an automatic ladder of nodes within a subscription;
+- fresh Windows installations default to full VPN and offer an explicit-consent
+  public-source onboarding path. Existing, legacy and recovery settings keep
+  their routing mode; no public source is enabled without consent;
+- disconnected full-VPN preferences can be saved without a source, with cached
+  configs invalidated. Start/build still reject a missing source; failed active
+  changes restore the previous state rather than falling back to direct traffic;
+- malformed direct keys lacking server/port are rejected before persistence.
+  Android network parity and actual Boost purchasing remain separate work.
+
+## 3.0.32 — 2026-09-23
+
+### Windows update hotfix
+
+- fixed VPN startup after an installed update when the saved sing-box profile
+  still referenced filter files in the previous protected runtime directory;
+- startup now detects Dropo-owned local rule-set paths from another runtime and
+  rewrites only those references to the current signed bundle before launching
+  the selective proxy, without contacting the subscription provider;
+- subscriptions, source order, selected nodes, profiles, routing modes and
+  per-service Direct/VPN/Zapret policies are preserved during the migration;
+- routing behavior is otherwise unchanged from 3.0.31. Android remains outside
+  this Windows release.
+
+## 3.0.31 — 2026-09-23
+
+### Full VPN and Windows routing
+
+- repaired `Everything through VPN`: the final Internet route and remote DoH
+  now use the selected VPN source, with no hidden Direct candidate in the
+  selector or stale selective-mode cache;
+- full VPN now refuses to start without a usable VPN source, while local/private
+  destinations and work-network WireGuard overlays keep their higher-priority
+  routes across every mode;
+- route diagnostics separate endpoint reachability from a confirmed effective
+  route and no longer present fallback/catalog data as a live route;
+- VPN start, stop, reconnect, source, subscription and route changes are
+  serialized and transactional; stale background work cannot revive or mutate
+  a disconnected session.
+
+### Telegram and Discord
+
+- Windows no longer bundles, starts or opens the legacy `tg-ws-proxy` sidecar;
+  Telegram follows the same explicit Direct/VPN service policy as other apps;
+- upgrades remove the obsolete sidecar binary and show a non-modal, explicit
+  migration action when an older Dropo version may have left a localhost proxy
+  saved in Telegram; Dropo never edits Telegram settings automatically;
+- Discord strategy selection and media health run in the background, are fenced
+  to the active VPN session, and mark voice/video working only after sustained
+  bidirectional evidence; explicit Direct/VPN policy remains authoritative.
+
+### Release reliability
+
+- Windows UI now uses the static MSVC runtime, fixing startup error
+  `0x0000135` on clean systems without a machine-wide Visual C++ runtime;
+- runtime manifest, SBOM and provenance checks reject the removed Telegram
+  sidecar and cover the self-contained Windows package;
+- WFP kill-switch code remains an inactive architecture prototype: it is not
+  installed, does not create filters and is not advertised as active protection;
+- Android source changes remain behind a separate Android release gate; no APK
+  is included in this Windows release.
+
+## 3.0.30 — 2026-09-21
+
+### Minimal Atlas interface
+
+- compact 700×500 Windows window with an animated globe and a centred connection
+  action; Home shows only connection state, source, mode and the service shortcut;
+- two primary destinations: Connection and Settings; subscriptions, services,
+  app options, advanced tools and help are grouped without removing features;
+- click-to-open side navigation, correct Back history, keyboard focus recovery
+  and layouts tested at 100/150/200% text scale;
+- service policies remain saved while full VPN is active; failed writes restore
+  the confirmed value and settings recover after bridge errors;
+- Windows no longer offers a misleading Auto service route that the core stores
+  as Direct; strategy auto-selection is separate, Android retains its own Auto;
+- animation respects reduced motion and pauses behind overlays/inactive views.
+
+### Release checks
+
+- publication now requires both general CI and the Windows package gate to pass
+  for the exact commit, with 24 offline readiness fixtures;
+- 93 Flutter tests cover navigation, accessibility, route editing and failures;
+- routing, packet strategies and VPN sources are unchanged; saved subscriptions
+  and policies are retained. Discord Zapret remains experimental;
+- Windows packages remain unsigned. Android is not part of this release; live
+  network acceptance after updating is separate from automated package checks.
+
+## 3.0.29 — 2026-09-17
+
+### Atlas desktop interface
+
+- forest-green desktop theme with a decorative globe, one connection button,
+  horizontal navigation, and a collapsible favourites list;
+- modes and per-service dropdowns remain on Home; advanced strategy details,
+  profiles, work networks and diagnostics remain available;
+- responsive layouts keep the connection action visible in compact windows;
+  source priority is distinct from confirmed active-source state;
+- rejected route writes restore the last confirmed policy, and full-VPN mode
+  clearly marks service policies as saved for selective mode;
+- fixed the diagnostics scrollbar; routing and packet-engine logic unchanged.
+
+### Reopen after installed updates
+
+- silent updates directly launch the newly installed app instead of passing
+  the executable to Explorer; no Finish-page action is required;
+- disabled competing Restart Manager relaunch; the installer owns one launch;
+- added installer-contract tests and a clean-Windows smoke check requiring one
+  visible UI after the same `--from-update` hand-off used by older clients;
+- saved settings and autostart choices are preserved. Portable remains a manual
+  archive update; reopening the window does not force a VPN connection.
+
+## 3.0.28 — 2026-09-17
+
+### Interface and navigation
+
+- clear connection states and one source panel distinguishing saved priority
+  from the active session; collapsible quick routes remain on Home;
+- separate Services and VPN Sources pages, domain/name search, pinned services,
+  and a single route editor instead of duplicate settings;
+- stale/offline states no longer claim an active route; writes lock conflicting
+  navigation and recover controls on failure;
+- accessible layouts tested at 100/150/200% text scale; native widget screenshots
+  and 67 Flutter regression tests, without starting another VPN core.
+
+### Optional public VPN fallback
+
+- public VPN Checker RU catalog requires opt-in consent and stays after personal
+  sources, including when its URL was imported manually;
+- exactly one selected node per source; no automatic sweep of sibling nodes;
+- manual node selection survives updated labels; cached lists retain their
+  original update time and show an offline warning;
+- removing the final source no longer restores an obsolete subscription URL;
+- public providers are third parties: reachability, privacy and speed are not
+  guaranteed. Existing service policies and direct-first traffic rules remain.
+
+Installed Windows 3.0.27 can obtain this release through the existing updater.
+Discord Zapret remains experimental; selective VPN is recommended for voice.
+
+## 3.0.27 — 2026-09-03
+
+### VPN compatibility and diagnostics
+
+- added desktop support for VLESS HTTPUpgrade transports and preserved their
+  host/path parameters when importing links and subscriptions;
+- direct input now accepts a newline-delimited bundle of proxy links and keeps
+  every supported node available for explicit selection;
+- exposed VPN-source health in the application status instead of reporting a
+  configured but unreachable source as healthy;
+- kept the active VPN route online while an update is downloaded and verified,
+  so users who need Dropo to reach GitHub do not lose the transfer midway.
+
+### Automatic Windows updates
+
+- installed Windows builds automatically download stable updates from this
+  repository when update checks are enabled;
+- the exact release asset is validated by declared size and GitHub SHA-256
+  before the active connection is stopped;
+- verified updates run through a silent in-place installer and relaunch Dropo;
+- portable Windows and Android builds remain download-notification only and
+  never overwrite their own files automatically;
+- release CI and the Windows package gate now follow `Dzhamuha-develop`, the
+  actual release branch.
+
+### Build reliability
+
+- added explicit offline switches for the pinned blocked-list bundle and cached
+  Flutter packages without weakening the normal publication gate;
+- updated the inherited Android bridge to gRPC `1.83.1`, which contains the
+  upstream fix for HTTP/2 DATA-frame fragmentation memory exhaustion;
+- expanded transport, subscription and updater regression coverage.
+
+## 3.0.26 — 2026-08-30
+
+### Stable routing profile
+
+- fresh Windows installations start with YouTube on scoped Zapret, Discord,
+  Instagram and ChatGPT on selective VPN, and all unrelated traffic on Direct;
+- upgrades preserve every explicit per-service policy already selected by the
+  user;
+- Discord VPN remains the recommended release route for web, the desktop app,
+  voice, video and Go Live;
+- Steam, games and unknown/shared-CDN traffic keep the direct-first fail-safe.
+
+### Zapret development
+
+- adapted all 22 Flowseal 1.10.2 strategy profiles to bounded, typed in-process
+  packet actions without an external executable, Lua runtime or shell command;
+- restored the live-tested General ALT recipe and scoped CONNECT probes;
+- added alternative Discord TLS discovery ports `2053`, `2083`, `2087`,
+  `2096` and `8443`, guarded by process identity and initial TLS evidence;
+- kept YouTube strategy selection available in automatic and manual modes;
+- marked Discord Zapret and its automatic selector as experimental because a
+  successful web/API probe cannot prove a bidirectional voice/media session;
+- never persists a Discord candidate as fully working without sustained live
+  media evidence.
+
+### Release engineering and documentation
+
+- documented the recommended per-service profile, experimental-mode contract,
+  provider/DPI variability and Discord voice limitations;
+- added regression coverage for shared Cloudflare addresses, Steam/game Direct,
+  bounded WinDivert filters and preservation of saved user policies;
+- Windows installer and portable artifacts are validated by tests, runtime
+  manifest/SBOM checks, MOTW simulation and Microsoft Defender scanning.
+
+### Known limitations
+
+- Discord Zapret may open web/API while the desktop app or voice remains
+  unavailable; use the selective VPN route for stable Discord operation;
+- YouTube Zapret depends on the ISP's current DPI behavior and may require a
+  different strategy on another network;
+- Windows binaries are unsigned until a publicly trusted Authenticode identity
+  is available;
+- Android is not included in this Windows release.
+
+## 3.0.26-rc.1 — 2026-08-29
+
+### Added
+
+- per-service policies for Direct, VPN and experimental local bypass;
+- primary service routes for YouTube, Discord, Instagram and ChatGPT;
+- collapsible service-route controls and support for adding services;
+- immediate `Всё через VPN` mode;
+- in-process Windows traffic orchestrator with one WinDivert owner;
+- service-aware TLS/QUIC/process classification and direct-first fail-safe;
+- background strategy selection state and diagnostics;
+- external `DROPO_TOOLCHAIN_ROOT` support for developer SDKs.
+
+### Improved
+
+- unselected games, Steam traffic and unrelated sites remain on the direct path;
+- application traffic classification, including Discord gateway and media;
+- route-aware quick checks for selected VPN services and direct/game guards;
+- Discord idle diagnostics without ten-second log spam from control-only TCP
+  connections;
+- cleanup of stale Dropo processes, proxy state and temporary host mappings;
+- reproducible Windows packaging, runtime manifest, SBOM and Defender gate;
+- Android transitive security dependencies updated to `grpc 1.82.1` and
+  `edwards25519 1.1.1`.
+
+### Known limitations
+
+- the built-in Zapret-style bypass is experimental and is not yet the stable
+  connection method for Discord and YouTube;
+- the Windows release candidate is unsigned until a publicly trusted
+  Authenticode identity is available;
+- the Android release workflow still requires a validated Android SDK setup.
+
+## Upstream history
+
+History before this fork is available in the upstream repository:
+[Droponevedimka/dropo](https://github.com/Droponevedimka/dropo).

@@ -1,0 +1,60 @@
+{
+  "schema_version": 4,
+  "filters_version": "07112026",
+  "updated_at": "2026-11-07T06:18:29.0000000Z",
+  "source": "https://github.com/1andrevich/Re-filter-lists",
+  "release_url": "https://github.com/1andrevich/Re-filter-lists/releases/tag/07112026",
+  "max_age_days": 30,
+  "routing_policy": {
+    "max_ip_host_bits": 4,
+    "specific_ip_rule_sets": [
+      "refilter_ips",
+      "discord_ips"
+    ],
+    "rationale": "Only specific blocked IP ranges are compiled; broad shared provider ranges pass directly."
+  },
+  "files": {
+    "domains_all": {
+      "file": "domains_all.lst",
+      "source_url": "https://github.com/1andrevich/Re-filter-lists/releases/download/07112026/domains_all.lst",
+      "sha256": "ec998ad04cf0ba1a483f317f43a93ff43988b35966559ac5ad3675a3d9032e46",
+      "entries": 82146
+    },
+    "ipsum": {
+      "file": "ipsum.lst",
+      "source_url": "https://github.com/1andrevich/Re-filter-lists/releases/download/07112026/ipsum.lst",
+      "sha256": "9e5c3dbc589cac369569f1788b2505257a8b4dbf6a1a5ea3be77dad10cb8ae51",
+      "entries": 27602
+    },
+    "refilter_domains": {
+      "file": "refilter_domains.srs",
+      "source_url": "https://github.com/1andrevich/Re-filter-lists/releases/download/07112026/domains_all.lst",
+      "sha256": "2c7a33729ed9ddce5f4e92052bfb3e671687597a2a252a76d42c45a6ae2d4bb3",
+      "entries": 82146
+    },
+    "refilter_ips": {
+      "file": "refilter_ips.srs",
+      "source_url": "https://github.com/1andrevich/Re-filter-lists/releases/download/07112026/ipsum.lst",
+      "sha256": "6a479710fdf5d92187d99c919f25b2d3d11d7369e0ac9821ca8a17a21e53d0d9",
+      "entries": 25773
+    },
+    "community_domains": {
+      "file": "community_domains.srs",
+      "source_url": "https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/community.lst",
+      "sha256": "fa7bc5862e9c799639ba6d810827b8759fedddb8f6d7ae116bce56323b0ad442",
+      "entries": 690
+    },
+    "community_ips": {
+      "file": "community_ips.srs",
+      "source_url": "https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/community_ips.lst",
+      "sha256": "66b05b86cca49d86c58c598c04a05d61ed97497306d01b1f13db56b5ce827668",
+      "entries": 14
+    },
+    "discord_ips": {
+      "file": "discord_ips.srs",
+      "source_url": "https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/discord_ips.lst",
+      "sha256": "e1a1c2749e5627311ee81ad69928a354fe79cda781fc3bbe30e4715945b2b6e9",
+      "entries": 2321
+    }
+  }
+}

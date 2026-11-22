@@ -1,0 +1,127 @@
+part of 'main.dart';
+
+/// Native counters include sessions while Flutter is paused. Only presentation
+/// belongs to the UI; no timer, health probe or review SDK touches the VPN path.
+class AndroidReviewPromptCoordinator {
+  AndroidReviewPromptCoordinator({
+    required this.readStatus,
+    required this.claim,
+    required this.cancelUnpresented,
+    required this.confirmPresentation,
+    required this.canPresent,
+    required this.present,
+    this.prepareNative,
+    this.launchNative,
+  });
+
+  final Future<Map<String, dynamic>> Function() readStatus;
+  final Future<Map<String, dynamic>> Function() claim;
+  final Future<void> Function(String) cancelUnpresented;
+  final Future<void> Function(String) confirmPresentation;
+  final bool Function() canPresent;
+  final Future<void> Function() present;
+  final Future<Map<String, dynamic>> Function()? prepareNative;
+  final Future<Map<String, dynamic>> Function(String)? launchNative;
+  bool _busy = false;
+  bool _finished = false;
+
+  Future<void> check() async {
+    if (_busy || _finished || !canPresent()) return;
+    _busy = true;
+    try {
+      final state = await readStatus();
+      if (state['shown'] == true) {
+        _finished = true;
+        return;
+      }
+      if (state['eligible'] != true || !canPresent()) return;
+      if (prepareNative != null) {
+        final preparation = await prepareNative!();
+        if (preparation['prepared'] != true) {
+          // Known pre-launch failure: stay silent, and avoid retrying every UI
+          // refresh. A new app instance may retry; no persistent budget was used.
+          _finished = preparation['retryLater'] != true;
+          return;
+        }
+        if (!canPresent()) return;
+      }
+      final reservation = await claim();
+      final id = reservation['claimId'];
+      if (reservation['claimed'] != true || id is! String || id.isEmpty) return;
+      if (!canPresent()) {
+        // A terminal service event can arrive before Flutter finishes its own
+        // disconnect UI. This reservation has never opened a route and is safe
+        // to release; a confirmed presentation cannot be released natively.
+        await cancelUnpresented(id);
+        return;
+      }
+      if (launchNative != null) {
+        final outcome = await launchNative!(id);
+        _finished =
+            outcome['attempted'] == true || outcome['retryLater'] != true;
+        return;
+      }
+      // showDialog pushes its route synchronously before returning its Future.
+      // Do not insert an await/lifecycle gap between the guard and presentation.
+      final presentation = present();
+      _finished = true;
+      unawaited(confirmPresentation(id).catchError((_) {}));
+      await presentation;
+    } catch (_) {
+      // Storage, lifecycle and Play Store errors must never affect VPN use.
+    } finally {
+      _busy = false;
+    }
+  }
+}
+
+@visibleForTesting
+Future<void> showAndroidReviewPrompt(
+  BuildContext context, {
+  required Future<void> Function(String) openExternal,
+}) async {
+  final review = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      scrollable: true,
+      icon: const Icon(Icons.rate_review_outlined),
+      title: Text(
+        _tr(dialogContext, 'Оставить отзыв о Dropo?', 'Review Dropo?'),
+      ),
+      content: Text(
+        _tr(
+          dialogContext,
+          'Поделитесь впечатлениями в Google Play. Ваш отзыв поможет нам улучшить приложение.',
+          'Share your experience on Google Play to help us improve Dropo.',
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: Text(_tr(dialogContext, 'Не сейчас', 'Not now')),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: Text(_tr(dialogContext, 'Оставить отзыв', 'Leave a review')),
+        ),
+      ],
+    ),
+  );
+  if (review != true || !context.mounted) return;
+  try {
+    await openExternal(_playStoreUrl);
+  } catch (_) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          _tr(
+            context,
+            'Не удалось открыть Google Play.',
+            'Could not open Google Play.',
+          ),
+        ),
+      ),
+    );
+  }
+}

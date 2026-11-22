@@ -1,0 +1,1341 @@
+package main
+
+// App settings methods for dropo.
+// This file contains app configuration API methods
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"strings"
+	"time"
+)
+
+// GetAppConfig возвращает текущие настройки приложения (API для фронтенда)
+func (a *App) GetAppConfig() map[string]interface{} {
+	a.waitForInit()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	versionInfo := GetVersionInfo()
+	networkMode := a.currentNetworkModeStatus()
+
+	return map[string]interface{}{
+		"success":           true,
+		"autoStart":         settings.AutoStart,
+		"autoStartPrompted": settings.AutoStartPrompted,
+		"enableLogging":     settings.EnableLogging,
+		"checkUpdates":      settings.CheckUpdates,
+		"reduceMotion":      settings.ReduceMotion,
+		"notifications":     settings.Notifications,
+		"theme":             settings.Theme,
+		"language":          settings.Language,
+		"logLevel":          settings.LogLevel,
+		"routingMode":       string(settings.RoutingMode),
+		"networkMode":       string(settings.NetworkMode),
+		"autoUpdateSub":     settings.AutoUpdateSub,
+		"subUpdateInterval": settings.SubUpdateInterval,
+		"lastSubUpdate":     settings.LastSubUpdate.Format(time.RFC3339),
+		"hideRuTraffic":     settings.HideRuTraffic,
+		"ruProxyAddress":    settings.RuProxyAddress,
+		"disableFreeAccess": settings.DisableFreeAccess,
+		"wireGuardVersion":  settings.WireGuardVersion,
+		"appVersion":        versionInfo["version"],
+		"appFullVersion":    versionInfo["fullVersion"],
+		"appName":           versionInfo["name"],
+		"singboxVersion":    versionInfo["singboxVersion"],
+		"buildHash":         versionInfo["buildHash"],
+		"buildTime":         versionInfo["buildTime"],
+		"githubRepo":        versionInfo["githubRepo"],
+		"githubURL":         versionInfo["githubURL"],
+		"telegramName":      versionInfo["telegramName"],
+		"telegramURL":       versionInfo["telegramURL"],
+		"networkModeStatus": networkModeStatusPayload(networkMode),
+	}
+}
+
+// SetReduceMotion changes presentation only, without rebuilding a profile.
+func (a *App) SetReduceMotion(reduced bool) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	if a.storage == nil {
+		return map[string]interface{}{"success": false, "error": "Хранилище не инициализировано"}
+	}
+	settings := a.storage.GetAppSettings()
+	settings.ReduceMotion = reduced
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	return map[string]interface{}{"success": true, "reduceMotion": reduced}
+}
+
+// SaveAppConfig сохраняет настройки приложения (API для фронтенда)
+func (a *App) SaveAppConfig(autoStart, enableLogging, checkUpdates, notifications, autoUpdateSub bool, theme, language, logLevel string, subUpdateInterval int) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	requestedTheme := Theme(theme)
+	requestedLanguage := Language(language)
+	requestedLogLevel := LogLevel(logLevel)
+	if !validTheme(requestedTheme) {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("неизвестная тема: %s", theme)}
+	}
+	if !validLanguage(requestedLanguage) {
+		return map[string]interface{}{"success": false, "error": "интерфейс пока доступен только на русском языке"}
+	}
+	if !validLogLevel(requestedLogLevel) {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("неизвестный уровень логирования: %s", logLevel)}
+	}
+	if subUpdateInterval < 1 || subUpdateInterval > 24*30 {
+		return map[string]interface{}{"success": false, "error": "интервал обновления подписки должен быть от 1 до 720 часов"}
+	}
+	a.mu.Lock()
+	isRunning := a.isRunning
+	a.mu.Unlock()
+	if isRunning && (settings.EnableLogging != enableLogging || settings.LogLevel != requestedLogLevel) {
+		return map[string]interface{}{"success": false, "error": "остановите VPN перед изменением логирования"}
+	}
+
+	oldAutoStart := settings.AutoStart
+	settings.AutoStart = autoStart
+	settings.AutoStartPrompted = true
+	settings.EnableLogging = enableLogging
+	settings.CheckUpdates = checkUpdates
+	// Retained for settings-file/API compatibility. The current UI does not
+	// advertise connection notifications until a platform implementation exists.
+	settings.Notifications = notifications
+	settings.AutoUpdateSub = autoUpdateSub
+	settings.Theme = requestedTheme
+	settings.Language = requestedLanguage
+	settings.LogLevel = requestedLogLevel
+	settings.SubUpdateInterval = subUpdateInterval
+
+	// Keep the persisted flag and the OS registration in sync. Apply the
+	// reversible external change first; if saving fails, restore the old state.
+	if autoStart != oldAutoStart {
+		if err := applyAutoStart(autoStart); err != nil {
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Ошибка настройки автозапуска: %v", err),
+			}
+		}
+	}
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		if autoStart != oldAutoStart {
+			_ = applyAutoStart(oldAutoStart)
+		}
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка сохранения настроек: %v", err),
+		}
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"message": "Настройки сохранены",
+	}
+}
+
+// ResolveAutoStartPrompt records the user's answer to the first-run autostart
+// dialog: enable=true keeps launch-at-logon on and registers it; enable=false
+// flips the stored default to off and ensures nothing is registered. Either way
+// the choice is remembered so the dialog is not shown again.
+func (a *App) ResolveAutoStartPrompt(enable bool) map[string]interface{} {
+	a.waitForInit()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	settings.AutoStart = enable
+	settings.AutoStartPrompted = true
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка сохранения выбора автозапуска: %v", err),
+		}
+	}
+	if err := applyAutoStart(enable); err != nil {
+		return map[string]interface{}{
+			"success":           false,
+			"error":             fmt.Sprintf("Ошибка настройки автозапуска: %v", err),
+			"autoStart":         enable,
+			"autoStartPrompted": true,
+		}
+	}
+
+	return map[string]interface{}{
+		"success":           true,
+		"autoStart":         enable,
+		"autoStartPrompted": true,
+	}
+}
+
+// GetWireGuardVersion returns current WireGuard version (bundled with app)
+func (a *App) GetWireGuardVersion() map[string]interface{} {
+	installed := false
+	wireguardPath := ""
+
+	if a.nativeWG != nil {
+		installed = a.nativeWG.IsInstalled()
+		wireguardPath = a.nativeWG.wireguardPath
+	}
+
+	return map[string]interface{}{
+		"success":       true,
+		"version":       WireGuardVersion,
+		"wintunVersion": WintunVersion,
+		"installed":     installed,
+		"wireguardPath": wireguardPath,
+	}
+}
+
+// GetAutoStartStatus проверяет статус автозапуска
+func (a *App) GetAutoStartStatus() map[string]interface{} {
+	return map[string]interface{}{
+		"success":   true,
+		"autoStart": IsAutoStartEnabled(),
+	}
+}
+
+// ============================================================================
+// Import/Export API methods
+// ============================================================================
+
+// ExportProfilesToFile opens save dialog and exports all profiles to JSON file.
+func (a *App) ExportProfilesToFile() map[string]interface{} {
+	return map[string]interface{}{
+		"success": false,
+		"error":   "file dialog moved to Flutter; call ExportProfilesToPath with a selected path",
+	}
+}
+
+func (a *App) ExportProfilesToPath(filename string) map[string]interface{} {
+	a.waitForInit()
+	if filename == "" {
+		return map[string]interface{}{"success": false, "error": "empty export path"}
+	}
+
+	exportResult := a.ExportAllProfiles()
+	if ok, _ := exportResult["success"].(bool); !ok {
+		return exportResult
+	}
+
+	jsonData, _ := exportResult["data"].(string)
+	if err := os.WriteFile(filename, []byte(jsonData), 0644); err != nil {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("failed to write export file: %v", err)}
+	}
+
+	profilesCount, _ := exportResult["profiles_count"].(int)
+	a.writeLog(fmt.Sprintf("Exported %d profiles to %s", profilesCount, filename))
+	return map[string]interface{}{
+		"success":        true,
+		"filename":       filename,
+		"profiles_count": profilesCount,
+	}
+}
+
+// ImportProfilesFromFile opens file dialog and imports profiles from JSON file.
+func (a *App) ImportProfilesFromFile() map[string]interface{} {
+	return map[string]interface{}{
+		"success": false,
+		"error":   "file dialog moved to Flutter; call ImportProfilesFromPath with a selected path",
+	}
+}
+
+func (a *App) ImportProfilesFromPath(filename string) map[string]interface{} {
+	a.waitForInit()
+	if filename == "" {
+		return map[string]interface{}{"success": false, "error": "empty import path"}
+	}
+
+	a.mu.Lock()
+	if a.isRunning {
+		a.mu.Unlock()
+		return map[string]interface{}{"success": false, "error": "VPN must be stopped before importing profiles"}
+	}
+	a.mu.Unlock()
+
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("failed to read import file: %v", err)}
+	}
+
+	validationResult := a.ValidateImportData(string(data))
+	if ok, _ := validationResult["success"].(bool); !ok {
+		return validationResult
+	}
+	validationResult["filename"] = filename
+	validationResult["file_data"] = string(data)
+	validationResult["needs_confirmation"] = true
+	return validationResult
+}
+
+// ConfirmImportProfiles confirms and executes import after user approval.
+func (a *App) ConfirmImportProfiles(jsonData string) map[string]interface{} {
+	return a.ImportAllProfiles(jsonData)
+}
+
+// ============================================================================
+// Routing Mode API methods
+// ============================================================================
+
+// GetRoutingMode returns current routing mode
+func (a *App) GetRoutingMode() map[string]interface{} {
+	a.waitForInit()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	mode := NormalizeRoutingMode(settings.RoutingMode)
+
+	// Get mode descriptions for UI
+	modeDescriptions := map[string]string{
+		string(RoutingModeBlockedOnly): "Только заблокированные",
+		string(RoutingModeAllTraffic):  "Весь трафик",
+	}
+
+	return map[string]interface{}{
+		"success":     true,
+		"mode":        string(mode),
+		"description": modeDescriptions[string(mode)],
+		"modes": []map[string]string{
+			{"value": string(RoutingModeBlockedOnly), "label": "Выбранные сервисы", "description": "VPN и Zapret работают только для сервисов с явной политикой; остальной трафик идёт напрямую."},
+			{"value": string(RoutingModeAllTraffic), "label": "Весь трафик", "description": "Весь трафик через VPN. Максимальная приватность, высокая нагрузка."},
+		},
+	}
+}
+
+// SetRoutingMode sets routing mode and rebuilds config
+func (a *App) SetRoutingMode(mode string) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	// Validate mode
+	routingMode := RoutingMode(mode)
+	switch routingMode {
+	case RoutingModeBlockedOnly, RoutingModeAllTraffic:
+		// Valid mode
+	case RoutingModeExceptRussia:
+		// Compatibility with older UI/state: broad foreign routing is retired.
+		routingMode = RoutingModeBlockedOnly
+	default:
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Неизвестный режим маршрутизации: %s", mode),
+		}
+	}
+
+	a.mu.Lock()
+	isRunning := a.isRunning
+	isStarting := a.isStarting
+	a.mu.Unlock()
+	if isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Дождитесь завершения текущего подключения VPN и повторите смену режима.",
+		}
+	}
+	if isRunning && runtime.GOOS != "windows" {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Нельзя изменить режим пока VPN активен. Сначала отключите VPN.",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	previousSettings := cloneGlobalAppSettings(settings)
+	if routingMode == RoutingModeAllTraffic {
+		profile, err := a.storage.GetActiveProfile()
+		if err != nil {
+			return map[string]interface{}{"success": false, "error": err.Error()}
+		}
+		if !hasConfiguredVPNSource(profile) && isRunning {
+			return map[string]interface{}{
+				"success": false,
+				"error":   "Для режима «Всё через VPN» выберите и включите VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ.",
+			}
+		}
+		if !hasConfiguredVPNSource(profile) {
+			settings.RoutingMode = routingMode
+			if err := a.storage.saveUnreadyVPNProfile(*profile, &settings); err != nil {
+				return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка сохранения настроек: %v", err)}
+			}
+			if a.configBuilder != nil {
+				a.configBuilder.SetRoutingMode(routingMode)
+			}
+			return map[string]interface{}{
+				"success": true, "mode": string(routingMode), "restarted": false,
+				"sourceRequired": true,
+				"message":        "Режим сохранён. Перед подключением выберите бесплатный источник или добавьте свою подписку.",
+			}
+		}
+	}
+	if NormalizeRoutingMode(settings.RoutingMode) == routingMode {
+		return map[string]interface{}{
+			"success":   true,
+			"message":   "Режим маршрутизации уже выбран",
+			"mode":      string(routingMode),
+			"restarted": false,
+			"unchanged": true,
+		}
+	}
+	settings.RoutingMode = routingMode
+
+	transactionGeneration := uint64(0)
+	if isRunning {
+		transactionGeneration = a.beginVPNTransactionalReconnect("Применяем режим маршрутизации")
+		defer a.finishVPNTransactionalReconnect(transactionGeneration)
+		stopResult := a.stopVPNForReconnect()
+		if !apiResultSucceeded(stopResult) {
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Не удалось остановить VPN для смены режима: %s", apiResultMessage(stopResult)),
+			}
+		}
+	}
+
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		recovery := a.restartAfterServicePolicyFailure(isRunning)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка сохранения настроек: %v%s", err, recovery),
+		}
+	}
+
+	// Update config builder
+	if a.configBuilder != nil {
+		a.configBuilder.SetRoutingMode(routingMode)
+	}
+
+	// Rebuild config for active profile
+	if err := a.RebuildActiveProfileConfig(); err != nil {
+		if a.configBuilder != nil {
+			a.configBuilder.SetRoutingMode(previousSettings.RoutingMode)
+		}
+		rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+		recovery := a.recoverAfterServicePolicyRollback(isRunning, rollbackOK)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v%s%s", err, rollbackMessage, recovery),
+		}
+	}
+	restartCancelled := false
+	if isRunning {
+		startResult := a.startVPNForReconnect()
+		if apiResultCancelled(startResult) {
+			restartCancelled = true
+		} else if !apiResultSucceeded(startResult) {
+			startError := apiResultMessage(startResult)
+			if a.configBuilder != nil {
+				a.configBuilder.SetRoutingMode(previousSettings.RoutingMode)
+			}
+			rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+			recovery := a.recoverAfterServicePolicyRollback(true, rollbackOK)
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Режим сохранён, но VPN не переподключился: %s%s%s", startError, rollbackMessage, recovery),
+			}
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("Routing mode changed to: %s", mode))
+
+	return map[string]interface{}{
+		"success":          true,
+		"message":          "Режим маршрутизации изменён",
+		"mode":             string(routingMode),
+		"restarted":        isRunning && !restartCancelled,
+		"restartCancelled": restartCancelled,
+	}
+}
+
+// ============================================================================
+// Filters API methods
+// ============================================================================
+
+// GetFiltersInfo returns information about bundled filters
+func (a *App) GetFiltersInfo() map[string]interface{} {
+	a.waitForInit()
+
+	// Create filter manager pointing to bin/filters
+	filterManager := NewFilterManager(a.runtimeBasePath())
+
+	info, err := filterManager.GetInfo()
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка получения информации о фильтрах: %v", err),
+		}
+	}
+
+	files := filterManager.GetFilterFiles()
+
+	return map[string]interface{}{
+		"success":        true,
+		"version":        info.Version,
+		"updated_at":     info.UpdatedAt,
+		"days_old":       info.DaysOld,
+		"max_age_days":   info.MaxAgeDays,
+		"is_outdated":    info.IsOutdated,
+		"filter_count":   info.FilterCount,
+		"total_size_kb":  info.TotalSizeKB,
+		"update_message": info.UpdateMessage,
+		"can_update":     info.CanUpdate,
+		"files":          files,
+	}
+}
+
+// UpdateFilters is intentionally disabled at runtime. Routing filters are
+// updated by the release build pipeline and shipped as reviewed bundled assets.
+func (a *App) UpdateFilters() map[string]interface{} {
+	a.waitForInit()
+
+	return map[string]interface{}{
+		"success": false,
+		"started": false,
+		"error":   "Обновление баз выполняется только при сборке приложения.",
+	}
+}
+
+// ============================================================================
+// Free Access API methods — opening blocked-in-RF
+// services without a VPN key, via local DPI-bypass methods (ByeDPI).
+// ============================================================================
+
+// GetFreeAccessConfig returns the current "Free access" settings and the
+// list of services for the settings UI, each with its enabled state.
+func (a *App) GetFreeAccessConfig() map[string]interface{} {
+	a.waitForInit()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	methodOptions := FreeAccessServiceMethodOptions()
+	storedStrategies, _ := a.loadFreeAccessStrategies()
+	serviceFallbackCache := a.loadServiceStrategyCache()
+	transparentTags := a.availableTransparentStrategyTags()
+	hasVPNProxy := false
+	if configPath := a.storage.ActiveConfigFilePath(); configPath != "" {
+		if ok, err := configHasVPNProbeCandidates(configPath); err == nil {
+			hasVPNProxy = ok
+		}
+	}
+
+	services := make([]map[string]interface{}, 0, len(DefaultFreeAccessServices))
+	for _, svc := range DefaultFreeAccessServices {
+		enabled := FreeAccessServiceEnabled(settings, svc.Tag)
+		selectedMethod := FreeAccessServiceMethod(settings, svc.Tag)
+		effectiveMethod := selectedMethod
+		effectiveMethodLabel := FreeAccessOutboundLabel(selectedMethod)
+		effectiveSource := "manual"
+		if !enabled && selectedMethod == FreeAccessMethodAuto {
+			effectiveMethod = FreeAccessMethodDirect
+			if hasVPNProxy {
+				effectiveMethod = FreeAccessMethodVPN
+			}
+			effectiveMethodLabel = FreeAccessOutboundLabel(effectiveMethod)
+			effectiveSource = "service-disabled"
+		} else if selectedMethod == FreeAccessMethodAuto || selectedMethod == FreeAccessMethodZapret {
+			effective := a.selectFreeAccessStrategyForService(settings, svc, storedStrategies, serviceFallbackCache, map[string]bool{}, transparentTags, hasVPNProxy)
+			effectiveMethod = effective.MethodTag
+			effectiveMethodLabel = effective.MethodLabel
+			effectiveSource = effective.Source
+			if effectiveMethod == "" {
+				effectiveMethod = selectedMethod
+				effectiveMethodLabel = FreeAccessOutboundLabel(selectedMethod)
+				effectiveSource = selectedMethod
+			}
+		}
+		item := map[string]interface{}{
+			"tag":                  svc.Tag,
+			"name":                 svc.DisplayName,
+			"domainSuffixes":       append([]string(nil), svc.DomainSuffixes...),
+			"ipCidrs":              append([]string(nil), svc.IPCIDRs...),
+			"enabled":              enabled,
+			"requiresVpn":          svc.RequiresVPN,
+			"zapretSupported":      runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+			"homeVisible":          HomeRouteServiceVisible(settings, svc.Tag),
+			"selectedMethod":       selectedMethod,
+			"methodLabel":          FreeAccessOutboundLabel(selectedMethod),
+			"effectiveMethod":      effectiveMethod,
+			"effectiveMethodLabel": effectiveMethodLabel,
+			"effectiveSource":      effectiveSource,
+		}
+		for key, value := range zapretStrategySummary(settings, svc.Tag, serviceFallbackCache) {
+			item[key] = value
+		}
+		services = append(services, item)
+	}
+
+	byeDPIInstalled := false
+	byeDPIRunning := false
+	if runtime.GOOS != "windows" && a.byeDPI != nil {
+		byeDPIInstalled = a.byeDPI.IsInstalled()
+		byeDPIRunning = a.byeDPI.IsRunning()
+	}
+
+	return map[string]interface{}{
+		"success":            true,
+		"enabled":            FreeMethodsAllowed(settings),
+		"reverse":            false,
+		"disableFreeAccess":  settings.DisableFreeAccess,
+		"freeMethodsAllowed": FreeMethodsAllowed(settings),
+		"services":           services,
+		"methodOptions":      methodOptions,
+		"byedpiInstalled":    byeDPIInstalled,
+		"byedpiRunning":      byeDPIRunning,
+		"methodCache":        a.routeProbeCacheSummary(),
+	}
+}
+
+// SetHomeRouteServiceVisible pins or removes an optional service on the home
+// dashboard. The four primary services are always visible and cannot be removed.
+// This is a UI preference only, so changing it never restarts the traffic stack.
+func (a *App) SetHomeRouteServiceVisible(tag string, visible bool) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	tag = strings.TrimSpace(strings.ToLower(tag))
+	if a.storage == nil {
+		return map[string]interface{}{"success": false, "error": "Хранилище не инициализировано"}
+	}
+	known := false
+	for _, service := range DefaultFreeAccessServices {
+		if service.Tag == tag {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Неизвестный сервис: %s", tag)}
+	}
+	if primaryHomeRouteServiceTags[tag] {
+		return map[string]interface{}{"success": true, "tag": tag, "visible": true, "primary": true}
+	}
+
+	settings := a.storage.GetAppSettings()
+	next := make([]string, 0, len(settings.HomeRouteServices)+1)
+	seen := make(map[string]bool, len(settings.HomeRouteServices)+1)
+	for _, existing := range settings.HomeRouteServices {
+		if existing == "" || existing == tag || primaryHomeRouteServiceTags[existing] || seen[existing] {
+			continue
+		}
+		seen[existing] = true
+		next = append(next, existing)
+	}
+	if visible {
+		next = append(next, tag)
+	}
+	settings.HomeRouteServices = next
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка сохранения главных маршрутов: %v", err)}
+	}
+	return map[string]interface{}{"success": true, "tag": tag, "visible": visible}
+}
+
+// SetFreeAccessEnabled toggles the "Free access" master switch and rebuilds config.
+func (a *App) SetFreeAccessEnabled(enabled bool) map[string]interface{} {
+	return a.SetDisableFreeAccess(!enabled)
+}
+
+// SetDisableFreeAccess is retained for compatibility with older clients.
+// Explicit Direct/VPN/Zapret service policies remain authoritative.
+func (a *App) SetDisableFreeAccess(disabled bool) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	a.mu.Lock()
+	isRunning := a.isRunning
+	isStarting := a.isStarting
+	a.mu.Unlock()
+	if isRunning || isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Нельзя изменить настройки пока VPN активен. Сначала отключите VPN.",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	previousSettings := cloneGlobalAppSettings(settings)
+	settings.DisableFreeAccess = disabled
+	settings.FreeAccessEnabled = true
+	settings.FreeAccessReverse = false
+
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка сохранения настроек: %v", err),
+		}
+	}
+
+	if err := a.RebuildActiveProfileConfig(); err != nil {
+		_ = a.storage.UpdateAppSettings(previousSettings)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v", err),
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("Free methods disabled: %v", disabled))
+
+	return map[string]interface{}{
+		"success":           true,
+		"disableFreeAccess": disabled,
+		"enabled":           !disabled,
+	}
+}
+
+// SetFreeAccessReverse toggles the preference for ByeDPI candidates before
+// VPN candidates in blocked-service urltest groups and rebuilds config.
+func (a *App) SetFreeAccessReverse(reverse bool) map[string]interface{} {
+	a.writeLog("Ignoring deprecated FreeAccessReverse setting; route probe selects by latency")
+	return map[string]interface{}{
+		"success": true,
+		"reverse": false,
+	}
+}
+
+// ToggleFreeAccessService is the legacy boolean API. Both values now map to
+// Direct because only the explicit route-policy API may opt traffic into VPN or
+// Zapret.
+func (a *App) ToggleFreeAccessService(tag string, enabled bool) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	found := false
+	for _, svc := range DefaultFreeAccessServices {
+		if svc.Tag == tag {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Неизвестный сервис: %s", tag),
+		}
+	}
+
+	a.mu.Lock()
+	isRunning := a.isRunning
+	isStarting := a.isStarting
+	a.mu.Unlock()
+	if isRunning || isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Нельзя изменить настройки пока VPN активен. Сначала отключите VPN.",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	previousSettings := cloneGlobalAppSettings(settings)
+	if settings.FreeAccessServices == nil {
+		settings.FreeAccessServices = DefaultFreeAccessServiceState()
+	}
+	settings.FreeAccessServices[tag] = true
+	if settings.FreeAccessMethods == nil {
+		settings.FreeAccessMethods = DefaultFreeAccessServiceMethodState()
+	}
+	method := FreeAccessMethodDirect
+	settings.FreeAccessMethods[tag] = method
+
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка сохранения настроек: %v", err),
+		}
+	}
+
+	if err := a.RebuildActiveProfileConfig(); err != nil {
+		_ = a.storage.UpdateAppSettings(previousSettings)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v", err),
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("Legacy free access service toggle %s mapped to route method %s", tag, method))
+
+	return map[string]interface{}{
+		"success": true,
+		"tag":     tag,
+		"enabled": enabled,
+		"method":  method,
+	}
+}
+
+// SetFreeAccessServiceMethod selects one of three explicit service policies:
+// Direct, VPN, or the Windows-only strict Zapret ladder. Concrete legacy
+// strategy tags are migrated and never exposed as extra UI policies.
+func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	var service FreeAccessService
+	found := false
+	for _, svc := range DefaultFreeAccessServices {
+		if svc.Tag == tag {
+			service = svc
+			found = true
+			break
+		}
+	}
+	if !found {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Неизвестный сервис: %s", tag),
+		}
+	}
+
+	normalized, valid := normalizeRequestedFreeAccessServiceMethod(method)
+	if !valid {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Неизвестный метод маршрута: %s", strings.TrimSpace(method)),
+		}
+	}
+	requestedMethod := strings.TrimSpace(strings.ToLower(method))
+	if normalized == FreeAccessMethodZapret && !serviceHasFreeBypass(service.Tag) && isKnownLegacyFreeAccessMethod(requestedMethod) {
+		normalized = FreeAccessMethodDirect
+	}
+	if normalized == FreeAccessMethodZapret {
+		if runtime.GOOS != "windows" {
+			return map[string]interface{}{
+				"success": false,
+				"error":   "Обход Zapret доступен только в версии для Windows.",
+			}
+		}
+		if !serviceHasFreeBypass(service.Tag) {
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Для сервиса %s нет безопасной Zapret-стратегии; выберите Напрямую или Через VPN.", service.DisplayName),
+			}
+		}
+	}
+
+	a.mu.Lock()
+	isRunning := a.isRunning
+	isStarting := a.isStarting
+	a.mu.Unlock()
+	if isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Дождитесь завершения текущего подключения VPN и повторите изменение маршрута.",
+		}
+	}
+	if isRunning && runtime.GOOS != "windows" {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Нельзя изменить метод пока VPN активен. Сначала отключите VPN.",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	previousSettings := cloneGlobalAppSettings(settings)
+	existing := FreeAccessServiceMethod(settings, tag)
+	if existing == normalized {
+		return map[string]interface{}{
+			"success":   true,
+			"tag":       tag,
+			"method":    normalized,
+			"restarted": false,
+			"unchanged": true,
+		}
+	}
+	if settings.FreeAccessMethods == nil {
+		settings.FreeAccessMethods = DefaultFreeAccessServiceMethodState()
+	}
+	settings.FreeAccessMethods[tag] = normalized
+	if settings.FreeAccessServices == nil {
+		settings.FreeAccessServices = DefaultFreeAccessServiceState()
+	}
+	// Route modes replace the legacy hidden enabled flag. A visible selection
+	// must always be authoritative and immediately undo an old disabled value.
+	settings.FreeAccessServices[tag] = true
+
+	transactionGeneration := uint64(0)
+	if isRunning {
+		transactionGeneration = a.beginVPNTransactionalReconnect("Применяем маршрут сервиса")
+		defer a.finishVPNTransactionalReconnect(transactionGeneration)
+		stopResult := a.stopVPNForReconnect()
+		if !apiResultSucceeded(stopResult) {
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Не удалось остановить VPN для смены маршрута: %s", apiResultMessage(stopResult)),
+			}
+		}
+	}
+
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		recovery := a.restartAfterServicePolicyFailure(isRunning)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка сохранения настроек: %v%s", err, recovery),
+		}
+	}
+
+	if err := a.RebuildActiveProfileConfig(); err != nil {
+		rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+		recovery := a.recoverAfterServicePolicyRollback(isRunning, rollbackOK)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v%s%s", err, rollbackMessage, recovery),
+		}
+	}
+	restartCancelled := false
+	if isRunning {
+		startResult := a.startVPNForReconnect()
+		if apiResultCancelled(startResult) {
+			restartCancelled = true
+		} else if !apiResultSucceeded(startResult) {
+			startError := apiResultMessage(startResult)
+			rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+			recovery := a.recoverAfterServicePolicyRollback(true, rollbackOK)
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Новый маршрут сохранён, но VPN не переподключился: %s%s%s", startError, rollbackMessage, recovery),
+			}
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("Free access service %s method: %s", tag, normalized))
+
+	return map[string]interface{}{
+		"success":          true,
+		"tag":              tag,
+		"method":           normalized,
+		"restarted":        isRunning && !restartCancelled,
+		"restartCancelled": restartCancelled,
+	}
+}
+
+// SetZapretServiceStrategy configures the strategy inside an explicit Zapret
+// service route. Auto forgets the network-specific result and starts a fresh
+// bounded search; manual locks one concrete typed strategy until changed.
+func (a *App) SetZapretServiceStrategy(tag string, mode string, strategyTag string) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+
+	tag = strings.TrimSpace(strings.ToLower(tag))
+	mode = NormalizeZapretStrategyMode(mode)
+	strategyTag = strings.TrimSpace(strings.ToLower(strategyTag))
+	service, found := findFreeAccessService(tag)
+	if a.storage == nil {
+		return map[string]interface{}{"success": false, "error": "Хранилище не инициализировано"}
+	}
+	if !found || runtime.GOOS != "windows" || !serviceHasFreeBypass(tag) {
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Настройка Zapret недоступна для сервиса %s", tag)}
+	}
+	var selected ServiceBypassMethod
+	if mode == ZapretStrategyModeManual {
+		var ok bool
+		selected, ok = findServiceBypassMethod(tag, strategyTag)
+		if !ok {
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Неизвестная стратегия Zapret для %s: %s", service.DisplayName, strategyTag)}
+		}
+	}
+
+	a.mu.Lock()
+	isRunning, isStarting := a.isRunning, a.isStarting
+	a.mu.Unlock()
+	if isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
+		return map[string]interface{}{"success": false, "error": "Дождитесь завершения текущего подключения и повторите настройку Zapret."}
+	}
+
+	settings := a.storage.GetAppSettings()
+	previousSettings := cloneGlobalAppSettings(settings)
+	if settings.ZapretStrategyModes == nil {
+		settings.ZapretStrategyModes = DefaultZapretStrategyModeState()
+	}
+	if settings.ZapretStrategies == nil {
+		settings.ZapretStrategies = map[string]string{}
+	}
+	settings.ZapretStrategyModes[tag] = mode
+	if mode == ZapretStrategyModeManual {
+		settings.ZapretStrategies[tag] = selected.Tag
+	} else {
+		delete(settings.ZapretStrategies, tag)
+	}
+
+	transactionGeneration := uint64(0)
+	if isRunning {
+		transactionGeneration = a.beginVPNTransactionalReconnect("Применяем стратегию Zapret")
+		defer a.finishVPNTransactionalReconnect(transactionGeneration)
+		stopResult := a.stopVPNForReconnect()
+		if !apiResultSucceeded(stopResult) {
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Не удалось остановить подключение для смены стратегии Zapret: %s", apiResultMessage(stopResult))}
+		}
+	}
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		recovery := a.restartAfterServicePolicyFailure(isRunning)
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка сохранения стратегии Zapret: %v%s", err, recovery)}
+	}
+	if mode == ZapretStrategyModeAuto {
+		a.removeServiceStrategyCacheEntry(tag)
+	}
+	if err := a.RebuildActiveProfileConfig(); err != nil {
+		rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+		recovery := a.recoverAfterServicePolicyRollback(isRunning, rollbackOK)
+		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Ошибка применения стратегии Zapret: %v%s%s", err, rollbackMessage, recovery)}
+	}
+	restartCancelled := false
+	if isRunning {
+		startResult := a.startVPNForReconnect()
+		if apiResultCancelled(startResult) {
+			restartCancelled = true
+		} else if !apiResultSucceeded(startResult) {
+			startError := apiResultMessage(startResult)
+			rollbackMessage, rollbackOK := a.restoreServicePolicy(previousSettings)
+			recovery := a.recoverAfterServicePolicyRollback(true, rollbackOK)
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Стратегия сохранена, но подключение не восстановлено: %s%s%s", startError, rollbackMessage, recovery)}
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("Zapret strategy for %s: mode=%s strategy=%s", tag, mode, strategyTag))
+	result := map[string]interface{}{
+		"success": true, "tag": tag, "mode": mode, "restarted": isRunning && !restartCancelled,
+		"restartCancelled": restartCancelled,
+		"searchStarted":    mode == ZapretStrategyModeAuto && isRunning && !restartCancelled,
+	}
+	for key, value := range zapretStrategySummary(settings, tag, a.loadServiceStrategyCache()) {
+		result[key] = value
+	}
+	return result
+}
+
+func zapretStrategySummary(settings GlobalAppSettings, serviceTag string, cache map[string]serviceStrategyCacheEntry) map[string]interface{} {
+	methods := rankedMethodsForService(serviceTag)
+	if len(methods) == 0 {
+		return nil
+	}
+	options := make([]map[string]interface{}, 0, len(methods))
+	for _, method := range methods {
+		options = append(options, map[string]interface{}{"tag": method.Tag, "label": method.Label})
+	}
+	mode := ZapretStrategyMode(settings, serviceTag)
+	selectedTag := ""
+	effectiveTag := ""
+	effectiveLabel := ""
+	source := "auto-pending"
+	notFound := false
+	if method, ok := ZapretManualStrategy(settings, serviceTag); ok {
+		selectedTag, effectiveTag, effectiveLabel, source = method.Tag, method.Tag, method.Label, "manual"
+	} else if entry, ok := cache[serviceTag]; ok && !isFreeAccessFallbackTag(entry.MethodTag) {
+		if method, found := findServiceBypassMethod(serviceTag, entry.MethodTag); found {
+			effectiveTag, effectiveLabel, source = method.Tag, method.Label, "auto-saved"
+		}
+	} else if ok && isFreeAccessFallbackTag(entry.MethodTag) {
+		effectiveLabel, source, notFound = "Подходящая стратегия не найдена", "auto-not-found", true
+	}
+	if effectiveTag == "" && !notFound && len(methods) > 0 {
+		effectiveTag, effectiveLabel = methods[0].Tag, methods[0].Label
+	}
+	return map[string]interface{}{
+		"zapretStrategyMode":           mode,
+		"zapretSelectedStrategy":       selectedTag,
+		"zapretEffectiveStrategy":      effectiveTag,
+		"zapretEffectiveStrategyLabel": effectiveLabel,
+		"zapretStrategySource":         source,
+		"zapretStrategyNotFound":       notFound,
+		"zapretStrategyOptions":        options,
+	}
+}
+
+func normalizeRequestedFreeAccessServiceMethod(method string) (string, bool) {
+	requested := strings.TrimSpace(strings.ToLower(method))
+	switch requested {
+	case "", FreeAccessMethodAuto:
+		return FreeAccessMethodAuto, true
+	case FreeAccessMethodDirect, FreeAccessMethodVPN, FreeAccessMethodZapret, "subscription", "auto-select", "proxy", "bypass", "obhod":
+		return NormalizeFreeAccessServiceMethod(requested), true
+	}
+	if IsFreeAccessProxyMethod(requested) || IsFreeAccessTransparentMethod(requested) || isKnownLegacyFreeAccessMethod(requested) {
+		if runtime.GOOS == "windows" {
+			return FreeAccessMethodZapret, true
+		}
+		return requested, true
+	}
+	return "", false
+}
+
+func isKnownLegacyFreeAccessMethod(method string) bool {
+	for _, strategy := range DefaultByeDPIStrategies {
+		if strategy.Tag == method {
+			return true
+		}
+	}
+	for _, strategy := range DefaultZapretTransparentStrategies {
+		if strategy.Tag == method {
+			return true
+		}
+	}
+	return false
+}
+
+func apiResultSucceeded(result map[string]interface{}) bool {
+	success, _ := result["success"].(bool)
+	return success
+}
+
+func apiResultCancelled(result map[string]interface{}) bool {
+	cancelled, _ := result["cancelled"].(bool)
+	return cancelled
+}
+
+func apiResultMessage(result map[string]interface{}) string {
+	if message := strings.TrimSpace(fmt.Sprint(result["error"])); message != "" && message != "<nil>" {
+		return message
+	}
+	return "неизвестная ошибка"
+}
+
+func (a *App) restoreServicePolicy(previous GlobalAppSettings) (string, bool) {
+	if err := a.storage.UpdateAppSettings(previous); err != nil {
+		return fmt.Sprintf("; не удалось откатить настройки: %v", err), false
+	}
+	if err := a.RebuildActiveProfileConfig(); err != nil {
+		return fmt.Sprintf("; настройки откатились, но прежний конфиг не восстановлен: %v", err), false
+	}
+	return "; прежний маршрут восстановлен", true
+}
+
+func (a *App) recoverAfterServicePolicyRollback(wasRunning bool, rollbackOK bool) string {
+	if !rollbackOK {
+		if wasRunning {
+			return "; VPN оставлен отключённым: прежние настройки не были надёжно восстановлены"
+		}
+		return ""
+	}
+	return a.restartAfterServicePolicyFailure(wasRunning)
+}
+
+func (a *App) restartAfterServicePolicyFailure(wasRunning bool) string {
+	if !wasRunning {
+		return ""
+	}
+	// Service-policy callers hold vpnLifecycleMu across their complete
+	// stop/build/rollback window. Use the internal restart so Restore-on-startup
+	// and the user's connection intent are not rewritten mid-transaction.
+	result := a.startVPNForReconnect()
+	if apiResultSucceeded(result) {
+		return "; прежнее VPN-подключение восстановлено"
+	}
+	if apiResultCancelled(result) {
+		return "; переподключение отменено пользователем"
+	}
+	return fmt.Sprintf("; не удалось восстановить VPN-подключение: %s", apiResultMessage(result))
+}
+
+// ============================================================================
+// RU-traffic API methods — RU domains are direct by
+// default in every routing mode; this opt-in hides them behind a proxy.
+// ============================================================================
+
+// GetHideRuTraffic returns the current "Скрывать RU-трафик" setting.
+func (a *App) GetHideRuTraffic() map[string]interface{} {
+	a.waitForInit()
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+
+	return map[string]interface{}{
+		"success":      true,
+		"enabled":      settings.HideRuTraffic,
+		"proxyAddress": settings.RuProxyAddress,
+	}
+}
+
+// SetHideRuTraffic toggles RU-traffic hiding and optionally sets a dedicated
+// RU proxy address. proxyAddress may be empty (falls back to the main VPN
+// proxy, then direct).
+func (a *App) SetHideRuTraffic(enabled bool, proxyAddress string) map[string]interface{} {
+	a.waitForInit()
+	proxyAddress = strings.TrimSpace(proxyAddress)
+
+	if a.storage == nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Хранилище не инициализировано",
+		}
+	}
+
+	a.mu.Lock()
+	isRunning := a.isRunning
+	a.mu.Unlock()
+	if isRunning {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Нельзя изменить настройки пока VPN активен. Сначала отключите VPN.",
+		}
+	}
+
+	if enabled && proxyAddress != "" && a.configBuilder != nil {
+		result, err := a.configBuilder.TestSubscription(proxyAddress)
+		if err != nil || !result.Success {
+			errMsg := "Адрес прокси недействителен"
+			if result != nil && result.Error != "" {
+				errMsg = result.Error
+			}
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Ошибка проверки адреса прокси для RU-трафика: %s", errMsg),
+			}
+		}
+	}
+
+	// Remote proxy validation above is read-only and may be slow. Serialize only
+	// the state recheck and config commit so Stop remains responsive during that
+	// network operation while Start cannot observe a partial write.
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	a.mu.Lock()
+	isRunning = a.isRunning
+	isStarting := a.isStarting
+	a.mu.Unlock()
+	if isRunning || isStarting || a.vpnStopping.Load() || a.reconnecting.Load() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Нельзя изменить настройки пока VPN активен. Сначала отключите VPN.",
+		}
+	}
+
+	settings := a.storage.GetAppSettings()
+	previousSettings := settings
+	settings.HideRuTraffic = enabled
+	settings.RuProxyAddress = proxyAddress
+
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка сохранения настроек: %v", err),
+		}
+	}
+
+	if err := a.RebuildActiveProfileConfig(); err != nil {
+		_ = a.storage.UpdateAppSettings(previousSettings)
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка перестройки конфига: %v", err),
+		}
+	}
+
+	a.writeLog(fmt.Sprintf("Hide RU traffic: %v (proxy configured: %v)", enabled, proxyAddress != ""))
+
+	return map[string]interface{}{
+		"success": true,
+		"enabled": enabled,
+	}
+}
+
+// RebuildActiveProfileConfig rebuilds config for active profile
+func (a *App) RebuildActiveProfileConfig() error {
+	if a.storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	if a.configBuilder == nil {
+		return fmt.Errorf("config builder not initialized")
+	}
+
+	profile, err := a.storage.GetActiveProfile()
+	if err != nil || profile == nil {
+		return fmt.Errorf("no active profile: %v", err)
+	}
+
+	// Get routing mode from settings
+	settings := a.storage.GetAppSettings()
+	a.configBuilder.SetRoutingMode(settings.RoutingMode)
+	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic && !hasConfiguredVPNSource(profile) {
+		a.mu.Lock()
+		active := a.isRunning || a.isStarting
+		a.mu.Unlock()
+		if active {
+			return fmt.Errorf("для активного полного VPN нужен включённый VPN-источник")
+		}
+		return a.storage.saveUnreadyVPNProfile(*profile, nil)
+	}
+
+	// Rebuild using config builder
+	return a.configBuilder.BuildConfig(profile.SubscriptionURL)
+}

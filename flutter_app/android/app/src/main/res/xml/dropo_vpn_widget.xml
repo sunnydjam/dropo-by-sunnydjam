@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="48dp"
+    android:minHeight="48dp"
+    android:targetCellWidth="1"
+    android:targetCellHeight="1"
+    android:initialLayout="@layout/dropo_vpn_widget"
+    android:previewLayout="@layout/dropo_vpn_widget"
+    android:previewImage="@mipmap/ic_launcher_adaptive"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

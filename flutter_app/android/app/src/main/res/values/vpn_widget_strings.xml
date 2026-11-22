@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vpn_widget_name">Dropo</string>
+    <string name="vpn_widget_accessibility">%1$s, %2$s</string>
+    <string name="vpn_widget_on">VPN on</string>
+    <string name="vpn_widget_off">VPN off</string>
+    <string name="vpn_widget_wait">Please wait</string>
+</resources>

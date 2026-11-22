@@ -1,0 +1,63 @@
+name: Bug report
+description: Сообщить о воспроизводимой ошибке в Dropo by sunnydjam
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Не публикуйте VPN-ключи, subscription URL и неотредактированные логи.
+  - type: input
+    id: version
+    attributes:
+      label: Версия или commit
+      placeholder: 3.0.25 / 9d55ef2
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Платформа
+      options:
+        - Windows 11 x64
+        - Windows 10 x64
+        - Android 11+ arm64
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Режим маршрутизации
+      options:
+        - Выборочные маршруты
+        - Всё через VPN
+        - Обход (Zapret), экспериментальный
+        - Без подключения
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      placeholder: Опишите точные действия и выбранные политики сервисов.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемый результат
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактический результат
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Отредактированная диагностика
+      description: Удалите ключи, URL подписок, токены и персональные адреса.
+      render: shell

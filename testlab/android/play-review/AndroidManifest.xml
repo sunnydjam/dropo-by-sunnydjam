@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dropo.lab.playreview">
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
+    <application android:debuggable="true" android:label="Dropo review lab" />
+    <instrumentation android:name="dropo.lab.playreview.PlayReviewInstrumentation"
+        android:targetPackage="in.droponevedimka.dropo.preview" />
+</manifest>

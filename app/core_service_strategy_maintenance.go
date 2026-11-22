@@ -1,0 +1,318 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func (a *App) handleClientQuickCheckFailures(session uint64, results []clientQuickCheckResult) {
+	// Don't react to a test that ran while the strategy engine was being
+	// switched: those failures are an artifact of the switch, not of the
+	// strategy, and acting on them creates a churn feedback loop.
+	if a.isRouteProbeDiscoveryRunning() {
+		a.writeLog("[FreeAccess] quick-check failures ignored: strategy discovery is in progress")
+		return
+	}
+	if !a.routeStrategySessionActive(session) {
+		// Without an active VPN session there is no transparent engine to
+		// retune; the test is purely informational.
+		return
+	}
+
+	queued := map[string]bool{}
+	for _, result := range results {
+		if result.Name == "" || result.Category != "Blocked" {
+			continue
+		}
+		// Endpoint-only probes report reachability, not the carrier that handled
+		// the request. A failure from such a probe is not evidence that the
+		// active Zapret strategy failed and must never trigger a live retune.
+		if !result.RouteVerified {
+			continue
+		}
+		// Explicit Direct and VPN policies are authoritative. A route-aware
+		// quick check must never turn their result into a Zapret retune request.
+		if result.ExpectedRoute != clientQuickCheckRouteZapret && result.ExpectedRoute != FreeAccessMethodAuto {
+			continue
+		}
+		if result.Success {
+			continue
+		}
+		serviceTag := strings.TrimSpace(result.ServiceTag)
+		if serviceTag == "" {
+			serviceTag = clientQuickCheckServiceTag(result.Name)
+		}
+		if serviceTag == "" || queued[serviceTag] {
+			continue
+		}
+		queued[serviceTag] = true
+		// Do not change the live selector on a single quick-check result. The
+		// maintenance worker first confirms the current strategy; a transient
+		// failure must leave a proven working selection untouched.
+		a.requestRouteStrategyMaintenanceForSession(session, fmt.Sprintf("service:%s quick-check failure: %s", serviceTag, firstNonEmpty(result.NormalError, result.ProxyError, result.StatusText)))
+	}
+}
+
+func clientQuickCheckServiceTag(name string) string {
+	value := strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case strings.HasPrefix(value, "discord"):
+		return "discord"
+	case strings.HasPrefix(value, "youtube"):
+		return "youtube"
+	case value == "instagram":
+		return "meta"
+	case value == "facebook":
+		return "facebook"
+	case value == "x":
+		return "twitter"
+	case value == "linkedin":
+		return "linkedin"
+	case value == "spotify":
+		return "spotify"
+	case value == "twitch":
+		return "twitch"
+	case value == "telegram":
+		return "telegram"
+	case value == "signal":
+		return "signal"
+	case strings.HasPrefix(value, "whatsapp"):
+		return "whatsapp"
+	case value == "facetime":
+		return "facetime"
+	case value == "viber":
+		return "viber"
+	case value == "snapchat":
+		return "snapchat"
+	case value == "tiktok":
+		return "tiktok"
+	case value == "chatgpt" || value == "openai api":
+		return "openai"
+	case value == "copilot proxy" || value == "cursor api":
+		return "ai-other"
+	case value == "canva":
+		return "canva"
+	case value == "notion":
+		return "notion"
+	case value == "slack":
+		return "slack"
+	case value == "miro":
+		return "miro"
+	case value == "wix":
+		return "wix"
+	case value == "coda":
+		return "coda"
+	case value == "grammarly":
+		return "grammarly"
+	case value == "docker hub":
+		return "docker"
+	case value == "clickup":
+		return "clickup"
+	case value == "manychat":
+		return "manychat"
+	case value == "help scout":
+		return "helpscout"
+	case value == "trello" || value == "bitbucket":
+		return "atlassian"
+	default:
+		return ""
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return "failed"
+}
+
+func (a *App) switchServiceToVPNFallback(serviceTag string) bool {
+	configPath := ""
+	if a.storage != nil {
+		configPath = a.storage.ActiveConfigFilePath()
+	}
+	if configPath == "" {
+		return false
+	}
+	hasVPN, err := configHasVPNProbeCandidates(configPath)
+	if err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] VPN fallback check failed for %s: %v", serviceTag, err))
+		return false
+	}
+	if !hasVPN {
+		a.writeLog(fmt.Sprintf("[FreeAccess] %s has no VPN fallback candidate; queued free strategy search", serviceTag))
+		return false
+	}
+
+	return a.switchServiceRoute(serviceTag, "auto-select")
+}
+
+func (a *App) switchServiceRoute(serviceTag, outboundTag string) bool {
+	return a.switchOutboundSelector(ServiceBypassGroupTag(serviceTag), outboundTag)
+}
+
+func (a *App) switchOutboundSelector(groupTag, outboundTag string) bool {
+	return a.switchOutboundSelectorContext(context.Background(), groupTag, outboundTag)
+}
+
+func (a *App) switchOutboundSelectorContext(ctx context.Context, groupTag, outboundTag string) bool {
+	if ctx == nil {
+		return false
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(5 * time.Second)
+	for !a.clashAPIPortReady(250*time.Millisecond) && time.Now().Before(deadline) {
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	if !a.clashAPIPortReady(250 * time.Millisecond) {
+		a.writeLog(fmt.Sprintf("[FreeAccess] cannot switch %s to VPN fallback: Clash API is not ready", groupTag))
+		return false
+	}
+	bodyData, err := json.Marshal(map[string]string{"name": outboundTag})
+	if err != nil {
+		return false
+	}
+	body := bytes.NewBuffer(bodyData)
+	req, err := a.newClashAPIRequest(http.MethodPut, clashProxyAPIPath(groupTag), body)
+	if err != nil {
+		return false
+	}
+	req = req.WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] failed to switch %s to VPN fallback: %v", groupTag, err))
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		a.writeLog(fmt.Sprintf("[FreeAccess] failed to switch %s to %s: HTTP %d", groupTag, outboundTag, resp.StatusCode))
+		return false
+	}
+	return true
+}
+
+func (a *App) currentServiceRoute(serviceTag string) string {
+	return a.currentOutboundSelector(ServiceBypassGroupTag(serviceTag))
+}
+
+func (a *App) currentOutboundSelector(groupTag string) string {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := a.clashAPIGet(client, clashProxyAPIPath(groupTag))
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	body, err := readHTTPBodyLimited(resp.Body, defaultMaxHTTPResponseBytes)
+	if err != nil {
+		return ""
+	}
+	var selector struct {
+		Now string `json:"now"`
+	}
+	if json.Unmarshal(body, &selector) != nil {
+		return ""
+	}
+	return strings.TrimSpace(selector.Now)
+}
+
+func (a *App) applyServiceStrategySelection(result routeProbeServiceResult) {
+	configPath := ""
+	if a.storage != nil {
+		configPath = a.storage.ActiveConfigFilePath()
+	}
+	if configPath != "" {
+		if config, err := readJSONConfig(configPath); err == nil {
+			if applyRouteProbeSelectionsToConfig(config, []routeProbeServiceResult{result}) {
+				if err := writeJSONConfig(configPath, config); err != nil {
+					a.writeLog(fmt.Sprintf("[FreeAccess] failed to persist %s strategy in active config: %v", result.Name, err))
+				}
+			}
+		}
+	}
+
+	if result.MethodKind == "transparent" {
+		a.applyTransparentRouteProbeSelection([]routeProbeServiceResult{result})
+	}
+	a.rememberRouteProbeResults([]routeProbeServiceResult{result})
+	if err := a.mergeFreeAccessStrategySelection(result); err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] failed to save %s strategy selection: %v", result.Name, err))
+	}
+}
+
+func (a *App) mergeFreeAccessStrategySelection(result routeProbeServiceResult) error {
+	path := a.freeAccessStrategyPath()
+	if path == "" || !result.Success || result.MethodTag == "" {
+		return nil
+	}
+	existing := freeAccessStrategyFile{
+		Version:  freeAccessStrategyVersion,
+		Services: []freeAccessStrategySelection{},
+	}
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		_ = json.Unmarshal(data, &existing)
+		if existing.Version != freeAccessStrategyVersion {
+			existing = freeAccessStrategyFile{Version: freeAccessStrategyVersion}
+		}
+	}
+	selection := freeAccessStrategySelection{
+		Tag:         result.Tag,
+		Name:        result.Name,
+		MethodTag:   result.MethodTag,
+		MethodLabel: result.MethodLabel,
+		MethodKind:  result.MethodKind,
+		Source:      "maintenance",
+		LatencyMS:   result.LatencyMS,
+	}
+	replaced := false
+	for i := range existing.Services {
+		if existing.Services[i].Tag == selection.Tag {
+			existing.Services[i] = selection
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		existing.Services = append(existing.Services, selection)
+	}
+	existing.Version = freeAccessStrategyVersion
+	existing.UpdatedAt = time.Now()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func findFreeAccessService(tag string) (FreeAccessService, bool) {
+	for _, svc := range DefaultFreeAccessServices {
+		if svc.Tag == tag {
+			return svc, true
+		}
+	}
+	return FreeAccessService{}, false
+}

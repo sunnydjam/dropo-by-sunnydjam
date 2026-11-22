@@ -1,0 +1,217 @@
+package main
+
+import (
+	"dropocore/ownedprofile"
+	"fmt"
+	"time"
+)
+
+func (a *App) GetVPNSources() map[string]interface{} {
+	a.waitForInit()
+	if a.storage == nil {
+		return map[string]interface{}{"success": false, "error": "storage is not initialized"}
+	}
+	profile, err := a.storage.GetActiveProfile()
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	active := a.activeVPNSource()
+	running, now := a.isVPNRunning() && !a.vpnStopping.Load(), time.Now()
+	views := publicVPNSources(profile.VPNSources)
+	confirmedActive := ""
+	for _, view := range views {
+		tag := "vpn-source-" + view["id"].(string)
+		response := a.vpnSourceResponseSnapshot(tag, running, now)
+		confirmed := running && active == tag && response.State == "ok"
+		if confirmed {
+			confirmedActive = tag
+		}
+		view["active"], view["response"] = confirmed, response
+	}
+	return map[string]interface{}{"success": true, "sources": views, "activeSource": confirmedActive, "running": running, "autoSelect": profile.VPNSourceSelectionMode != "priority"}
+}
+
+func (a *App) AddVPNSource(name, uri string) map[string]interface{} {
+	return a.changeVPNSources(func(profile *ProfileData) error {
+		source, err := newVPNSource(nextVPNSourceID(profile.VPNSources), name, uri)
+		if err != nil {
+			return err
+		}
+		profile.VPNSources = append(profile.VPNSources, source)
+		return nil
+	})
+}
+
+func (a *App) RemoveVPNSource(id string) map[string]interface{} {
+	return a.changeVPNSources(func(profile *ProfileData) error {
+		id = normalizeVPNSourceID(id)
+		for index, source := range profile.VPNSources {
+			if source.ID == id {
+				if windowsOwnedFamily(source.PublicCatalogID) != "" {
+					profile.VPNSources = removeOwnedVPNFamily(profile.VPNSources, source.PublicCatalogID)
+				} else {
+					profile.VPNSources = append(profile.VPNSources[:index], profile.VPNSources[index+1:]...)
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("VPN source %q not found", id)
+	})
+}
+
+func (a *App) SetVPNSourceNode(id string, nodeIndex int) map[string]interface{} {
+	return a.changeVPNSources(func(profile *ProfileData) error {
+		id = normalizeVPNSourceID(id)
+		for index := range profile.VPNSources {
+			source := &profile.VPNSources[index]
+			if source.ID != id {
+				continue
+			}
+			if nodeIndex < 0 || nodeIndex >= source.NodeCount {
+				return fmt.Errorf("node index %d is outside source range", nodeIndex)
+			}
+			source.SelectedNode = nodeIndex
+			source.SelectedNodeID = ""
+			if nodeIndex < len(source.NodeIDs) {
+				source.SelectedNodeID = source.NodeIDs[nodeIndex]
+			}
+			return nil
+		}
+		return fmt.Errorf("VPN source %q not found", id)
+	})
+}
+
+// SetVPNSourceNodeByID resolves the user's selection inside the lifecycle
+// transaction, so a stale UI index cannot select a different server.
+func (a *App) SetVPNSourceNodeByID(id, nodeID string) map[string]interface{} {
+	return a.setVPNSourceNodeByID(id, nodeID, vpnSourceReconnectOps{
+		stop: a.stopVPNForReconnect, start: a.startVPNForReconnect, restore: a.restoreVPNSourceProfile,
+	})
+}
+
+func (a *App) setVPNSourceNodeByID(id, nodeID string, ops vpnSourceReconnectOps) map[string]interface{} {
+	if id == "" || len(id) > 128 || id != normalizeVPNSourceID(id) || !validVPNFavoriteNodeID(nodeID) {
+		return map[string]interface{}{"success": false, "error": "Неверный идентификатор сервера. Обновите список."}
+	}
+	missing := func() error {
+		return fmt.Errorf("Выбранный сервер больше недоступен. Обновите список и выберите сервер снова.")
+	}
+	return a.changeVPNSourcesTransactionValidated(func(profile *ProfileData) error {
+		for i := range profile.VPNSources {
+			source := &profile.VPNSources[i]
+			if source.ID != id {
+				continue
+			}
+			for index, candidateID := range source.NodeIDs {
+				if candidateID == nodeID && index < source.NodeCount {
+					source.SelectedNode, source.SelectedNodeID = index, nodeID
+					return nil
+				}
+			}
+		}
+		return missing()
+	}, func(sources []VPNSource) error {
+		for _, source := range sources {
+			if source.ID == id && source.SelectedNodeID == nodeID && source.SelectedNode >= 0 && source.SelectedNode < len(source.NodeIDs) && source.NodeIDs[source.SelectedNode] == nodeID {
+				return nil
+			}
+		}
+		return missing()
+	}, ops)
+}
+
+func (a *App) SetVPNSourceEnabled(id string, enabled bool) map[string]interface{} {
+	return a.changeVPNSources(func(profile *ProfileData) error {
+		id = normalizeVPNSourceID(id)
+		for index := range profile.VPNSources {
+			if profile.VPNSources[index].ID == id {
+				profile.VPNSources[index].Disabled = !enabled
+				if provider := profile.VPNSources[index].PublicCatalogID; ownedprofile.IsPrimary(provider) {
+					for i := range profile.VPNSources {
+						if sameWindowsOwnedFamily(provider, profile.VPNSources[i].PublicCatalogID) {
+							profile.VPNSources[i].Disabled = !enabled
+						}
+					}
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("VPN source %q not found", id)
+	})
+}
+
+func (a *App) MoveVPNSource(id string, newIndex int) map[string]interface{} {
+	return a.changeVPNSources(func(profile *ProfileData) error {
+		if newIndex < 0 || newIndex >= len(profile.VPNSources) {
+			return fmt.Errorf("source index %d is outside range", newIndex)
+		}
+		id = normalizeVPNSourceID(id)
+		oldIndex := -1
+		for index, source := range profile.VPNSources {
+			if source.ID == id {
+				oldIndex = index
+				break
+			}
+		}
+		if oldIndex < 0 {
+			return fmt.Errorf("VPN source %q not found", id)
+		}
+		source := profile.VPNSources[oldIndex]
+		profile.VPNSources = append(profile.VPNSources[:oldIndex], profile.VPNSources[oldIndex+1:]...)
+		profile.VPNSources = append(profile.VPNSources, VPNSource{})
+		copy(profile.VPNSources[newIndex+1:], profile.VPNSources[newIndex:])
+		profile.VPNSources[newIndex] = source
+		profile.VPNSourceSelectionMode = "priority"
+		return nil
+	})
+}
+
+func (a *App) RefreshVPNSources() map[string]interface{} {
+	return a.changeVPNSources(func(_ *ProfileData) error { return nil })
+}
+
+// Reordering is an explicit user preference. This action restores automatic
+// latency selection without discarding the list's tie-break/fallback order.
+func (a *App) EnableVPNSourceAutoSelect() map[string]interface{} {
+	return a.changeVPNSources(func(profile *ProfileData) error {
+		profile.VPNSourceSelectionMode = "latency"
+		return nil
+	})
+}
+
+func (a *App) changeVPNSources(change func(*ProfileData) error) map[string]interface{} {
+	return a.changeVPNSourcesTransaction(change, vpnSourceReconnectOps{
+		stop:    a.stopVPNForReconnect,
+		start:   a.startVPNForReconnect,
+		restore: a.restoreVPNSourceProfile,
+	})
+}
+
+// publicVPNSources deliberately excludes subscription URIs and cached node
+// keys. The trusted local UI only needs display metadata and never receives
+// reusable credentials through the JSON bridge.
+func publicVPNSources(sources []VPNSource) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(sources))
+	for _, source := range sources {
+		referenceOnly := ownedprofile.IsPrimary(source.PublicCatalogID) && ownedSourceExpired(source)
+		name := source.Name
+		if ownedprofile.IsPrimary(source.PublicCatalogID) {
+			name = ownedprofile.RegionName(source.PublicCatalogID)
+		}
+		problem := source.LastError
+		if source.PublicCatalogID == managedFreeVPNProviderID && problem != "" {
+			problem = "Не удалось обновить Dropo Free. Используются сохранённые серверы, если они доступны."
+		}
+		result = append(result, map[string]interface{}{
+			"id": source.ID, "name": name, "kind": source.Kind, "reference_only": referenceOnly,
+			"public_catalog_id": source.PublicCatalogID, "using_cache": source.UsingCache,
+			"disabled": source.Disabled, "selected_node": source.SelectedNode,
+			"selected_node_id": source.SelectedNodeID, "node_count": source.NodeCount,
+			"node_names":        append([]string(nil), source.NodeNames...),
+			"node_ids":          append([]string{}, source.NodeIDs...),
+			"favorite_node_ids": append([]string{}, source.FavoriteNodeIDs...),
+			"last_updated":      source.LastUpdated, "last_error": problem,
+		})
+	}
+	return result
+}

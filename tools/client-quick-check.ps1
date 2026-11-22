@@ -1,0 +1,736 @@
+# dropo client quick connectivity diagnostics.
+# Send this file to a client and ask them to run it while dropo VPN/free access is enabled.
+
+param(
+    [int]$Timeout = 8,
+    [int]$MethodTimeout = 8,
+    [string]$OutDir = "",
+    [string]$AppDir = "",
+    [switch]$SkipProxyCheck,
+    [switch]$DeepMethodCheck,
+    [switch]$CleanupDropoOrphans,
+    [switch]$AllCatalog,
+    [switch]$DirectOnly,
+    [switch]$SelectedOnly
+)
+
+$ErrorActionPreference = "SilentlyContinue"
+$ProgressPreference = "SilentlyContinue"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+if (-not $OutDir) {
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $OutDir = Join-Path ([Environment]::GetFolderPath("Desktop")) "dropo-client-check-$stamp"
+}
+New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+
+$directServices = @(
+    @{ Name = "Yandex"; URL = "https://ya.ru"; Category = "Direct-RU" },
+    @{ Name = "Yandex Mail"; URL = "https://mail.yandex.ru"; Category = "Direct-RU" },
+    @{ Name = "VK"; URL = "https://vk.com"; Category = "Direct-RU" },
+    @{ Name = "Ozon"; URL = "https://www.ozon.ru"; Category = "Direct-RU" },
+    @{ Name = "Sber"; URL = "https://www.sberbank.ru"; Category = "Direct-RU"; Regional = $true },
+    @{ Name = "Gosuslugi"; URL = "https://www.gosuslugi.ru"; Category = "Direct-RU" },
+    @{ Name = "Rutube"; URL = "https://rutube.ru"; Category = "Direct-RU" },
+    @{ Name = "Habr"; URL = "https://habr.com"; Category = "Direct-RU" },
+    @{ Name = "Google"; URL = "https://www.google.com"; Category = "Direct-Foreign" },
+    @{ Name = "GitHub"; URL = "https://github.com"; Category = "Direct-Foreign" },
+    @{ Name = "Wikipedia"; URL = "https://www.wikipedia.org"; Category = "Direct-Foreign" },
+    @{ Name = "StackOverflow"; URL = "https://stackoverflow.com"; Category = "Direct-Foreign" }
+)
+
+$blockedServices = @(
+    @{ Name = "Discord"; URL = "https://discord.com"; Category = "Blocked" },
+    @{ Name = "Discord API"; URL = "https://discord.com/api/v10/gateway"; Category = "Blocked" },
+    @{ Name = "Discord CDN"; URL = "https://cdn.discordapp.com"; Category = "Blocked" },
+    @{ Name = "YouTube"; URL = "https://www.youtube.com"; Category = "Blocked" },
+    @{ Name = "YouTube API"; URL = "https://youtubei.googleapis.com"; Category = "Blocked" },
+    @{ Name = "YouTube Images"; URL = "https://i.ytimg.com/generate_204"; Category = "Blocked" },
+    @{ Name = "YouTube video"; URL = "https://redirector.googlevideo.com"; Category = "Blocked" },
+    @{ Name = "Instagram"; URL = "https://www.instagram.com"; Category = "Blocked" },
+    @{ Name = "Facebook"; URL = "https://www.facebook.com"; Category = "Blocked" },
+    @{ Name = "X"; URL = "https://x.com"; Category = "Blocked" },
+    @{ Name = "LinkedIn"; URL = "https://www.linkedin.com"; Category = "Blocked" },
+    @{ Name = "Spotify"; URL = "https://open.spotify.com"; Category = "Blocked" },
+    @{ Name = "Twitch"; URL = "https://www.twitch.tv"; Category = "Blocked" },
+    @{ Name = "Telegram"; URL = "https://telegram.org"; Category = "Blocked" },
+    @{ Name = "Signal"; URL = "https://signal.org"; Category = "Blocked" },
+    @{ Name = "WhatsApp Web"; URL = "https://web.whatsapp.com"; Category = "Blocked" },
+    @{ Name = "WhatsApp CDN"; URL = "https://static.whatsapp.net"; Category = "Blocked" },
+    @{ Name = "FaceTime"; URL = "https://facetime.apple.com"; Category = "Blocked" },
+    @{ Name = "Viber"; URL = "https://www.viber.com"; Category = "Blocked" },
+    @{ Name = "Snapchat"; URL = "https://www.snapchat.com"; Category = "Blocked" },
+    @{ Name = "TikTok"; URL = "https://www.tiktok.com"; Category = "Blocked" },
+    @{ Name = "ChatGPT"; URL = "https://chatgpt.com"; Category = "AI-VPNOnly" },
+    @{ Name = "OpenAI API"; URL = "https://api.openai.com"; Category = "AI-VPNOnly" },
+    @{ Name = "Copilot proxy"; URL = "https://copilot-proxy.githubusercontent.com"; Category = "AI-VPNOnly" },
+    @{ Name = "Cursor API"; URL = "https://api2.cursor.sh"; Category = "AI-VPNOnly" }
+)
+
+$directGameServices = @(
+    @{ Name = "Steam Store"; URL = "https://store.steampowered.com"; Category = "Direct-Game" },
+    @{ Name = "Steam Community"; URL = "https://steamcommunity.com"; Category = "Direct-Game" },
+    @{ Name = "Steam Static"; URL = "https://clientconfig.akamai.steamstatic.com"; Category = "Direct-Game" },
+    @{ Name = "EA"; URL = "https://www.ea.com"; Category = "Direct-Game" },
+    @{ Name = "Apex Legends"; URL = "https://www.ea.com/games/apex-legends"; Category = "Direct-Game" }
+)
+
+function Test-TcpPort {
+    param([string]$HostName, [int]$Port)
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $async = $client.BeginConnect($HostName, $Port, $null, $null)
+        $ok = $async.AsyncWaitHandle.WaitOne(1000, $false)
+        if ($ok) { $client.EndConnect($async) }
+        $client.Close()
+        return $ok
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-CheckUrl {
+    param([string]$Url, [string]$ProxyUrl, [switch]$Direct)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $params = @{
+            Uri = $Url
+            TimeoutSec = $Timeout
+            UseBasicParsing = $true
+            MaximumRedirection = 5
+            ErrorAction = "Stop"
+            Headers = @{ "User-Agent" = "dropo-client-quick-check/1.0" }
+        }
+        if ($ProxyUrl) {
+            $params.Proxy = $ProxyUrl
+        } elseif ($Direct -and (Get-Command Invoke-WebRequest).Parameters.ContainsKey("NoProxy")) {
+            $params.NoProxy = $true
+        }
+        $response = Invoke-WebRequest @params
+        $sw.Stop()
+        return [PSCustomObject]@{
+            Success = $true
+            Status = [int]$response.StatusCode
+            TimeMs = [int]$sw.ElapsedMilliseconds
+            Error = ""
+        }
+    } catch {
+        $sw.Stop()
+        $status = 0
+        if ($_.Exception.Response) {
+            try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+        }
+        $reachable = ($status -ge 200 -and $status -lt 500)
+        return [PSCustomObject]@{
+            Success = $reachable
+            Status = $status
+            TimeMs = [int]$sw.ElapsedMilliseconds
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+function Invoke-CurlSocksCheck {
+    param([string]$Url, [int]$Port)
+
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $curl) {
+        return [PSCustomObject]@{
+            Success = $false
+            Status = 0
+            TimeMs = 0
+            Error = "curl.exe not found"
+        }
+    }
+
+    $errFile = Join-Path $OutDir ("curl-{0}-{1}.err" -f $Port, ([Guid]::NewGuid().ToString("N")))
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $statusText = & $curl.Source `
+            --location `
+            --head `
+            --silent `
+            --show-error `
+            --output NUL `
+            --write-out "%{http_code}" `
+            --max-time $MethodTimeout `
+            --connect-timeout $MethodTimeout `
+            --socks5-hostname "127.0.0.1:$Port" `
+            --user-agent "dropo-client-quick-check/1.0" `
+            $Url 2>$errFile
+        $exitCode = $LASTEXITCODE
+        $sw.Stop()
+        $status = 0
+        [int]::TryParse(($statusText | Select-Object -Last 1), [ref]$status) | Out-Null
+        $errText = Get-Content $errFile -Raw -ErrorAction SilentlyContinue
+        Remove-Item $errFile -ErrorAction SilentlyContinue
+        return [PSCustomObject]@{
+            Success = ($exitCode -eq 0 -and $status -ge 200 -and $status -lt 500)
+            Status = $status
+            TimeMs = [int]$sw.ElapsedMilliseconds
+            Error = $errText
+        }
+    } catch {
+        $sw.Stop()
+        Remove-Item $errFile -ErrorAction SilentlyContinue
+        return [PSCustomObject]@{
+            Success = $false
+            Status = 0
+            TimeMs = [int]$sw.ElapsedMilliseconds
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+function Find-ActiveConfig {
+    $candidates = @()
+    if ($AppDir) {
+        $candidates += (Join-Path $AppDir "resources\deep_windows_proxy_config.json")
+        $candidates += (Join-Path $AppDir "resources\active_config.json")
+    }
+    $candidates += (Join-Path $env:LOCALAPPDATA "dropo\resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path $PSScriptRoot "resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path (Split-Path $PSScriptRoot -Parent) "resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path (Get-Location) "resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path $env:ProgramFiles "dropo\resources\deep_windows_proxy_config.json")
+    $candidates += (Join-Path $PSScriptRoot "resources\active_config.json")
+    $candidates += (Join-Path (Split-Path $PSScriptRoot -Parent) "resources\active_config.json")
+    $candidates += (Join-Path (Get-Location) "resources\active_config.json")
+    $candidates += (Join-Path $env:ProgramFiles "dropo\resources\active_config.json")
+    $candidates += (Join-Path $env:LOCALAPPDATA "dropo\resources\active_config.json")
+
+    foreach ($path in $candidates | Select-Object -Unique) {
+        if ($path -and (Test-Path $path -PathType Leaf)) {
+            return $path
+        }
+    }
+    return ""
+}
+
+function Find-SettingsPath {
+    $candidates = @()
+    if ($AppDir) { $candidates += (Join-Path $AppDir "resources\settings.json") }
+    $candidates += (Join-Path $env:LOCALAPPDATA "dropo\resources\settings.json")
+    $candidates += (Join-Path $env:ProgramFiles "dropo\resources\settings.json")
+    foreach ($path in $candidates | Where-Object { $_ } | Select-Object -Unique) {
+        if (Test-Path $path -PathType Leaf) { return $path }
+    }
+    return ""
+}
+
+function Get-ServiceTag {
+    param([string]$Name)
+    $value = $Name.Trim().ToLowerInvariant()
+    switch -Regex ($value) {
+        '^discord' { return "discord" }
+        '^youtube' { return "youtube" }
+        '^instagram$' { return "meta" }
+        '^facebook$' { return "facebook" }
+        '^x$' { return "twitter" }
+        '^linkedin$' { return "linkedin" }
+        '^spotify$' { return "spotify" }
+        '^twitch$' { return "twitch" }
+        '^telegram$' { return "telegram" }
+        '^signal$' { return "signal" }
+        '^whatsapp' { return "whatsapp" }
+        '^facetime$' { return "facetime" }
+        '^viber$' { return "viber" }
+        '^snapchat$' { return "snapchat" }
+        '^tiktok$' { return "tiktok" }
+        '^(chatgpt|openai api)$' { return "openai" }
+        '^(copilot proxy|cursor api)$' { return "ai-other" }
+    }
+    return ""
+}
+
+function Get-ServiceRouteMethods {
+    param([string]$Path)
+    $methods = @{}
+    if (-not $Path) { return $methods }
+    try {
+        $settings = Get-Content $Path -Raw | ConvertFrom-Json
+        $appSettings = if ($settings.app) { $settings.app } else { $settings }
+        foreach ($property in $appSettings.free_access_methods.PSObject.Properties) {
+            $methods[$property.Name] = ([string]$property.Value).Trim().ToLowerInvariant()
+        }
+    } catch {}
+    return $methods
+}
+
+function Get-ConfigSummary {
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    try {
+        $config = Get-Content $Path -Raw | ConvertFrom-Json
+        $mixed = $config.inbounds | Where-Object { $_.type -eq "mixed" } | Select-Object -First 1
+        $tun = $config.inbounds | Where-Object { $_.type -eq "tun" } | Select-Object -First 1
+        $tunAddress = @($tun.address) | Where-Object { $_ }
+        $direct = $config.outbounds | Where-Object { $_.tag -eq "direct" } | Select-Object -First 1
+        $autoSelect = $config.outbounds | Where-Object { $_.tag -eq "auto-select" } | Select-Object -First 1
+        $proxyOutbounds = @($config.outbounds | Where-Object {
+            $_.tag -like "proxy-*" -or
+            $_.type -in @("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic")
+        })
+        $clashController = [string]$config.experimental.clash_api.external_controller
+        $clashPort = 0
+        if ($clashController -match '^(?:127\.0\.0\.1|localhost|\[::1\]):(?<port>\d+)$') {
+            $clashPort = [int]$Matches.port
+        }
+        $groups = $config.outbounds |
+            Where-Object { $_.tag -like "bypass-*" -or $_.tag -in @("smart-bypass", "vpn-or-direct") } |
+            ForEach-Object {
+                [PSCustomObject]@{
+                    Tag = $_.tag
+                    Type = $_.type
+                    Now = $_.default
+                    Candidates = ($_.outbounds -join ",")
+                    Url = $_.url
+                }
+            }
+        return [PSCustomObject]@{
+            Path = $Path
+            MixedPort = $mixed.listen_port
+            TunInterface = $tun.interface_name
+            TunAutoRoute = $tun.auto_route
+            TunStrictRoute = $tun.strict_route
+            TunAddress = ($tunAddress -join ",")
+            TunHasIPv6 = [bool](@($tunAddress | Where-Object { "$_" -match ":" }).Count -gt 0)
+            DirectBindInterface = $direct.bind_interface
+            RouteFinal = $config.route.final
+            RouteAutoDetectInterface = $config.route.auto_detect_interface
+            RouteDefaultInterface = $config.route.default_interface
+            DnsFinal = $config.dns.final
+            ClashController = $clashController
+            ClashPort = $clashPort
+            HasVpnCandidate = [bool]$autoSelect
+            VpnCandidateCount = $proxyOutbounds.Count
+            AutoSelectCandidates = if ($autoSelect) { ($autoSelect.outbounds -join ",") } else { "" }
+            Groups = $groups
+        }
+    } catch {
+        return [PSCustomObject]@{ Path = $Path; Error = $_.Exception.Message }
+    }
+}
+
+function Get-ClashProxies {
+    param([string]$ConfigPath)
+    try {
+        if (-not $ConfigPath) { return $null }
+        $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+        $api = $config.experimental.clash_api
+        $controller = [string]$api.external_controller
+        if ($controller -notmatch '^(?:127\.0\.0\.1|localhost|\[::1\]):\d+$') { return $null }
+        $headers = @{}
+        if ([string]$api.secret) {
+            $headers.Authorization = "Bearer $($api.secret)"
+        }
+        return Invoke-RestMethod -Uri "http://$controller/proxies" -Headers $headers -TimeoutSec 2
+    } catch {
+        return $null
+    }
+}
+
+function Get-SingBoxListeners {
+    $pids = @(Get-Process sing-box -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    if (-not $pids -or $pids.Count -eq 0) {
+        return @()
+    }
+
+    return @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $pids -contains $_.OwningProcess } |
+        Select-Object LocalAddress, LocalPort, OwningProcess)
+}
+
+function Get-LiveMixedPort {
+    param([int]$ConfiguredPort, [object[]]$Listeners, [int[]]$ExcludedPorts = @())
+
+    if ($ConfiguredPort -and (Test-TcpPort "127.0.0.1" $ConfiguredPort)) {
+        return $ConfiguredPort
+    }
+
+    $excluded = @(18091, 18092, 18093, 18094, 18095)
+    $excluded += 19081..19120
+    $excluded += $ExcludedPorts
+    $loopback = @("127.0.0.1", "0.0.0.0", "::1", "::")
+    $candidate = $Listeners |
+        Where-Object { $loopback -contains $_.LocalAddress -and ($excluded -notcontains [int]$_.LocalPort) } |
+        Sort-Object LocalPort |
+        Select-Object -First 1
+
+    if ($candidate) {
+        return [int]$candidate.LocalPort
+    }
+    return 0
+}
+
+function Find-AppRoot {
+    $candidates = @()
+    if ($AppDir) { $candidates += $AppDir }
+    try {
+        Get-CimInstance Win32_Process -Filter "Name = 'dropo.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath } |
+            ForEach-Object { $candidates += (Split-Path $_.ExecutablePath -Parent) }
+    } catch {}
+    $candidates += $PSScriptRoot
+    $parent = Split-Path $PSScriptRoot -Parent
+    if ($parent) { $candidates += $parent }
+    $cwd = (Get-Location).Path
+    if ($cwd) { $candidates += $cwd }
+
+    foreach ($candidate in $candidates | Where-Object { $_ } | Select-Object -Unique) {
+        $resolved = Resolve-Path $candidate -ErrorAction SilentlyContinue
+        if (-not $resolved) { continue }
+        $root = $resolved.Path
+        if ((Test-Path (Join-Path $root "resources\active_config.json")) -or
+            (Test-Path (Join-Path $root "bin\sing-box.exe")) -or
+            (Test-Path (Join-Path $root "dropo.exe"))) {
+            return $root
+        }
+    }
+    return ""
+}
+
+function Test-PathInside {
+    param([string]$Path, [string]$Root)
+    if (-not $Path -or -not $Root) { return $false }
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $fullRoot = [System.IO.Path]::GetFullPath($Root)
+        if (-not $fullRoot.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+            $fullRoot += [System.IO.Path]::DirectorySeparatorChar
+        }
+        return $fullPath.StartsWith($fullRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Get-DropoProcessDetails {
+    param([string]$Root)
+    $names = @("dropo.exe", "dropo-ui.exe", "dropo-core.exe", "sing-box.exe", "wireguard.exe", "tg-ws-proxy.exe", "xray.exe")
+    $managedNames = @("sing-box.exe", "wireguard.exe", "tg-ws-proxy.exe", "xray.exe")
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $names -contains $_.Name } |
+        ForEach-Object {
+            $inside = Test-PathInside -Path $_.ExecutablePath -Root $Root
+            [PSCustomObject]@{
+                Name = $_.Name
+                ProcessId = $_.ProcessId
+                ParentProcessId = $_.ParentProcessId
+                ExecutablePath = $_.ExecutablePath
+                CommandLine = $_.CommandLine
+                CreationDate = $_.CreationDate
+                InsideAppRoot = $inside
+                ManagedSidecar = ($inside -and ($managedNames -contains $_.Name))
+            }
+        }
+}
+
+function Stop-DropoManagedSidecars {
+    param([object[]]$Processes)
+    $killed = @()
+    foreach ($proc in $Processes | Where-Object { $_.ManagedSidecar }) {
+        try {
+            & taskkill.exe /F /T /PID $proc.ProcessId | Out-Null
+            $killed += $proc.ProcessId
+        } catch {}
+    }
+    return $killed
+}
+
+Write-Host ""
+Write-Host "dropo client quick check" -ForegroundColor Cyan
+Write-Host "Output: $OutDir" -ForegroundColor DarkGray
+Write-Host ""
+
+$appRoot = Find-AppRoot
+if ($appRoot -and -not $AppDir) {
+    $AppDir = $appRoot
+}
+$processInfo = @(Get-DropoProcessDetails -Root $appRoot)
+if ($CleanupDropoOrphans) {
+    $killed = Stop-DropoManagedSidecars -Processes $processInfo
+    if ($killed.Count -gt 0) {
+        Start-Sleep -Milliseconds 800
+        $processInfo = @(Get-DropoProcessDetails -Root $appRoot)
+    }
+    $killed | Set-Content (Join-Path $OutDir "cleanup-killed-pids.txt") -Encoding UTF8
+}
+$processInfo | Format-Table | Out-String | Set-Content (Join-Path $OutDir "processes.txt") -Encoding UTF8
+$processInfo | Export-Csv (Join-Path $OutDir "processes.csv") -NoTypeInformation -Encoding UTF8
+$processInfo | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir "processes.json") -Encoding UTF8
+$singBoxListeners = Get-SingBoxListeners
+$singBoxListeners | Export-Csv (Join-Path $OutDir "singbox-listeners.csv") -NoTypeInformation -Encoding UTF8
+
+$activeConfigPath = Find-ActiveConfig
+$configSummary = Get-ConfigSummary -Path $activeConfigPath
+$configSummary | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir "config-summary.json") -Encoding UTF8
+$settingsPath = Find-SettingsPath
+$serviceMethods = Get-ServiceRouteMethods -Path $settingsPath
+
+# Never copy active_config.json into a support bundle: it contains the
+# process-local Clash bearer secret and can also contain VPN credentials.
+
+$mixedPort = $null
+if ($configSummary -and $configSummary.MixedPort) {
+    $mixedPort = [int]$configSummary.MixedPort
+}
+$clashPort = if ($configSummary -and $configSummary.ClashPort) { [int]$configSummary.ClashPort } else { 0 }
+$liveMixedPort = Get-LiveMixedPort -ConfiguredPort $mixedPort -Listeners $singBoxListeners -ExcludedPorts @($clashPort)
+$portList = @(18091, 18092, 18093, 18094, 18095)
+if ($clashPort -and ($portList -notcontains $clashPort)) {
+    $portList += $clashPort
+}
+if ($mixedPort -and ($portList -notcontains $mixedPort)) {
+    $portList += $mixedPort
+}
+if ($liveMixedPort -and ($portList -notcontains $liveMixedPort)) {
+    $portList += $liveMixedPort
+}
+$ports = foreach ($port in $portList) {
+    [PSCustomObject]@{ Host = "127.0.0.1"; Port = $port; Open = (Test-TcpPort "127.0.0.1" $port) }
+}
+$ports | Export-Csv (Join-Path $OutDir "ports.csv") -NoTypeInformation -Encoding UTF8
+
+Get-NetAdapter -ErrorAction SilentlyContinue |
+    Select-Object Name, InterfaceDescription, Status, LinkSpeed, ifIndex |
+    Export-Csv (Join-Path $OutDir "net-adapters.csv") -NoTypeInformation -Encoding UTF8
+Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+    Sort-Object RouteMetric, InterfaceMetric |
+    Select-Object DestinationPrefix, NextHop, InterfaceAlias, RouteMetric, InterfaceMetric |
+    Export-Csv (Join-Path $OutDir "default-routes.csv") -NoTypeInformation -Encoding UTF8
+Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Select-Object InterfaceAlias, ServerAddresses |
+    Export-Csv (Join-Path $OutDir "dns-servers.csv") -NoTypeInformation -Encoding UTF8
+
+netsh winhttp show proxy | Out-File (Join-Path $OutDir "winhttp-proxy.txt") -Encoding UTF8
+Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue |
+    Select-Object ProxyEnable, ProxyServer, AutoConfigURL |
+    ConvertTo-Json -Depth 3 |
+    Set-Content (Join-Path $OutDir "user-proxy.json") -Encoding UTF8
+
+$clash = Get-ClashProxies -ConfigPath $activeConfigPath
+if ($clash) {
+    $clash | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir "clash-proxies.json") -Encoding UTF8
+}
+
+$proxyUrl = ""
+if (-not $SkipProxyCheck -and $liveMixedPort -and (Test-TcpPort "127.0.0.1" $liveMixedPort)) {
+    $proxyUrl = "http://127.0.0.1:$liveMixedPort"
+}
+
+$allServices = @()
+if (-not $SelectedOnly) {
+    $allServices += $directServices
+    $allServices += $directGameServices
+}
+if (-not $DirectOnly) {
+    foreach ($svc in $blockedServices) {
+        $serviceTag = Get-ServiceTag -Name $svc.Name
+        $method = if ($serviceTag -and $serviceMethods.ContainsKey($serviceTag)) { $serviceMethods[$serviceTag] } else { "direct" }
+        if ($AllCatalog -or $method -ne "direct") {
+            $allServices += $svc
+        }
+    }
+}
+
+$results = foreach ($svc in $allServices) {
+    $serviceTag = Get-ServiceTag -Name $svc.Name
+    $method = if ($svc.Category -like "Direct*") {
+        "direct"
+    } elseif ($serviceTag -and $serviceMethods.ContainsKey($serviceTag)) {
+        $serviceMethods[$serviceTag]
+    } else {
+        "direct"
+    }
+    $expectedRoute = switch ($method) {
+        "vpn" { "vpn" }
+        "zapret" { "zapret" }
+        "auto" { "zapret" }
+        default { "direct" }
+    }
+
+    Write-Host ("Testing {0,-18} [{1,-6}] " -f $svc.Name, $expectedRoute.ToUpperInvariant()) -NoNewline
+    $normal = $null
+    $proxy = $null
+    if ($expectedRoute -eq "vpn" -and $proxyUrl) {
+        $proxy = Invoke-CheckUrl -Url $svc.URL -ProxyUrl $proxyUrl
+    } elseif ($expectedRoute -ne "vpn") {
+        $normal = Invoke-CheckUrl -Url $svc.URL -ProxyUrl "" -Direct
+    }
+
+    $regionalLimit = [bool]($svc.Regional -and $normal -and -not $normal.Success)
+    $effectiveSuccess = if ($expectedRoute -eq "vpn") { [bool]($proxy -and $proxy.Success) } else { [bool](($normal -and $normal.Success) -or $regionalLimit) }
+    $color = if ($regionalLimit) { "Yellow" } elseif ($effectiveSuccess) { "Green" } else { "Red" }
+    $statusText = if ($regionalLimit) {
+        "REGION_LIMIT"
+    } elseif (-not $effectiveSuccess) {
+        "FAIL"
+    } elseif ($expectedRoute -eq "vpn") {
+        "VPN_OK"
+    } elseif ($expectedRoute -eq "zapret") {
+        "ZAPRET_OK"
+    } else {
+        "DIRECT_OK"
+    }
+    Write-Host $statusText -ForegroundColor $color
+
+    [PSCustomObject]@{
+        Name = $svc.Name
+        Category = $svc.Category
+        ServiceTag = $serviceTag
+        ExpectedRoute = $expectedRoute
+        Url = $svc.URL
+        EffectiveSuccess = $effectiveSuccess
+        StatusText = $statusText
+        NormalSuccess = if ($normal) { $normal.Success } else { $null }
+        NormalStatus = if ($normal) { $normal.Status } else { $null }
+        NormalTimeMs = if ($normal) { $normal.TimeMs } else { $null }
+        NormalError = if ($normal) { $normal.Error } else { "" }
+        ProxyChecked = [bool]$proxy
+        ProxySuccess = if ($proxy) { $proxy.Success } else { $null }
+        ProxyStatus = if ($proxy) { $proxy.Status } else { $null }
+        ProxyTimeMs = if ($proxy) { $proxy.TimeMs } else { $null }
+        ProxyError = if ($proxy) { $proxy.Error } else { "" }
+    }
+}
+
+$results | Export-Csv (Join-Path $OutDir "service-results.csv") -NoTypeInformation -Encoding UTF8
+$results | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir "service-results.json") -Encoding UTF8
+$results |
+    Where-Object { -not $_.EffectiveSuccess } |
+    Select-Object Name, Category, ExpectedRoute, Url, NormalStatus, NormalTimeMs, NormalError, ProxyChecked, ProxySuccess, ProxyError |
+    Format-List |
+    Out-String |
+    Set-Content (Join-Path $OutDir "failures.txt") -Encoding UTF8
+
+$methodResults = @()
+if ($DeepMethodCheck) {
+    $freeProxyMethods = @(
+        @{ Tag = "byedpi"; Port = 18091; Type = "socks" },
+        @{ Tag = "byedpi-sni"; Port = 18092; Type = "socks" },
+        @{ Tag = "byedpi-oob"; Port = 18093; Type = "socks" },
+        @{ Tag = "byedpi-fake"; Port = 18094; Type = "socks" }
+    )
+    $openFreeProxyMethods = $freeProxyMethods | Where-Object { Test-TcpPort "127.0.0.1" $_.Port }
+    $failedBlocked = $results | Where-Object { $_.ExpectedRoute -eq "zapret" -and -not $_.EffectiveSuccess }
+
+    if ($failedBlocked -and $openFreeProxyMethods) {
+        Write-Host ""
+        Write-Host "Deep free proxy method check" -ForegroundColor Cyan
+        foreach ($svc in $failedBlocked) {
+            foreach ($method in $openFreeProxyMethods) {
+                Write-Host ("  {0,-18} via {1,-12} " -f $svc.Name, $method.Tag) -NoNewline
+                $check = Invoke-CurlSocksCheck -Url $svc.Url -Port $method.Port
+                $color = if ($check.Success) { "Green" } else { "Red" }
+                $text = if ($check.Success) { "OK" } else { "FAIL" }
+                Write-Host $text -ForegroundColor $color
+                $methodResults += [PSCustomObject]@{
+                    Name = $svc.Name
+                    Category = $svc.Category
+                    Url = $svc.Url
+                    Method = $method.Tag
+                    Port = $method.Port
+                    Success = $check.Success
+                    Status = $check.Status
+                    TimeMs = $check.TimeMs
+                    Error = $check.Error
+                }
+            }
+        }
+    }
+}
+$methodResults | Export-Csv (Join-Path $OutDir "free-method-results.csv") -NoTypeInformation -Encoding UTF8
+$methodResults | Export-Csv (Join-Path $OutDir "byedpi-method-results.csv") -NoTypeInformation -Encoding UTF8
+
+$noRouteGroups = @()
+if ($configSummary -and $configSummary.Groups) {
+    $noRouteGroups = @($configSummary.Groups |
+        Where-Object {
+            $_.Now -eq "dropo-block" -or
+            $_.Candidates -match '(^|,)dropo-block(,|$)'
+        } |
+        Select-Object -ExpandProperty Tag)
+}
+
+$summary = [PSCustomObject]@{
+    CreatedAt = (Get-Date).ToString("s")
+    AppRoot = $appRoot
+    ActiveConfig = $activeConfigPath
+    SettingsPath = $settingsPath
+    MixedProxy = $proxyUrl
+    ConfiguredMixedPort = $mixedPort
+    LiveMixedPort = $liveMixedPort
+    Processes = $processInfo
+    Ports = $ports
+    SingBoxListeners = $singBoxListeners
+    Config = $configSummary
+    Total = $results.Count
+    EffectiveFailed = ($results | Where-Object { -not $_.EffectiveSuccess }).Count
+    NormalFailed = ($results | Where-Object { $null -ne $_.NormalSuccess -and -not $_.NormalSuccess }).Count
+    ProxyRecovered = 0
+    MethodRecovered = ($methodResults | Where-Object { $_.Success } | Select-Object -ExpandProperty Name -Unique).Count
+    DirectFailed = ($results | Where-Object { $_.ExpectedRoute -eq "direct" -and -not $_.EffectiveSuccess }).Count
+    BlockedFailed = ($results | Where-Object { $_.ExpectedRoute -ne "direct" -and -not $_.EffectiveSuccess }).Count
+    NoRouteGroupCount = $noRouteGroups.Count
+    NoRouteGroups = ($noRouteGroups -join ",")
+    ManagedSidecarProcesses = ($processInfo | Where-Object { $_.ManagedSidecar }).Count
+}
+$summary | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir "summary.json") -Encoding UTF8
+
+Write-Host ""
+Write-Host "Summary" -ForegroundColor Cyan
+Write-Host "  App root:      $appRoot"
+Write-Host "  Active config: $activeConfigPath"
+Write-Host "  Settings:      $settingsPath"
+Write-Host "  Mixed proxy:   $proxyUrl"
+if ($summary.ManagedSidecarProcesses -gt 0) {
+    Write-Host "  Managed sidecars still running: $($summary.ManagedSidecarProcesses)" -ForegroundColor Yellow
+    Write-Host "  To clean only Dropo bundled sidecars, rerun with -CleanupDropoOrphans" -ForegroundColor Yellow
+}
+if ($configSummary) {
+    Write-Host "  VPN candidate: $($configSummary.HasVpnCandidate) ($($configSummary.VpnCandidateCount) proxy outbound(s))"
+    if ($configSummary.TunAddress) {
+        Write-Host "  TUN address:   $($configSummary.TunAddress)"
+    }
+    if ($configSummary.TunHasIPv6) {
+        Write-Host "  TUN IPv6:      enabled (can break IPv4-only client networks)" -ForegroundColor Yellow
+    }
+}
+if ($noRouteGroups.Count -gt 0) {
+    Write-Host "  No-route groups: $($noRouteGroups -join ', ')" -ForegroundColor Yellow
+}
+if ($mixedPort -and $mixedPort -ne $liveMixedPort) {
+    Write-Host "  Mixed port:    $mixedPort in config, live $liveMixedPort" -ForegroundColor Yellow
+} elseif ($mixedPort -and -not $proxyUrl) {
+    Write-Host "  Mixed port:    $mixedPort (not listening)" -ForegroundColor Yellow
+}
+Write-Host "  Route failed:  $($summary.EffectiveFailed)/$($summary.Total)"
+if ($DeepMethodCheck) {
+    Write-Host "  Method rescued:$($summary.MethodRecovered)"
+}
+Write-Host "  Direct failed: $($summary.DirectFailed)"
+Write-Host "  Blocked failed:$($summary.BlockedFailed)"
+if ($summary.BlockedFailed -gt 0 -and $DeepMethodCheck -and $summary.MethodRecovered -eq 0 -and $configSummary -and -not $configSummary.HasVpnCandidate) {
+    Write-Host ""
+    Write-Host "Blocked services failed through every live free proxy method and active config has no VPN/VLESS candidate." -ForegroundColor Yellow
+    Write-Host "Send the full output folder; native strategy target results and fallback decisions are visible in route-probe logs." -ForegroundColor Yellow
+}
+Write-Host ""
+Write-Host "Send this folder back for analysis:" -ForegroundColor Yellow
+Write-Host "  $OutDir"
+
+$firstFailures = $results | Where-Object { -not $_.EffectiveSuccess } | Select-Object -First 5
+if ($firstFailures) {
+    Write-Host ""
+    Write-Host "First errors:" -ForegroundColor Red
+    foreach ($failure in $firstFailures) {
+        $errorText = if ($failure.ExpectedRoute -eq "vpn") { $failure.ProxyError } else { $failure.NormalError }
+        Write-Host "  $($failure.Name) [$($failure.ExpectedRoute)]: $errorText" -ForegroundColor DarkRed
+    }
+}
+
+if ($summary.EffectiveFailed -gt 0) {
+    exit 1
+}
+exit 0

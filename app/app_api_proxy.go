@@ -1,0 +1,972 @@
+package main
+
+// Proxy methods for dropo.
+// This file contains Clash API proxy operations
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"runtime"
+	"time"
+)
+
+type clashProxyHistoryEntry struct {
+	Delay int `json:"delay"`
+}
+
+type clashProxyInfo struct {
+	Name    string                   `json:"name"`
+	Type    string                   `json:"type"`
+	Now     string                   `json:"now"`
+	All     []string                 `json:"all"`
+	History []clashProxyHistoryEntry `json:"history"`
+}
+
+type clashProxiesResponse struct {
+	Proxies map[string]clashProxyInfo `json:"proxies"`
+}
+
+// GetProxiesWithDelay returns list of proxies with delay (ping)
+func (a *App) GetProxiesWithDelay() map[string]interface{} {
+	if !a.isVPNRunning() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "VPN не запущен",
+		}
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Get list of proxies
+	resp, err := a.clashAPIGet(client, "/proxies")
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Не удалось подключиться к API: " + err.Error(),
+		}
+	}
+	defer resp.Body.Close()
+
+	body, err := readHTTPBodyLimited(resp.Body, defaultMaxHTTPResponseBytes)
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Ошибка чтения ответа",
+		}
+	}
+
+	var proxiesResp struct {
+		Proxies map[string]struct {
+			Name    string `json:"name"`
+			Type    string `json:"type"`
+			History []struct {
+				Delay int `json:"delay"`
+			} `json:"history"`
+		} `json:"proxies"`
+	}
+
+	if err := json.Unmarshal(body, &proxiesResp); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Ошибка парсинга: " + err.Error(),
+		}
+	}
+
+	// Form list of proxies with delays
+	proxies := []map[string]interface{}{}
+	for name, proxy := range proxiesResp.Proxies {
+		// Skip service proxies
+		if name == "DIRECT" || name == "REJECT" || name == "GLOBAL" ||
+			proxy.Type == "Selector" || proxy.Type == "URLTest" || proxy.Type == "Fallback" {
+			continue
+		}
+
+		delay := 0
+		if len(proxy.History) > 0 {
+			delay = proxy.History[len(proxy.History)-1].Delay
+		}
+
+		proxies = append(proxies, map[string]interface{}{
+			"name":  name,
+			"type":  proxy.Type,
+			"delay": delay,
+		})
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"proxies": proxies,
+	}
+}
+
+const vpnResponseProbeTarget = "https://www.gstatic.com/generate_204"
+const vpnResponseFallbackProbeTarget = "https://cp.cloudflare.com/generate_204"
+const vpnResponseProbeBudget = 9 * time.Second
+
+// TestProxyDelay measures an HTTP URL-test through a specific outbound, not
+// ICMP or the latency of every service using that outbound.
+func (a *App) TestProxyDelay(proxyName string) map[string]interface{} {
+	delay, err := a.testProxyDelayContext(context.Background(), proxyName)
+	if err != nil {
+		return map[string]interface{}{"success": false, "delay": 0, "error": err.Error()}
+	}
+	return map[string]interface{}{"success": true, "delay": delay, "name": proxyName}
+}
+
+// The monitor supplies its session context so Stop cancels the in-flight HTTP
+// request as well as rejecting a late result. A cancelled check cannot start the
+// fallback probe.
+func (a *App) testProxyDelayContext(ctx context.Context, proxyName string) (int, error) {
+	delay, _, err := a.testProxyDelayWithTargetContext(ctx, proxyName)
+	return delay, err
+}
+
+// A single target outage is not proof that the VPN source failed. Both requests
+// use the same explicit outbound and a shared budget; no selector is changed.
+func (a *App) testProxyDelayWithTargetContext(ctx context.Context, proxyName string) (int, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, vpnResponseProbeBudget)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
+	if !a.isVPNRunning() {
+		return 0, "", fmt.Errorf("VPN не запущен")
+	}
+	type sample struct {
+		delay  int
+		target string
+		err    error
+	}
+	results := make(chan sample, 2)
+	probe := func(target string, apiTimeout int, limit time.Duration) {
+		go func() {
+			pctx, stop := context.WithTimeout(ctx, limit)
+			defer stop()
+			delay, err := a.testProxyDelayTarget(pctx, proxyName, target, apiTimeout)
+			results <- sample{delay, target, err}
+		}()
+	}
+	probe(vpnResponseProbeTarget, 5000, 6*time.Second)
+	// A healthy first target normally answers alone. On a slow route, overlap
+	// the independent confirmation instead of stacking both timeouts.
+	timer := time.NewTimer(1500 * time.Millisecond)
+	defer timer.Stop()
+	hedge := timer.C
+	remaining := 1
+	var lastErr error
+	for remaining > 0 || hedge != nil {
+		select {
+		case <-ctx.Done():
+			return 0, "", ctx.Err()
+		case r := <-results:
+			remaining--
+			if err := ctx.Err(); err != nil {
+				return 0, "", err
+			}
+			if r.err == nil {
+				return r.delay, r.target, nil
+			}
+			lastErr = r.err
+			if hedge == nil {
+				continue
+			}
+		case <-hedge:
+			if err := ctx.Err(); err != nil {
+				return 0, "", err
+			}
+		}
+		hedge = nil
+		remaining++
+		probe(vpnResponseFallbackProbeTarget, 2500, 3*time.Second)
+	}
+	return 0, "", lastErr
+}
+
+func (a *App) testProxyDelayTarget(ctx context.Context, proxyName, target string, timeoutMS int) (int, error) {
+	client := &http.Client{Timeout: 6 * time.Second}
+	path := clashProxyAPIPath(proxyName) + fmt.Sprintf("/delay?timeout=%d&url=%s", timeoutMS, url.QueryEscape(target))
+	req, err := a.newClashAPIRequest(http.MethodGet, path, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := client.Do(req.WithContext(ctx))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("VPN response check returned HTTP %d", resp.StatusCode)
+	}
+	body, err := readHTTPBodyLimited(resp.Body, defaultMaxHTTPResponseBytes)
+	if err != nil {
+		return 0, err
+	}
+	var response struct {
+		Delay int `json:"delay"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return 0, fmt.Errorf("VPN response check returned an invalid result")
+	}
+	if response.Delay <= 0 {
+		return 0, fmt.Errorf("VPN response check returned no measured response time")
+	}
+	return response.Delay, nil
+}
+
+// TestAllProxiesDelay tests delay of all proxies in parallel
+func (a *App) TestAllProxiesDelay() map[string]interface{} {
+	if !a.isVPNRunning() {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "VPN не запущен",
+		}
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Get list of proxies from selector proxy
+	resp, err := a.clashAPIGet(client, "/proxies/proxy")
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		}
+	}
+	defer resp.Body.Close()
+
+	body, err := readHTTPBodyLimited(resp.Body, defaultMaxHTTPResponseBytes)
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Ошибка чтения",
+		}
+	}
+
+	var selectorInfo struct {
+		All []string `json:"all"`
+		Now string   `json:"now"`
+	}
+
+	if err := json.Unmarshal(body, &selectorInfo); err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		}
+	}
+
+	// Filter service proxies
+	filteredProxies := []string{}
+	hasVPNProxy := false
+	for _, name := range selectorInfo.All {
+		if name == "auto-select" {
+			hasVPNProxy = true
+		}
+		// Skip service elements
+		if name == "direct" || name == "block" || name == "dns-out" || name == "auto-select" {
+			continue
+		}
+		filteredProxies = append(filteredProxies, name)
+	}
+
+	// Get WireGuard configs from settings
+	settings, _ := a.storage.GetUserSettings()
+	wireGuardTags := []string{}
+	wireGuardNames := map[string]string{} // tag -> name
+	if settings != nil && len(settings.WireGuardConfigs) > 0 {
+		for _, wg := range settings.WireGuardConfigs {
+			wireGuardTags = append(wireGuardTags, wg.Tag)
+			wireGuardNames[wg.Tag] = wg.Name
+		}
+	}
+
+	// Free access / RU-traffic resilient groups - only
+	// the ones actually configured exist as outbounds, see addFreeAccessOutbounds.
+	type freeAccessGroup struct {
+		Tag   string
+		Label string
+	}
+	freeAccessGroups := []freeAccessGroup{}
+	if appSettings := a.storage.GetAppSettings(); FreeMethodsAllowed(appSettings) || hasVPNProxy {
+		smartLabel := "Бесплатный доступ"
+		if !FreeMethodsAllowed(appSettings) {
+			smartLabel = "VPN для заблокированных"
+		}
+		freeAccessGroups = append(freeAccessGroups, freeAccessGroup{Tag: SmartBypassGroupTag, Label: smartLabel})
+		for _, svc := range DefaultFreeAccessServices {
+			if FreeAccessServiceEnabled(appSettings, svc.Tag) || hasVPNProxy {
+				if svc.RequiresVPN && !hasVPNProxy {
+					continue
+				}
+				freeAccessGroups = append(freeAccessGroups, freeAccessGroup{Tag: ServiceBypassGroupTag(svc.Tag), Label: svc.DisplayName})
+			}
+		}
+		if appSettings.HideRuTraffic {
+			freeAccessGroups = append(freeAccessGroups, freeAccessGroup{Tag: RuRouteGroupTag, Label: "RU-трафик"})
+		}
+	} else if appSettings.HideRuTraffic {
+		freeAccessGroups = append(freeAccessGroups, freeAccessGroup{Tag: RuRouteGroupTag, Label: "RU-трафик"})
+	}
+
+	totalCount := len(filteredProxies) + len(wireGuardTags) + len(freeAccessGroups)
+	if totalCount == 0 {
+		return map[string]interface{}{
+			"success":      true,
+			"proxies":      []map[string]interface{}{},
+			"currentProxy": selectorInfo.Now,
+			"count":        0,
+		}
+	}
+
+	// Test delay for each proxy in parallel
+	type proxyResult struct {
+		Name       string
+		Delay      int
+		Type       string
+		IsInternal bool
+	}
+
+	results := make(chan proxyResult, totalCount)
+
+	// Test external proxies
+	for _, proxyName := range filteredProxies {
+		go func(name string) {
+			delay := 0
+			proxyType := ""
+
+			// Get proxy info
+			infoResp, err := a.clashAPIGet(client, clashProxyAPIPath(name))
+			if err == nil {
+				defer infoResp.Body.Close()
+				infoBody, _ := readHTTPBodyLimited(infoResp.Body, defaultMaxHTTPResponseBytes)
+				var info struct {
+					Type    string `json:"type"`
+					History []struct {
+						Delay int `json:"delay"`
+					} `json:"history"`
+				}
+				if json.Unmarshal(infoBody, &info) == nil {
+					proxyType = info.Type
+					if len(info.History) > 0 {
+						delay = info.History[len(info.History)-1].Delay
+					}
+				}
+			}
+
+			// If no history, test delay
+			if delay == 0 {
+				delayResp, err := a.clashAPIGet(client, clashProxyAPIPath(name)+"/delay?timeout=3000&url=http://www.gstatic.com/generate_204")
+				if err == nil {
+					defer delayResp.Body.Close()
+					delayBody, _ := readHTTPBodyLimited(delayResp.Body, defaultMaxHTTPResponseBytes)
+					var d struct {
+						Delay int `json:"delay"`
+					}
+					if json.Unmarshal(delayBody, &d) == nil {
+						delay = d.Delay
+					}
+				}
+			}
+
+			results <- proxyResult{Name: name, Delay: delay, Type: proxyType, IsInternal: false}
+		}(proxyName)
+	}
+
+	// Test WireGuard servers
+	for _, wgTag := range wireGuardTags {
+		go func(tag string) {
+			delay := -1 // -1 means "active but ping not measured"
+			displayName := wireGuardNames[tag]
+			if displayName == "" {
+				displayName = tag
+			}
+
+			// Check that WireGuard endpoint is accessible in Clash API
+			infoResp, err := a.clashAPIGet(client, clashProxyAPIPath(tag))
+			if err == nil {
+				defer infoResp.Body.Close()
+				infoBody, _ := readHTTPBodyLimited(infoResp.Body, defaultMaxHTTPResponseBytes)
+				var info struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(infoBody, &info) == nil && info.Type == "WireGuard" {
+					delay = -1 // WireGuard is active
+				}
+			}
+
+			results <- proxyResult{Name: displayName + " (внутр.)", Delay: delay, Type: "WireGuard", IsInternal: true}
+		}(wgTag)
+	}
+
+	// Test free access / RU-traffic resilient groups
+	for _, group := range freeAccessGroups {
+		go func(tag, label string) {
+			delay := 0
+			active := ""
+
+			infoResp, err := a.clashAPIGet(client, clashProxyAPIPath(tag))
+			if err == nil {
+				defer infoResp.Body.Close()
+				infoBody, _ := readHTTPBodyLimited(infoResp.Body, defaultMaxHTTPResponseBytes)
+				var info struct {
+					Now     string `json:"now"`
+					History []struct {
+						Delay int `json:"delay"`
+					} `json:"history"`
+				}
+				if json.Unmarshal(infoBody, &info) == nil {
+					active = info.Now
+					if len(info.History) > 0 {
+						delay = info.History[len(info.History)-1].Delay
+					}
+				}
+			}
+
+			name := label
+			if active != "" {
+				name = fmt.Sprintf("%s (%s)", label, FreeAccessOutboundLabel(active))
+			}
+
+			results <- proxyResult{Name: name, Delay: delay, Type: "FreeAccess", IsInternal: false}
+		}(group.Tag, group.Label)
+	}
+
+	// Collect results
+	proxies := []map[string]interface{}{}
+	timeout := time.After(10 * time.Second)
+
+collect:
+	for i := 0; i < totalCount; i++ {
+		select {
+		case result := <-results:
+			proxies = append(proxies, map[string]interface{}{
+				"name":       result.Name,
+				"delay":      result.Delay,
+				"type":       result.Type,
+				"isInternal": result.IsInternal,
+			})
+		case <-timeout:
+			break collect
+		}
+	}
+
+	return map[string]interface{}{
+		"success":      true,
+		"proxies":      proxies,
+		"currentProxy": selectorInfo.Now,
+		"count":        len(proxies),
+	}
+}
+
+// GetBypassRouteSummary returns currently selected bypass/VPN methods for
+// each enabled blocked service. sing-box urltest groups own the actual
+// latency checks; this method only reads their current decision from the
+// Clash-compatible API.
+func (a *App) GetBypassRouteSummary() map[string]interface{} {
+	settings := GlobalAppSettings{}
+	if a.storage != nil {
+		settings = a.storage.GetAppSettings()
+	}
+
+	mode := NormalizeRoutingMode(settings.RoutingMode)
+
+	if !a.isVPNRunning() {
+		return map[string]interface{}{
+			"success":    true,
+			"running":    false,
+			"mode":       string(mode),
+			"foreignVpn": mode == RoutingModeExceptRussia,
+			"services":   []map[string]interface{}{},
+		}
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	proxies, err := a.fetchClashProxies(client)
+	if err != nil {
+		a.mu.Lock()
+		transparentOnly := a.isRunning && a.cmd == nil
+		a.mu.Unlock()
+		if transparentOnly {
+			return a.transparentBypassRouteSummary(settings, mode)
+		}
+		return map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		}
+	}
+
+	_, hasVPNProxy := proxies["auto-select"]
+	serviceFallbackCache := a.loadServiceStrategyCache()
+	services := make([]map[string]interface{}, 0, len(DefaultFreeAccessServices))
+	for _, svc := range DefaultFreeAccessServices {
+		if mode == RoutingModeAllTraffic {
+			method, outbound, delay := summarizeAllTrafficProxy(proxies)
+			services = append(services, map[string]interface{}{
+				"tag":             svc.Tag,
+				"name":            svc.DisplayName,
+				"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+				"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+				"requiresVpn":     true,
+				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+				"group":           "proxy",
+				"method":          method,
+				"outbound":        outbound,
+				"delay":           delay,
+			})
+			continue
+		}
+		enabled := FreeAccessServiceEnabled(settings, svc.Tag)
+		if !enabled {
+			if hasVPNProxy {
+				enabled = true
+			} else {
+				continue
+			}
+		}
+
+		groupTag := ServiceBypassGroupTag(svc.Tag)
+		info, ok := proxies[groupTag]
+		if !ok {
+			method := "waiting"
+			outbound := ""
+			override := FreeAccessServiceMethod(settings, svc.Tag)
+			switch override {
+			case FreeAccessMethodDirect:
+				method = "Direct"
+				outbound = "direct"
+			case FreeAccessMethodVPN:
+				method = "VPN"
+				outbound = "auto-select"
+			default:
+				if IsFreeAccessProxyMethod(override) || IsFreeAccessTransparentMethod(override) {
+					method = FreeAccessOutboundLabel(override)
+					if IsFreeAccessTransparentMethod(override) {
+						outbound = "direct"
+					} else {
+						outbound = override
+					}
+				}
+			}
+			if method == "waiting" && svc.RequiresVPN {
+				if hasVPNProxy {
+					method = "VPN"
+					outbound = "auto-select"
+				} else {
+					method = "Direct (no VPN key)"
+					outbound = "direct"
+				}
+			}
+			services = append(services, map[string]interface{}{
+				"tag":             svc.Tag,
+				"name":            svc.DisplayName,
+				"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+				"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+				"requiresVpn":     svc.RequiresVPN,
+				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+				"group":           groupTag,
+				"method":          method,
+				"outbound":        outbound,
+				"delay":           0,
+			})
+			continue
+		}
+
+		// The Clash selector is the live route authority. Probe history describes
+		// a previously tested candidate and must never overwrite a later manual
+		// policy or selector change.
+		method, outbound, delay := summarizeBypassProxy(proxies, info)
+		if info.Now == "direct" {
+			// On Windows Unified, direct is also the carrier used by the single
+			// in-process packet engine. Read the immutable active plan so a live
+			// Zapret selection is not mislabeled as plain Direct.
+			if nativeMethod, nativeOutbound, ok := a.nativeTrafficRouteSummary(svc.Tag); ok {
+				method = nativeMethod
+				outbound = nativeOutbound
+			}
+		}
+		item := map[string]interface{}{
+			"tag":             svc.Tag,
+			"name":            svc.DisplayName,
+			"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+			"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+			"requiresVpn":     svc.RequiresVPN,
+			"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+			"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+			"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+			"group":           groupTag,
+			"method":          method,
+			"outbound":        outbound,
+			"delay":           delay,
+		}
+		for key, value := range zapretStrategySummary(settings, svc.Tag, serviceFallbackCache) {
+			item[key] = value
+		}
+		services = append(services, item)
+	}
+
+	catchAll := map[string]interface{}{}
+	if info, ok := proxies[SmartBypassGroupTag]; ok {
+		method, outbound, delay := summarizeBypassProxy(proxies, info)
+		catchAll = map[string]interface{}{
+			"method":   method,
+			"outbound": outbound,
+			"delay":    delay,
+		}
+	}
+
+	return map[string]interface{}{
+		"success":    true,
+		"running":    true,
+		"mode":       string(mode),
+		"foreignVpn": mode == RoutingModeExceptRussia,
+		"services":   services,
+		"catchAll":   catchAll,
+	}
+}
+
+func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode RoutingMode) map[string]interface{} {
+	storedStrategies, _ := a.loadFreeAccessStrategies()
+	serviceFallbackCache := a.loadServiceStrategyCache()
+	transparentTags := a.availableTransparentStrategyTags()
+	services := make([]map[string]interface{}, 0, len(DefaultFreeAccessServices))
+
+	for _, svc := range DefaultFreeAccessServices {
+		if mode != RoutingModeAllTraffic && !FreeAccessServiceEnabled(settings, svc.Tag) && !svc.RequiresVPN {
+			continue
+		}
+		if mode == RoutingModeAllTraffic {
+			services = append(services, map[string]interface{}{
+				"tag":             svc.Tag,
+				"name":            svc.DisplayName,
+				"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+				"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+				"requiresVpn":     true,
+				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+				"group":           "proxy",
+				"method":          "VPN",
+				"outbound":        "",
+				"delay":           0,
+			})
+			continue
+		}
+
+		method := "Direct"
+		outbound := "direct"
+		delay := 0
+
+		if nativeMethod, nativeOutbound, ok := a.nativeTrafficRouteSummary(svc.Tag); ok {
+			method = nativeMethod
+			outbound = nativeOutbound
+		} else {
+			selected := a.selectFreeAccessStrategyForService(settings, svc, storedStrategies, serviceFallbackCache, map[string]bool{}, transparentTags, false)
+			if selected.MethodTag != "" {
+				method = selected.MethodLabel
+				outbound = selected.MethodTag
+				delay = int(selected.LatencyMS)
+			}
+			if svc.RequiresVPN && selected.MethodKind != "vpn" {
+				method = "Direct (no VPN key)"
+				outbound = "direct"
+				delay = 0
+			}
+		}
+		item := map[string]interface{}{
+			"tag":             svc.Tag,
+			"name":            svc.DisplayName,
+			"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+			"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+			"requiresVpn":     svc.RequiresVPN,
+			"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+			"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+			"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+			"group":           ServiceBypassGroupTag(svc.Tag),
+			"method":          method,
+			"outbound":        outbound,
+			"delay":           delay,
+		}
+		for key, value := range zapretStrategySummary(settings, svc.Tag, serviceFallbackCache) {
+			item[key] = value
+		}
+		services = append(services, item)
+	}
+
+	catchAll := map[string]interface{}{}
+	if method, outbound, ok := a.nativeTrafficRouteSummary(commonBlockedServiceTag); ok {
+		catchAll = map[string]interface{}{
+			"method":   method,
+			"outbound": outbound,
+			"delay":    0,
+		}
+	} else if tag := defaultZapretStrategyTag(transparentTags); tag != "" {
+		catchAll = map[string]interface{}{
+			"method":   FreeAccessOutboundLabel(tag),
+			"outbound": tag,
+			"delay":    0,
+		}
+	}
+
+	return map[string]interface{}{
+		"success":       true,
+		"running":       true,
+		"mode":          string(mode),
+		"foreignVpn":    mode == RoutingModeExceptRussia,
+		"networkEngine": "windows_unified",
+		"services":      services,
+		"catchAll":      catchAll,
+	}
+}
+
+// TestRouteMethods runs the blocked-service method probe without starting the
+// main VPN process. It is kept as an internal/manual route-probe API; the home
+// screen uses RunClientQuickCheck for user-facing service availability checks.
+func (a *App) TestRouteMethods() map[string]interface{} {
+	a.waitForInit()
+
+	startedAt := time.Now()
+	report, err := a.runRouteProbeDiscovery("manual method probe")
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка проверки методов: %v", err),
+		}
+	}
+
+	results := []routeProbeServiceResult{}
+	if report != nil {
+		results = report.Services
+	}
+	return map[string]interface{}{
+		"success":    true,
+		"durationMs": time.Since(startedAt).Milliseconds(),
+		"services":   results,
+	}
+}
+
+// RefreshFreeAccessMethods updates the persisted route-method discovery cache
+// from Settings without opening the home-screen test modal.
+func (a *App) RefreshFreeAccessMethods() map[string]interface{} {
+	a.waitForInit()
+
+	startedAt := time.Now()
+	report, err := a.runRouteProbeDiscovery("settings refresh")
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("Ошибка обновления методов: %v", err),
+		}
+	}
+
+	results := []routeProbeServiceResult{}
+	durationMs := time.Since(startedAt).Milliseconds()
+	if report != nil {
+		results = report.Services
+		durationMs = report.DurationMS
+	}
+	return map[string]interface{}{
+		"success":      true,
+		"durationMs":   durationMs,
+		"services":     results,
+		"successCount": routeProbeSuccessCount(results),
+		"cache":        a.routeProbeCacheSummary(),
+	}
+}
+
+func (a *App) fetchClashProxies(client *http.Client) (map[string]clashProxyInfo, error) {
+	resp, err := a.clashAPIGet(client, "/proxies")
+	if err != nil {
+		return nil, fmt.Errorf("не удалось подключиться к API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := readHTTPBodyLimited(resp.Body, defaultMaxHTTPResponseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения ответа: %w", err)
+	}
+
+	var proxiesResp clashProxiesResponse
+	if err := json.Unmarshal(body, &proxiesResp); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга API: %w", err)
+	}
+
+	return proxiesResp.Proxies, nil
+}
+
+func latestProxyDelay(info clashProxyInfo) int {
+	if len(info.History) == 0 {
+		return 0
+	}
+	return info.History[len(info.History)-1].Delay
+}
+
+func summarizeBypassProxy(proxies map[string]clashProxyInfo, info clashProxyInfo) (string, string, int) {
+	active := info.Now
+	if active == "" {
+		active = info.Name
+	}
+
+	methodTag := active
+	outbound := active
+	delay := latestProxyDelay(info)
+
+	if activeInfo, ok := proxies[active]; ok {
+		if delay == 0 {
+			delay = latestProxyDelay(activeInfo)
+		}
+		if active == "auto-select" && activeInfo.Now != "" {
+			outbound = activeInfo.Now
+		}
+	}
+
+	return FreeAccessOutboundLabel(methodTag), outbound, delay
+}
+
+func (a *App) nativeTrafficRouteSummary(serviceTag string) (string, string, bool) {
+	if a == nil || a.trafficEngine == nil || serviceTag == "" {
+		return "", "", false
+	}
+	plan := a.trafficEngine.CurrentPlan()
+	kind := ""
+	for _, route := range plan.Routes {
+		if route.ServiceID == serviceTag {
+			kind = string(route.Kind)
+			break
+		}
+	}
+	switch kind {
+	case clientQuickCheckRouteVPN:
+		return "VPN", "auto-select", true
+	case clientQuickCheckRouteDirect:
+		return "Direct", "direct", true
+	case clientQuickCheckRouteZapret:
+		strategyID := ""
+		for _, selection := range plan.Selections {
+			if selection.ServiceID == serviceTag {
+				strategyID = selection.StrategyID
+				break
+			}
+		}
+		label := FreeAccessOutboundLabel(strategyID)
+		for _, strategy := range plan.Strategies {
+			if strategy.ID == strategyID && strategy.Label != "" {
+				label = strategy.Label
+				break
+			}
+		}
+		if label == "" {
+			label = "Обход (Zapret)"
+		}
+		return label, strategyID, true
+	default:
+		return "", "", false
+	}
+}
+
+func summarizeAllTrafficProxy(proxies map[string]clashProxyInfo) (string, string, int) {
+	active := "auto-select"
+	delay := 0
+	if proxy, ok := proxies["proxy"]; ok {
+		if proxy.Now != "" {
+			active = proxy.Now
+		}
+		delay = latestProxyDelay(proxy)
+	}
+	visited := map[string]bool{}
+	for active != "" && !visited[active] {
+		visited[active] = true
+		info, ok := proxies[active]
+		if !ok || info.Now == "" || info.Now == active {
+			break
+		}
+		if delay == 0 {
+			delay = latestProxyDelay(info)
+		}
+		active = info.Now
+	}
+	if active == "" {
+		active = "auto-select"
+	}
+	if delay == 0 {
+		if info, ok := proxies[active]; ok {
+			delay = latestProxyDelay(info)
+		}
+	}
+	if active == "direct" {
+		return "Direct", active, delay
+	}
+	return "VPN", active, delay
+}
+
+// GetCurrentProxy returns current active proxy and its delay
+func (a *App) GetCurrentProxy() map[string]interface{} {
+	if !a.isVPNRunning() {
+		return map[string]interface{}{
+			"success": false,
+		}
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Get info about proxy selector
+	resp, err := a.clashAPIGet(client, "/proxies/proxy")
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+		}
+	}
+	defer resp.Body.Close()
+
+	body, err := readHTTPBodyLimited(resp.Body, defaultMaxHTTPResponseBytes)
+	if err != nil {
+		return map[string]interface{}{
+			"success": false,
+		}
+	}
+
+	var proxyInfo struct {
+		Name string `json:"name"`
+		Now  string `json:"now"`
+		Type string `json:"type"`
+	}
+
+	if err := json.Unmarshal(body, &proxyInfo); err != nil {
+		return map[string]interface{}{
+			"success": false,
+		}
+	}
+
+	currentProxy := proxyInfo.Now
+	if currentProxy == "" {
+		currentProxy = proxyInfo.Name
+	}
+
+	// Get delay for current proxy
+	delay := 0
+	if currentProxy != "" {
+		delayResp, err := a.clashAPIGet(client, clashProxyAPIPath(currentProxy)+"/delay?timeout=3000&url=http://www.gstatic.com/generate_204")
+		if err == nil {
+			defer delayResp.Body.Close()
+			delayBody, _ := readHTTPBodyLimited(delayResp.Body, defaultMaxHTTPResponseBytes)
+			var delayInfo struct {
+				Delay int `json:"delay"`
+			}
+			if json.Unmarshal(delayBody, &delayInfo) == nil {
+				delay = delayInfo.Delay
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"name":    currentProxy,
+		"type":    proxyInfo.Type,
+		"delay":   delay,
+	}
+}

@@ -1,0 +1,160 @@
+package main
+
+import (
+	"context"
+	"dropocore/dnspolicy"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/netip"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
+)
+
+var publicDNSQueryID atomic.Uint32
+
+// lookupPublicHostWithoutHosts uses protected DNS with a numeric bootstrap.
+// It deliberately bypasses the Windows hosts overlay so a native application's
+// exact fake bootstrap name can still be connected to its real public address
+// by Dropo's in-process relay.
+func lookupPublicHostWithoutHosts(ctx context.Context, host string) ([]netip.Addr, error) {
+	host = normalizeProxyHost(host)
+	if host == "" || net.ParseIP(host) != nil {
+		return nil, errors.New("public DNS host is invalid")
+	}
+	addresses, err := dnspolicy.DefaultLookup(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	return uniquePublicAddresses(addresses), nil
+}
+
+func queryPublicDNS(ctx context.Context, server netip.Addr, host string, queryType dnsmessage.Type) ([]netip.Addr, error) {
+	name, err := dnsmessage.NewName(strings.TrimSuffix(host, ".") + ".")
+	if err != nil {
+		return nil, err
+	}
+	id := uint16(publicDNSQueryID.Add(1))
+	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: id, RecursionDesired: true})
+	builder.EnableCompression()
+	if err := builder.StartQuestions(); err != nil {
+		return nil, err
+	}
+	if err := builder.Question(dnsmessage.Question{Name: name, Type: queryType, Class: dnsmessage.ClassINET}); err != nil {
+		return nil, err
+	}
+	query, err := builder.Finish()
+	if err != nil {
+		return nil, err
+	}
+
+	// The selective packet engine intentionally owns outbound UDP/53 so it can
+	// synthesize fake addresses for exact native-app bootstrap names. The scoped
+	// Zapret relay must resolve those same names without consuming its own fake
+	// answer, so this narrowly bounded resolver uses standard DNS-over-TCP.
+	// It is neither a system proxy nor encrypted DNS and cannot capture unrelated
+	// application traffic.
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(server.String(), "53"))
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = connection.SetDeadline(deadline)
+	framed := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(framed[:2], uint16(len(query)))
+	copy(framed[2:], query)
+	if _, err := connection.Write(framed); err != nil {
+		return nil, err
+	}
+	response, err := readBoundedTCPDNSMessage(connection)
+	if err != nil {
+		return nil, err
+	}
+	return parsePublicDNSAnswer(response, id)
+}
+
+func readBoundedTCPDNSMessage(reader io.Reader) ([]byte, error) {
+	var length [2]byte
+	if _, err := io.ReadFull(reader, length[:]); err != nil {
+		return nil, err
+	}
+	responseLength := int(binary.BigEndian.Uint16(length[:]))
+	if responseLength < 12 || responseLength > 4096 {
+		return nil, fmt.Errorf("unusable TCP DNS response length %d", responseLength)
+	}
+	response := make([]byte, responseLength)
+	if _, err := io.ReadFull(reader, response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func parsePublicDNSAnswer(message []byte, id uint16) ([]netip.Addr, error) {
+	var parser dnsmessage.Parser
+	header, err := parser.Start(message)
+	if err != nil {
+		return nil, err
+	}
+	if header.ID != id || !header.Response || header.Truncated || header.RCode != dnsmessage.RCodeSuccess {
+		return nil, fmt.Errorf("unusable DNS response id=%d truncated=%t rcode=%s", header.ID, header.Truncated, header.RCode)
+	}
+	if err := parser.SkipAllQuestions(); err != nil {
+		return nil, err
+	}
+	addresses := make([]netip.Addr, 0, 4)
+	for {
+		answer, err := parser.AnswerHeader()
+		if errors.Is(err, dnsmessage.ErrSectionDone) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch answer.Type {
+		case dnsmessage.TypeA:
+			resource, err := parser.AResource()
+			if err != nil {
+				return nil, err
+			}
+			addresses = append(addresses, netip.AddrFrom4(resource.A))
+		case dnsmessage.TypeAAAA:
+			resource, err := parser.AAAAResource()
+			if err != nil {
+				return nil, err
+			}
+			addresses = append(addresses, netip.AddrFrom16(resource.AAAA))
+		default:
+			if err := parser.SkipAnswer(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return uniquePublicAddresses(addresses), nil
+}
+
+func uniquePublicAddresses(addresses []netip.Addr) []netip.Addr {
+	result := make([]netip.Addr, 0, len(addresses))
+	seen := make(map[netip.Addr]struct{}, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !zapretPublicAddress(address) || dropoFakeIPv4Prefix.Contains(address) {
+			continue
+		}
+		if _, exists := seen[address]; exists {
+			continue
+		}
+		seen[address] = struct{}{}
+		result = append(result, address)
+	}
+	return result
+}

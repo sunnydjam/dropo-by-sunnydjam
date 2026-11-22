@@ -1,0 +1,1742 @@
+# dropo Build Script
+# This script builds the application and outputs to release/dropo-{version}-{hash}/ folder.
+
+param(
+    [switch]$Build,
+    [switch]$Portable,
+    # Build every implemented release artifact in one pass:
+    # Windows installer + portable ZIP + Android APK + Google Play AAB.
+    [switch]$All,
+    [switch]$Clean,
+    [string]$Version,
+    # Public HTTPS account-service origin. Defaults to the explicit process
+    # environment DROPO_ACCOUNT_ENDPOINT, otherwise accounts remain unconfigured.
+    # Never pass bot tokens or private subscription URLs to Flutter builds.
+    [string]$AccountEndpoint,
+    # CI mode: build the complete Windows installer and portable archive.
+    [switch]$AppOnly,
+    # Backward-compatible alias: Windows is now built with Flutter + Go core.
+    [switch]$Flutter,
+    # Opt-in Android artifact build. Alone it builds only the APK; combine with
+    # -Build/-Flutter for Windows app + Android, or use -All for all artifacts.
+    [switch]$Android,
+    # Google Play upload bundle. Always release-signed and ARM32/ARM64;
+    # combine with -Android/-AndroidPreview to keep the APK download channel.
+    [switch]$AndroidBundle,
+    # Optimized, development-signed phone preview; never a publication artifact.
+    [switch]$AndroidPreview,
+    [ValidateSet("arm64", "universal", "x64")]
+    [string]$AndroidArchitecture = "arm64",
+    # Local/offline rebuild aid: reuse an existing Flutter Windows Release
+    # output while still rebuilding and signing the Go core and launcher.
+    [switch]$ReuseFlutterWindowsOutput,
+    # Resolve Flutter dependencies exclusively from the configured local pub
+    # cache, enforcing the committed lockfile. Missing exact packages fail
+    # instead of downgrading; all builds compile with --no-pub afterwards.
+    [switch]$UseCachedFlutterPackages,
+    # Local/offline signing aid. Production CI leaves this disabled and uses
+    # the configured RFC3161 timestamp server.
+    [switch]$SkipWindowsTimestamp,
+    # Backward-compatible switch. Unsigned Windows output is now the normal
+    # fallback when no publicly trusted signing identity is configured.
+    [switch]$AllowUnsignedWindows,
+    # Fail closed for publishers that configure a production signing gate.
+    [switch]$RequireWindowsSigning,
+    # Inert packaging-only opt-in. The guard is never installed as a service or
+    # activated by this build; its signed bytes must be pinned independently.
+    [string]$WfpGuardBinaryPath,
+    [string]$WfpGuardSHA256,
+    # Development-only escape hatch. Public/reproducible packages must always
+    # be built from a clean commit.
+    [switch]$AllowDirtySource,
+    # Keep known-good release folders while producing a local test build.
+    [switch]$KeepExistingBuilds,
+    # Local development only: verify the already-pinned blocked catalog and do
+    # not contact GitHub. Publication builds must leave this disabled.
+    [switch]$UseBundledFilters
+)
+
+$ErrorActionPreference = "Stop"
+
+function Test-DropoPublicAccountHost {
+    param([string]$HostName)
+    $hostValue = $HostName.ToLowerInvariant().TrimEnd('.')
+    if ($hostValue -eq 'localhost' -or
+        $hostValue -match '(?:^|\.)(?:localhost|local|localdomain|internal|lan)$' -or
+        $hostValue -eq 'home.arpa' -or $hostValue.EndsWith('.home.arpa')) {
+        return $false
+    }
+    $address = $null
+    if ([Net.IPAddress]::TryParse($hostValue, [ref]$address)) {
+        if ($address.IsIPv4MappedToIPv6) { $address = $address.MapToIPv4() }
+        if ([Net.IPAddress]::IsLoopback($address)) { return $false }
+        $bytes = $address.GetAddressBytes()
+        if ($bytes.Length -eq 4) {
+            return $bytes[0] -ne 0 -and $bytes[0] -ne 10 -and $bytes[0] -ne 127 -and $bytes[0] -lt 224 -and
+                -not ($bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127) -and
+                -not ($bytes[0] -eq 169 -and $bytes[1] -eq 254) -and
+                -not ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -and
+                -not ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+        }
+        return $bytes.Length -eq 16 -and $address.ToString() -ne '::' -and
+            -not $address.IsIPv6LinkLocal -and -not $address.IsIPv6SiteLocal -and
+            $bytes[0] -ne 255 -and ($bytes[0] -band 254) -ne 252 -and $address.ScopeId -eq 0
+    }
+    # DNS resolution is not performed during builds. Reject local/single-label
+    # names and malformed labels; TLS still verifies the actual server at runtime.
+    return $hostValue.Length -le 253 -and $hostValue.Contains('.') -and
+        $hostValue -match '^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+}
+
+function Resolve-DropoAccountEndpoint {
+    param([string]$Endpoint, [string]$EnvironmentEndpoint, [switch]$ReuseWindowsOutput)
+    $value = $Endpoint.Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) { $value = $EnvironmentEndpoint.Trim() }
+    if ([string]::IsNullOrWhiteSpace($value)) { return '' }
+    $uri = $null
+    if ($value -notmatch '^https://[^\s\\/?#@]+/?$' -or
+        -not [Uri]::TryCreate($value, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne 'https' -or $uri.UserInfo -ne '' -or
+        $uri.Query -ne '' -or $uri.Fragment -ne '' -or $uri.AbsolutePath -ne '/' -or
+        $uri.Port -lt 1 -or -not (Test-DropoPublicAccountHost -HostName $uri.IdnHost)) {
+        throw 'AccountEndpoint must be a public HTTPS origin without credentials, query, fragment or path.'
+    }
+    if ($ReuseWindowsOutput) {
+        throw 'A configured account endpoint requires a fresh Flutter build. Do not use -ReuseFlutterWindowsOutput.'
+    }
+    # .NET Framework and modern .NET serialize IPv6 Uri authorities differently.
+    # Emit one canonical origin so both build hosts bind stored sessions alike.
+    $publicHost = $uri.IdnHost.ToLowerInvariant().TrimEnd('.')
+    $publicAddress = $null
+    if ([Net.IPAddress]::TryParse($publicHost, [ref]$publicAddress)) {
+        $publicHost = $publicAddress.ToString().ToLowerInvariant()
+        if ($publicAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) {
+            $publicHost = "[$publicHost]"
+        }
+    }
+    $portSuffix = if ($uri.IsDefaultPort) { '' } else { ':' + $uri.Port }
+    return "https://$publicHost$portSuffix"
+}
+
+function Get-DropoAccountBuildArguments {
+    param([string]$Endpoint)
+    if (-not [string]::IsNullOrWhiteSpace($Endpoint)) {
+        return @('--dart-define', "DROPO_ACCOUNT_ENDPOINT=$Endpoint")
+    }
+    return @()
+}
+
+function Get-DropoAndroidBundleBuildArguments {
+    param(
+        [string]$AppVersion,
+        [int]$BuildNumber,
+        [string]$Endpoint
+    )
+    $arguments = @(
+        'build', 'appbundle', '--release',
+        '--target-platform', 'android-arm,android-arm64',
+        '--build-name', $AppVersion, '--build-number', $BuildNumber,
+        '--dart-define', "DROPO_APP_VERSION=$AppVersion",
+        '--dart-define', 'DROPO_PLAY_DISTRIBUTION=true',
+        '--dart-define', 'DROPO_PURCHASES_ENABLED=false'
+    )
+    $arguments += @(Get-DropoAccountBuildArguments -Endpoint $Endpoint)
+    return $arguments
+}
+
+$AccountEndpoint = Resolve-DropoAccountEndpoint -Endpoint $AccountEndpoint `
+    -EnvironmentEndpoint ([Environment]::GetEnvironmentVariable('DROPO_ACCOUNT_ENDPOINT', 'Process')) `
+    -ReuseWindowsOutput:$ReuseFlutterWindowsOutput
+if ($AndroidPreview) { $Android = $true }
+if ($All) {
+    $Android = $true
+    $AndroidBundle = $true
+}
+$ScriptRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$DevEnvironmentScript = Join-Path $ScriptRoot "tools\dev-environment.ps1"
+. $DevEnvironmentScript
+$ToolchainRoot = Get-DropoToolchainRoot -RepositoryRoot $ScriptRoot
+
+# Local developer toolchains stay outside PATH so they do not affect the rest
+# of Windows. Make Dropo's configured Go SDK available to this build only.
+Add-DropoGoSdkToPath -ToolchainRoot $ToolchainRoot
+
+# Read version from version.json
+function Get-VersionInfo {
+    $versionFile = Join-Path $ScriptRoot "version.json"
+    if (-not (Test-Path $versionFile)) {
+        Write-Host "[ERROR] version.json not found!" -ForegroundColor Red
+        exit 1
+    }
+    return Get-Content $versionFile | ConvertFrom-Json
+}
+
+# Get latest version from release folder
+function Get-LatestRelease {
+    $releaseDir = Join-Path $ScriptRoot "release"
+    if (-not (Test-Path $releaseDir)) {
+        return $null
+    }
+
+    $versions = @(Get-ChildItem -Path $releaseDir -Directory |
+        Where-Object { $_.Name -match '^(dropo-)?(\d+\.\d+\.\d+)-([0-9a-f]+)$' } |
+        ForEach-Object {
+            $null = $_.Name -match '^(dropo-)?(\d+\.\d+\.\d+)-([0-9a-f]+)$'
+            [PSCustomObject]@{
+                Name      = $_.Name
+                Version   = [version]$Matches[2]
+                WriteTime = $_.LastWriteTime
+            }
+        } |
+        Sort-Object Version, WriteTime -Descending)
+
+    if ($versions.Count -gt 0) {
+        return $versions[0].Name
+    }
+    return $null
+}
+
+function Get-BuildHash {
+    param([string]$Revision)
+    if ($Revision -match '^[0-9a-fA-F]{7,}$') {
+        return $Revision.Substring(0, 7).ToLowerInvariant()
+    }
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Revision)
+    $digest = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    return ([BitConverter]::ToString($digest).Replace("-", "").ToLowerInvariant()).Substring(0, 7)
+}
+
+function Get-DirtyBuildHash {
+    param(
+        [string]$Revision,
+        [string]$RepositoryRoot
+    )
+
+    $sourceFiles = @(& git -C $RepositoryRoot ls-files --cached --others --exclude-standard 2>$null |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Sort-Object -Unique)
+    if ($LASTEXITCODE -ne 0 -or $sourceFiles.Count -eq 0) {
+        throw "Could not enumerate source files for a dirty development build."
+    }
+
+    $fingerprint = [Text.StringBuilder]::new()
+    [void]$fingerprint.AppendLine($Revision)
+    foreach ($relativePath in $sourceFiles) {
+        $sourcePath = Join-Path $RepositoryRoot $relativePath
+        [void]$fingerprint.Append($relativePath.Replace('\\', '/'))
+        [void]$fingerprint.Append("`0")
+        if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
+            [void]$fingerprint.Append((Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant())
+        } else {
+            [void]$fingerprint.Append("missing")
+        }
+        [void]$fingerprint.AppendLine()
+    }
+    $bytes = [Text.Encoding]::UTF8.GetBytes($fingerprint.ToString())
+    $digest = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    return ([BitConverter]::ToString($digest).Replace("-", "").ToLowerInvariant()).Substring(0, 12)
+}
+
+function Copy-LicenseFile {
+    param(
+        [string]$Source,
+        [string]$DestinationDir,
+        [string]$DestinationName
+    )
+
+    if (-not (Test-Path $Source -PathType Leaf)) {
+        throw "License file not found: $Source"
+    }
+
+    if (-not (Test-Path $DestinationDir)) {
+        New-Item -ItemType Directory -Path $DestinationDir | Out-Null
+    }
+
+    Copy-Item $Source (Join-Path $DestinationDir $DestinationName) -Force
+    Write-Host "[OK] Copied licenses/$DestinationName" -ForegroundColor Green
+}
+
+function Download-File {
+    param(
+        [string]$Url,
+        [string]$Destination
+    )
+
+    $parent = Split-Path $Destination -Parent
+    if ($parent -and -not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Path $parent | Out-Null
+    }
+
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & $curl.Source -fsSL --retry 3 --connect-timeout 10 --max-time 60 -A "dropo-build" -o $Destination $Url
+        if ($LASTEXITCODE -ne 0) {
+            throw "curl failed with exit code $LASTEXITCODE for $Url"
+        }
+        return
+    }
+
+    Invoke-WebRequest -UseBasicParsing -Headers @{ "User-Agent" = "dropo-build" } -Uri $Url -OutFile $Destination -TimeoutSec 60
+}
+
+function Test-ReleaseAssetAvailable {
+    param(
+        [string]$Url,
+        [long]$ExpectedSize = 0
+    )
+
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($Url)
+        $request.Method = "HEAD"
+        $request.AllowAutoRedirect = $true
+        $request.UserAgent = "dropo-build"
+        $request.Timeout = 15000
+        $response = $request.GetResponse()
+        try {
+            $status = [int]$response.StatusCode
+            if ($status -lt 200 -or $status -ge 300) {
+                return $false
+            }
+            if ($ExpectedSize -gt 0 -and $response.ContentLength -gt 0 -and $response.ContentLength -ne $ExpectedSize) {
+                Write-Host "[Deps] Hosted asset size mismatch: expected $ExpectedSize, got $($response.ContentLength)" -ForegroundColor Yellow
+                return $false
+            }
+            return $true
+        } finally {
+            $response.Close()
+        }
+    } catch {
+        Write-Host "[Deps] Hosted asset check failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+$VersionInfo = Get-VersionInfo
+$AppVersion = if ($Version) { $Version } else { $VersionInfo.version }
+$PubspecPath = Join-Path $ScriptRoot "flutter_app\pubspec.yaml"
+if (-not (Test-Path -LiteralPath $PubspecPath -PathType Leaf)) {
+    throw "Flutter pubspec not found: $PubspecPath"
+}
+$PubspecVersionLine = Get-Content -LiteralPath $PubspecPath | Where-Object { $_ -match '^version:\s*' } | Select-Object -First 1
+if ($PubspecVersionLine -notmatch '^version:\s*([0-9]+\.[0-9]+\.[0-9]+)(?:\+[0-9]+)?\s*$') {
+    throw "flutter_app/pubspec.yaml has no valid semantic version."
+}
+$PubspecAppVersion = $Matches[1]
+if ($PubspecAppVersion -ne [string]$VersionInfo.version) {
+    throw "Version mismatch: version.json=$($VersionInfo.version), flutter_app/pubspec.yaml=$PubspecAppVersion. Keep version.json as the release source of truth."
+}
+$SingBoxVersion = $VersionInfo.singbox.version
+$SingBoxArchiveSHA256 = ([string]$VersionInfo.singbox.archiveSha256).ToLowerInvariant()
+$SingBoxExeSHA256 = ([string]$VersionInfo.singbox.executableSha256).ToLowerInvariant()
+$WireGuardVersion = $VersionInfo.wireguard.version
+$WireGuardExeSHA256 = ([string]$VersionInfo.wireguard.wireguardSha256).ToLowerInvariant()
+$WireGuardWgSHA256 = ([string]$VersionInfo.wireguard.wgSha256).ToLowerInvariant()
+$WireGuardWintunSHA256 = ([string]$VersionInfo.wireguard.wintunSha256).ToLowerInvariant()
+$WinDivertVersion = $VersionInfo.windivert.version
+$WinDivertArchiveSHA256 = ([string]$VersionInfo.windivert.archiveSha256).ToLowerInvariant()
+$WinDivertDllSHA256 = ([string]$VersionInfo.windivert.dllSha256).ToLowerInvariant()
+$WinDivertDriverSHA256 = ([string]$VersionInfo.windivert.driverSha256).ToLowerInvariant()
+$WinDivertArchiveURL = [string]$VersionInfo.windivert.url
+$XrayVersion = $VersionInfo.xray.version
+$XrayArchiveSHA256 = ([string]$VersionInfo.xray.archiveSha256).ToLowerInvariant()
+$XrayExeSHA256 = ([string]$VersionInfo.xray.executableSha256).ToLowerInvariant()
+$UTLSVersion = "1.8.4"
+$sourceRevisionOutput = @(& git -C $ScriptRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or $sourceRevisionOutput.Count -ne 1) {
+    throw 'Cannot determine the source commit. Git rev-parse must succeed before building release artifacts.'
+}
+$SourceRevision = ([string]$sourceRevisionOutput[0]).Trim().ToLowerInvariant()
+if ($SourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
+    throw 'Git HEAD must resolve to a complete source commit SHA before building release artifacts.'
+}
+$sourceStatus = @(& git -C $ScriptRoot status --porcelain 2>$null)
+if ($LASTEXITCODE -ne 0) {
+    throw 'Cannot determine whether the source worktree is clean. Git status must succeed before building release artifacts.'
+}
+$SourceDirty = $sourceStatus.Count -gt 0
+$dirtyBuildAllowed = $AllowDirtySource -or $env:DROPO_ALLOW_DIRTY_BUILD -eq "1"
+$willBuildAndroidBundle = $AndroidBundle -or $All
+$willBuildWindows = $Build -or $Flutter -or $AppOnly -or $All -or (-not $Portable -and -not $Android -and -not $AndroidBundle -and -not $Clean)
+if ([string]::IsNullOrWhiteSpace($WfpGuardBinaryPath) -ne [string]::IsNullOrWhiteSpace($WfpGuardSHA256)) {
+    throw 'Specify both -WfpGuardBinaryPath and -WfpGuardSHA256, or neither.'
+}
+if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+    if (-not $willBuildWindows) {
+        throw 'WFP guard packaging is available only for a Windows build.'
+    }
+    if ($WfpGuardSHA256 -cnotmatch '^[0-9a-fA-F]{64}$') {
+        throw '-WfpGuardSHA256 must be an independently pinned 64-character SHA-256.'
+    }
+    # The guard release preflight requires Windows-trusted core and guard
+    # signatures from the same signer, with the configured release cert pinned
+    # when its SHA-1 thumbprint is available.
+    # Do not let the normal unsigned development-build fallback weaken it.
+    $RequireWindowsSigning = $true
+}
+if (($willBuildWindows -or $willBuildAndroidBundle) -and $SourceDirty -and -not $dirtyBuildAllowed) {
+    throw "Reproducible Windows/Google Play packages require a clean Git worktree. Commit the intended source first, or use -AllowDirtySource for a development-only build."
+}
+$BuildHash = if ($SourceDirty) {
+    Get-DirtyBuildHash -Revision $SourceRevision -RepositoryRoot $ScriptRoot
+} else {
+    Get-BuildHash -Revision $SourceRevision
+}
+$sourceEpoch = 0L
+if ([long]::TryParse([string]$env:SOURCE_DATE_EPOCH, [ref]$sourceEpoch) -and $sourceEpoch -gt 0) {
+    $BuildDate = ([DateTimeOffset]::FromUnixTimeSeconds($sourceEpoch)).UtcDateTime
+} elseif ($SourceRevision -ne "unknown") {
+    $commitEpoch = (& git -C $ScriptRoot show -s --format=%ct $SourceRevision 2>$null | Select-Object -First 1)
+    if (-not [long]::TryParse(([string]$commitEpoch).Trim(), [ref]$sourceEpoch) -or $sourceEpoch -le 0) {
+        throw "Could not resolve the source commit timestamp."
+    }
+    $BuildDate = ([DateTimeOffset]::FromUnixTimeSeconds($sourceEpoch)).UtcDateTime
+} else {
+    $BuildDate = [DateTime]::new(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+}
+if ($null -eq $BuildDate) {
+    throw "Could not construct deterministic UTC build time."
+}
+$BuildTime = $BuildDate.ToString("yyyy-MM-dd HH:mm:ss")
+$BuildTimestampISO = $BuildDate.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+# Build folder and archive names include the app name, version and hash for unique test environments.
+$ArtifactBaseName = "dropo-$AppVersion-$BuildHash"
+$BuildFolderName = $ArtifactBaseName
+
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "   dropo Build System" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Version:   $AppVersion" -ForegroundColor White
+Write-Host "Build:     $BuildHash" -ForegroundColor Gray
+Write-Host "sing-box:  $SingBoxVersion" -ForegroundColor White
+Write-Host "WireGuard: $WireGuardVersion" -ForegroundColor White
+Write-Host "WinDivert: $WinDivertVersion" -ForegroundColor White
+Write-Host "Xray:      $XrayVersion" -ForegroundColor White
+Write-Host ""
+
+# Paths
+$AppDir = Join-Path $ScriptRoot "app"
+$ReleaseDir = Join-Path $ScriptRoot "release"
+$VersionDir = Join-Path $ReleaseDir $BuildFolderName
+$DepsDir = Join-Path $ScriptRoot "dependencies"
+$SingBoxDir = Join-Path $DepsDir "sing-box-v$SingBoxVersion"
+$SingBoxExe = Join-Path $SingBoxDir "windows-amd64\sing-box-$SingBoxVersion-windows-amd64\sing-box.exe"
+$XrayDir = Join-Path $DepsDir "xray-v$XrayVersion"
+$XrayExe = Join-Path $XrayDir "xray.exe"
+$WinDivertDir = Join-Path $DepsDir "WinDivert-$WinDivertVersion-A"
+$WinDivertX64Dir = Join-Path $WinDivertDir "x64"
+$ReleasePlatform = "windows"
+$ReleaseArch = "x64"
+$RequiredDepFiles = @("sing-box.exe", "xray.exe", "wireguard.exe", "wg.exe", "wintun.dll", "WinDivert.dll", "WinDivert64.sys")
+$ForbiddenDepFiles = @("winws.exe", "winws2.exe", "cygwin1.dll", "zapret-lib.lua", "zapret-antidpi.lua", "tg-ws-proxy.exe")
+$WindowsInstallerAsset = "dropo-Windows-Setup-x64.exe"
+$WindowsPortableAsset = "dropo-Windows-Portable-x64.zip"
+$AndroidReleaseArch = $AndroidArchitecture
+if ($AndroidArchitecture -eq 'x64' -and (-not $AndroidPreview -or $willBuildAndroidBundle)) { throw 'x64 is restricted to local AndroidPreview emulator builds.' }
+$AndroidFlutterTargetPlatform = if ($AndroidArchitecture -eq 'x64') {'android-x64'} elseif ($AndroidArchitecture -eq "universal") { "android-arm,android-arm64" } else { "android-arm64" }
+$AndroidGoMobileTarget = if ($AndroidArchitecture -eq 'x64') {'android/amd64'} elseif ($willBuildAndroidBundle -or $AndroidArchitecture -eq "universal") { "android/arm,android/arm64" } else { "android/arm64" }
+$AndroidBridgeTags = "with_gvisor,with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0"
+$AndroidAppAsset = "dropo-Android-$AndroidReleaseArch.apk"
+$AndroidBundleAsset = 'dropo-Android-Play-universal.aab'
+
+. (Join-Path $PSScriptRoot "windows-dependencies.ps1")
+
+# Clean build
+if ($Clean) {
+    Write-Host "Cleaning..." -ForegroundColor Yellow
+    if (Test-Path $VersionDir) {
+        Remove-Item -Recurse -Force $VersionDir
+    }
+    Write-Host "[OK] Cleaned release/$BuildFolderName" -ForegroundColor Green
+    if (-not $Build -and -not $Flutter -and -not $AppOnly -and -not $All -and -not $Android -and -not $AndroidBundle -and -not $Portable) {
+        exit 0
+    }
+}
+
+
+. (Join-Path $PSScriptRoot "windows-packaging.ps1")
+
+function Get-SignToolCommand {
+    $fromPath = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($fromPath) {
+        return $fromPath.Source
+    }
+
+    $kitsRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    if (Test-Path $kitsRoot) {
+        return Get-ChildItem -Path $kitsRoot -Filter signtool.exe -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    return $null
+}
+
+function Invoke-WindowsCodeSigning {
+    param([string[]]$Paths)
+
+    $pfxPath = [string]$env:DROPO_WINDOWS_PFX_PATH
+    $pfxPassword = [string]$env:DROPO_WINDOWS_PFX_PASSWORD
+    $certificateSha1 = ([string]$env:DROPO_WINDOWS_CERT_SHA1) -replace '\s', ''
+    $hasPfx = -not [string]::IsNullOrWhiteSpace($pfxPath)
+    $hasCertificateSha1 = -not [string]::IsNullOrWhiteSpace($certificateSha1)
+
+    if (-not $hasPfx -and -not $hasCertificateSha1) {
+        if ($RequireWindowsSigning -or $env:DROPO_REQUIRE_WINDOWS_SIGNING -eq "1") {
+            throw "Windows signing is required, but no public certificate is configured."
+        }
+        if (-not $script:UnsignedWindowsNoticeShown) {
+            Write-Host "[WARNING] No public Windows signing identity configured; Windows artifacts will remain unsigned." -ForegroundColor Yellow
+            $script:UnsignedWindowsNoticeShown = $true
+        }
+        return
+    }
+    if ($hasPfx -and (-not (Test-Path -LiteralPath $pfxPath -PathType Leaf))) {
+        throw "Windows signing certificate not found: $pfxPath"
+    }
+    if ($hasPfx -and [string]::IsNullOrWhiteSpace($pfxPassword)) {
+        throw "DROPO_WINDOWS_PFX_PASSWORD is required with DROPO_WINDOWS_PFX_PATH."
+    }
+    $signTool = Get-SignToolCommand
+    if (-not $signTool) {
+        throw "signtool.exe was not found. Install the Windows SDK signing tools."
+    }
+    $timestampUrl = [string]$env:DROPO_WINDOWS_TIMESTAMP_URL
+    if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
+        $timestampUrl = "http://timestamp.digicert.com"
+    }
+
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Windows binary to sign was not found: $path"
+        }
+        $arguments = @("sign", "/fd", "SHA256")
+        if (-not $SkipWindowsTimestamp) {
+            $arguments += @("/td", "SHA256", "/tr", $timestampUrl)
+        }
+        if ($hasPfx) {
+            $arguments += @("/f", $pfxPath, "/p", $pfxPassword)
+        } else {
+            $arguments += @("/sha1", $certificateSha1)
+        }
+        $arguments += $path
+        & $signTool @arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Authenticode signing failed for $path (exit code $LASTEXITCODE)."
+        }
+        & $signTool verify /pa /all $path | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Authenticode verification failed for $path (exit code $LASTEXITCODE)."
+        }
+        Write-Host "[OK] Signed $([IO.Path]::GetFileName($path))" -ForegroundColor Green
+    }
+}
+
+# Build application
+function Build-Application {
+    Write-Host ""
+    Write-Host "Building application..." -ForegroundColor Yellow
+
+    $FlutterCmd = Get-FlutterCommand
+    if (-not $FlutterCmd) {
+        Write-Host "[ERROR] Flutter SDK not found. Configure DROPO_TOOLCHAIN_ROOT or add Flutter to PATH" -ForegroundColor Red
+        exit 1
+    }
+    $FlutterDir = Join-Path $ScriptRoot "flutter_app"
+    if (-not (Test-Path $FlutterDir)) {
+        Write-Host "[ERROR] flutter_app/ not found." -ForegroundColor Red
+        exit 1
+    }
+
+    # Every Windows artifact is self-contained, including CI/AppOnly requests.
+    Ensure-SingBoxWindowsDependency
+    Ensure-WinDivertWindowsDependency
+    Ensure-XrayWindowsDependency
+    Ensure-WireGuardWindowsDependency
+    # Every build, including AppOnly/CI builds, verifies the repository-owned
+    # blocked catalog and refreshes it when upstream published a new release.
+    # End-user startup never downloads routing data.
+    $filterUpdateArguments = @{
+        RepositoryRoot = $ScriptRoot
+        SingBoxPath    = $SingBoxExe
+    }
+    if ($UseBundledFilters) {
+        $filterUpdateArguments.Offline = $true
+    }
+    & (Join-Path $ScriptRoot "scripts\filters\update-blocked-lists.ps1") @filterUpdateArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Bundled blocked-list update failed with exit code $LASTEXITCODE"
+    }
+    $postCatalogStatus = @(& git -C $ScriptRoot status --porcelain 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Cannot verify the source worktree after the blocked catalog update. Git status failed.'
+    }
+    $postCatalogDirty = $postCatalogStatus.Count -gt 0
+    if ($postCatalogDirty -and -not $dirtyBuildAllowed) {
+        throw "The blocked catalog changed during the build. Review and commit the refreshed catalog, then rebuild from that clean commit."
+    }
+
+    # Keep release/ clean: every new build removes ALL previous build containers
+    # (any version/hash) and any stray archives, so only the current build remains.
+    if (-not $KeepExistingBuilds -and (Test-Path $ReleaseDir)) {
+        $oldBuilds = Get-ChildItem -Path $ReleaseDir -Directory | Where-Object { $_.Name -match "^dropo-.+-[0-9a-f]+$" }
+        foreach ($oldBuild in $oldBuilds) {
+            Write-Host "[CLEAN] Removing old build: $($oldBuild.Name)" -ForegroundColor Yellow
+            try {
+                Remove-Item -Path $oldBuild.FullName -Recurse -Force
+            } catch {
+                Write-Host "[WARNING] Could not remove old build $($oldBuild.Name): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+        # Remove any stray archives left directly in release/ root.
+        $oldZips = Get-ChildItem -Path $ReleaseDir -File -Filter "*.zip"
+        foreach ($oldZip in $oldZips) {
+            Write-Host "[CLEAN] Removing old ZIP: $($oldZip.Name)" -ForegroundColor Yellow
+            Remove-Item -Path $oldZip.FullName -Force
+        }
+    }
+
+    # Create the release container (identified by version+hash) and the runnable
+    # app subfolder inside it (named plain "dropo", no version/hash). Split
+    # release archives are written next to it, inside the container.
+    if (-not (Test-Path $VersionDir)) {
+        New-Item -ItemType Directory -Path $VersionDir | Out-Null
+    }
+    if ($VersionInfo.singbox.sourceBuild -eq $true -or $VersionInfo.xray.sourceBuild -eq $true) {
+        & (Join-Path $ScriptRoot 'tools\export-runtime-source.ps1') -DestinationDirectory $VersionDir
+    }
+    $AppFolder = Join-Path $VersionDir "dropo"
+    if (-not (Test-Path $AppFolder)) {
+        New-Item -ItemType Directory -Path $AppFolder | Out-Null
+    }
+
+    # Root contains only the launcher and resources/. The actual Flutter UI,
+    # Go core, manifests and runtime files live directly under resources/.
+    $RuntimeFolder = Join-Path $AppFolder "resources"
+    if (-not (Test-Path $RuntimeFolder)) {
+        New-Item -ItemType Directory -Path $RuntimeFolder | Out-Null
+    }
+    $resourcesDir = Join-Path $RuntimeFolder "resources"
+    if (-not (Test-Path $resourcesDir)) {
+        New-Item -ItemType Directory -Path $resourcesDir | Out-Null
+    }
+
+    # Build an initial core. It is rebuilt after native files are staged, with
+    # the exact runtime-manifest hash embedded into the signed executable.
+    # Keep Go symbol and DWARF metadata in the unsigned Windows core. Stripped
+    # network-facing Go binaries are prone to unstable Defender ML detections;
+    # public Authenticode signing remains the publication-grade solution.
+    $ldflags = "-X 'main.Version=$AppVersion' -X 'main.BuildTime=$BuildTime' -X 'main.BuildHash=$BuildHash' -X 'main.SingBoxVersion=$SingBoxVersion' -X 'main.WireGuardVersion=$WireGuardVersion' -H=windowsgui"
+
+    Push-Location $AppDir
+    try {
+        Write-Host "Building dropo-core.exe $AppVersion (hash: $BuildHash)..." -ForegroundColor Gray
+        & go build -trimpath -buildvcs=false -ldflags $ldflags -o (Join-Path $RuntimeFolder "dropo-core.exe") .
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERROR] Go core build failed!" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "[OK] Built dropo-core.exe" -ForegroundColor Green
+    } finally {
+        Pop-Location
+    }
+
+    Push-Location $FlutterDir
+    try {
+        if ($ReuseFlutterWindowsOutput) {
+            Write-Host "Reusing existing Flutter Windows Release output..." -ForegroundColor Yellow
+        } else {
+            # Flutter/CMake can reuse an AOT snapshot compiled with an older
+            # --dart-define value even when the release build hash changes.
+            # That makes a freshly packaged UI reject its own freshly built
+            # core as an incompatible instance. Release builds must invalidate
+            # both layers of the Windows AOT cache before compiling the UI.
+            $flutterAOTCache = Join-Path $FlutterDir ".dart_tool\flutter_build"
+            $flutterWindowsCache = Join-Path $FlutterDir "build\windows"
+            foreach ($cachePath in @($flutterAOTCache, $flutterWindowsCache)) {
+                if (Test-Path -LiteralPath $cachePath) {
+                    Write-Host "[CLEAN] Removing stale Flutter release cache: $cachePath" -ForegroundColor Yellow
+                    Remove-Item -LiteralPath $cachePath -Recurse -Force
+                }
+            }
+            Write-Host "Building Flutter Windows UI..." -ForegroundColor Gray
+            $flutterBuildArguments = @(
+                "build",
+                "windows",
+                "--release",
+                "--build-name", $AppVersion,
+                "--build-number", "1",
+                "--dart-define", "DROPO_CORE_ENDPOINT=http://127.0.0.1:17890",
+                "--dart-define", "DROPO_APP_VERSION=$AppVersion",
+                "--dart-define", "DROPO_BUILD_HASH=$BuildHash"
+            )
+            $flutterBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
+            $flutterBuildArguments += @('--dart-define', 'DROPO_PURCHASES_ENABLED=true')
+            Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages
+            $flutterBuildArguments += "--no-pub"
+            & $FlutterCmd @flutterBuildArguments
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[ERROR] Flutter Windows build failed." -ForegroundColor Red
+                exit 1
+            }
+        }
+    } finally {
+        Pop-Location
+    }
+    $FlutterOutput = Join-Path $FlutterDir "build\windows\x64\runner\Release"
+    if (-not (Test-Path $FlutterOutput)) {
+        Write-Host "[ERROR] Flutter output not found: $FlutterOutput" -ForegroundColor Red
+        exit 1
+    }
+    $flutterAOTSnapshot = Join-Path $FlutterOutput "data\app.so"
+    if (-not (Test-Path -LiteralPath $flutterAOTSnapshot -PathType Leaf)) {
+        Write-Host "[ERROR] Flutter AOT snapshot not found: $flutterAOTSnapshot" -ForegroundColor Red
+        exit 1
+    }
+    $flutterAOTText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($flutterAOTSnapshot))
+    if (-not $flutterAOTText.Contains($BuildHash)) {
+        Write-Host "[ERROR] Flutter AOT snapshot does not contain current build hash $BuildHash. Refusing to package a UI/core mismatch." -ForegroundColor Red
+        exit 1
+    }
+    $flutterAOTText = $null
+    Copy-Item -Path (Join-Path $FlutterOutput "*") -Destination $RuntimeFolder -Recurse -Force
+    $uiExe = Join-Path $RuntimeFolder "dropo.exe"
+    if (-not (Test-Path $uiExe)) {
+        Write-Host "[ERROR] dropo.exe not found after Flutter build!" -ForegroundColor Red
+        exit 1
+    }
+    Rename-Item -LiteralPath $uiExe -NewName "dropo-ui.exe" -Force
+    Write-Host "[OK] Built Flutter dropo-ui.exe" -ForegroundColor Green
+
+    & (Join-Path $ScriptRoot 'tools\check-windows-ui-runtime.ps1') `
+        -RuntimeFolder $RuntimeFolder `
+        -CMakeCachePath (Join-Path $FlutterDir 'build\windows\x64\CMakeCache.txt')
+
+    $coreExe = Join-Path $RuntimeFolder "dropo-core.exe"
+    $uiExe = Join-Path $RuntimeFolder "dropo-ui.exe"
+    # Sign first: Authenticode changes PE bytes, so the launcher must pin the
+    # final on-disk hashes that it will verify immediately before execution.
+    Invoke-WindowsCodeSigning -Paths @($coreExe, $uiExe)
+    $coreSHA256 = (Get-FileHash -LiteralPath $coreExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    $uiSHA256 = (Get-FileHash -LiteralPath $uiExe -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    Push-Location (Join-Path $ScriptRoot "launcher")
+    try {
+        Write-Host "Building dropo launcher..." -ForegroundColor Gray
+        $launcherLdflags = "-X 'main.expectedCoreSHA256=$coreSHA256' -X 'main.expectedUISHA256=$uiSHA256' -s -w -H=windowsgui"
+        & go build -trimpath -buildvcs=false -ldflags $launcherLdflags -o (Join-Path $AppFolder "dropo.exe") .
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERROR] dropo launcher build failed!" -ForegroundColor Red
+            exit 1
+        }
+    } finally {
+        Pop-Location
+    }
+    Write-Host "[OK] Built launcher dropo.exe" -ForegroundColor Green
+
+    Invoke-WindowsCodeSigning -Paths @((Join-Path $AppFolder "dropo.exe"))
+
+    # Create bin directory for sing-box
+    $binDir = Join-Path $RuntimeFolder "bin"
+    if (-not (Test-Path $binDir)) {
+        New-Item -ItemType Directory -Path $binDir | Out-Null
+    }
+    $wfpGuardDestination = Join-Path $binDir 'dropo-wfp-guard.exe'
+    if (Test-Path -LiteralPath $wfpGuardDestination) {
+        throw 'Stale dropo-wfp-guard.exe found in the release staging folder; refuse implicit packaging or overwrite.'
+    }
+
+    # Copy sing-box.exe to bin/ folder
+    $singBoxDest = Join-Path $binDir "sing-box.exe"
+    if (Test-Path $SingBoxExe) {
+        Copy-Item $SingBoxExe $singBoxDest -Force
+        Write-Host "[OK] Copied bin/sing-box.exe (v$SingBoxVersion)" -ForegroundColor Green
+    } else {
+        Write-Host "[WARNING] sing-box.exe not found at: $SingBoxExe" -ForegroundColor Yellow
+        Write-Host "          Run download-singbox.ps1 to download it" -ForegroundColor Yellow
+    }
+
+    # Copy WireGuard dependencies to bin/ folder
+    $WireGuardDir = Join-Path $DepsDir "wireguard-windows-v$WireGuardVersion"
+    $WireGuardFiles = @("wireguard.exe", "wg.exe", "wintun.dll")
+
+    foreach ($file in $WireGuardFiles) {
+        $src = Join-Path $WireGuardDir $file
+        $dst = Join-Path $binDir $file
+        if (Test-Path $src) {
+            Copy-Item $src $dst -Force
+            Write-Host "[OK] Copied bin/$file" -ForegroundColor Green
+        } else {
+            Write-Host "[WARNING] $file not found at: $src" -ForegroundColor Yellow
+        }
+    }
+
+    # Copy the official WinDivert runtime used by Dropo's in-process engine.
+    foreach ($file in @("WinDivert.dll", "WinDivert64.sys")) {
+        $src = Join-Path $WinDivertX64Dir $file
+        $dst = Join-Path $binDir $file
+        if (-not (Test-Path $src -PathType Leaf)) {
+            throw "Required official WinDivert file not found: $src"
+        }
+        Copy-Item $src $dst -Force
+        Write-Host "[OK] Copied bin/$file (official WinDivert v$WinDivertVersion)" -ForegroundColor Green
+    }
+
+    # Copy Xray-core for VLESS xhttp bridge outbounds
+    $xrayDst = Join-Path $binDir "xray.exe"
+    if (Test-Path $XrayExe) {
+        Copy-Item $XrayExe $xrayDst -Force
+        Write-Host "[OK] Copied bin/xray.exe (Xray-core v$XrayVersion)" -ForegroundColor Green
+    } else {
+        Write-Host "[WARNING] xray.exe not found at: $XrayExe" -ForegroundColor Yellow
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        . (Join-Path $ScriptRoot 'tools\check-wfp-guard-release.ps1') -FunctionsOnly
+        Copy-VerifiedDropoWfpGuard -BinaryPath $WfpGuardBinaryPath -ExpectedSHA256 $WfpGuardSHA256 -BinFolder $binDir | Out-Null
+        Write-Host '[OK] Staged Windows-trusted, SHA-256-pinned WFP guard as an inert runtime file' -ForegroundColor Green
+    }
+
+    # Defender evaluates extracted child PE files independently from the outer
+    # installer. Preserve upstream signatures and report unsigned dependencies,
+    # but never re-sign third-party files as though dropo authored them.
+    $unsignedNestedPE = @(Get-ChildItem -LiteralPath $binDir -File | Where-Object {
+        $_.Extension -in @(".exe", ".dll") -and
+        (Get-AuthenticodeSignature -FilePath $_.FullName).Status -eq [System.Management.Automation.SignatureStatus]::NotSigned
+    } | Select-Object -ExpandProperty FullName)
+    if ($unsignedNestedPE.Count -gt 0) {
+        Write-Host "[INFO] $($unsignedNestedPE.Count) upstream PE runtime file(s) are unsigned and remain attributed to upstream." -ForegroundColor DarkYellow
+    }
+    # Copy third-party license notices required by bundled sidecar binaries.
+    $licensesDir = Join-Path $RuntimeFolder "licenses"
+    Copy-LicenseFile (Join-Path $SingBoxDir "windows-amd64\sing-box-$SingBoxVersion-windows-amd64\LICENSE") $licensesDir "sing-box-LICENSE.txt"
+    Copy-LicenseFile (Join-Path $XrayDir "LICENSE") $licensesDir "xray-LICENSE.txt"
+    Copy-LicenseFile (Join-Path $WireGuardDir "LICENSE") $licensesDir "wireguard-windows-LICENSE.txt"
+    Copy-LicenseFile (Join-Path $WinDivertDir "LICENSE") $licensesDir "WinDivert-LICENSE.txt"
+    Copy-LicenseFile (Join-Path $DepsDir "filters\LICENSE.Re-filter-lists.txt") $licensesDir "Re-filter-lists-LICENSE.txt"
+    Copy-LicenseFile (Join-Path $DepsDir "metacubex-utls-LICENSE.txt") $licensesDir "metacubex-utls-LICENSE.txt"
+    Copy-LicenseFile (Join-Path $ScriptRoot "THIRD_PARTY_NOTICES.md") $licensesDir "THIRD_PARTY_NOTICES.md"
+    # Copy template.json
+    $templateSrc = Join-Path $AppDir "config\template.json"
+    if (Test-Path $templateSrc) {
+        Copy-Item $templateSrc $resourcesDir -Force
+        Write-Host "[OK] Copied template.json" -ForegroundColor Green
+    }
+
+    # Copy filters (rule-sets for routing)
+    $filtersDir = Join-Path $DepsDir "filters"
+    $filtersDest = Join-Path $binDir "filters"
+    if (Test-Path $filtersDir) {
+        if (-not (Test-Path $filtersDest)) {
+            New-Item -ItemType Directory -Path $filtersDest | Out-Null
+        }
+        # Copy all .srs files and version.json
+        Get-ChildItem -Path $filtersDir -File | Where-Object { $_.Extension -in @(".srs", ".lst") } | ForEach-Object {
+            Copy-Item $_.FullName $filtersDest -Force
+        }
+        $filtersVersion = Join-Path $filtersDir "version.json"
+        if (Test-Path $filtersVersion) {
+            Copy-Item $filtersVersion $filtersDest -Force
+        }
+        $filterCount = (Get-ChildItem -Path $filtersDest -Filter "*.srs").Count
+        $catalogCount = (Get-ChildItem -Path $filtersDest -Filter "*.lst").Count
+        Write-Host "[OK] Copied bin/filters/ ($filterCount rule-sets, $catalogCount native catalogs)" -ForegroundColor Green
+    } else {
+        Write-Host "[WARNING] Filters not found at: $filtersDir" -ForegroundColor Yellow
+    }
+
+    # Copy support scripts for client-side diagnostics and recovery.
+    $supportScripts = @(
+        "repair-browser-proxy.ps1"
+    )
+    foreach ($scriptName in $supportScripts) {
+        $scriptPath = Join-Path $ScriptRoot "tools\$scriptName"
+        if (Test-Path $scriptPath -PathType Leaf) {
+            Copy-Item $scriptPath (Join-Path $RuntimeFolder $scriptName) -Force
+            Write-Host "[OK] Copied $scriptName" -ForegroundColor Green
+        }
+    }
+
+    # Keep release artifacts clean even if a local smoke test previously wrote
+    # runtime state into the resources folder.
+    $runtimeResourceEntries = @(
+        "active_config.json",
+        "settings.json",
+        "cache.db",
+        "xray_config.json",
+        "tg-ws-proxy.json",
+        "service_strategy_cache.json",
+        "service-hostlists"
+    )
+    foreach ($entry in $runtimeResourceEntries) {
+        $runtimePath = Join-Path $resourcesDir $entry
+        if (Test-Path $runtimePath) {
+            Remove-Item -LiteralPath $runtimePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # The native runtime is content-addressed and described file-by-file. The
+    # signed core trusts only the SHA-256 of this local manifest; no executable
+    # dependency URL or archive identity is accepted by a current Windows build.
+    foreach ($requiredFile in $RequiredDepFiles) {
+        if (-not (Test-Path (Join-Path $binDir $requiredFile) -PathType Leaf)) {
+			throw "Core dependency staging is missing required file: $requiredFile"
+        }
+    }
+    foreach ($forbiddenFile in $ForbiddenDepFiles) {
+        if (Test-Path (Join-Path $binDir $forbiddenFile)) {
+            throw "Forbidden Windows runtime file must not be packaged: $forbiddenFile"
+        }
+    }
+
+    $runtimeFiles = @(Get-ChildItem -LiteralPath $binDir -Recurse -File |
+        Where-Object { $_.Name -ne ".deps-version" } |
+        Sort-Object FullName)
+    if ($runtimeFiles.Count -eq 0) {
+        throw "Bundled runtime is empty."
+    }
+    $runtimeIdentity = New-Object System.Text.StringBuilder
+    foreach ($file in $runtimeFiles) {
+        $relative = "bin/" + $file.FullName.Substring($binDir.Length).TrimStart([char[]]"\/").Replace('\', '/')
+        $sha = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        [void]$runtimeIdentity.Append($relative).Append('|').Append([long]$file.Length).Append('|').Append($sha).Append("`n")
+    }
+    $runtimeIdentityHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($runtimeIdentity.ToString()))
+    $RuntimeVersion = ([System.BitConverter]::ToString($runtimeIdentityHash).Replace('-', '').ToLowerInvariant()).Substring(0, 12)
+    Set-Content -Path (Join-Path $binDir ".deps-version") -Value $RuntimeVersion -NoNewline -Encoding ascii
+
+    $runtimeManifestFiles = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $binDir -Recurse -File | Sort-Object FullName)) {
+        $relative = "bin/" + $file.FullName.Substring($binDir.Length).TrimStart([char[]]"\/").Replace('\', '/')
+        $runtimeManifestFiles += [ordered]@{
+            path   = $relative
+            size   = [long]$file.Length
+            sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $runtimeManifest = [ordered]@{ version = $RuntimeVersion; files = $runtimeManifestFiles }
+    $runtimeManifestPath = Join-Path $RuntimeFolder "runtime-manifest.json"
+    [System.IO.File]::WriteAllText($runtimeManifestPath, ($runtimeManifest | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+    $runtimeManifestSHA256 = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Host "[OK] Wrote trusted runtime manifest (version=$RuntimeVersion, files=$($runtimeManifestFiles.Count))" -ForegroundColor Green
+
+    # A compact SPDX 2.3 software bill of materials travels inside the signed
+    # Windows packages. It describes every native runtime file by SHA-256 and
+    # the independently versioned components that produced the bundle.
+    $spdxSHA1Values = @(Get-ChildItem -LiteralPath $binDir -Recurse -File | Sort-Object FullName | ForEach-Object {
+        (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA1).Hash.ToLowerInvariant()
+    })
+    $spdxVerificationBytes = [System.Text.Encoding]::ASCII.GetBytes(($spdxSHA1Values -join ""))
+    $spdxVerificationHash = [System.Security.Cryptography.SHA1]::Create().ComputeHash($spdxVerificationBytes)
+    $spdxVerificationCode = [System.BitConverter]::ToString($spdxVerificationHash).Replace('-', '').ToLowerInvariant()
+    $spdxPackages = @(
+        [ordered]@{ name = "dropo"; SPDXID = "SPDXRef-Package-dropo"; versionInfo = $AppVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $true; packageVerificationCode = [ordered]@{ packageVerificationCodeValue = $spdxVerificationCode }; licenseConcluded = "MIT"; licenseDeclared = "MIT" },
+        [ordered]@{ name = "sing-box"; SPDXID = "SPDXRef-Package-sing-box"; versionInfo = $SingBoxVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "NOASSERTION"; licenseDeclared = "NOASSERTION" },
+        [ordered]@{ name = "Xray-core"; SPDXID = "SPDXRef-Package-xray"; versionInfo = $XrayVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "MPL-2.0"; licenseDeclared = "MPL-2.0" },
+        [ordered]@{ name = "WireGuard for Windows"; SPDXID = "SPDXRef-Package-wireguard"; versionInfo = $WireGuardVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "NOASSERTION"; licenseDeclared = "NOASSERTION" },
+        [ordered]@{ name = "WinDivert"; SPDXID = "SPDXRef-Package-windivert"; versionInfo = $WinDivertVersion; downloadLocation = "NOASSERTION"; filesAnalyzed = $false; licenseConcluded = "LGPL-3.0-only OR GPL-2.0-only"; licenseDeclared = "LGPL-3.0-only OR GPL-2.0-only" },
+        [ordered]@{ name = "Flowseal zapret-discord-youtube payloads"; SPDXID = "SPDXRef-Package-flowseal-payloads"; versionInfo = "1.10.2"; downloadLocation = "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.2"; filesAnalyzed = $false; licenseConcluded = "MIT"; licenseDeclared = "MIT" },
+        [ordered]@{ name = "metacubex uTLS"; SPDXID = "SPDXRef-Package-metacubex-utls"; versionInfo = $UTLSVersion; downloadLocation = "https://github.com/metacubex/utls"; filesAnalyzed = $false; licenseConcluded = "BSD-3-Clause"; licenseDeclared = "BSD-3-Clause" }
+    )
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        # The guard is a separate Dropo-signed binary supplied to this build.
+        # Its version/license are not inferred from the parent app's metadata.
+        $guardSHA1 = (Get-FileHash -LiteralPath $wfpGuardDestination -Algorithm SHA1).Hash.ToLowerInvariant()
+        $guardVerificationBytes = [System.Text.Encoding]::ASCII.GetBytes($guardSHA1)
+        $guardVerificationHash = [System.Security.Cryptography.SHA1]::Create().ComputeHash($guardVerificationBytes)
+        $guardVerificationCode = [System.BitConverter]::ToString($guardVerificationHash).Replace('-', '').ToLowerInvariant()
+        $spdxPackages += [ordered]@{
+            name = 'Dropo WFP guard'
+            SPDXID = 'SPDXRef-Package-dropo-wfp-guard'
+            versionInfo = 'NOASSERTION'
+            downloadLocation = 'NOASSERTION'
+            filesAnalyzed = $true
+            packageVerificationCode = [ordered]@{ packageVerificationCodeValue = $guardVerificationCode }
+            licenseConcluded = 'NOASSERTION'
+            licenseDeclared = 'NOASSERTION'
+            checksums = @([ordered]@{ algorithm = 'SHA256'; checksumValue = $WfpGuardSHA256.ToLowerInvariant() })
+        }
+    }
+    $spdxFiles = @()
+    $spdxRelationships = @([ordered]@{ spdxElementId = "SPDXRef-DOCUMENT"; relationshipType = "DESCRIBES"; relatedSpdxElement = "SPDXRef-Package-dropo" })
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        $spdxRelationships += [ordered]@{ spdxElementId = 'SPDXRef-Package-dropo'; relationshipType = 'CONTAINS'; relatedSpdxElement = 'SPDXRef-Package-dropo-wfp-guard' }
+    }
+    for ($index = 0; $index -lt $runtimeManifestFiles.Count; $index++) {
+        $item = $runtimeManifestFiles[$index]
+        $fileID = "SPDXRef-File-$($index + 1)"
+        $spdxFiles += [ordered]@{
+            fileName = "./$($item.path)"
+            SPDXID = $fileID
+            checksums = @([ordered]@{ algorithm = "SHA256"; checksumValue = $item.sha256 })
+            licenseConcluded = "NOASSERTION"
+            copyrightText = "NOASSERTION"
+        }
+        $spdxRelationships += [ordered]@{ spdxElementId = "SPDXRef-Package-dropo"; relationshipType = "CONTAINS"; relatedSpdxElement = $fileID }
+        if ([string]$item.path -ceq 'bin/dropo-wfp-guard.exe') {
+            $spdxRelationships += [ordered]@{ spdxElementId = 'SPDXRef-Package-dropo-wfp-guard'; relationshipType = 'CONTAINS'; relatedSpdxElement = $fileID }
+        }
+    }
+    $spdxDocument = [ordered]@{
+        spdxVersion = "SPDX-2.3"
+        dataLicense = "CC0-1.0"
+        SPDXID = "SPDXRef-DOCUMENT"
+        name = "dropo-$AppVersion-windows-x64"
+        documentNamespace = "https://github.com/sunnydjam/dropo-by-sunnydjam/spdx/$AppVersion/$BuildHash"
+        creationInfo = [ordered]@{ created = $BuildTimestampISO; creators = @("Organization: Droponevedimka") }
+        packages = $spdxPackages
+        files = $spdxFiles
+        relationships = $spdxRelationships
+    }
+    $spdxPath = Join-Path $RuntimeFolder "dropo-sbom.spdx.json"
+    [System.IO.File]::WriteAllText($spdxPath, ($spdxDocument | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding($false)))
+
+    # This provenance statement is intentionally local and self-contained. It
+    # records the exact source revision and runtime-manifest subject; a public
+    # Authenticode identity strengthens origin when one is configured.
+    $provenance = [ordered]@{
+        _type = "https://in-toto.io/Statement/v1"
+        subject = @([ordered]@{ name = "runtime-manifest.json"; digest = [ordered]@{ sha256 = $runtimeManifestSHA256 } })
+        predicateType = "https://slsa.dev/provenance/v1"
+        predicate = [ordered]@{
+            buildDefinition = [ordered]@{
+                buildType = "https://github.com/sunnydjam/dropo-by-sunnydjam/build/windows-installer-portable/v1"
+                externalParameters = [ordered]@{ version = $AppVersion; platform = $ReleasePlatform; architecture = $ReleaseArch }
+                internalParameters = [ordered]@{ buildHash = $BuildHash; sourceRevision = $SourceRevision; sourceDirty = $SourceDirty }
+                resolvedDependencies = @(
+                    [ordered]@{ uri = "pkg:generic/sing-box@$SingBoxVersion" },
+                    [ordered]@{ uri = "pkg:generic/xray-core@$XrayVersion" },
+                    [ordered]@{ uri = "pkg:generic/wireguard-windows@$WireGuardVersion" },
+                    [ordered]@{ uri = "pkg:generic/windivert@$WinDivertVersion" },
+                    [ordered]@{ uri = "pkg:github/Flowseal/zapret-discord-youtube@1.10.2" },
+                    [ordered]@{ uri = "pkg:golang/github.com/metacubex/utls@$UTLSVersion" }
+                )
+            }
+            runDetails = [ordered]@{ builder = [ordered]@{ id = "dropo-local-windows-builder" }; metadata = [ordered]@{ invocationId = $BuildHash; startedOn = $BuildTimestampISO } }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        $provenance.predicate.buildDefinition.resolvedDependencies += [ordered]@{
+            uri = 'file:dropo-wfp-guard.exe'
+            digest = [ordered]@{ sha256 = $WfpGuardSHA256.ToLowerInvariant() }
+        }
+    }
+    $provenancePath = Join-Path $RuntimeFolder "dropo-build-provenance.json"
+    [System.IO.File]::WriteAllText($provenancePath, ($provenance | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "[OK] Wrote SPDX SBOM and package provenance metadata" -ForegroundColor Green
+
+    $finalLdflags = "-X 'main.trustedRuntimeVersion=$RuntimeVersion' -X 'main.trustedRuntimeManifestSHA256=$runtimeManifestSHA256' -X 'main.Version=$AppVersion' -X 'main.BuildTime=$BuildTime' -X 'main.BuildHash=$BuildHash' -X 'main.SingBoxVersion=$SingBoxVersion' -X 'main.WireGuardVersion=$WireGuardVersion' -H=windowsgui"
+    Push-Location $AppDir
+    try {
+        & go build -trimpath -buildvcs=false -ldflags $finalLdflags -o $coreExe .
+        if ($LASTEXITCODE -ne 0) {
+            throw "Go core rebuild with final bundled-runtime identity failed."
+        }
+    } finally {
+        Pop-Location
+    }
+    Invoke-WindowsCodeSigning -Paths @($coreExe)
+    $coreSHA256 = (Get-FileHash -LiteralPath $coreExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        # Pass the same in-memory hash that was embedded by finalLdflags above.
+        # A hash derived from the adjacent manifest here would not establish the
+        # signed core -> manifest -> guard chain.
+        $guardPreflightArgs = @{
+            RuntimeFolder = $RuntimeFolder
+            ExpectedManifestSHA256 = $runtimeManifestSHA256
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:DROPO_WINDOWS_CERT_SHA1)) {
+            $guardPreflightArgs.ExpectedSignerThumbprint = [string]$env:DROPO_WINDOWS_CERT_SHA1
+        }
+        Assert-DropoWfpGuardRelease @guardPreflightArgs | Out-Null
+        Write-Host '[OK] Staged WFP guard matches the build-time manifest hash and signed core publisher' -ForegroundColor Green
+    }
+
+    Push-Location (Join-Path $ScriptRoot "launcher")
+    try {
+        $launcherLdflags = "-X 'main.expectedCoreSHA256=$coreSHA256' -X 'main.expectedUISHA256=$uiSHA256' -s -w -H=windowsgui"
+        & go build -trimpath -buildvcs=false -ldflags $launcherLdflags -o (Join-Path $AppFolder "dropo.exe") .
+        if ($LASTEXITCODE -ne 0) {
+            throw "Launcher rebuild after bundled-runtime binding failed."
+        }
+    } finally {
+        Pop-Location
+    }
+    Invoke-WindowsCodeSigning -Paths @((Join-Path $AppFolder "dropo.exe"))
+    Write-Host "[OK] Rebuilt core and launcher with the final bundled-runtime identity" -ForegroundColor Green
+
+    # Publish the same complete offline payload in two explicit forms. The
+    # installer owns updates and protected Program Files placement; the ZIP is
+    # genuinely portable and never attempts to replace itself while running.
+    $portablePath = Join-Path $VersionDir $WindowsPortableAsset
+    New-AppOnlyArchive -SourceAppFolder $AppFolder -DestinationZip $portablePath
+    $installerPath = Join-Path $VersionDir $WindowsInstallerAsset
+    New-WindowsInstaller -SourceAppFolder $AppFolder -DestinationExe $installerPath -PackageVersion $AppVersion
+    if (-not [string]::IsNullOrWhiteSpace($WfpGuardBinaryPath)) {
+        $guardInstallerArgs = @{
+            RuntimeFolder = $RuntimeFolder
+            InstallerPath = $installerPath
+            ExpectedManifestSHA256 = $runtimeManifestSHA256
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:DROPO_WINDOWS_CERT_SHA1)) {
+            $guardInstallerArgs.ExpectedSignerThumbprint = [string]$env:DROPO_WINDOWS_CERT_SHA1
+        }
+        Assert-DropoWfpGuardInstallerRelease @guardInstallerArgs | Out-Null
+        Write-Host '[OK] Signed installer, core and inert WFP guard share one trusted publisher' -ForegroundColor Green
+    }
+    foreach ($assetPath in @($installerPath, $portablePath)) {
+        $assetName = Split-Path -Leaf $assetPath
+        $assetSHA = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText("$assetPath.sha256", "$assetSHA  $assetName`n", [Text.UTF8Encoding]::new($false))
+        $assetSize = [math]::Round((Get-Item -LiteralPath $assetPath).Length / 1MB, 2)
+        Write-Host "[OK] Created $assetName ($assetSize MB, SHA-256 $assetSHA)" -ForegroundColor Green
+    }
+    if ($env:DROPO_SKIP_WINDOWS_RELEASE_GATE -ne "1") {
+        & (Join-Path $ScriptRoot "tools\windows-release-gate.ps1") -InstallerPath $installerPath -PortablePath $portablePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Windows MOTW/Defender release gate failed with exit code $LASTEXITCODE"
+        }
+    }
+
+    Write-Host ""
+    Write-Host "[SUCCESS] Build completed: release/$BuildFolderName/" -ForegroundColor Green
+    Write-Host "  app folder:  dropo/  (run dropo/dropo.exe)" -ForegroundColor Gray
+	$releaseFiles = @($WindowsInstallerAsset, $WindowsPortableAsset)
+	Write-Host "  release files: $($releaseFiles -join ' + ')" -ForegroundColor Gray
+
+    # Show files
+    Write-Host ""
+    Write-Host "Output files (release/$BuildFolderName/):" -ForegroundColor Cyan
+    Get-ChildItem $VersionDir -Recurse | ForEach-Object {
+        $size = if ($_.PSIsContainer) { "" } else { " ({0:N2} MB)" -f ($_.Length / 1MB) }
+        $relativePath = $_.FullName.Replace($VersionDir, "").TrimStart("\")
+        Write-Host "  $relativePath$size" -ForegroundColor White
+    }
+}
+
+function Get-FlutterCommand {
+    # A configured project SDK takes precedence over another project's PATH.
+    $toolchainFlutter = Join-Path $ToolchainRoot "flutter\bin\flutter.bat"
+    if (Test-Path -LiteralPath $toolchainFlutter -PathType Leaf) {
+        return $toolchainFlutter
+    }
+
+    $flutter = Get-Command flutter -ErrorAction SilentlyContinue
+    if ($flutter) {
+        return $flutter.Source
+    }
+
+    foreach ($sdkRoot in @(
+        (Join-Path (Split-Path $ScriptRoot -Parent) 'flutter-sdk'),
+        (Join-Path ([IO.Path]::GetPathRoot($ScriptRoot)) 'flutter-sdk')
+    )) {
+        $localFlutter = Join-Path $sdkRoot 'flutter/bin/flutter.bat'
+        if (Test-Path -LiteralPath $localFlutter -PathType Leaf) {
+            return $localFlutter
+        }
+    }
+
+    return $null
+}
+
+function Restore-FlutterLockedPackages {
+    param(
+        [Parameter(Mandatory = $true)][string]$FlutterCmd,
+        [switch]$Offline
+    )
+    # An unconstrained offline resolution may downgrade an unavailable pinned
+    # package to an older cached version, silently changing the release input.
+    $lockPath = Join-Path (Get-Location).Path 'pubspec.lock'
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+        throw 'A committed Flutter pubspec.lock is required for release builds.'
+    }
+    $lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash
+    $pubArguments = @('pub', 'get', '--enforce-lockfile')
+    if ($Offline) { $pubArguments += '--offline' }
+    Write-Host 'Restoring exact locked Flutter dependencies...' -ForegroundColor Gray
+    & $FlutterCmd @pubArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Locked Flutter dependency resolution failed. Fetch the exact packages online; do not update the lockfile during a release build.'
+    }
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash -cne $lockHash) {
+        throw 'Flutter dependency resolution changed pubspec.lock; refusing to build different release inputs.'
+    }
+}
+
+function Get-GoMobileCommand {
+    $gomobile = Get-Command gomobile -ErrorAction SilentlyContinue
+    if ($gomobile) {
+        return $gomobile.Source
+    }
+
+    $androidToolsRoot = [Environment]::GetEnvironmentVariable("DROPO_ANDROID_TOOLCHAIN_ROOT", "User")
+    if ($env:DROPO_ANDROID_TOOLCHAIN_ROOT) { $androidToolsRoot = $env:DROPO_ANDROID_TOOLCHAIN_ROOT }
+    foreach ($candidate in @(
+        (Join-Path $ToolchainRoot "gopath\bin\gomobile.exe"),
+        $(if ($androidToolsRoot) { Join-Path $androidToolsRoot "bin\gomobile.exe" })
+    )) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+    }
+
+    $localGoMobile = Join-Path $env:USERPROFILE "go\bin\gomobile.exe"
+    if (Test-Path $localGoMobile) {
+        return $localGoMobile
+    }
+
+    return $null
+}
+
+function Initialize-AndroidBuildEnvironment {
+    $androidToolsRoot = $env:DROPO_ANDROID_TOOLCHAIN_ROOT
+    if (-not $androidToolsRoot) { $androidToolsRoot = [Environment]::GetEnvironmentVariable("DROPO_ANDROID_TOOLCHAIN_ROOT", "User") }
+    if ($androidToolsRoot -and (Test-Path -LiteralPath $androidToolsRoot -PathType Container)) {
+        if (-not $env:ANDROID_HOME -and -not $env:ANDROID_SDK_ROOT) {
+            $env:ANDROID_HOME = Join-Path $androidToolsRoot "sdk"
+            $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
+        }
+        if (-not $env:JAVA_HOME) {
+            $javaRoot = Join-Path $androidToolsRoot "java"
+            $jdk = Get-ChildItem -LiteralPath $javaRoot -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory } |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "bin\java.exe") } |
+                Sort-Object FullName -Descending | Select-Object -First 1
+            if ($jdk) { $env:JAVA_HOME = $jdk.FullName }
+        }
+        if (-not $env:GRADLE_USER_HOME) { $env:GRADLE_USER_HOME = Join-Path $androidToolsRoot "gradle-cache" }
+        if (-not $env:GOCACHE) { $env:GOCACHE = Join-Path $androidToolsRoot "go-build-cache" }
+        $androidBin = Join-Path $androidToolsRoot "bin"
+        if (Test-Path -LiteralPath $androidBin) { $env:Path = "$androidBin;$env:Path" }
+    }
+    if (-not $env:ANDROID_HOME -and -not $env:ANDROID_SDK_ROOT) {
+        $sdkCandidates = @(
+            (Join-Path (Split-Path $ScriptRoot -Parent) 'android-sdk'),
+            (Join-Path ([IO.Path]::GetPathRoot($ScriptRoot)) 'android-sdk')
+        )
+        foreach ($localAndroidSdk in $sdkCandidates) {
+            if (Test-Path -LiteralPath $localAndroidSdk -PathType Container) {
+                $env:ANDROID_HOME = $localAndroidSdk
+                $env:ANDROID_SDK_ROOT = $localAndroidSdk
+                break
+            }
+        }
+    }
+
+    if (-not $env:JAVA_HOME) {
+        $javaCandidates = @(
+            (Join-Path (Split-Path $ScriptRoot -Parent) 'java'),
+            (Join-Path ([IO.Path]::GetPathRoot($ScriptRoot)) 'java')
+        )
+        foreach ($javaRoot in $javaCandidates) {
+            $localJdk = Get-ChildItem -LiteralPath $javaRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bin/java.exe') -PathType Leaf } |
+                Sort-Object Name -Descending | Select-Object -First 1
+            if ($localJdk) {
+                $env:JAVA_HOME = $localJdk.FullName
+                break
+            }
+        }
+    }
+
+    if ($env:JAVA_HOME -and ($env:PATH -notlike "$env:JAVA_HOME\bin*")) {
+        $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+    }
+}
+
+function Get-MtCommand {
+    $mt = Get-Command mt.exe -ErrorAction SilentlyContinue
+    if ($mt) {
+        return $mt.Source
+    }
+
+    $kitsDir = "C:\Program Files (x86)\Windows Kits\10\bin"
+    if (Test-Path $kitsDir) {
+        $candidate = Get-ChildItem $kitsDir -Recurse -Filter mt.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\x64\\mt\.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($candidate) {
+            return $candidate.FullName
+        }
+    }
+
+    return $null
+}
+
+function Set-WindowsAdminManifest {
+    param([string]$ExePath)
+
+    $manifestPath = Join-Path $ScriptRoot "flutter_app\windows\runner\dropo_admin.manifest"
+    if (-not (Test-Path $manifestPath)) {
+        Write-Host "[ERROR] Admin manifest not found: $manifestPath" -ForegroundColor Red
+        exit 1
+    }
+
+    $mt = Get-MtCommand
+    if (-not $mt) {
+        Write-Host "[ERROR] mt.exe not found. Install Windows SDK / Visual Studio Build Tools." -ForegroundColor Red
+        exit 1
+    }
+
+    & $mt -manifest $manifestPath "-outputresource:$ExePath;#1"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] Failed to embed administrator manifest into $ExePath" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[OK] Embedded administrator manifest" -ForegroundColor Green
+}
+
+function Reset-AndroidApkOutput {
+    param([string]$FlutterRoot, [ValidateSet('profile', 'release')][string]$Mode)
+    # Android's incremental ZIP writer can retain an unreferenced old libgojni
+    # payload after an AAR rebuild. Remove only the two generated output files
+    # so Gradle packages a fresh APK; retain compilation caches and releases.
+    $outputRoot = [IO.Path]::GetFullPath((Join-Path $FlutterRoot 'build\app\outputs'))
+    if (-not $outputRoot.StartsWith($ScriptRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Android package output escapes the checkout.'
+    }
+    foreach ($relative in @("apk\$Mode\app-$Mode.apk", "flutter-apk\app-$Mode.apk")) {
+        $target = [IO.Path]::GetFullPath((Join-Path $outputRoot $relative))
+        if (-not $target.StartsWith($outputRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Unexpected Android APK output path.'
+        }
+        $cursor = $target
+        while ($cursor.Length -gt $ScriptRoot.Length) {
+            if ((Test-Path -LiteralPath $cursor) -and
+                ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'Android APK output traverses a reparse point.'
+            }
+            $cursor = Split-Path $cursor -Parent
+        }
+        if (Test-Path -LiteralPath $target) {
+            if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'APK output is not a regular file.' }
+            Remove-Item -LiteralPath $target -Force
+        }
+    }
+}
+
+function Get-AndroidBridgeFingerprint {
+    param(
+        [string]$BridgeDir,
+        [string]$CoreDir,
+        [Parameter(Mandatory = $true)]
+        [string]$GoWorkingDirectory
+    )
+
+    # Resolve Go in the same module context used by gomobile: automatic
+    # toolchain selection can differ from the go.exe first found on PATH.
+    # A security update must invalidate a native AAR even with identical sources.
+    Push-Location -LiteralPath $GoWorkingDirectory
+    try {
+        $goVersionOutput = @(& go env GOVERSION 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $goVersionOutput.Count -ne 1) {
+            throw 'Cannot determine the Android bridge Go toolchain version.'
+        }
+        $goVersion = ([string]$goVersionOutput[0]).Trim()
+        if ($goVersion -cnotmatch '^go\d+\.\d+\.\d+$') {
+            throw 'Android release builds require a stable, identifiable Go toolchain.'
+        }
+    } finally {
+        Pop-Location
+    }
+
+    $files = @()
+    foreach ($dir in @($BridgeDir, $CoreDir)) {
+        if (Test-Path $dir) {
+            $files += Get-ChildItem -Path $dir -Recurse -File -Include "*.go", "go.mod", "go.sum", "*.go.txt", "manifest.json" |
+                Sort-Object FullName
+        }
+    }
+    $overlayPreparer = Join-Path $ScriptRoot "tools\prepare-android-xhttp-overlay.ps1"
+    if (-not (Test-Path -LiteralPath $overlayPreparer -PathType Leaf)) {
+        throw "Android XHTTP overlay preparer is missing."
+    }
+    $files += Get-Item -LiteralPath $overlayPreparer
+
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.AppendLine('androidBridgeFingerprint=2')
+    [void]$builder.AppendLine("goVersion=$goVersion")
+    [void]$builder.AppendLine("sing-box=$SingBoxVersion")
+    [void]$builder.AppendLine("gomobileTarget=$AndroidGoMobileTarget")
+    [void]$builder.AppendLine("tags=$AndroidBridgeTags")
+    foreach ($file in $files) {
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLower()
+        [void]$builder.AppendLine("$($file.FullName)|$hash")
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
+        return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace("-", "").ToLower()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Build-AndroidBridgeAAR {
+    Write-Host ""
+    Write-Host "Building Android gomobile bridge..." -ForegroundColor Yellow
+
+    $GoMobileCmd = Get-GoMobileCommand
+    if (-not $GoMobileCmd) {
+        Write-Host "[ERROR] gomobile not found. Install it with: go install golang.org/x/mobile/cmd/gomobile@latest" -ForegroundColor Red
+        exit 1
+    }
+
+    Initialize-AndroidBuildEnvironment
+    # gomobile invokes gobind by name, even when gomobile itself was resolved
+    # by absolute path. Keep the matching tools together in this build's PATH.
+    $goMobileBin = Split-Path $GoMobileCmd -Parent
+    $env:Path = "$goMobileBin;$env:Path"
+    if (-not (Get-Command gobind -ErrorAction SilentlyContinue)) {
+        throw "gobind is missing beside gomobile. Run tools/install-android-toolchain.ps1."
+    }
+
+    $MobileBridgeDir = Join-Path $ScriptRoot "app\mobile\dropoandroid"
+    $MobileCoreDir = Join-Path $ScriptRoot "app\mobile\dropocore"
+    $AARDir = Join-Path $ScriptRoot "flutter_app\android\app\libs"
+    $AARPath = Join-Path $AARDir "dropoandroid.aar"
+    $VersionMarker = Join-Path $AARDir "dropoandroid.version"
+    $GoModPath = Join-Path $MobileBridgeDir "go.mod"
+    $GoSumPath = Join-Path $MobileBridgeDir "go.sum"
+    $OriginalGoMod = if (Test-Path $GoModPath) { [System.IO.File]::ReadAllBytes($GoModPath) } else { $null }
+    $OriginalGoSum = if (Test-Path $GoSumPath) { [System.IO.File]::ReadAllBytes($GoSumPath) } else { $null }
+
+    if (-not (Test-Path $MobileBridgeDir)) {
+        Write-Host "[ERROR] Android mobile bridge not found: $MobileBridgeDir" -ForegroundColor Red
+        exit 1
+    }
+    if (-not (Test-Path $MobileCoreDir)) {
+        Write-Host "[ERROR] Android mobile core not found: $MobileCoreDir" -ForegroundColor Red
+        exit 1
+    }
+
+    New-Item -ItemType Directory -Force -Path $AARDir | Out-Null
+    # Verify the pinned upstream bytes and bundled corresponding MPL source
+    # before either compiling or reusing an AAR. No module-cache edits or
+    # silently unpatched fallback are permitted.
+    $xhttpOverlay = & (Join-Path $ScriptRoot "tools\prepare-android-xhttp-overlay.ps1") `
+        -OutputDirectory (Join-Path $ToolchainRoot 'android-xhttp-overlay')
+    $fingerprint = Get-AndroidBridgeFingerprint -BridgeDir $MobileBridgeDir -CoreDir $MobileCoreDir `
+        -GoWorkingDirectory $xhttpOverlay.BindingDirectory
+    if ((Test-Path $AARPath) -and (Test-Path $VersionMarker) -and ((Get-Content $VersionMarker -Raw).Trim() -eq $fingerprint)) {
+        $aarMB = [math]::Round((Get-Item $AARPath).Length / 1MB, 2)
+        Write-Host "[OK] Reusing Android bridge AAR: $AARPath ($aarMB MB, v$SingBoxVersion)" -ForegroundColor Green
+        return
+    }
+
+    foreach ($staleName in @(
+            "dropocore.aar",
+            "dropocore-sources.jar",
+            "dropocore.version",
+            "libbox.aar",
+            "libbox-sources.jar",
+            "libbox.version"
+        )) {
+        $stalePath = Join-Path $AARDir $staleName
+        if (Test-Path $stalePath) {
+            Remove-Item -LiteralPath $stalePath -Force
+        }
+    }
+
+    $originalAndroidGoFlags = $env:GOFLAGS
+    if ($originalAndroidGoFlags -match '(?:^|\s|\")-(?:overlay|modfile)(?:=|\s)') {
+        throw "Android XHTTP build cannot combine an existing Go overlay or modfile with the pinned lifecycle overlay."
+    }
+    # Bind from an isolated source copy so gomobile can derive its per-ABI
+    # gobind modules with the pinned local Xray replacement without touching
+    # the repository's module files or inheriting a conflicting -modfile.
+    Push-Location $xhttpOverlay.BindingDirectory
+    try {
+        # GOFLAGS is inherited by gobind/gomobile's nested Go invocations.
+        # Restore the caller's process environment even if any build fails.
+        $env:GOFLAGS = ("$originalAndroidGoFlags " + $xhttpOverlay.BindingGoFlag).Trim()
+        & go mod tidy
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERROR] Failed to prepare Android bridge Go module." -ForegroundColor Red
+            exit 1
+        }
+
+        & go list -mod=mod golang.org/x/mobile/cmd/gobind | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERROR] Failed to prepare gomobile gobind tool for Android bridge." -ForegroundColor Red
+            exit 1
+        }
+
+        $ldflags = "-X github.com/sagernet/sing-box/constant.Version=$SingBoxVersion -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0"
+        & $GoMobileCmd bind `
+            "-target=$AndroidGoMobileTarget" `
+            -androidapi=23 `
+            -trimpath `
+            -ldflags $ldflags `
+            -tags $AndroidBridgeTags `
+            -o $AARPath `
+            .
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERROR] gomobile bind failed for Android bridge." -ForegroundColor Red
+            exit 1
+        }
+    } finally {
+        $env:GOFLAGS = $originalAndroidGoFlags
+        Pop-Location
+        if ($null -ne $OriginalGoMod) {
+            [System.IO.File]::WriteAllBytes($GoModPath, $OriginalGoMod)
+        }
+        if ($null -ne $OriginalGoSum) {
+            [System.IO.File]::WriteAllBytes($GoSumPath, $OriginalGoSum)
+        }
+    }
+
+    [System.IO.File]::WriteAllText($VersionMarker, $fingerprint, (New-Object System.Text.UTF8Encoding($false)))
+    $aarMB = [math]::Round((Get-Item $AARPath).Length / 1MB, 2)
+    Write-Host "[OK] Created Android bridge AAR: $AARPath ($aarMB MB, v$SingBoxVersion)" -ForegroundColor Green
+}
+
+function Get-AndroidBuildNumber {
+    $v = [version]$AppVersion
+    return ($v.Major * 10000) + ($v.Minor * 100) + $v.Build
+}
+
+function Write-DropoAndroidBuildMetadata {
+    param(
+        [string]$ArtifactPath,
+        [string]$ArtifactSHA256,
+        [ValidateSet('preview', 'sideload', 'play')][string]$Channel,
+        [string]$PackageName,
+        [string]$Architecture
+    )
+    $metadata = [ordered]@{
+        artifactName = [IO.Path]::GetFileName($ArtifactPath)
+        sha256 = $ArtifactSHA256
+        sourceRevision = $SourceRevision
+        sourceDirty = [bool]$SourceDirty
+        channel = $Channel
+        packageName = $PackageName
+        version = $AppVersion
+        versionCode = Get-AndroidBuildNumber
+        architecture = $Architecture
+    }
+    [IO.File]::WriteAllText("$ArtifactPath.build.json", ($metadata | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+}
+
+function Build-AndroidApplication {
+    Write-Host ""
+    Write-Host "Building Android Flutter APK..." -ForegroundColor Yellow
+
+    Build-AndroidBridgeAAR
+
+    $FlutterCmd = Get-FlutterCommand
+    if (-not $FlutterCmd) {
+        Write-Host "[ERROR] Flutter SDK not found. Configure DROPO_TOOLCHAIN_ROOT or add Flutter to PATH" -ForegroundColor Red
+        exit 1
+    }
+
+    $FlutterDir = Join-Path $ScriptRoot "flutter_app"
+    if (-not (Test-Path $FlutterDir)) {
+        Write-Host "[ERROR] flutter_app/ not found." -ForegroundColor Red
+        exit 1
+    }
+
+    if (-not (Test-Path $VersionDir)) {
+        New-Item -ItemType Directory -Path $VersionDir | Out-Null
+    }
+
+    $buildNumber = Get-AndroidBuildNumber
+    Push-Location $FlutterDir
+    try {
+        # The same explicit Dart define drives native Gradle distribution.
+        $androidBuildMode = if ($AndroidPreview) { "profile" } else { "release" }
+        Reset-AndroidApkOutput -FlutterRoot $FlutterDir -Mode $androidBuildMode
+        $androidBuildArguments = @(
+            'build', 'apk', "--$androidBuildMode",
+            '--target-platform', $AndroidFlutterTargetPlatform,
+            '--build-name', $AppVersion, '--build-number', $buildNumber,
+            '--dart-define', "DROPO_APP_VERSION=$AppVersion",
+            '--dart-define', 'DROPO_PLAY_DISTRIBUTION=false'
+        )
+        $androidBuildArguments += @(Get-DropoAccountBuildArguments -Endpoint $AccountEndpoint)
+        $androidBuildArguments += @('--dart-define', 'DROPO_PURCHASES_ENABLED=true')
+        Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages
+        $androidBuildArguments += '--no-pub'
+        & $FlutterCmd @androidBuildArguments
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERROR] Flutter Android build failed. Run 'flutter doctor -v' and check Android SDK/JDK." -ForegroundColor Red
+            exit 1
+        }
+    } finally {
+        Pop-Location
+    }
+
+    $androidBuildMode = if ($AndroidPreview) { "profile" } else { "release" }
+    $sourceApk = Join-Path $FlutterDir "build\app\outputs\flutter-apk\app-$androidBuildMode.apk"
+    if (-not (Test-Path $sourceApk)) {
+        Write-Host "[ERROR] Android APK output not found: $sourceApk" -ForegroundColor Red
+        exit 1
+    }
+
+    $assetName = $AndroidAppAsset
+    if ($AndroidPreview) { $assetName = "dropo-Android-Preview-$AndroidReleaseArch.apk" }
+    $destApk = Join-Path $VersionDir $assetName
+    Copy-Item $sourceApk $destApk -Force
+
+    $verifyArgs = @("-NoProfile", "-File", (Join-Path $ScriptRoot "tools\verify-android-apk.ps1"), "-Path", $destApk, "-Architecture", $AndroidReleaseArch, "-ExpectedVersion", $AppVersion)
+    if ($AndroidPreview) { $verifyArgs += "-Preview" }
+    & pwsh @verifyArgs
+    if ($LASTEXITCODE -ne 0) { throw "Android artifact verification failed." }
+
+    $sha = (Get-FileHash -Algorithm SHA256 $destApk).Hash.ToLower()
+    [System.IO.File]::WriteAllText((Join-Path $VersionDir "$assetName.sha256"), "$sha  $assetName`n", (New-Object System.Text.UTF8Encoding($false)))
+    $androidChannel = if ($AndroidPreview) { 'preview' } else { 'sideload' }
+    $androidPackage = if ($AndroidPreview) { 'in.droponevedimka.dropo.preview' } else { 'in.droponevedimka.dropo' }
+    Write-DropoAndroidBuildMetadata -ArtifactPath $destApk -ArtifactSHA256 $sha `
+        -Channel $androidChannel -PackageName $androidPackage -Architecture $AndroidReleaseArch
+    $apkMB = [math]::Round((Get-Item $destApk).Length / 1MB, 2)
+
+    Write-Host "[OK] Created Android APK: $assetName ($apkMB MB)" -ForegroundColor Green
+    Write-Host "[OK] SHA256: $sha" -ForegroundColor Green
+}
+
+function Build-AndroidAppBundle {
+    Write-Host ""
+    Write-Host 'Building Google Play Android App Bundle (ARM32/ARM64)...' -ForegroundColor Yellow
+    if ($SourceDirty) {
+        Write-Host '[WARNING] Dirty-source AAB is development-only. Do not upload it to a public release or Google Play.' -ForegroundColor Yellow
+    }
+
+    # This tool is build-only, SHA-256-pinned, and never enters application
+    # assets or performs a first-run dependency download on an end-user device.
+    $bundletool = & (Join-Path $ScriptRoot 'tools\prepare-android-bundletool.ps1') -Download
+    Build-AndroidBridgeAAR
+
+    $FlutterCmd = Get-FlutterCommand
+    if (-not $FlutterCmd) { throw 'Flutter SDK not found for the Google Play bundle build.' }
+    $FlutterDir = Join-Path $ScriptRoot 'flutter_app'
+    if (-not (Test-Path -LiteralPath $FlutterDir -PathType Container)) {
+        throw 'flutter_app/ not found for the Google Play bundle build.'
+    }
+    if (-not (Test-Path -LiteralPath $VersionDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $VersionDir | Out-Null
+    }
+
+    $buildNumber = Get-AndroidBuildNumber
+    Push-Location $FlutterDir
+    try {
+        # Native permissions/installer code and Flutter updater UI must agree
+        # on this channel. Never use the Preview/profile signing fallback.
+        $androidBundleArguments = @(Get-DropoAndroidBundleBuildArguments `
+            -AppVersion $AppVersion -BuildNumber $buildNumber -Endpoint $AccountEndpoint)
+        Restore-FlutterLockedPackages -FlutterCmd $FlutterCmd -Offline:$UseCachedFlutterPackages
+        $androidBundleArguments += '--no-pub'
+        & $FlutterCmd @androidBundleArguments
+        if ($LASTEXITCODE -ne 0) { throw 'Flutter Google Play bundle build failed. A production upload key is required.' }
+    } finally {
+        Pop-Location
+    }
+
+    $sourceBundle = Join-Path $FlutterDir 'build\app\outputs\bundle\release\app-release.aab'
+    if (-not (Test-Path -LiteralPath $sourceBundle -PathType Leaf)) {
+        throw "Android App Bundle output not found: $sourceBundle"
+    }
+    $destBundle = Join-Path $VersionDir $AndroidBundleAsset
+    Copy-Item -LiteralPath $sourceBundle -Destination $destBundle -Force
+    $verifyArgs = @(
+        '-NoProfile', '-File', (Join-Path $ScriptRoot 'tools\verify-android-aab.ps1'),
+        '-Path', $destBundle, '-ExpectedVersion', $AppVersion,
+        '-BundletoolPath', $bundletool.Path
+    )
+    & pwsh @verifyArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Google Play bundle verification failed.' }
+
+    $sha = (Get-FileHash -LiteralPath $destBundle -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText("$destBundle.sha256", "$sha  $AndroidBundleAsset`n", [Text.UTF8Encoding]::new($false))
+    Write-DropoAndroidBuildMetadata -ArtifactPath $destBundle -ArtifactSHA256 $sha `
+        -Channel 'play' -PackageName 'com.dropo.myapp' -Architecture 'universal'
+    # Play bundles stay in a local immutable archive, never in GitHub assets.
+    # Keep it outside release/: normal Windows cleanup may remove old builds.
+    if (-not $SourceDirty) {
+        $archived = & (Join-Path $ScriptRoot 'tools\archive-android-aab.ps1') -ReleaseFolder $VersionDir
+        Write-Host "[OK] Local Google Play archive: $($archived.archivePath)" -ForegroundColor Green
+    } else {
+        Write-Host '[INFO] Development AAB kept only in the working build folder; release archive unchanged.' -ForegroundColor Gray
+    }
+    $bundleMB = [math]::Round((Get-Item -LiteralPath $destBundle).Length / 1MB, 2)
+    Write-Host "[OK] Created Google Play AAB: $AndroidBundleAsset ($bundleMB MB)" -ForegroundColor Green
+    Write-Host "[OK] SHA256: $sha" -ForegroundColor Green
+}
+
+# Create the deterministic portable ZIP from an existing build.
+function Create-Portable {
+    Write-Host ""
+    Write-Host "Creating Windows portable archive..." -ForegroundColor Yellow
+
+    $sourceDir = $VersionDir
+    if (-not (Test-Path $sourceDir)) {
+        # Try to find latest version
+        $latestVer = Get-LatestRelease
+        if ($latestVer) {
+            $sourceDir = Join-Path $ReleaseDir $latestVer
+            Write-Host "Using latest release: $latestVer" -ForegroundColor Gray
+        } else {
+            Write-Host "[ERROR] No built version found. Run with -Build first." -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    # The runnable app lives in <container>/dropo/ (no version/hash in its name).
+    $appFolder = Join-Path $sourceDir "dropo"
+    $appExe = Join-Path $appFolder "dropo.exe"
+    if (-not (Test-Path $appExe)) {
+        Write-Host "[ERROR] dropo.exe not found in $appFolder" -ForegroundColor Red
+        exit 1
+    }
+    $appAssetPath = Join-Path $sourceDir $WindowsPortableAsset
+    New-AppOnlyArchive -SourceAppFolder $appFolder -DestinationZip $appAssetPath
+
+    $fileSize = (Get-Item $appAssetPath).Length / 1MB
+    Write-Host "[OK] Created: $WindowsPortableAsset ($([math]::Round($fileSize, 2)) MB, complete offline runtime)" -ForegroundColor Green
+}
+
+# Main execution
+# Windows ships as an offline installer plus a deterministic portable ZIP.
+if ($AppOnly) {
+    Build-Application
+    if ($Android) {
+        Build-AndroidApplication
+    }
+    if ($AndroidBundle) {
+        Build-AndroidAppBundle
+    }
+} elseif ($All) {
+    Build-Application
+    Build-AndroidApplication
+    Build-AndroidAppBundle
+} else {
+    $didWork = $false
+    if ($Flutter -or $Build) {
+        Build-Application
+        $didWork = $true
+    }
+    if ($Portable) {
+        Create-Portable
+        $didWork = $true
+    }
+    if ($Android) {
+        Build-AndroidApplication
+        $didWork = $true
+    }
+    if ($AndroidBundle) {
+        Build-AndroidAppBundle
+        $didWork = $true
+    }
+    if (-not $didWork) {
+        Build-Application
+        Create-Portable
+    }
+}
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "   Done!" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Cyan

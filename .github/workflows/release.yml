@@ -1,0 +1,161 @@
+name: Publish Windows Release
+
+# Publish only packages produced by the successful clean-Windows gate. The
+# release page, checksums and downloadable assets are created as one operation;
+# no signing keys are stored in Actions.
+on:
+  workflow_run:
+    workflows: ["Windows package release gate"]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: read
+
+# Serialize publication for a commit if its package gate is dispatched twice.
+concurrency:
+  group: publish-windows-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  release-record:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.display_title == 'Prepare Dropo release' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # Publishing scripts must come from the workflow's trusted revision.
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: release-source
+          persist-credentials: false
+
+      - name: Require CI and package gate for the same commit
+        id: readiness
+        shell: pwsh
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          PACKAGE_ID: ${{ github.event.workflow_run.id }}
+          PACKAGE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: ./tools/check-release-readiness.ps1 -Sha $env:RELEASE_SHA -ExpectedRunId $env:PACKAGE_ID -ExpectedAttempt $env:PACKAGE_ATTEMPT
+
+      - name: Reject generated contributor metadata
+        if: steps.readiness.outputs.ready == 'true'
+        shell: pwsh
+        run: .\tools\check-clean-contributors.ps1
+
+      - name: Verify release contains the latest blocked lists
+        if: steps.readiness.outputs.ready == 'true'
+        shell: pwsh
+        run: .\scripts\filters\update-blocked-lists.ps1 -CheckOnly
+
+      - name: Download verified Windows packages
+        if: steps.readiness.outputs.ready == 'true'
+        shell: pwsh
+        env:
+          PACKAGE_RUN_ID: ${{ steps.readiness.outputs.package_run_id }}
+          PACKAGE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          gh run download "$env:PACKAGE_RUN_ID" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --name "dropo-windows-release-$env:PACKAGE_RUN_ID-$env:PACKAGE_ATTEMPT" `
+            --dir "release-assets"
+          if ($LASTEXITCODE -ne 0) { throw "Verified artifact download failed" }
+          $installer = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Setup-x64.exe")
+          $portable = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Portable-x64.zip")
+          if ($installer.Count -ne 1 -or $portable.Count -ne 1) {
+            throw "Expected exactly one verified installer and portable archive"
+          }
+
+      - name: Read version and check existing release
+        if: steps.readiness.outputs.ready == 'true'
+        id: version
+        shell: pwsh
+        run: |
+          $config = Get-Content release-source/version.json -Raw | ConvertFrom-Json
+          $version = $config.version
+          $channel = [string]$config.build.releaseChannel
+          if ($channel -notin @('pilot', 'stable')) {
+            throw 'An explicit pilot or stable release channel is required.'
+          }
+          "draft=$($channel -eq 'pilot')".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Append
+          $tag = "v$version"
+          ./tools/check-existing-release.ps1 -Repository $env:GITHUB_REPOSITORY -Tag $tag
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
+          "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
+
+      - name: Require public publisher signature for stable releases
+        if: steps.version.outputs.exists == 'false' && steps.version.outputs.draft == 'false'
+        shell: pwsh
+        env:
+          PUBLIC_SIGNER_CERT_SHA256: ${{ vars.DROPO_PUBLIC_SIGNER_CERT_SHA256 }}
+        run: |
+          $installer = @(Get-ChildItem release-assets -Recurse -File -Filter 'dropo-Windows-Setup-x64.exe')
+          if ($installer.Count -ne 1) { throw 'Expected one verified installer.' }
+          ./tools/verify-public-windows-signature.ps1 -Path $installer[0].FullName -ExpectedCertificateSHA256 $env:PUBLIC_SIGNER_CERT_SHA256
+
+      - name: Prepare release information
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $repo = "${{ github.repository }}"
+          $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+          $templatePath = (Resolve-Path ".github/release-notes-template.md").Path
+          $notes = [IO.File]::ReadAllText($templatePath, $strictUtf8)
+          $notes = $notes.Replace("{{TAG}}", $tag)
+          $notes = $notes.Replace("{{REPOSITORY}}", $repo)
+          $installerHashFile = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Setup-x64.exe.sha256")
+          $portableHashFile = @(Get-ChildItem release-assets -Recurse -File -Filter "dropo-Windows-Portable-x64.zip.sha256")
+          if ($installerHashFile.Count -ne 1 -or $portableHashFile.Count -ne 1) {
+            throw "Verified package SHA-256 files are missing or ambiguous"
+          }
+          $installerHash = ((Get-Content $installerHashFile[0].FullName -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          $portableHash = ((Get-Content $portableHashFile[0].FullName -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($installerHash -notmatch '^[0-9a-f]{64}$' -or $portableHash -notmatch '^[0-9a-f]{64}$') {
+            throw "Verified package SHA-256 value is invalid"
+          }
+          $notes = $notes.Replace("__WINDOWS_INSTALLER_SHA256_PENDING_LOCAL_UPLOAD__", $installerHash)
+          $notes = $notes.Replace("__WINDOWS_PORTABLE_SHA256_PENDING_LOCAL_UPLOAD__", $portableHash)
+          if ($notes -match '\?{3,}' -or $notes -notmatch '[А-Яа-яЁё]') {
+            throw "Release notes failed the UTF-8/Cyrillic integrity check."
+          }
+          [IO.File]::WriteAllText("release-notes.md", $notes, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Create release record
+        if: steps.version.outputs.exists == 'false'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.event.workflow_run.head_sha }}
+          name: dropo ${{ steps.version.outputs.tag }}
+          body_path: release-notes.md
+          # Migration pilots are reviewable drafts and never update clients.
+          draft: ${{ steps.version.outputs.draft == 'true' }}
+          make_latest: ${{ steps.version.outputs.draft != 'true' }}
+          # A concurrent external publisher must not replace an existing asset.
+          overwrite_files: false
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/**/dropo-Windows-Setup-x64.exe
+            release-assets/**/dropo-Windows-Setup-x64.exe.sha256
+            release-assets/**/dropo-Windows-Portable-x64.zip
+            release-assets/**/dropo-Windows-Portable-x64.zip.sha256
+            release-assets/**/dropo-Runtime-Sources.zip
+            release-assets/**/dropo-Runtime-Sources.zip.sha256
