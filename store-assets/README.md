@@ -2,7 +2,7 @@
 
 Оформление обновлено 21 октября 2026 года: тёмно-зелёная планета с орбитой и маленький летающий герой-доктор.
 Скриншоты настоящего интерфейса версии 3.0.25 сохранены внутри нового оформления.
-Готовый комплект: `dropo-publication-assets.zip`.
+Соберите комплект из корня чистого checkout командой `git archive -o dropo-publication-assets.zip HEAD:store-assets ru-RU app-icon-512.png README.md manifest.json`. Запишите SHA коммита и SHA-256 архива рядом со сборкой. [Архив комплекта 3.1.20](https://github.com/sunnydjam/dropo-by-sunnydjam/blob/297167a196e1c85445cd9c45295438acd5980897/store-assets/dropo-publication-assets.zip).
 
 | Поле в Google Play Console | Файл / папка | Формат |
 | --- | --- | --- |
