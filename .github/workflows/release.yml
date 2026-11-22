@@ -51,7 +51,9 @@ jobs:
         shell: pwsh
         env:
           RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
-        run: ./tools/check-release-readiness.ps1 -Sha $env:RELEASE_SHA
+          PACKAGE_ID: ${{ github.event.workflow_run.id }}
+          PACKAGE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: ./tools/check-release-readiness.ps1 -Sha $env:RELEASE_SHA -ExpectedRunId $env:PACKAGE_ID -ExpectedAttempt $env:PACKAGE_ATTEMPT
 
       - name: Reject generated contributor metadata
         if: steps.readiness.outputs.ready == 'true'

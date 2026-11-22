@@ -46,5 +46,13 @@ foreach ($ineligibleEvent in @('push', 'pull_request')) {
 $dispatchedCI = New-Run $ci.path 11
 $dispatchedCI.event = 'workflow_dispatch'
 Assert-Ready @($dispatchedCI, $package) $true 'main CI may be dispatched'
-Write-Host 'Release readiness fixtures passed (27 cases).'
+$package | Add-Member -NotePropertyName display_title -NotePropertyValue 'Prepare Dropo release'
+$eventArgs = @{ Repository = $testRepo; Sha = $testSha; Branch = 'main'; ExpectedRunId = '20'; ExpectedAttempt = '1' }
+if (-not (Get-ReleaseReadiness @eventArgs -Runs @($ci, $package)).Ready) { throw 'Release event must accept its exact package attempt' }
+foreach ($field in 'id', 'run_attempt', 'display_title') {
+    $other = $package.psobject.Copy()
+    $other.$field = if ($field -eq 'display_title') { 'Validate Windows packages' } else { 22 }
+    if ((Get-ReleaseReadiness @eventArgs -Runs @($ci, $other)).Ready) { throw "Unexpected package passed release gate: $field" }
+}
+Write-Host 'Release readiness fixtures passed.'
 & (Join-Path $PSScriptRoot 'test-existing-release.ps1')

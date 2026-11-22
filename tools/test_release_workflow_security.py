@@ -91,11 +91,17 @@ class ReleaseTrust(unittest.TestCase):
         self.assertIn('default: validate',events)
         self.assertIn("inputs.intent == 'release'",text)
         self.assertNotIn('  push:',events)
-        self.assertIn("if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'",text)
+        self.assertIn("    if: github.event_name == 'pull_request' || inputs.intent == 'validate' || github.ref == 'refs/heads/main'\n", text)
         self.assertNotRegex(events,r'(?m)^\s+(paths|paths-ignore):')
         self.assertNotIn('pull_request_target:',events)
         self.assertIn('persist-credentials: false',text)
         self.assertNotIn('contents: write',text)
+
+    def test_publish_uses_the_triggering_package_attempt(self):
+        text, _ = condition()
+        self.assertIn('PACKAGE_ID: ${{ github.event.workflow_run.id }}', text)
+        self.assertIn('PACKAGE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}', text)
+        self.assertIn('-ExpectedRunId $env:PACKAGE_ID -ExpectedAttempt $env:PACKAGE_ATTEMPT', text)
 
 class FlutterActionPins(unittest.TestCase):
     def test_floating_nested_cache_is_rejected(self):

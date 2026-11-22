@@ -17,9 +17,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-package-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   clean-windows-package:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || inputs.intent == 'validate' || github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 60
     env:

@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   contributor-guard:
     runs-on: ubuntu-latest
@@ -35,6 +39,9 @@ jobs:
       - name: Validate release version synchronization
         shell: bash
         run: bash ./tools/check-version-sync.sh
+      - name: Check local links in repository documentation
+        shell: pwsh
+        run: ./tools/check-doc-links.ps1
       - name: Validate PowerShell script syntax
         shell: pwsh
         run: ./tools/check-powershell-syntax.ps1

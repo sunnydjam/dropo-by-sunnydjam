@@ -2,6 +2,8 @@ param(
     [string]$Repository = $env:GITHUB_REPOSITORY,
     [string]$Sha = "",
     [string]$Branch = "main",
+    [string]$ExpectedRunId,
+    [string]$ExpectedAttempt,
     [switch]$FunctionsOnly
 )
 
@@ -10,7 +12,8 @@ $ErrorActionPreference = "Stop"
 # Pure decision function, also exercised by offline fixture tests. Never use a
 # successful older run to override a newer failed/pending run for the same SHA.
 function Get-ReleaseReadiness {
-    param([object[]]$Runs, [string]$Repository, [string]$Sha, [string]$Branch)
+    param([object[]]$Runs, [string]$Repository, [string]$Sha, [string]$Branch,
+        [string]$ExpectedRunId, [string]$ExpectedAttempt)
     $packageRun = $null
     foreach ($path in @('.github/workflows/ci.yml', '.github/workflows/windows-release-gate.yml')) {
         $eligibleEvents = if ($path -eq '.github/workflows/ci.yml') {
@@ -31,6 +34,12 @@ function Get-ReleaseReadiness {
         }
         if ($path -eq '.github/workflows/windows-release-gate.yml') { $packageRun = $latest[0] }
     }
+    if (($ExpectedRunId -or $ExpectedAttempt) -and
+        ([string]$packageRun.id -cne $ExpectedRunId -or
+         [string]$packageRun.run_attempt -cne $ExpectedAttempt -or
+         $packageRun.display_title -cne 'Prepare Dropo release')) {
+        return [pscustomobject]@{ Ready = $false; PackageRunId = ''; Reason = 'Latest package run differs from the requested release attempt' }
+    }
     return [pscustomobject]@{ Ready = $true; PackageRunId = [string]$packageRun.id; Reason = 'CI and Windows package gate passed for the exact release commit' }
 }
 
@@ -45,7 +54,7 @@ foreach ($workflow in @('ci.yml', 'windows-release-gate.yml')) {
     if ($LASTEXITCODE -ne 0) { throw "Cannot verify required workflow $workflow" }
     foreach ($page in ($response | ConvertFrom-Json)) { $runs += @($page.workflow_runs) }
 }
-$result = Get-ReleaseReadiness -Runs $runs -Repository $Repository -Sha $Sha -Branch $Branch
+$result = Get-ReleaseReadiness -Runs $runs -Repository $Repository -Sha $Sha -Branch $Branch -ExpectedRunId $ExpectedRunId -ExpectedAttempt $ExpectedAttempt
 Write-Host $result.Reason
 if ($env:GITHUB_OUTPUT) {
     "ready=$($result.Ready.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
