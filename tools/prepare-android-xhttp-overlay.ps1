@@ -173,11 +173,23 @@ foreach ($file in $files) {
 }
 
 $manifestHash = (Get-FileHash -LiteralPath $resolvedManifest -Algorithm SHA256).Hash.ToLowerInvariant()
-$overlayPath = Join-Path $resolvedOutput ("xray-stage-v1.260327.1-0.20261031132019-a4a3dff5b20c-$manifestHash-$($sourceHash.Substring(0, 16)).json")
 $overlayJSON = ([ordered]@{ Replace = $stagedReplace } | ConvertTo-Json -Depth 4) + "`n"
+# The mapping includes absolute paths to this checkout. Its key must distinguish
+# two worktrees that use identical content from the same shared toolchain.
+$mappingHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($overlayJSON))).ToLowerInvariant()
+$overlayPath = Join-Path $resolvedOutput ("xray-$manifestHash-$mappingHash.json")
 if (Test-Path -LiteralPath $overlayPath -PathType Leaf) {
     if ([IO.File]::ReadAllText($overlayPath) -cne $overlayJSON) { throw 'Existing Android XHTTP overlay mapping is not the expected deterministic mapping.' }
-} else { [IO.File]::WriteAllText($overlayPath, $overlayJSON, [Text.UTF8Encoding]::new($false)) }
+} else {
+    $pendingPath = Join-Path $resolvedOutput ([Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllText($pendingPath, $overlayJSON, [Text.UTF8Encoding]::new($false))
+        try { [IO.File]::Move($pendingPath, $overlayPath) }
+        catch [IO.IOException] {
+            if (-not [IO.File]::Exists($overlayPath) -or [IO.File]::ReadAllText($overlayPath) -cne $overlayJSON) { throw }
+        }
+    } finally { [IO.File]::Delete($pendingPath) }
+}
 
 $modfileDirectory = Join-Path $resolvedOutput ('build-modfile-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $modfileDirectory | Out-Null
