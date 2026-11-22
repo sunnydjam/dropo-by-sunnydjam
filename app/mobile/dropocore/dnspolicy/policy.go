@@ -20,7 +20,7 @@ import (
 )
 
 const Hostname = "dns.droponevedimka.ru"
-const BootstrapIPv4 = "193.233.88.97"
+const BootstrapIPv4 = "109.120.152.117"
 const QueryPath = "/dns-query"
 const FinlandHostname = "dropo.fun"
 const FinlandIPv4 = "77.42.65.119"

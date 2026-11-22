@@ -168,7 +168,10 @@ func androidSourcesViewLocked() map[string]interface{} {
 
 			name = ownedprofile.RegionName(publicID)
 			if active {
-				if publicID == ownedprofile.Free {
+				if current.activeSourceID == publicID+ownedprofile.MainSuffix {
+					activeIngress = "main"
+					name = ownedprofile.Name(publicID) + " · Основной"
+				} else if publicID == ownedprofile.Free {
 					activeIngress = "latvia"
 				} else {
 					activeIngress = "finland"

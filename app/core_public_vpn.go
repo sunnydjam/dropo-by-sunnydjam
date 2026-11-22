@@ -83,7 +83,7 @@ func removeRetiredPublicVPNSource(profile *ProfileData) {
 func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 	for index := range sources {
 		source := &sources[index]
-		if isRegionalProvider(source.PublicCatalogID) || ownedprofile.IsReserve(source.PublicCatalogID) {
+		if isRegionalProvider(source.PublicCatalogID) || isMainIngress(source.PublicCatalogID) || ownedprofile.IsReserve(source.PublicCatalogID) {
 			// Only a matching, validated primary may supply a managed fast route.
 			live := false
 			for _, parent := range sources {
@@ -92,7 +92,7 @@ func normalizePublicVPNSourceMetadata(sources []VPNSource) {
 				}
 				_, relay, err := ownedprofile.Pair(parent.PublicCatalogID, parent.URI)
 				if err == nil {
-					if isRegionalProvider(source.PublicCatalogID) {
+					if isRegionalProvider(source.PublicCatalogID) || isMainIngress(source.PublicCatalogID) {
 						live = source.URI == parent.URI
 					} else {
 						live = source.URI == relay

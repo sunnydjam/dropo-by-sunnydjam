@@ -138,7 +138,7 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		t.Fatalf("managed pair add failed: %v", result)
 	}
 	profile, _ := storage.GetActiveProfile()
-	if len(profile.VPNSources) != 1 {
+	if len(profile.VPNSources) != 2 {
 		t.Fatal("missing independent managed ingress")
 	}
 	for _, s := range profile.VPNSources {
@@ -152,7 +152,7 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		out := raw.(map[string]interface{})
 		if out["tag"] == "auto-select" {
 			found = true
-			if reflect.ValueOf(out["outbounds"]).Len() != 1 {
+			if reflect.ValueOf(out["outbounds"]).Len() != 2 {
 				t.Fatal("reserve missing from selector")
 			}
 		}
@@ -165,7 +165,7 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		t.Fatalf("disable failed: %v", result)
 	}
 	profile, _ = storage.GetActiveProfile()
-	if !profile.VPNSources[0].Disabled {
+	if !profile.VPNSources[0].Disabled || !profile.VPNSources[1].Disabled {
 		t.Fatal("disabled primary left reserve active")
 	}
 	if result := app.SetVPNSourceEnabled(primary, true); result["success"] != true {
@@ -329,10 +329,10 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(profile.VPNSources) != 1 {
-					t.Fatal("retired managed ingress configured")
+				if len(profile.VPNSources) != 2 || profile.VPNSources[1].PublicCatalogID != tier.id+ownedprofile.MainSuffix {
+					t.Fatal("expected regional and restored main ingress")
 				}
-				want := []string{"vpn-source-" + profile.VPNSources[0].ID}
+				want := []string{"vpn-source-" + profile.VPNSources[0].ID, "vpn-source-" + profile.VPNSources[1].ID}
 				app.rememberRouteProbeResults([]routeProbeServiceResult{
 					{Tag: "openai", Success: true, MethodKind: "vpn", MethodTag: want[0]},
 				})
@@ -359,6 +359,9 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 					protocol = "socks"
 				}
 				for i := range want {
+					if i == 1 {
+						protocol = "socks"
+					}
 					if getOutbound(config, want[i])["type"] != protocol {
 						t.Fatalf("unexpected runtime transport at position %d", i)
 					}

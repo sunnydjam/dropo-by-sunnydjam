@@ -8,7 +8,7 @@
       {
         "type": "https",
         "tag": "dns-remote",
-        "server": "193.233.88.97",
+        "server": "109.120.152.117",
         "server_port": 443,
         "path": "/dns-query",
         "tls": {"enabled": true, "server_name": "dns.droponevedimka.ru"}
@@ -16,7 +16,7 @@
       {
         "type": "https",
         "tag": "dns-direct",
-        "server": "193.233.88.97",
+        "server": "109.120.152.117",
         "server_port": 443,
         "path": "/dns-query",
         "tls": {"enabled": true, "server_name": "dns.droponevedimka.ru"}

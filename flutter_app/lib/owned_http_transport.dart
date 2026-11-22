@@ -92,7 +92,7 @@ List<OwnedHttpRoute> ownedHttpRoutes(
   }
   final prefix = account ? '/dropo-api' : '/dropo-subscription';
   return [
-    OwnedHttpRoute(canonical, InternetAddress('193.233.88.97')),
+    OwnedHttpRoute(canonical, InternetAddress('109.120.152.117')),
     OwnedHttpRoute(
       canonical.replace(
         host: 'ms-api.ordaflow.net',

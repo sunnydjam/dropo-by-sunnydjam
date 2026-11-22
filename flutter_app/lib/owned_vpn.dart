@@ -12,6 +12,7 @@ String? _ownedSourceFamily(Object? provider) {
     final id = 'dropo-individual-$pool';
     if (provider == id ||
         provider == '$id-reserve' ||
+        provider == '$id-main' ||
         provider == '$id-lv-quic' ||
         provider == '$id-fi-tcp') {
       return id;
@@ -501,13 +502,14 @@ class OwnedVPNClient {
           final key = Uri.parse(text);
           if (key.scheme != 'vless' ||
               (key.host != 'cdn.droponevedimka.ru' &&
+                  key.host != '109.120.152.117' &&
                   key.host != '193.233.88.97') ||
               key.port != 443) {
             throw const FormatException('Untrusted ingress.');
           }
           return key
               .replace(
-                host: '193.233.88.97',
+                host: 'cdn.droponevedimka.ru',
                 queryParameters: {
                   ...key.queryParameters,
                   'dropo_expiry': '$until',

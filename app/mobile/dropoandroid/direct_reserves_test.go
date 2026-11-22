@@ -31,11 +31,16 @@ func TestPlayManagedDirectReservesPassPinnedEngineConfig(t *testing.T) {
 		Config     string
 		Candidates []struct{ ID string }
 	}
-	if json.Unmarshal([]byte(BuildSingBoxConfig()), &runtime) != nil || !runtime.Success || len(runtime.Candidates) != 2 {
+	if json.Unmarshal([]byte(BuildSingBoxConfig()), &runtime) != nil || !runtime.Success || len(runtime.Candidates) != 4 {
 		t.Fatal("expected four independent managed sources")
 	}
-	if !(runtime.Candidates[0].ID == ownedprofile.Free+"-lv-quic" && runtime.Candidates[1].ID == ownedprofile.Boost+"-fi-tcp" || runtime.Candidates[1].ID == ownedprofile.Free+"-lv-quic" && runtime.Candidates[0].ID == ownedprofile.Boost+"-fi-tcp") {
-		t.Fatal("Latvia should bootstrap the profile with Finland available as fallback")
+	regional := map[string]string{ownedprofile.Free + "-lv-quic": ownedprofile.Free, ownedprofile.Boost + "-fi-tcp": ownedprofile.Boost}
+	for i := 0; i < len(runtime.Candidates); i += 2 {
+		tier, ok := regional[runtime.Candidates[i].ID]
+		if !ok || runtime.Candidates[i+1].ID != tier+ownedprofile.MainSuffix {
+			t.Fatal("tier lost its regional or primary route")
+		}
+		delete(regional, runtime.Candidates[i].ID)
 	}
 	var graph struct{ Outbounds []map[string]any }
 	if err := json.Unmarshal([]byte(runtime.Config), &graph); err != nil {

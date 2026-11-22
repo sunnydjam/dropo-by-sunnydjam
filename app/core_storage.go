@@ -1818,7 +1818,13 @@ func (b *ConfigBuilderForStorage) fetchVPNSourceNodes(source VPNSource) ([]Proxy
 }
 
 func (b *ConfigBuilderForStorage) fetchVPNSourceNodesContext(ctx context.Context, source VPNSource) ([]ProxyConfig, error) {
-	if ownedprofile.IsPrimary(source.PublicCatalogID) {
+	if isMainIngress(source.PublicCatalogID) {
+		raw, err := ownedprofile.MainURI(windowsOwnedFamily(source.PublicCatalogID), source.URI, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		source.URI = raw
+	} else if ownedprofile.IsPrimary(source.PublicCatalogID) {
 		raw, err := windowsRegionalURI(source)
 		if err != nil {
 			return nil, err
