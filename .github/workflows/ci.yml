@@ -89,6 +89,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Desktop Go vet failed" }
           go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
           if ($LASTEXITCODE -ne 0) { throw "Desktop govulncheck failed" }
+      - name: Bootstrap tests and vet
+        shell: pwsh
+        run: ./scripts/check/bootstrap.ps1
       - name: Launcher and Android Go bridge tests
         shell: pwsh
         run: |

@@ -5,6 +5,7 @@
 | Задача | Команда |
 | --- | --- |
 | Проверить общий код источников | `go -C app/mobile/dropocore test ./ownedprofile` |
+| Проверить bootstrap | `pwsh -File scripts/check/bootstrap.ps1` |
 | Проверить Flutter | `Push-Location flutter_app`, затем `flutter test` и `Pop-Location` |
 | Собрать Windows | `pwsh -File scripts/build/build.ps1 -Build` |
 | Собрать Android Preview | `pwsh -File scripts/build/build.ps1 -AndroidPreview -AndroidArchitecture universal` |
