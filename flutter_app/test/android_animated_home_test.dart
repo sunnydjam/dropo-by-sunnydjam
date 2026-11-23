@@ -34,6 +34,7 @@ void main() {
         '2',
       );
       expect(parseAndroidSceneAction('{"action":"cancel"}')?.action, 'cancel');
+      expect(parseAndroidSceneAction('{"action":"landed"}')?.action, 'landed');
       expect(
         parseAndroidSceneAction(
           '{"action":"mode","value":"all_traffic"}',

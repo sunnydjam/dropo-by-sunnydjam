@@ -20,6 +20,7 @@ class _PlanetFlags extends ChangeNotifier {
   int parentBuilds = 0;
   int buttonPresses = 0;
   int landings = 0;
+  int connectionAttempt = 0;
   void update(void Function() change) {
     change();
     notifyListeners();
@@ -66,6 +67,7 @@ Future<void> _pumpPlanet(WidgetTester tester, _PlanetFlags flags) async {
                             connected: flags.connected,
                             busy: flags.busy,
                             connecting: flags.connecting,
+                            connectionAttempt: flags.connectionAttempt,
                             hasError: flags.error,
                             motionEnabled: flags.enabled,
                             textureAvailable: flags.textureAvailable,
@@ -190,6 +192,21 @@ void main() {
     await tester.pump(const Duration(milliseconds: 260));
     expect(stage(), 'landed');
     expect(flags.landings, 1);
+    await tester.pumpWidget(const SizedBox.shrink());
+    flags.dispose();
+  });
+
+  testWidgets('an immediate connection still launches the mascot', (
+    tester,
+  ) async {
+    final flags = _PlanetFlags();
+    await _pumpPlanet(tester, flags);
+    flags.update(() {
+      flags.connectionAttempt++;
+      flags.connected = true;
+    });
+    await tester.pump();
+    expect(atlasPlanetFlightStageForTesting(_painter(tester)), 'launch');
     await tester.pumpWidget(const SizedBox.shrink());
     flags.dispose();
   });

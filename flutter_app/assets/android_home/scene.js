@@ -25,6 +25,7 @@
   let ready = false, presented = false, hostReceived = false;
   let geometry = '', layoutRevision = 0, stableFrames = 0;
   let phase = 'loading', logicalState = 'idle', phaseStart = performance.now();
+  let landingReported = false;
   const orbitSeconds = 2.7;
   let duration = 1, transitionFrom = null, connectedAt = 0, lastTimer = '';
   let raf = 0, stillTimer = 0, lastPaint = -Infinity, lastTick = null, sceneClock = 0;
@@ -74,7 +75,9 @@
   }
   function syncConnectedPanel() {
     const resting = logicalState === 'idle' || logicalState === 'error';
-    const show = presented && (resting || logicalState === 'connected');
+    const show = presented && (host.sharedRouteControls
+      ? logicalState === 'connected' && phase === 'connected'
+      : resting || logicalState === 'connected');
     details.hidden = !show;
     details.inert = !show;
     details.classList.toggle('dp-setup', resting);
@@ -87,6 +90,7 @@
   function syncControls() {
     main.classList.toggle('shared-routes', host.sharedRouteControls === true);
     logicalState = connectionState();
+    if (logicalState !== 'connected') landingReported = false;
     const resting = logicalState === 'idle' || logicalState === 'error';
     main.dataset.state = logicalState;
     main.dataset.busy = String(host.busy || host.connecting || host.disconnecting);
@@ -192,6 +196,7 @@
       return;
     }
     if (logicalState === 'connected') {
+      if (host.sharedRouteControls && ['launch', 'orbit'].includes(phase)) return;
       if (!['connected', 'arrive'].includes(phase)) {
         if (presented && host.active) transition('arrive', .42);
         else setPhase('connected');
@@ -406,6 +411,10 @@
 
     Object.assign(earthAction.style,{left:(b.cx-hit/2)+'px',top:(b.cy-hit/2)+'px',width:hit+'px',height:hit+'px'});
     updateTimer();
+    if (presented && host.sharedRouteControls && phase === 'connected' && !landingReported) {
+      landingReported = true;
+      send('landed');
+    }
   }
   function updateTimer() {
     if (!connectedAt) return;

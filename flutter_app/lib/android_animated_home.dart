@@ -83,6 +83,7 @@ bool isAndroidSceneCriticalResource(String? url) {
     }
     if (!const {
       'failed',
+      'landed',
       'connect',
       'disconnect',
       'cancel',
@@ -122,6 +123,8 @@ class _AndroidAnimatedHome extends StatefulWidget {
     required this.onHelp,
     required this.fallback,
     required this.onPresented,
+    required this.sceneHeight,
+    required this.connectedFooter,
   });
 
   final bool connected, connecting, disconnecting, busy, enabled, canCancel;
@@ -134,6 +137,8 @@ class _AndroidAnimatedHome extends StatefulWidget {
   final ValueChanged<String> onMode;
   final Widget fallback;
   final VoidCallback onPresented;
+  final double sceneHeight;
+  final Widget connectedFooter;
 
   @override
   State<_AndroidAnimatedHome> createState() => _AndroidAnimatedHomeState();
@@ -152,6 +157,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   String? _candidate;
   Timer? _retryPresentation;
   bool _presented = false, _checking = false, _active = false;
+  bool _landed = false;
 
   @override
   void initState() {
@@ -286,6 +292,10 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
         unawaited(_presentWhenDrawn());
       case 'failed':
         _fail();
+      case 'landed':
+        if (widget.connected && !widget.disconnecting && !_landed) {
+          setState(() => _landed = true);
+        }
       case 'connect':
         if (widget.enabled && !widget.connected) {
           widget.onConnectionRequested(true);
@@ -362,6 +372,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   @override
   void didUpdateWidget(_AndroidAnimatedHome oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!widget.connected) _landed = false;
     _synchronize();
   }
 
@@ -384,8 +395,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildScene() {
     if (_failed) return widget.fallback;
     final controller = _controller;
     if (controller == null) return const SizedBox.expand();
@@ -393,6 +403,25 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
     return WebViewWidget(
       key: const ValueKey('android-animated-home'),
       controller: controller,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showFooter =
+        widget.connected && !widget.disconnecting && (_failed || _landed);
+    final animate =
+        widget.motionEnabled && !MediaQuery.disableAnimationsOf(context);
+    return Column(
+      children: [
+        SizedBox(height: widget.sceneHeight, child: _buildScene()),
+        AnimatedSize(
+          alignment: Alignment.topCenter,
+          duration: animate ? const Duration(milliseconds: 250) : Duration.zero,
+          curve: Curves.easeOutCubic,
+          child: showFooter ? widget.connectedFooter : const SizedBox.shrink(),
+        ),
+      ],
     );
   }
 }

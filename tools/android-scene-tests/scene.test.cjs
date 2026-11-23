@@ -296,3 +296,27 @@ test('embedded home leaves route settings to Flutter and keeps session controls 
   const box = await page.locator('.dp-disconnect').boundingBox();
   assert.ok(box && box.y >= 0 && box.y + box.height <= 450, 'Disconnect fits the compact hero');
 });
+
+test('embedded home announces landing once after the orbit on a fast connection', async t => {
+  const page = await pageFor(t);
+  const embedded = {...idle, sharedRouteControls:true};
+  await update(page, embedded);
+  assert.equal((await state(page)).hidden, true);
+
+  await update(page, {...embedded, connecting:true});
+  await update(page, {...embedded, connected:true});
+  const takingOff = await state(page);
+  assert.ok(['launch','orbit'].includes(takingOff.phase));
+  assert.equal(takingOff.hidden, true);
+  assert.equal(takingOff.messages.filter(message => message.action === 'landed').length, 0);
+
+  await page.waitForFunction(() => window.sceneMessages.some(message => message.action === 'landed'));
+  const landed = await state(page);
+  assert.equal(landed.phase, 'connected');
+  assert.equal(landed.hidden, false);
+  await update(page, {...embedded, connected:true});
+  assert.equal((await state(page)).messages.filter(message => message.action === 'landed').length, 1);
+
+  await update(page, embedded);
+  assert.equal((await state(page)).hidden, true);
+});
