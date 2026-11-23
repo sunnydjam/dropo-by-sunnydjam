@@ -7,7 +7,7 @@ and tilts beside DrOppo. Provenance is retained in
 provenance are documented in `store-assets/source/DROPPO_SCENE.md` and
 `store-assets/source/DROPPO_SCENE_ASSETS.json`.
 
-## Previous atlas (source archive only)
+## Windows rotating atlas
 
 `earth_night_atlas.png` is an original decorative image created for Dropo's
 approved night-Earth visual direction with the built-in image generation tool.
@@ -18,9 +18,9 @@ No third-party photograph or remote runtime image URL is used.
 - SHA-256: `7c076c237aa555405e17973e2eb187a48711c16d891e0064194703228ee8ffae`.
 - The approved app concept supplied the appearance reference: dark emerald
   terrain and clouds, small warm city lights, thin atmosphere, black space.
-- The previous atlas remains in the source repository and is no longer in the
-  Flutter asset bundle. Current artwork is also bundled locally, with no runtime
-  downloads. Status palettes, controls and animation remain code-native.
+- Windows projects the bundled atlas onto a rotating sphere and lights its warm
+  city layer in every connection state. Android and the Windows rendering
+  fallback use the bundled perspective artwork. There are no runtime downloads.
 - Geographic details and city illumination are artistic approximations, not
   navigational or scientific data.
 

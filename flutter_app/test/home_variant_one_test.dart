@@ -229,6 +229,20 @@ void main() {
         expect(card.bottom, lessThanOrEqualTo(size.height));
         expect(card.bottom, greaterThan(size.height * .6));
         expect(card.overlaps(action), false);
+        if (!mobile) {
+          final turbo = tester.getRect(
+            find.byKey(const ValueKey('free-plan-turbo')),
+          );
+          final version = tester.getRect(
+            find.byKey(const ValueKey('app-version')),
+          );
+          final brand = tester.getRect(find.text('Dropo').first);
+          expect(size.height - card.bottom, closeTo(6, .1));
+          expect(turbo.top - card.top, greaterThanOrEqualTo(5));
+          expect(card.bottom - turbo.bottom, greaterThanOrEqualTo(5));
+          expect(version.left, greaterThanOrEqualTo(brand.right));
+          expect(version.center.dy, closeTo(brand.center.dy, 8));
+        }
         expect(tester.takeException(), isNull);
         await _capture(tester, 'bottom-turbo-$name');
         await _tap(tester, 'free-plan-turbo');

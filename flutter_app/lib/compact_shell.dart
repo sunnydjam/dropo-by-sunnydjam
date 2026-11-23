@@ -350,6 +350,35 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
     );
   }
 
+  Widget _versionLink({bool besideBrand = false}) => _AccessibleDescription(
+    message: 'О приложении',
+    child: TextButton(
+      key: const ValueKey('app-version'),
+      onPressed: widget.onAbout,
+      style: TextButton.styleFrom(
+        minimumSize: Size(besideBrand ? 0 : 88, 48),
+        backgroundColor: Colors.transparent,
+        padding: besideBrand
+            ? const EdgeInsets.only(left: 8, right: 3, bottom: 7)
+            : const EdgeInsets.symmetric(horizontal: 8),
+        alignment: besideBrand ? Alignment.bottomLeft : Alignment.centerRight,
+      ),
+      child: Text(
+        'v${widget.version}',
+        style: const TextStyle(fontSize: 12, color: _atlasMuted),
+      ),
+    ),
+  );
+
+  Widget _brandWithVersion(Widget brand) => FittedBox(
+    fit: BoxFit.scaleDown,
+    alignment: Alignment.centerLeft,
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [brand, _versionLink(besideBrand: true)],
+    ),
+  );
+
   Widget _drawerPanel({required bool android}) {
     return MouseRegion(
       child: FocusScope(
@@ -391,7 +420,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
                       if (_primarySections.contains(item.$1) &&
                           item.$1 != 'account')
                         _item(item),
-                    if (!android)
+                    if (!android && _isMobileShell)
                       Padding(
                         padding: const EdgeInsets.only(top: 16),
                         child: Text(
@@ -504,32 +533,17 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
               : 56.0)
         : 0.0;
     final contentWidth = screen.width - railWidth;
-    final reserveFooter =
-        _isAndroidPlatform ||
-        widget.activeSection != 'home' ||
-        contentWidth < 960 ||
-        navigationTextScale > 1.3;
+    final desktop = !_isMobileShell;
+    final reserveFooter = desktop
+        ? !showRail
+        : _isAndroidPlatform ||
+              widget.activeSection != 'home' ||
+              contentWidth < 960 ||
+              navigationTextScale > 1.3;
     final compactTelemetry = contentWidth < 760 || navigationTextScale > 1.5;
     final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
     final showCompactBrand =
         !expandedRail && (!_isMobileShell || widget.activeSection == 'home');
-    Widget versionLink() => _AccessibleDescription(
-      message: 'О приложении',
-      child: TextButton(
-        key: const ValueKey('app-version'),
-        onPressed: widget.onAbout,
-        style: TextButton.styleFrom(
-          minimumSize: const Size(88, 48),
-          backgroundColor: Colors.transparent,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          alignment: Alignment.centerRight,
-        ),
-        child: Text(
-          'v${widget.version}',
-          style: const TextStyle(fontSize: 12, color: _atlasMuted),
-        ),
-      ),
-    );
     final title =
         _items
             .where((item) => item.$1 == widget.activeSection)
@@ -556,7 +570,16 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
                     onPressed: widget.disabled ? null : _back,
                     icon: const Icon(Icons.arrow_back),
                   ),
-                if (showCompactBrand) const Text('Dropo', style: _brandStyle),
+                if (showCompactBrand)
+                  if (desktop)
+                    Flexible(
+                      flex: 2,
+                      child: _brandWithVersion(
+                        const Text('Dropo', style: _brandStyle),
+                      ),
+                    )
+                  else
+                    const Text('Dropo', style: _brandStyle),
                 if (showCompactBrand &&
                     screen.width >= 600 &&
                     MediaQuery.textScalerOf(context).scale(14) <= 20) ...[
@@ -584,7 +607,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
                           ),
                         ),
                 ),
-                if (!reserveFooter) versionLink(),
+                if (!desktop && !reserveFooter) _versionLink(),
               ],
             ),
           ),
@@ -656,8 +679,8 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
                           ],
                         ),
                       ),
-                  ] else
-                    versionLink(),
+                  ] else if (!desktop)
+                    _versionLink(),
                 ],
               ),
             ),
@@ -708,6 +731,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
               children: [
                 Positioned.fill(
                   child: _AtlasSpaceBackground(
+                    desktop: !_isMobileShell,
                     motionEnabled:
                         widget.motionEnabled &&
                         widget.visible &&
@@ -767,13 +791,12 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
                         child: Column(
                           children: [
                             if (expandedRail)
-                              const SizedBox(
+                              SizedBox(
                                 height: 48,
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Padding(
-                                    padding: EdgeInsets.only(left: 18),
-                                    child: Text(
+                                child: Padding(
+                                  padding: const EdgeInsets.only(left: 18),
+                                  child: _brandWithVersion(
+                                    const Text(
                                       'Dropo',
                                       key: ValueKey('navigation-brand'),
                                       style: TextStyle(
