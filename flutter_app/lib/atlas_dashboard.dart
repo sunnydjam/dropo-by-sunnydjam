@@ -325,6 +325,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
     this.motionEnabled = true,
     this.connecting = false,
     this.desktopScene = false,
+    this.connectionAttempt = 0,
   });
   final String title;
   final Color accent;
@@ -335,6 +336,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
 
   final bool checking;
   final bool connecting, desktopScene;
+  final int connectionAttempt;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -401,6 +403,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
                       connected: connected,
                       busy: busy,
                       connecting: desktopScene && connecting,
+                      connectionAttempt: connectionAttempt,
                       hasError: hasError,
                       motionEnabled: motionEnabled,
                       size: planetSize,

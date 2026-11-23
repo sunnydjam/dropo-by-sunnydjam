@@ -8,6 +8,7 @@ class _AtlasAnimatedPlanet extends StatefulWidget {
     required this.size,
     this.busy = false,
     this.connecting = false,
+    this.connectionAttempt = 0,
     this.hasError = false,
     this.motionEnabled = true,
     this.textureAvailable = true,
@@ -15,6 +16,7 @@ class _AtlasAnimatedPlanet extends StatefulWidget {
     this.onLanded,
   });
   final bool connected, busy, connecting, hasError, motionEnabled;
+  final int connectionAttempt;
   final bool textureAvailable, mascotAvailable;
   final double size;
   final VoidCallback? onLanded;
@@ -149,7 +151,9 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
       _lightElapsed = 0;
       _lights.value = 0;
     }
-    _updateMotion();
+    _updateMotion(
+      fastConnect: widget.connectionAttempt != oldWidget.connectionAttempt,
+    );
   }
 
   @override
@@ -158,7 +162,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     _updateMotion();
   }
 
-  void _updateMotion() {
+  void _updateMotion({bool fastConnect = false}) {
     final animate =
         widget.motionEnabled &&
         _visible &&
@@ -178,7 +182,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
       _enterFlightStage(
         _canLand ? _AtlasFlightStage.landed : _AtlasFlightStage.resting,
       );
-    } else if (widget.connecting &&
+    } else if ((widget.connecting || fastConnect) &&
         (stage == _AtlasFlightStage.resting ||
             stage == _AtlasFlightStage.landed)) {
       _enterFlightStage(_AtlasFlightStage.launch);
@@ -822,6 +826,7 @@ Widget buildAtlasPlanetForTesting({
   bool connected = false,
   bool busy = false,
   bool connecting = false,
+  int connectionAttempt = 0,
   bool hasError = false,
   bool motionEnabled = true,
   bool textureAvailable = true,
@@ -832,6 +837,7 @@ Widget buildAtlasPlanetForTesting({
   connected: connected,
   busy: busy,
   connecting: connecting,
+  connectionAttempt: connectionAttempt,
   hasError: hasError,
   motionEnabled: motionEnabled,
   textureAvailable: textureAvailable,
