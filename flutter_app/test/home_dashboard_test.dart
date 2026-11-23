@@ -1286,19 +1286,24 @@ void main() {
   for (final size in [const Size(700, 500), const Size(390, 844)]) {
     for (final scale in [1.0, 2.0]) {
       testWidgets(
-        'connection action stays centred on planet at $size / $scale',
+        'Connect is centred and Disconnect sits below the planet at $size / $scale',
         (tester) async {
           final bridge = _HomeBridge();
           await bridge.saveSubscription('https://example.test/subscription');
           await _pumpHome(tester, bridge, size: size, scale: scale);
-          void expectCentred() {
+          void expectActionPlacement() {
             final planet = tester.getRect(
               find.byKey(const ValueKey('atlas-planet')),
             );
             final action = tester.getRect(
               find.byKey(const ValueKey('home-connect')),
             );
-            expect((action.center - planet.center).distance, lessThan(0.1));
+            expect(action.center.dx, closeTo(planet.center.dx, 0.1));
+            if (bridge.connected) {
+              expect(action.bottom, closeTo(planet.bottom, 0.1));
+            } else {
+              expect(action.center.dy, closeTo(planet.center.dy, 0.1));
+            }
             expect(action.height, greaterThanOrEqualTo(48));
             expect(action.left, greaterThanOrEqualTo(planet.left));
             expect(action.right, lessThanOrEqualTo(planet.right));
@@ -1315,8 +1320,8 @@ void main() {
             expect(tester.takeException(), isNull);
           }
 
-          expectCentred();
-          expect(find.text('Подключить'), findsOneWidget);
+          expectActionPlacement();
+          expect(find.text('Подключиться'), findsOneWidget);
           await _tap(tester, 'home-connect');
           await tester.pump(const Duration(seconds: 2));
           await tester.pump();
@@ -1326,7 +1331,12 @@ void main() {
             findsOneWidget,
           );
           expect(find.text('Отключить'), findsOneWidget);
-          expectCentred();
+          expectActionPlacement();
+          await tester.tapAt(
+            tester.getCenter(find.byKey(const ValueKey('atlas-planet'))),
+          );
+          await tester.pump();
+          expect(bridge.toggles, 1);
           await _tap(tester, 'home-connect');
           await tester.pump(const Duration(seconds: 2));
           await tester.pump();
@@ -1335,7 +1345,7 @@ void main() {
             find.byKey(const ValueKey('planet-disconnected')),
             findsOneWidget,
           );
-          expectCentred();
+          expectActionPlacement();
         },
       );
     }
@@ -1352,10 +1362,7 @@ void main() {
     expect(bridge.toggles, 1);
     expect(tester.widget<FilledButton>(action).onPressed, isNull);
     expect(
-      find.descendant(
-        of: action,
-        matching: find.byType(CircularProgressIndicator),
-      ),
+      find.descendant(of: action, matching: find.text('Проверяем соединение…')),
       findsOneWidget,
     );
     await tester.tap(action);

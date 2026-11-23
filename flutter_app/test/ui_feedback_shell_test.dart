@@ -162,10 +162,7 @@ void main() {
         expect(find.text('Отключено'), findsNothing);
         expect(_key('planet-disconnected'), findsOneWidget);
         final actionLabel = tester.renderObject<RenderParagraph>(
-          find.descendant(
-            of: _key('home-connect'),
-            matching: find.text('Подключить'),
-          ),
+          find.text('Подключиться'),
         );
         expect(
           actionLabel.size.height,
@@ -280,7 +277,7 @@ void main() {
       final bridge = _FeedbackBridge()..pendingConnection = Completer<void>();
       await _pump(tester, bridge);
       await _tap(tester, 'home-connect');
-      expect(find.text('Подключаем…'), findsOneWidget);
+      expect(find.text('Проверяем соединение…'), findsOneWidget);
       expect(_key('planet-connecting'), findsOneWidget);
       expect(
         tester.widget<FilledButton>(_key('home-connect')).onPressed,
@@ -300,7 +297,7 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
       await tester.pump();
       expect(_key('planet-error'), findsOneWidget);
-      expect(find.text('Повторить'), findsOneWidget);
+      expect(find.text('Попробовать снова'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },

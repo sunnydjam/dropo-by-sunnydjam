@@ -153,17 +153,6 @@ func Validate(id, raw string) (int64, error) {
 	return until, nil
 }
 
-// MainURI refreshes the dial address of both vaulted legacy keys and newly
-// issued keys. Validation binds the TLS name, HTTP authority, tier and expiry.
-func MainURI(id, raw string, now time.Time) (string, error) {
-	if !IsPrimary(id) || Expired(id, raw, now) {
-		return "", errors.New("managed primary unavailable")
-	}
-	u, _ := url.Parse(raw)
-	u.Host = PrimaryIPv4 + ":443"
-	u.Fragment = Name(id) + " · Основной"
-	return u.String(), nil
-}
 func Expired(id, raw string, now time.Time) bool {
 	if !IsProvider(id) {
 		return false

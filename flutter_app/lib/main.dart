@@ -301,11 +301,6 @@ abstract class CoreBridge {
   Future<Map<String, dynamic>> setRoutingMode(String mode);
   Future<Map<String, dynamic>> networkMode();
   Future<Map<String, dynamic>> setNetworkMode(String mode);
-  Future<Map<String, dynamic>> hideRuTraffic();
-  Future<Map<String, dynamic>> setHideRuTraffic(
-    bool enabled,
-    String proxyAddress,
-  );
   Future<Map<String, dynamic>> freeAccessConfig();
   Future<Map<String, dynamic>> setDisableFreeAccess(bool disabled);
   Future<Map<String, dynamic>> setFreeAccessServiceMethod(
@@ -617,19 +612,6 @@ class HttpCoreBridge implements CoreBridge {
   @override
   Future<Map<String, dynamic>> setNetworkMode(String mode) {
     return callMap('SetNetworkMode', args: [mode]);
-  }
-
-  @override
-  Future<Map<String, dynamic>> hideRuTraffic() {
-    return callMap('GetHideRuTraffic');
-  }
-
-  @override
-  Future<Map<String, dynamic>> setHideRuTraffic(
-    bool enabled,
-    String proxyAddress,
-  ) {
-    return callMap('SetHideRuTraffic', args: [enabled, proxyAddress]);
   }
 
   @override
@@ -1348,19 +1330,6 @@ class ChannelCoreBridge implements CoreBridge {
   }
 
   @override
-  Future<Map<String, dynamic>> hideRuTraffic() {
-    return callMap('GetHideRuTraffic');
-  }
-
-  @override
-  Future<Map<String, dynamic>> setHideRuTraffic(
-    bool enabled,
-    String proxyAddress,
-  ) {
-    return callMap('SetHideRuTraffic', args: [enabled, proxyAddress]);
-  }
-
-  @override
   Future<Map<String, dynamic>> freeAccessConfig() {
     return callMap('GetFreeAccessConfig');
   }
@@ -1987,8 +1956,6 @@ class MockCoreBridge implements CoreBridge {
     'language': _config.language,
     'logLevel': _config.logLevel,
     'subUpdateInterval': _config.subUpdateInterval,
-    'hideRuTraffic': _config.hideRuTraffic,
-    'ruProxyAddress': _config.ruProxyAddress,
     'disableFreeAccess': _config.disableFreeAccess,
     'routingMode': _config.routingMode,
     'networkMode': _config.networkMode,
@@ -2112,27 +2079,6 @@ class MockCoreBridge implements CoreBridge {
   Future<Map<String, dynamic>> setNetworkMode(String mode) async {
     _config = _config.copyWith(networkMode: mode);
     return {'success': true, 'mode': mode};
-  }
-
-  @override
-  Future<Map<String, dynamic>> hideRuTraffic() async {
-    return {
-      'success': true,
-      'enabled': _config.hideRuTraffic,
-      'proxyAddress': _config.ruProxyAddress,
-    };
-  }
-
-  @override
-  Future<Map<String, dynamic>> setHideRuTraffic(
-    bool enabled,
-    String proxyAddress,
-  ) async {
-    _config = _config.copyWith(
-      hideRuTraffic: enabled,
-      ruProxyAddress: proxyAddress,
-    );
-    return {'success': true, 'enabled': enabled};
   }
 
   @override
@@ -3016,8 +2962,6 @@ class AppConfig {
     required this.language,
     required this.logLevel,
     required this.subUpdateInterval,
-    required this.hideRuTraffic,
-    required this.ruProxyAddress,
     required this.disableFreeAccess,
     required this.routingMode,
     required this.networkMode,
@@ -3038,8 +2982,6 @@ class AppConfig {
   final String language;
   final String logLevel;
   final int subUpdateInterval;
-  final bool hideRuTraffic;
-  final String ruProxyAddress;
   final bool disableFreeAccess;
   final String routingMode;
   final String networkMode;
@@ -3059,8 +3001,6 @@ class AppConfig {
     language: 'ru',
     logLevel: 'trace',
     subUpdateInterval: 24,
-    hideRuTraffic: false,
-    ruProxyAddress: '',
     disableFreeAccess: false,
     routingMode: 'blocked_only',
     networkMode: 'auto',
@@ -3088,8 +3028,6 @@ class AppConfig {
       subUpdateInterval: _asInt(json['subUpdateInterval']) == 0
           ? 24
           : _asInt(json['subUpdateInterval']),
-      hideRuTraffic: json['hideRuTraffic'] == true,
-      ruProxyAddress: json['ruProxyAddress']?.toString() ?? '',
       disableFreeAccess: json['disableFreeAccess'] == true,
       routingMode: json['routingMode']?.toString() ?? 'blocked_only',
       networkMode:
@@ -3115,8 +3053,6 @@ class AppConfig {
     String? language,
     String? logLevel,
     int? subUpdateInterval,
-    bool? hideRuTraffic,
-    String? ruProxyAddress,
     bool? disableFreeAccess,
     String? routingMode,
     String? networkMode,
@@ -3137,8 +3073,6 @@ class AppConfig {
       language: language ?? this.language,
       logLevel: logLevel ?? this.logLevel,
       subUpdateInterval: subUpdateInterval ?? this.subUpdateInterval,
-      hideRuTraffic: hideRuTraffic ?? this.hideRuTraffic,
-      ruProxyAddress: ruProxyAddress ?? this.ruProxyAddress,
       disableFreeAccess: disableFreeAccess ?? this.disableFreeAccess,
       routingMode: routingMode ?? this.routingMode,
       networkMode: networkMode ?? this.networkMode,
@@ -6814,10 +6748,12 @@ class _DropoHomePageState extends State<DropoHomePage>
           : null,
       connection: _HomeConnectionPanel(
         atlas: true,
+        desktopScene: !_isMobileShell,
         status: status,
         online: online,
         booting: booting,
         busy: isBusy,
+        starting: busyTasks.containsKey('vpn-connect') && !status.connected,
         disconnecting: busyTasks.containsKey('vpn-disconnect'),
         routingMode: appConfig.routingMode,
         enabled: powerEnabled,
@@ -10939,71 +10875,6 @@ class _SettingsDialogState extends State<_SettingsDialog>
           ),
         if (widget.advanced)
           _SettingsGroup(
-            title: 'Маршрутизация',
-            children: [
-              _SelectSetting(
-                title: 'Режим маршрутизации',
-                description: _routingModeDescription(config.routingMode),
-                value: config.routingMode,
-                stacked: true,
-                options: const {
-                  'blocked_only': 'Выбранные сервисы',
-                  'all_traffic': 'Весь трафик',
-                },
-                onChanged:
-                    !saving &&
-                        !widget.currentStatus.connecting &&
-                        !widget.currentStatus.disconnecting
-                    ? (value) => _applySpecial(
-                        () => widget.bridge.setRoutingMode(value),
-                        config.copyWith(routingMode: value),
-                      )
-                    : null,
-              ),
-              _SwitchSetting(
-                title: 'Скрывать RU-трафик от провайдера',
-                description:
-                    'Российские сайты по умолчанию идут напрямую. Включите, чтобы завернуть их в VPN/прокси.',
-                value: config.hideRuTraffic,
-                onChanged: canChangeRuntime
-                    ? (value) => _applySpecial(
-                        () => widget.bridge.setHideRuTraffic(
-                          value,
-                          config.ruProxyAddress,
-                        ),
-                        config.copyWith(hideRuTraffic: value),
-                      )
-                    : null,
-              ),
-              if (config.hideRuTraffic)
-                _TextSetting(
-                  title: 'Адрес прокси для RU-трафика',
-                  description: 'Необязательно: vless://, trojan:// или ss://',
-                  initialValue: config.ruProxyAddress,
-                  onSubmitted: canChangeRuntime
-                      ? (value) => _applySpecial(
-                          () => widget.bridge.setHideRuTraffic(true, value),
-                          config.copyWith(ruProxyAddress: value),
-                        )
-                      : null,
-                ),
-              if (isMobile)
-                const _InfoBand(
-                  icon: Icons.vpn_lock,
-                  title: 'Android VPN',
-                  body: 'Сетевой режим: Android VpnService + sing-box libbox.',
-                )
-              else
-                const _InfoBand(
-                  icon: Icons.hub,
-                  title: 'Windows Unified',
-                  body:
-                      'В режиме «По сервисам» применяются выбранные маршруты; остальное идёт напрямую. В режиме «Всё через VPN» используется TUN. Встроенный движок обхода работает только для выбранных сервисов.',
-                ),
-            ],
-          ),
-        if (widget.advanced)
-          _SettingsGroup(
             title: 'Диагностика',
             children: [
               _ButtonSetting(
@@ -12465,17 +12336,6 @@ InputDecoration _fieldDecoration({
       borderSide: const BorderSide(color: Color(0xFF36D399)),
     ),
   );
-}
-
-String _routingModeDescription(String mode) {
-  return switch (mode) {
-    'all_traffic' =>
-      'Весь трафик через VPN. Максимальная приватность, высокая нагрузка.',
-    _ =>
-      _isMobileShell
-          ? 'VPN работает только для выбранных сервисов. Остальной трафик идёт напрямую.'
-          : 'VPN и Zapret работают только для выбранных сервисов. Остальной трафик идёт напрямую.',
-  };
 }
 
 Map<String, dynamic> _asMap(Object? value) {

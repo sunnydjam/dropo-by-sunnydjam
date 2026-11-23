@@ -195,8 +195,15 @@ func TestFullVPNLastSourceRemovalAndDisablePersistUnreadyAcrossRestart(t *testin
 			if remove && len(profile.VPNSources) != 0 {
 				t.Fatal("removed public source returned")
 			}
-			if !remove && (len(profile.VPNSources) != 2 || !profile.VPNSources[0].Disabled || !profile.VPNSources[1].Disabled) {
-				t.Fatal("disabled public source returned enabled")
+			if !remove {
+				if len(profile.VPNSources) != 3 {
+					t.Fatalf("expected the three saved routes, got %d", len(profile.VPNSources))
+				}
+				for _, source := range profile.VPNSources {
+					if !source.Disabled {
+						t.Fatal("disabled regional route returned enabled")
+					}
+				}
 			}
 		})
 	}

@@ -40,8 +40,7 @@ func RequiresXrayBridge(proxy ProxyConfig) bool {
 	if proxy.Type != "vless" {
 		return false
 	}
-	if (proxy.finlandRelay != nil || ownedprofile.IsFinlandReserveID(strings.TrimPrefix(proxy.Tag, "vpn-source-"))) &&
-		ownedprofile.IsFinlandReality(proxy.Server, proxy.ServerPort, proxy.Network, proxy.Security, proxy.SNI, proxy.PublicKey, proxy.ShortID, proxy.Fingerprint) {
+	if ownedprofile.IsManagedReality(proxy.Server, proxy.ServerPort, proxy.Network, proxy.Security, proxy.SNI, proxy.PublicKey, proxy.ShortID, proxy.Fingerprint) {
 		return true
 	}
 	switch NormalizeTransport(proxy.Network) {
@@ -56,6 +55,18 @@ func hasLegacyFinlandOutbound(config map[string]interface{}) bool {
 	outbounds, _ := config["outbounds"].([]interface{})
 	for _, tier := range []string{ownedprofile.Free, ownedprofile.Boost} {
 		if configOutboundByTag(outbounds, "vpn-source-"+tier+"-fi-tcp")["type"] == "vless" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLegacyFinlandCarrier(config map[string]interface{}) bool {
+	outbounds, _ := config["outbounds"].([]interface{})
+	for _, raw := range outbounds {
+		outbound, _ := raw.(map[string]interface{})
+		tag, _ := outbound["tag"].(string)
+		if strings.HasPrefix(tag, "fi-carrier-") || strings.HasPrefix(tag, "fi-quic-") {
 			return true
 		}
 	}

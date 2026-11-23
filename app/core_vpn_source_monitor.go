@@ -228,6 +228,14 @@ func nextVPNSourceHealthState(state vpnSourceHealthState, healthy bool, now time
 }
 
 func (a *App) configuredVPNSourceTags() []string {
+	var tags []string
+	for _, group := range a.configuredVPNSourceTagGroups() {
+		tags = append(tags, group...)
+	}
+	return tags
+}
+
+func (a *App) configuredVPNSourceTagGroups() [][]string {
 	if a == nil || a.storage == nil {
 		return nil
 	}
@@ -237,21 +245,24 @@ func (a *App) configuredVPNSourceTags() []string {
 	}
 	config, _ := a.storage.GetProfileConfig(profile.ID)
 	outbounds, _ := config["outbounds"].([]interface{})
-	result := make([]string, 0, len(profile.VPNSources))
-	for _, source := range profile.VPNSources {
-		if source.Disabled || ownedSourceExpired(source) {
-			continue
+	var result [][]string
+	for _, group := range windowsRuntimeSourceGroups(profile.VPNSources) {
+		var tags []string
+		for _, source := range group {
+			tag := "vpn-source-" + source.ID
+			if !source.Disabled && !ownedSourceExpired(source) && outboundTagExists(outbounds, tag) {
+				tags = append(tags, tag)
+			}
 		}
-		tag := "vpn-source-" + source.ID
-		if outboundTagExists(outbounds, tag) {
-			result = append(result, tag)
+		if len(tags) > 0 {
+			result = append(result, tags)
 		}
 	}
 	return result
 }
 
 func (a *App) selectFirstHealthyVPNSource(ctx context.Context, generation uint64) string {
-	tags := a.configuredVPNSourceTags()
+	tags := a.sessionVPNSourceTags()
 	if len(tags) == 0 {
 		return ""
 	}
@@ -408,7 +419,7 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 		return
 	}
 	if !slices.Contains(tags, active) {
-		a.selectInitialVPNSource(ctx, generation)
+		a.selectFirstHealthyVPNSource(ctx, generation)
 		return
 	}
 	now := time.Now()
@@ -432,20 +443,14 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 	if !a.clearManualVPNSourceForMonitor(generation, active) {
 		return
 	}
-	start := 0
-	for index, tag := range tags {
-		if tag == active {
-			start = index + 1
-			break
-		}
-	}
-	for offset := 0; offset < len(tags); offset++ {
-		tag := tags[(start+offset)%len(tags)]
+	activeIndex := slices.Index(tags, active)
+	fallback := append(slices.Clone(tags[activeIndex+1:]), tags[:activeIndex]...)
+	for _, tag := range fallback {
 		canAttempt, current := a.vpnSourceCanAttemptForMonitor(generation, tag, now)
 		if !current {
 			return
 		}
-		if tag == active || !canAttempt {
+		if !canAttempt {
 			continue
 		}
 		candidateHealthy, current := a.vpnSourceHealthy(ctx, generation, tag)
@@ -468,7 +473,7 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 func (a *App) maybeRecoverPreferredVPNSource(ctx context.Context, generation uint64, tags []string, active string, now time.Time) {
 	// Automatic latency selection runs once per connection, not on each ping.
 	// Keep a healthy session stable; failures still follow the ranked chain.
-	if a.automaticVPNSourceSelection() {
+	if a.automaticVPNSourceSelection() || slices.ContainsFunc(a.configuredVPNSourceTagGroups(), func(group []string) bool { return len(group) > 1 }) {
 		return
 	}
 	activeIndex := -1

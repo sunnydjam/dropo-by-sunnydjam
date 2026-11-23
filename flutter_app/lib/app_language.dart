@@ -101,7 +101,8 @@ const _englishUi = <String, String>{
   'Планета, звёзды и мягкий рассвет. Движение останавливается, когда приложение свёрнуто; системное уменьшение движения имеет приоритет.':
       'Animate Earth, stars, and dawn. Animations pause in the background and respect the device’s reduced-motion setting.',
   'Маршрутизация': 'Routing',
-  'Режим маршрутизации': 'Routing mode',
+  'Подключиться': 'Connect',
+  'Попробовать снова': 'Try again',
   'Выбранные сервисы': 'Selected services',
   'Весь трафик': 'All traffic',
   'Политика конфиденциальности': 'Privacy policy',

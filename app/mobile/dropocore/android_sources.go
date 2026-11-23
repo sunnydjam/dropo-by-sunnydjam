@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 )
 
 // Android stores independent subscriptions, not a flattened list of servers.
@@ -35,7 +34,7 @@ const maxAndroidVPNSources = 16
 // The existing HTTPS relays have dedicated persistent slots. Direct FI/LV
 // sources are generated in memory and do not evict existing subscriptions.
 const maxAndroidSourceCandidates = maxAndroidVPNSources + 2
-const maxAndroidRuntimeSourceCandidates = maxAndroidSourceCandidates + 4
+const maxAndroidRuntimeSourceCandidates = maxAndroidSourceCandidates + 6
 
 func androidLogicalSourceCount(sources []androidVPNSource) int {
 	count := 0
@@ -111,7 +110,7 @@ func primaryAndroidSourceLocked() *androidVPNSource {
 func androidSourceInputs(sources []androidVPNSource) []ownedprofile.Source {
 	inputs := make([]ownedprofile.Source, len(sources))
 	for i, s := range sources {
-		inputs[i] = ownedprofile.Source{ID: s.ID, Provider: s.PublicCatalogID, URI: s.URI, Disabled: s.Disabled}
+		inputs[i] = ownedprofile.Source{ID: s.ID, Provider: s.PublicCatalogID, URI: s.URI, Disabled: s.Disabled, ManagedIngress: s.ManagedIngress}
 	}
 	return inputs
 }
@@ -164,23 +163,17 @@ func androidSourcesViewLocked() map[string]interface{} {
 		}
 		name := source.Name
 		activeIngress := ""
+		managedIngress := ""
 		if ownedprofile.IsPrimary(publicID) {
-
-			name = ownedprofile.RegionName(publicID)
+			name = ownedprofile.DisplayName(publicID, ownedprofile.Name(publicID))
+			managedIngress = ownedprofile.NormalizeIngress(publicID, source.ManagedIngress)
 			if active {
-				if current.activeSourceID == publicID+ownedprofile.MainSuffix {
-					activeIngress = "main"
-					name = ownedprofile.Name(publicID) + " · Основной"
-				} else if publicID == ownedprofile.Free {
-					activeIngress = "latvia"
-				} else {
-					activeIngress = "finland"
-				}
+				activeIngress = ownedprofile.CandidateIngress(publicID, current.activeSourceID)
 			}
 		}
 		views = append(views, map[string]interface{}{
 			"public_catalog_id": publicID, "reference_only": ownedprofile.IsPrimary(publicID) && ownedAndroidSourceExpired(source),
-			"id": source.ID, "name": name, "active_ingress": activeIngress, "kind": kind, "disabled": source.Disabled,
+			"id": source.ID, "name": name, "active_ingress": activeIngress, "managed_ingress": managedIngress, "kind": kind, "disabled": source.Disabled,
 			"selected_node": androidSelectedNode(source), "node_count": len(source.Nodes),
 			"node_names": names, "last_updated": source.UpdatedAt, "last_error": problem,
 			"node_ids": ids, "favorite_node_ids": append([]string{}, source.FavoriteNodeIDs...),
@@ -309,15 +302,22 @@ func changeAndroidSources(method string, args []interface{}) string {
 		}
 		switch method {
 		case "SetManagedIngress":
-			pref := stringArg(args, 1, "")
-			if len(args) != 2 || sources[index].Disabled || !(sources[index].PublicCatalogID == ownedprofile.Free && pref == "latvia" || sources[index].PublicCatalogID == ownedprofile.Boost && pref == "finland") || len(ownedprofile.DirectReserves(sources[index].PublicCatalogID, sources[index].URI, time.Now())) == 0 {
+			if len(args) != 2 {
+				return androidSourceError("Не указан способ подключения.")
+			}
+			pref, ok := args[1].(string)
+			owner := &sources[index]
+			if !ok || owner.Disabled || !ownedprofile.ValidIngress(owner.PublicCatalogID, pref) || ownedAndroidSourceExpired(*owner) {
 				return androidSourceError("Этот вход сейчас недоступен.")
+			}
+			owner.ManagedIngress = pref
+			if pref == "" {
+				break
 			}
 			order, ok := ownedprofile.Move(androidSourceInputs(sources), id, 0)
 			if !ok {
 				return androidSourceError("Источник больше недоступен.")
 			}
-			sources[index].ManagedIngress = pref
 			reordered := make([]androidVPNSource, len(order))
 			for i, j := range order {
 				reordered[i] = sources[j]

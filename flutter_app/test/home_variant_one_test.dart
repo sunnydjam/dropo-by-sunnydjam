@@ -432,15 +432,15 @@ void main() {
     },
   );
 
-  testWidgets('connected action is transparent over a larger real Earth', (
+  testWidgets('connected action uses the Android-style dark capsule', (
     tester,
   ) async {
     await _pump(tester, size: const Size(1536, 1024), connected: true);
     final action = tester.widget<FilledButton>(
       find.byKey(const ValueKey('home-connect')),
     );
-    expect(action.style!.backgroundColor!.resolve({}), Colors.transparent);
-    expect(action.style!.side!.resolve({})!.color, const Color(0xFF5CF0B0));
+    expect(action.style!.backgroundColor!.resolve({}), const Color(0xED102019));
+    expect(action.style!.side!.resolve({})!.color, const Color(0x558CAF9D));
     expect(find.text('Отключить'), findsOneWidget);
     expect(
       tester.getSize(find.byKey(const ValueKey('atlas-planet'))).width,

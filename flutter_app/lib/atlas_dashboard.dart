@@ -323,6 +323,8 @@ class _AtlasConnectionPanel extends StatelessWidget {
     required this.onPressed,
     this.hasError = false,
     this.motionEnabled = true,
+    this.connecting = false,
+    this.desktopScene = false,
   });
   final String title;
   final Color accent;
@@ -332,6 +334,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
   final VoidCallback onPressed;
 
   final bool checking;
+  final bool connecting, desktopScene;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -397,74 +400,86 @@ class _AtlasConnectionPanel extends StatelessWidget {
                     child: _AtlasAnimatedPlanet(
                       connected: connected,
                       busy: busy,
+                      connecting: desktopScene && connecting,
                       hasError: hasError,
                       motionEnabled: motionEnabled,
                       size: planetSize,
                     ),
                   ),
-                  SizedBox(
-                    width: largeText
-                        ? planetSize
-                        : math.min(
-                            math.max(244.0, planetSize * 0.56),
-                            planetSize,
-                          ),
-                    child: FilledButton(
-                      key: const ValueKey('home-connect'),
+                  if (desktopScene)
+                    _DesktopPlanetAction(
+                      size: planetSize,
+                      accent: accent,
+                      connecting: connecting || checking,
+                      stopping: stopping,
+                      sessionActive: sessionActive,
+                      hasError: hasError,
                       onPressed: enabled ? onPressed : null,
-                      style: FilledButton.styleFrom(
-                        enabledMouseCursor: SystemMouseCursors.click,
-                        disabledMouseCursor: SystemMouseCursors.basic,
-                        minimumSize: Size(48, widePlanet ? 60 : 52),
-                        backgroundColor: connected
-                            ? Colors.transparent
-                            : hasError
-                            ? const Color(0xFFFFB4AB)
-                            : _atlasMint,
-                        foregroundColor: connected
-                            ? _atlasText
-                            : _atlasBackground,
-                        disabledBackgroundColor: _atlasSurface,
-                        disabledForegroundColor: _atlasMuted,
-                        side: BorderSide(
-                          color: hasError
-                              ? const Color(0xFFFFB4AB)
-                              : enabled
-                              ? _atlasMint
-                              : _atlasBorder,
-                          width: 1.5,
-                        ),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 14,
-                        ),
-                        textStyle: TextStyle(
-                          fontFamily: 'Inter',
-                          fontSize: widePlanet ? 19 : 17,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        shape: const StadiumBorder(),
-                      ),
-                      child: largeText
-                          ? Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                actionIcon,
-                                const SizedBox(height: 8),
-                                actionLabel,
-                              ],
-                            )
-                          : Row(
-                              mainAxisSize: MainAxisSize.min,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                actionIcon,
-                                const SizedBox(width: 8),
-                                Flexible(child: actionLabel),
-                              ],
+                    )
+                  else
+                    SizedBox(
+                      width: largeText
+                          ? planetSize
+                          : math.min(
+                              math.max(244.0, planetSize * 0.56),
+                              planetSize,
                             ),
+                      child: FilledButton(
+                        key: const ValueKey('home-connect'),
+                        onPressed: enabled ? onPressed : null,
+                        style: FilledButton.styleFrom(
+                          enabledMouseCursor: SystemMouseCursors.click,
+                          disabledMouseCursor: SystemMouseCursors.basic,
+                          minimumSize: Size(48, widePlanet ? 60 : 52),
+                          backgroundColor: connected
+                              ? Colors.transparent
+                              : hasError
+                              ? const Color(0xFFFFB4AB)
+                              : _atlasMint,
+                          foregroundColor: connected
+                              ? _atlasText
+                              : _atlasBackground,
+                          disabledBackgroundColor: _atlasSurface,
+                          disabledForegroundColor: _atlasMuted,
+                          side: BorderSide(
+                            color: hasError
+                                ? const Color(0xFFFFB4AB)
+                                : enabled
+                                ? _atlasMint
+                                : _atlasBorder,
+                            width: 1.5,
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 14,
+                          ),
+                          textStyle: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: widePlanet ? 19 : 17,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          shape: const StadiumBorder(),
+                        ),
+                        child: largeText
+                            ? Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  actionIcon,
+                                  const SizedBox(height: 8),
+                                  actionLabel,
+                                ],
+                              )
+                            : Row(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  actionIcon,
+                                  const SizedBox(width: 8),
+                                  Flexible(child: actionLabel),
+                                ],
+                              ),
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -473,6 +488,177 @@ class _AtlasConnectionPanel extends StatelessWidget {
       );
     },
   );
+}
+
+class _DesktopPlanetAction extends StatelessWidget {
+  const _DesktopPlanetAction({
+    required this.size,
+    required this.accent,
+    required this.connecting,
+    required this.stopping,
+    required this.sessionActive,
+    required this.hasError,
+    required this.onPressed,
+  });
+
+  final double size;
+  final Color accent;
+  final bool connecting, stopping, sessionActive, hasError;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final waiting = connecting || stopping;
+    final start = !sessionActive && !waiting;
+    final powerSize = (size * .31).clamp(48.0, 78.0);
+    final hint = hasError ? 'Попробовать снова' : 'Подключиться';
+    final label = stopping
+        ? 'Отключаем…'
+        : connecting
+        ? 'Проверяем соединение…'
+        : 'Отключить';
+    final power = FilledButton(
+      key: const ValueKey('home-connect'),
+      onPressed: waiting ? null : onPressed,
+      style: FilledButton.styleFrom(
+        enabledMouseCursor: SystemMouseCursors.click,
+        backgroundColor: start
+            ? (hasError ? const Color(0x20FF566C) : const Color(0x20FFFFFF))
+            : const Color(0xED102019),
+        disabledBackgroundColor: const Color(0xED102019),
+        foregroundColor: Colors.white,
+        disabledForegroundColor: _atlasText,
+        padding: start
+            ? EdgeInsets.zero
+            : const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        minimumSize: start ? Size.square(powerSize) : const Size(48, 48),
+        side: BorderSide(
+          color: start
+              ? (hasError ? const Color(0x99FF9BA8) : const Color(0x66FFFFFF))
+              : const Color(0x558CAF9D),
+        ),
+        shape: start
+            ? const CircleBorder()
+            : RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
+      ),
+      child: start
+          ? Icon(
+              hasError ? Icons.refresh : Icons.power_settings_new,
+              size: 32,
+              semanticLabel: _uiText(context, hint),
+            )
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (waiting)
+                  SizedBox.square(
+                    dimension: 12,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: accent,
+                      ),
+                    ),
+                  )
+                else
+                  const Icon(Icons.power_settings_new, size: 17),
+                const SizedBox(width: 8),
+                Flexible(child: Text(_uiText(context, label))),
+              ],
+            ),
+    );
+
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        if (start && onPressed != null)
+          ClipOval(
+            child: GestureDetector(
+              excludeFromSemantics: true,
+              behavior: HitTestBehavior.opaque,
+              onTap: onPressed,
+              child: SizedBox.square(dimension: size * .85),
+            ),
+          ),
+        if (start) ...[
+          power,
+          Positioned(
+            top: size / 2 + powerSize * .25,
+            left: size / 2 + powerSize * .43,
+            child: IgnorePointer(
+              child: CustomPaint(
+                size: Size(size * .22, size * .27),
+                painter: const _DesktopConnectArrow(),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: ExcludeSemantics(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Transform.rotate(
+                    angle: -.10,
+                    child: Text(
+                      _uiText(context, hint),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontFamily: 'Caveat',
+                        fontWeight: FontWeight.w600,
+                        fontSize: (size * .13).clamp(22.0, 34.0),
+                        shadows: const [
+                          Shadow(color: Colors.black, blurRadius: 8),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ] else
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 5),
+              child: power,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _DesktopConnectArrow extends CustomPainter {
+  const _DesktopConnectArrow();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+    final arrow = Path()
+      ..moveTo(w * .52, h)
+      ..cubicTo(w * .99, h * .80, w * 1.04, h * .27, 0, 0)
+      ..moveTo(w * .33, h * .006)
+      ..lineTo(0, 0)
+      ..lineTo(w * .14, h * .24);
+    canvas.drawPath(
+      arrow,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = 2,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _DesktopConnectArrow oldDelegate) => false;
 }
 
 class _AtlasRouteControls extends StatelessWidget {

@@ -244,6 +244,8 @@ class _HomeConnectionPanel extends StatelessWidget {
     this.operationError = false,
     this.motionEnabled = true,
     this.atlas = false,
+    this.starting = false,
+    this.desktopScene = false,
   });
   final CoreStatus status;
   final bool online, booting, busy, disconnecting, enabled;
@@ -252,6 +254,7 @@ class _HomeConnectionPanel extends StatelessWidget {
   final bool atlas;
   final bool operationError;
   final bool motionEnabled;
+  final bool starting, desktopScene;
 
   @override
   Widget build(BuildContext context) {
@@ -300,6 +303,8 @@ class _HomeConnectionPanel extends StatelessWidget {
         connected: connected,
         sessionActive: status.connected,
         checking: checking,
+        connecting: !stopping && (starting || status.connecting || checking),
+        desktopScene: desktopScene,
         busy: busy,
         stopping: stopping,
         enabled: enabled,

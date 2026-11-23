@@ -7,30 +7,53 @@ class _AtlasAnimatedPlanet extends StatefulWidget {
     required this.connected,
     required this.size,
     this.busy = false,
+    this.connecting = false,
     this.hasError = false,
     this.motionEnabled = true,
     this.textureAvailable = true,
     this.mascotAvailable = true,
+    this.onLanded,
   });
-  final bool connected, busy, hasError, motionEnabled;
+  final bool connected, busy, connecting, hasError, motionEnabled;
   final bool textureAvailable, mascotAvailable;
   final double size;
+  final VoidCallback? onLanded;
 
   @override
   State<_AtlasAnimatedPlanet> createState() => _AtlasAnimatedPlanetState();
 }
+
+enum _AtlasFlightStage {
+  resting(0),
+  launch(0.65),
+  orbit(2.7),
+  landing(0.58),
+  landed(0);
+
+  const _AtlasFlightStage(this.seconds);
+  final double seconds;
+}
+
+typedef _AtlasFlightFrame = ({_AtlasFlightStage stage, double progress});
 
 class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _controller;
   final _phase = ValueNotifier<double>(0);
   final _lights = ValueNotifier<double>(0);
+  final _flight = ValueNotifier<_AtlasFlightFrame>((
+    stage: _AtlasFlightStage.resting,
+    progress: 0,
+  ));
   _AtlasSceneAssets? _assets;
   bool _visible = true;
   int _lastFrame = -1;
   double _previousPhase = 0;
   double _lightElapsed = 0;
+  double _flightElapsed = 0;
   bool get _lit => widget.connected && !widget.hasError && !widget.busy;
+  bool get _canLand =>
+      widget.connected && !widget.hasError && !widget.connecting;
 
   @override
   void initState() {
@@ -58,12 +81,52 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     _lastFrame = frame;
     final delta = (_controller.value - _previousPhase) % 1;
     _previousPhase = _controller.value;
+    _advanceFlight(delta * 70);
     if (_lit && _lights.value < 1) {
       _lightElapsed += delta * 70;
       final progress = (_lightElapsed / 0.6).clamp(0.0, 1.0);
       _lights.value = progress * progress * (3 - 2 * progress);
     }
     _phase.value = _controller.value;
+  }
+
+  void _enterFlightStage(_AtlasFlightStage stage) {
+    if (_flight.value.stage == stage) return;
+    _flightElapsed = 0;
+    _flight.value = (stage: stage, progress: 0);
+    if (stage == _AtlasFlightStage.landed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _canLand && _flight.value.stage == stage) {
+          widget.onLanded?.call();
+        }
+      });
+    }
+  }
+
+  void _advanceFlight(double seconds) {
+    final stage = _flight.value.stage;
+    if (stage.seconds == 0) return;
+    _flightElapsed += seconds;
+    if (_flightElapsed >= stage.seconds) {
+      switch (stage) {
+        case _AtlasFlightStage.launch:
+          _enterFlightStage(_AtlasFlightStage.orbit);
+          return;
+        case _AtlasFlightStage.orbit:
+          if (_canLand) {
+            _enterFlightStage(_AtlasFlightStage.landing);
+            return;
+          }
+          _flightElapsed %= stage.seconds;
+        case _AtlasFlightStage.landing:
+          _enterFlightStage(_AtlasFlightStage.landed);
+          return;
+        case _AtlasFlightStage.resting:
+        case _AtlasFlightStage.landed:
+          return;
+      }
+    }
+    _flight.value = (stage: stage, progress: _flightElapsed / stage.seconds);
   }
 
   bool _isVisible(AppLifecycleState? state) =>
@@ -108,6 +171,20 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
       _controller.stop(canceled: false);
     }
     if (!animate) _lights.value = _lit ? 1 : 0;
+    final stage = _flight.value.stage;
+    if (widget.hasError || (!_canLand && !widget.connecting)) {
+      _enterFlightStage(_AtlasFlightStage.resting);
+    } else if (!animate) {
+      _enterFlightStage(
+        _canLand ? _AtlasFlightStage.landed : _AtlasFlightStage.resting,
+      );
+    } else if (widget.connecting &&
+        (stage == _AtlasFlightStage.resting ||
+            stage == _AtlasFlightStage.landed)) {
+      _enterFlightStage(_AtlasFlightStage.launch);
+    } else if (_canLand && stage == _AtlasFlightStage.resting) {
+      _enterFlightStage(_AtlasFlightStage.landed);
+    }
   }
 
   @override
@@ -116,6 +193,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     _controller.dispose();
     _phase.dispose();
     _lights.dispose();
+    _flight.dispose();
     super.dispose();
   }
 
@@ -139,6 +217,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
                 foregroundPainter: _AtlasGlobePainter(
                   phase: _phase,
                   lights: _lights,
+                  flight: _flight,
                   texture: widget.textureAvailable ? _assets?.textures : null,
                   mascots: widget.mascotAvailable ? _assets?.mascots : null,
                   palette: palette,
@@ -480,42 +559,59 @@ class _AtlasGlobePainter extends CustomPainter {
   _AtlasGlobePainter({
     required this.phase,
     required this.lights,
+    required this.flight,
     required this.texture,
     required this.mascots,
     required this.palette,
-  }) : super(repaint: Listenable.merge([phase, lights]));
+  }) : super(repaint: Listenable.merge([phase, lights, flight]));
 
   final ValueNotifier<double> phase, lights;
+  final ValueNotifier<_AtlasFlightFrame> flight;
   final Map<_AtlasPlanetPalette, ui.Image>? texture;
   final Map<_DrOppoPose, _DrOppoSprite>? mascots;
   final _AtlasPlanetPalette palette;
   Color get tone => palette.tone;
-  _DrOppoPose get pose => _DrOppoPose.forPalette(palette);
+  bool get _inFlight => switch (flight.value.stage) {
+    _AtlasFlightStage.launch ||
+    _AtlasFlightStage.orbit ||
+    _AtlasFlightStage.landing => true,
+    _ => false,
+  };
+  _DrOppoPose get pose =>
+      _inFlight ? _DrOppoPose.flying : _DrOppoPose.forPalette(palette);
+  double get _flightProgress =>
+      Curves.easeInOut.transform(flight.value.progress);
+  double get _landingZoom => switch (flight.value.stage) {
+    _AtlasFlightStage.landing => _flightProgress,
+    _AtlasFlightStage.landed => 1,
+    _ => 0,
+  };
+  double _orbitAngle(double progress) => math.pi * (0.1 + 2 * progress);
   double get tilt => math.sin(phase.value * 2 * math.pi) * math.pi / 180;
   double _float(Size size) =>
       math.sin(phase.value * 2 * math.pi) *
       math.min(3.0, size.shortestSide * 0.006);
   Rect globeBounds(Size size) => Rect.fromCenter(
     center: size.center(Offset(0, _float(size))),
-    width: size.shortestSide * 0.85,
-    height: size.shortestSide * 0.85,
+    width: size.shortestSide * (0.85 - 0.10 * _landingZoom),
+    height: size.shortestSide * (0.85 - 0.10 * _landingZoom),
   );
 
-  Rect mascotBounds(Size size) {
+  Rect _restingBounds(Size size, _DrOppoPose pose) {
     final d = size.shortestSide;
     final origin = size.center(Offset.zero) - Offset(d / 2, d / 2);
     final box = switch (pose) {
       _DrOppoPose.flying => Rect.fromLTWH(
-        d * 0.64,
+        d * 0.595,
         d * 0.025,
         d * 0.33,
         d * 0.235,
       ),
       _DrOppoPose.waiting => Rect.fromLTWH(
-        d * 0.64,
+        d * 0.39,
         d * 0.035,
         d * 0.22,
-        d * 0.245,
+        d * 0.155,
       ),
       _DrOppoPose.puzzled => Rect.fromLTWH(
         d * 0.675,
@@ -533,41 +629,137 @@ class _AtlasGlobePainter extends CustomPainter {
         };
     final fitted = applyBoxFit(BoxFit.contain, source, box.size).destination;
     var rect = Alignment.bottomCenter.inscribe(fitted, box);
-    if (pose != _DrOppoPose.flying) {
-      // Contact points are on the approved alpha-trimmed artwork, not on its
-      // transparent canvas: the sitting hip and the standing boot soles.
-      // The visible sphere is smaller than the image because its atmosphere
-      // has transparent margins. Anchor to that rim so DrOppo does not hover.
-      final anchor = pose == _DrOppoPose.waiting
-          ? const Offset(0.46, 0.805)
-          : const Offset(0.47, 0.99);
-      final contactX = rect.left + rect.width * anchor.dx;
-      final radius = d * 0.367;
-      final dx = contactX - d * 0.5;
-      final rimY =
-          d * 0.504 - math.sqrt(math.max(0.0, radius * radius - dx * dx));
-      rect = rect.shift(Offset(0, rimY - rect.top - rect.height * anchor.dy));
+    // Use the contact point on each alpha-trimmed pose and the visible rim
+    // inside the atmospheric padding of the globe texture.
+    final anchor = switch (pose) {
+      _DrOppoPose.waiting => const Offset(0.46, 0.805),
+      _DrOppoPose.puzzled => const Offset(0.47, 0.99),
+      _DrOppoPose.flying => const Offset(0.34, 0.94),
+    };
+    final radius = d * (0.367 - 0.043 * _landingZoom);
+    final dx = rect.left + rect.width * anchor.dx - d * 0.5;
+    final rimY =
+        d * 0.504 - math.sqrt(math.max(0.0, radius * radius - dx * dx));
+    rect = rect.shift(Offset(0, rimY - rect.top - rect.height * anchor.dy));
+    return rect.shift(origin + Offset(0, _float(size)));
+  }
+
+  Rect _orbitBounds(Size size, double progress) {
+    final angle = _orbitAngle(progress);
+    final depth = math.sin(angle);
+    final d = size.shortestSide;
+    final base = _restingBounds(size, _DrOppoPose.flying).size;
+    final center =
+        globeBounds(size).center +
+        Offset(
+          math.cos(angle) * d * 0.33,
+          (-math.cos(angle) * 0.31 + depth * 0.09) * d,
+        );
+    return Rect.fromCenter(
+      center: center,
+      width: base.width * (0.84 + depth * 0.14),
+      height: base.height * (0.84 + depth * 0.14),
+    );
+  }
+
+  Rect mascotBounds(Size size) {
+    final stage = flight.value.stage;
+    if (stage == _AtlasFlightStage.orbit) {
+      return _orbitBounds(size, flight.value.progress);
     }
-    // Only the flying pose hovers independently. Seated feet and standing
-    // boots remain anchored to the slowly floating planet beneath them.
-    final hover = pose == _DrOppoPose.flying
-        ? math.sin(phase.value * 2 * math.pi * 5) * math.min(2.0, d * 0.004)
-        : 0.0;
-    return rect.shift(origin + Offset(0, _float(size) + hover));
+    final hero = _restingBounds(size, pose);
+    if (stage == _AtlasFlightStage.landing) {
+      return Rect.lerp(_orbitBounds(size, 1), hero, _flightProgress)!;
+    }
+    if (stage == _AtlasFlightStage.launch) {
+      final seated = _restingBounds(size, _DrOppoPose.waiting);
+      final target = _orbitBounds(size, 0);
+      final lift =
+          math.sin(math.pi * _flightProgress) * size.shortestSide * 0.035;
+      return Rect.fromCenter(
+        center:
+            Offset.lerp(seated.center, target.center, _flightProgress)! -
+            Offset(0, lift),
+        width: target.width,
+        height: target.height,
+      );
+    }
+    return hero;
+  }
+
+  void _paintMascot(Canvas canvas, Size size) {
+    final bounds = mascotBounds(size);
+    final roll = switch (flight.value.stage) {
+      _AtlasFlightStage.orbit =>
+        math.cos(_orbitAngle(flight.value.progress)) * 0.13,
+      _AtlasFlightStage.landing => 0.13 * (1 - _flightProgress),
+      _AtlasFlightStage.launch => 0.13 * _flightProgress,
+      _ => 0.0,
+    };
+    if (flight.value.stage == _AtlasFlightStage.launch) {
+      final seated = _restingBounds(size, _DrOppoPose.waiting);
+      _drawMascot(
+        canvas,
+        _DrOppoPose.waiting,
+        seated.shift(bounds.center - seated.center),
+        1 - _flightProgress,
+        roll,
+      );
+    }
+    _drawMascot(
+      canvas,
+      pose,
+      bounds,
+      flight.value.stage == _AtlasFlightStage.launch ? _flightProgress : 1,
+      roll,
+    );
+  }
+
+  void _drawMascot(
+    Canvas canvas,
+    _DrOppoPose pose,
+    Rect bounds,
+    double opacity,
+    double roll,
+  ) {
+    final mascot = mascots?[pose];
+    if (mascot == null || opacity == 0) return;
+    canvas.save();
+    canvas.translate(bounds.center.dx, bounds.center.dy);
+    canvas.rotate(roll);
+    canvas.translate(-bounds.center.dx, -bounds.center.dy);
+    canvas.drawImageRect(
+      mascot.image,
+      mascot.source,
+      bounds,
+      Paint()
+        ..filterQuality = FilterQuality.medium
+        ..color = Colors.white.withValues(alpha: opacity),
+    );
+    canvas.restore();
   }
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
     final globe = globeBounds(size);
-    final image = texture?[palette];
+    final orbiting = flight.value.stage == _AtlasFlightStage.orbit;
+    final behind = orbiting && math.sin(_orbitAngle(flight.value.progress)) < 0;
+    final surface = orbiting ? _AtlasPlanetPalette.connecting : palette;
+    final image = texture?[surface];
+    if (behind) _paintMascot(canvas, size);
     canvas.save();
     canvas.translate(center.dx, center.dy + _float(size));
     canvas.rotate(tilt);
     canvas.translate(-center.dx, -center.dy - _float(size));
     if (image != null) {
       final paint = Paint()..filterQuality = FilterQuality.medium;
-      if (palette == _AtlasPlanetPalette.connected && lights.value < 1) {
+      if (orbiting) {
+        paint.color = Colors.white.withValues(
+          alpha: 0.90 + math.sin(flight.value.progress * math.pi * 4) * 0.07,
+        );
+      }
+      if (surface == _AtlasPlanetPalette.connected && lights.value < 1) {
         final dim = 1 - lights.value;
         paint.colorFilter = ColorFilter.matrix([
           1 - 0.75 * dim,
@@ -600,7 +792,7 @@ class _AtlasGlobePainter extends CustomPainter {
       );
     } else {
       // Optional artwork never replaces or blocks the actual connect action.
-      final radius = size.shortestSide * 0.39;
+      final radius = globe.width * 0.46;
       canvas.drawCircle(globe.center, radius, Paint()..color = palette.ocean);
       canvas.drawCircle(
         globe.center,
@@ -612,21 +804,14 @@ class _AtlasGlobePainter extends CustomPainter {
       );
     }
     canvas.restore();
-    final mascot = mascots?[pose];
-    if (mascot != null) {
-      canvas.drawImageRect(
-        mascot.image,
-        mascot.source,
-        mascotBounds(size),
-        Paint()..filterQuality = FilterQuality.medium,
-      );
-    }
+    if (!behind) _paintMascot(canvas, size);
   }
 
   @override
   bool shouldRepaint(covariant _AtlasGlobePainter oldDelegate) =>
       oldDelegate.phase != phase ||
       oldDelegate.lights != lights ||
+      oldDelegate.flight != flight ||
       oldDelegate.texture != texture ||
       oldDelegate.mascots != mascots ||
       oldDelegate.palette != palette;
@@ -636,18 +821,22 @@ class _AtlasGlobePainter extends CustomPainter {
 Widget buildAtlasPlanetForTesting({
   bool connected = false,
   bool busy = false,
+  bool connecting = false,
   bool hasError = false,
   bool motionEnabled = true,
   bool textureAvailable = true,
   bool mascotAvailable = true,
+  VoidCallback? onLanded,
   double size = 280,
 }) => _AtlasAnimatedPlanet(
   connected: connected,
   busy: busy,
+  connecting: connecting,
   hasError: hasError,
   motionEnabled: motionEnabled,
   textureAvailable: textureAvailable,
   mascotAvailable: mascotAvailable,
+  onLanded: onLanded,
   size: size,
 );
 
@@ -696,6 +885,10 @@ Rect atlasPlanetGlobeBoundsForTesting(CustomPainter painter, Size size) =>
 @visibleForTesting
 String atlasPlanetMascotPoseForTesting(CustomPainter painter) =>
     (painter as _AtlasGlobePainter).pose.name;
+
+@visibleForTesting
+String atlasPlanetFlightStageForTesting(CustomPainter painter) =>
+    (painter as _AtlasGlobePainter).flight.value.stage.name;
 
 @visibleForTesting
 Rect atlasPlanetMascotBoundsForTesting(CustomPainter painter, Size size) =>

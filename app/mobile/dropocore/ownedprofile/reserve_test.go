@@ -1,6 +1,7 @@
 package ownedprofile
 
 import (
+	"dropocore/dnspolicy"
 	"net/url"
 	"strings"
 	"testing"
@@ -21,12 +22,12 @@ func TestManagedGroupsKeepPersonalSourcesAndOwnReserveOrder(t *testing.T) {
 		{ID: "turbo-relay", Provider: BoostReserve, URI: boostRelay},
 	}
 	plan := Candidates(sources, time.Unix(1000, 0))
-	want := []string{"personal", Boost + "-fi-tcp", Boost + MainSuffix, Free + "-lv-quic", Free + MainSuffix}
+	want := []string{"personal", Boost + "-fi-tcp", Boost + MainSuffix, Boost + ExtraSuffix, Free + "-lv-quic", Free + MainSuffix, Free + ExtraSuffix}
 	if len(plan) != len(want) {
 		t.Fatalf("expected %d candidates, got %d", len(want), len(plan))
 	}
 	for i, candidate := range plan {
-		if candidate.ID != want[i] || ((i == 1 || i == 2) && candidate.OwnerID != "turbo") || (i >= 3 && candidate.OwnerID != "free") {
+		if candidate.ID != want[i] || (i >= 1 && i <= 3 && candidate.OwnerID != "turbo") || (i >= 4 && candidate.OwnerID != "free") {
 			t.Fatalf("incorrect candidate ownership or order at index %d", i)
 		}
 	}
@@ -44,30 +45,38 @@ func TestManagedGroupsKeepPersonalSourcesAndOwnReserveOrder(t *testing.T) {
 func TestDirectReserveCompatibilityWithController(t *testing.T) {
 	const fiKey = "cec3ca12-ad4b-4714-a401-a31c79362f07"
 	const lvKey = "iUhknX5NjVWE2kSZjzYHqxHCSZnivpjJfBZCuCKrbUM"
-	want := []struct{ scheme, port, key string }{{"vless", "2444", fiKey}, {"hysteria2", "2443", lvKey}}
+	const lvVLESS = "5528f6e8-5768-4736-9c6c-608475e5a2dc"
+	const fiHysteria = "4YNB5dgsEZB77M9N_uLLJ6DWpXkYQl7PlIZjYns62rc"
 	paid := strings.NewReplacer("%2Ffree", "%2Fboost", "expiry=0", "expiry=4102444800").Replace(reserveTestPrimary)
-	candidates := append(DirectReserves(Boost, paid, time.Now()), DirectReserves(Free, reserveTestPrimary, time.Now())...)
-	if len(candidates) != len(want) {
-		t.Fatal("expected both direct transports")
-	}
-	for i, candidate := range candidates {
-		link, err := url.Parse(candidate.URI)
-		if err != nil || (i == 0 && link.Hostname() != ReserveIPv4) || link.Scheme != want[i].scheme || link.Port() != want[i].port || link.User.Username() != want[i].key {
-			t.Fatalf("direct reserve %d does not match the backend contract", i)
+	for _, tier := range []struct{ id, raw, ip, port, legacyKey string }{
+		{Boost, paid, dnspolicy.FinlandIPv4, "2444", fiKey},
+		{Free, reserveTestPrimary, dnspolicy.LatviaIPv4, "2443", lvKey},
+	} {
+		routes := DirectReserves(tier.id, tier.raw, time.Now())
+		if len(routes) != 3 {
+			t.Fatal("expected three regional transports")
+		}
+		seen := map[string]string{}
+		for _, route := range routes {
+			key, err := url.Parse(route.URI)
+			port := tier.port
+			if route.Ingress == XHTTP {
+				port = "2446"
+			}
+			if err != nil || key.Hostname() != tier.ip || key.Port() != port {
+				t.Fatalf("%s %s: wrong regional endpoint", tier.id, route.Ingress)
+			}
+			seen[route.Ingress] = key.User.Username()
+		}
+		primary, _ := url.Parse(tier.raw)
+		if len(seen) != 3 || seen[RegionalIngress(tier.id)] != tier.legacyKey || seen[XHTTP] != seen[Reality] || seen[Reality] == primary.User.Username() || seen[Hysteria] == primary.User.Username() {
+			t.Fatal("regional credential partition does not match the backend")
+		}
+		if tier.id == Free && seen[Reality] != lvVLESS || tier.id == Boost && seen[Hysteria] != fiHysteria {
+			t.Fatal("derived transport key differs from the server fixture")
 		}
 	}
 	boost := strings.ReplaceAll(strings.ReplaceAll(reserveTestPrimary, "%2Ffree", "%2Fboost"), "expiry=0", "expiry=2000")
-	if _, ok := FinlandRelayOutbound(candidates[0].FinlandRelayURI, fiKey, 2444, "test"); !ok {
-		t.Fatal("valid carrier missing")
-	}
-	for _, wrong := range []struct {
-		user string
-		port int
-	}{{"00000000-0000-4000-8000-000000000000", 2443}, {fiKey, 2443}, {fiKey, 443}} {
-		if _, ok := FinlandRelayOutbound(candidates[0].FinlandRelayURI, wrong.user, wrong.port, "test"); ok {
-			t.Fatal("cross-user or cross-tier relay accepted")
-		}
-	}
 	if len(DirectReserves(Boost, boost, time.Unix(2001, 0))) != 0 || len(DirectReserves("personal", reserveTestPrimary, time.Now())) != 0 {
 		t.Fatal("expired Boost or a personal source acquired a managed reserve")
 	}
@@ -162,36 +171,16 @@ func TestOwnedReserveTransportBudgetUsesOnlyExactEndpoint(t *testing.T) {
 	}
 }
 
-func TestFinlandFastCarrierRequiresMatchingLiveBoost(t *testing.T) {
-	key := strings.NewReplacer("%2Ffree", "%2Fboost", "expiry=0", "expiry=4102444800").Replace(reserveTestPrimary)
-	u, _ := url.Parse(key)
-	uuid := finlandUUID(strings.ToLower(u.User.Username()))
-	if _, ok := FinlandQUICCarrier(key, uuid, "carrier"); !ok {
-		t.Fatal("live boost rejected")
-	}
-	for _, bad := range []string{reserveTestPrimary, strings.Replace(key, "4102444800", "1", 1), ""} {
-		if _, ok := FinlandQUICCarrier(bad, uuid, "carrier"); ok {
-			t.Fatal("ineligible key accepted")
-		}
-	}
-	if _, ok := FinlandQUICCarrier(key, "other", "carrier"); ok {
-		t.Fatal("mismatched Finnish credential accepted")
-	}
-}
-
-func TestMainIngressUpgradesLegacyAddressOnlyForCurrentTier(t *testing.T) {
+func TestRegionalRoutesAcceptCachedPrimaryAndKeepTierScope(t *testing.T) {
 	now := time.Unix(1000, 0)
 	for _, host := range []string{"193.233.88.97", "cdn.droponevedimka.ru", PrimaryIPv4} {
 		raw := strings.Replace(reserveTestPrimary, "@193.233.88.97", "@"+host, 1)
-		want, _ := url.Parse(raw)
-		upgraded, err := MainURI(Free, raw, now)
-		u, _ := url.Parse(upgraded)
-		if err != nil || u.Host != PrimaryIPv4+":443" || u.RawQuery != want.RawQuery || u.User.String() != want.User.String() {
-			t.Fatal("invalid migration of current Free key")
+		if len(DirectReserves(Free, raw, now)) != 3 {
+			t.Fatal("legacy Free credential did not migrate")
 		}
 	}
 	for _, bad := range []string{"personal", FreeReserve, Boost} {
-		if _, err := MainURI(bad, reserveTestPrimary, now); err == nil {
+		if len(DirectReserves(bad, reserveTestPrimary, now)) != 0 {
 			t.Fatal("cross-tier or unowned credential accepted")
 		}
 	}

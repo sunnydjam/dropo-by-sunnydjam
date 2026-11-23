@@ -38,7 +38,7 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 	if !decodeSuccess(BuildSingBoxConfig()) {
 		t.Fatal("cannot prepare managed failover")
 	}
-	wantIDs := []string{ownedprofile.Free + "-lv-quic", ownedprofile.Free + ownedprofile.MainSuffix}
+	wantIDs := []string{ownedprofile.Free + "-lv-quic", ownedprofile.Free + ownedprofile.MainSuffix, ownedprofile.Free + ownedprofile.ExtraSuffix}
 	if len(current.preparedSources) != len(wantIDs) {
 		t.Fatalf("expected two independent sources, got %d", len(current.preparedSources))
 	}
@@ -63,7 +63,7 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 		t.Fatal("healthy reserve did not commit")
 	}
 	view := sourceCall(t, "GetVPNSources")["sources"].([]interface{})
-	if len(view) != 1 || view[0].(map[string]interface{})["id"] != "old-owned" || view[0].(map[string]interface{})["active"] != true || view[0].(map[string]interface{})["active_ingress"] != "latvia" {
+	if len(view) != 1 || view[0].(map[string]interface{})["id"] != "old-owned" || view[0].(map[string]interface{})["active"] != true || view[0].(map[string]interface{})["active_ingress"] != ownedprofile.Hysteria {
 		t.Fatal("an active reserve must still display as the main profile")
 	}
 	CancelPendingSourceWork()
@@ -310,16 +310,17 @@ func TestAndroidManagedIngressChoiceSurvivesRestoreAndPreservesEntitlement(t *te
 	if sourceCall(t, "SetManagedIngress", "source-1", "latvia")["success"] == true {
 		t.Fatal("personal source acquired managed transport")
 	}
-	for _, retired := range []string{"main", "finland"} {
-		if sourceCall(t, "SetManagedIngress", ownedprofile.Free, retired)["success"] == true {
-			t.Fatal("retired preference accepted")
-		}
+	if sourceCall(t, "SetManagedIngress", ownedprofile.Free, "finland")["success"] == true {
+		t.Fatal("Free acquired a Finnish transport")
 	}
-	sourceSuccess(t, "SetManagedIngress", ownedprofile.Free, "latvia")
-	current.VPNSources[0].ManagedIngress = "finland" // persisted by the previous build
+	sourceSuccess(t, "SetManagedIngress", ownedprofile.Free, ownedprofile.XHTTP)
 	current = stateWithoutOwnedSecrets(current)
 	sourceSuccess(t, "RestoreManagedVPNSource", ownedprofile.Free, ownedReserveFixture, ownedprofile.Free, "")
-	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 3 || current.preparedSources[0].ID != ownedprofile.Free+"-lv-quic" || current.preparedSources[1].ID != ownedprofile.Free+ownedprofile.MainSuffix || current.preparedSources[2].OwnerID == ownedprofile.Free {
-		t.Fatal("restored choice escaped its tier or displaced personal subscription")
+	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 2 || current.preparedSources[0].ID != ownedprofile.Free+ownedprofile.MainSuffix || current.preparedSources[1].OwnerID == ownedprofile.Free {
+		t.Fatal("restored manual choice did not pin regional XHTTP before the personal subscription")
+	}
+	sourceSuccess(t, "SetManagedIngress", ownedprofile.Free, "")
+	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 4 || current.preparedSources[0].ID != ownedprofile.Free+"-lv-quic" || current.preparedSources[1].ID != ownedprofile.Free+ownedprofile.MainSuffix || current.preparedSources[2].ID != ownedprofile.Free+ownedprofile.ExtraSuffix {
+		t.Fatal("returning to automatic did not restore the Free transport order")
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
@@ -138,7 +139,7 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		t.Fatalf("managed pair add failed: %v", result)
 	}
 	profile, _ := storage.GetActiveProfile()
-	if len(profile.VPNSources) != 2 {
+	if len(profile.VPNSources) != 3 {
 		t.Fatal("missing independent managed ingress")
 	}
 	for _, s := range profile.VPNSources {
@@ -152,7 +153,7 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		out := raw.(map[string]interface{})
 		if out["tag"] == "auto-select" {
 			found = true
-			if reflect.ValueOf(out["outbounds"]).Len() != 2 {
+			if reflect.ValueOf(out["outbounds"]).Len() != 3 {
 				t.Fatal("reserve missing from selector")
 			}
 		}
@@ -246,7 +247,7 @@ func TestOwnedOrphanReserveKeepsExistingOrder(t *testing.T) {
 	}
 }
 
-func TestEnrollingBoostKeepsPreferredFreeRelay(t *testing.T) {
+func TestEnrollingBoostKeepsFreeFirstAndHidesLegacyRelays(t *testing.T) {
 	p := ProfileData{}
 	if err := upsertOwnedVPNPair(&p, ownedprofile.Free, ownedReserveFixture); err != nil {
 		t.Fatal(err)
@@ -258,7 +259,7 @@ func TestEnrollingBoostKeepsPreferredFreeRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	views := publicVPNSources(p.VPNSources)
-	want := []string{ownedprofile.FreeReserve, ownedprofile.Free, ownedprofile.Boost, ownedprofile.BoostReserve}
+	want := []string{ownedprofile.Free, ownedprofile.Boost}
 	if len(views) != len(want) {
 		t.Fatalf("got %d source rows", len(views))
 	}
@@ -266,6 +267,43 @@ func TestEnrollingBoostKeepsPreferredFreeRelay(t *testing.T) {
 		if views[i]["public_catalog_id"] != id {
 			t.Fatalf("row %d should be %s", i, id)
 		}
+	}
+}
+
+func TestWindowsManagedIngressIsOneSourceWithPersistentManualChoice(t *testing.T) {
+	storage, builder := publicVPNTestBuilder(t, "")
+	app := &App{storage: storage, configBuilder: builder, initialized: true}
+	app.initializedReady.Store(true)
+	requireAPISuccess(t, app.AddManagedVPNSource(ownedprofile.Free, "", ownedReserveFixture, true))
+
+	profile, _ := storage.GetActiveProfile()
+	owner, backup := profile.VPNSources[0], profile.VPNSources[1]
+	views := publicVPNSources(profile.VPNSources)
+	if len(views) != 1 || views[0]["id"] != owner.ID || views[0]["name"] != "Dropo Free" {
+		t.Fatalf("expected one visible Free profile, got %v", views)
+	}
+	if app.SetManagedIngress(owner.ID, "finland")["success"] == true {
+		t.Fatal("Free accepted a Finnish ingress")
+	}
+	requireAPISuccess(t, app.SetManagedIngress(owner.ID, ownedprofile.XHTTP))
+	if got := app.configuredVPNSourceTags(); !slices.Equal(got, []string{"vpn-source-" + backup.ID}) {
+		t.Fatalf("manual XHTTP selection did not pin its route: %v", got)
+	}
+
+	if err := storage.Load(); err != nil {
+		t.Fatal(err)
+	}
+	profile, _ = storage.GetActiveProfile()
+	if views := publicVPNSources(profile.VPNSources); views[0]["managed_ingress"] != ownedprofile.XHTTP {
+		t.Fatal("manual ingress was lost after opening the saved profile")
+	}
+	requireAPISuccess(t, app.RestoreManagedVPNSource(ownedprofile.Free, ownedReserveFixture, owner.ID, ""))
+	if got := app.configuredVPNSourceTags(); !slices.Equal(got, []string{"vpn-source-" + backup.ID}) {
+		t.Fatalf("vault restore lost the pinned transport: %v", got)
+	}
+	requireAPISuccess(t, app.SetManagedIngress(owner.ID, ""))
+	if got := app.configuredVPNSourceTags(); !slices.Equal(got, []string{"vpn-source-" + owner.ID, "vpn-source-" + backup.ID, "vpn-source-" + profile.VPNSources[2].ID}) {
+		t.Fatalf("automatic Free order is wrong: %v", got)
 	}
 }
 
@@ -329,10 +367,10 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(profile.VPNSources) != 2 || profile.VPNSources[1].PublicCatalogID != tier.id+ownedprofile.MainSuffix {
+				if len(profile.VPNSources) != 3 || profile.VPNSources[1].PublicCatalogID != tier.id+ownedprofile.MainSuffix {
 					t.Fatal("expected regional and restored main ingress")
 				}
-				want := []string{"vpn-source-" + profile.VPNSources[0].ID, "vpn-source-" + profile.VPNSources[1].ID}
+				want := []string{"vpn-source-" + profile.VPNSources[0].ID, "vpn-source-" + profile.VPNSources[1].ID, "vpn-source-" + profile.VPNSources[2].ID}
 				app.rememberRouteProbeResults([]routeProbeServiceResult{
 					{Tag: "openai", Success: true, MethodKind: "vpn", MethodTag: want[0]},
 				})
@@ -359,8 +397,10 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 					protocol = "socks"
 				}
 				for i := range want {
-					if i == 1 {
+					if i == 1 || i == 2 && tier.id == ownedprofile.Free {
 						protocol = "socks"
+					} else if i == 2 {
+						protocol = "hysteria2"
 					}
 					if getOutbound(config, want[i])["type"] != protocol {
 						t.Fatalf("unexpected runtime transport at position %d", i)
@@ -378,24 +418,13 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 					if stream["network"] != "tcp" {
 						t.Fatal("Finland REALITY missing")
 					}
-					fast := getOutbound(bridge, "xray-out-0-fi-fast")
-					if fast == nil || getOutbound(bridge, "fi-quic-"+profile.VPNSources[0].ID) == nil {
-						t.Fatal("fast Finnish route is missing")
-					}
-					balancers := bridge["routing"].(map[string]any)["balancers"].([]any)
-					bal := balancers[0].(map[string]any)
-					if bal["fallbackTag"] != "xray-out-0" || !reflect.DeepEqual(interfaceStringSlice(bal["selector"]), []string{"xray-out-0-fi-fast"}) {
-						t.Fatal("Finnish route lost its verified fallback")
-					}
-					if tags := interfaceStringSlice(bridge["observatory"].(map[string]any)["subjectSelector"]); !reflect.DeepEqual(tags, []string{"xray-out-0-fi-fast"}) {
-						t.Fatal("health probe did not use the complete fast path")
+					servers := getOutbound(bridge, "xray-out-0")["settings"].(map[string]any)["vnext"].([]any)
+					if servers[0].(map[string]any)["address"] != dnspolicy.FinlandIPv4 || hasLegacyFinlandCarrier(bridge) {
+						t.Fatal("Finnish REALITY is not direct")
 					}
 					hosts := collectXrayEndpointHosts(bridge)
-					if !slices.Contains(hosts, "62.72.20.9") || !slices.Contains(hosts, ownedprofile.ReserveIPv4) || slices.Contains(hosts, "77.42.65.119") {
-						t.Fatal("only the two physical ingress addresses may bypass TUN")
-					}
-					if getOutbound(bridge, "fi-carrier-"+profile.VPNSources[0].ID) == nil {
-						t.Fatal("Finland HTTPS carrier missing")
+					if !slices.Contains(hosts, dnspolicy.FinlandIPv4) || slices.Contains(hosts, ownedprofile.PrimaryIPv4) || slices.Contains(hosts, ownedprofile.ReserveIPv4) {
+						t.Fatal("Windows must protect only the regional Xray endpoint")
 					}
 				}
 			})

@@ -484,31 +484,27 @@ func TestXHTTPConfigCheckHasNoNetworkOrInstancesAndSanitizesErrors(t *testing.T)
 	}
 }
 
-func TestFinlandCarrierDialIsScoped(t *testing.T) {
+func TestManagedDirectTCPProtectsSocketAndResetsOnNetworkChange(t *testing.T) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	session := newXHTTPSocketSession(func(int32) error { t.Fatal("the final hop tried to open a physical socket"); return nil }, nil)
+	var protections atomic.Int32
+	session := newXHTTPSocketSession(func(int32) error { protections.Add(1); return nil }, nil)
 	defer session.close()
 	endpoint := listener.Addr().(*net.TCPAddr)
-	session.finlandTarget = endpoint.String()
-	session.finlandCarrier = &net.Dialer{}
 	dialer := protectedXHTTPDialer{}
 	addr := xnet.IPAddress(endpoint.IP)
 	dest := xnet.TCPDestination(addr, xnet.Port(endpoint.Port))
-	for _, bad := range []xnet.Destination{xnet.TCPDestination(addr, 1), xnet.UDPDestination(addr, dest.Port)} {
-		if conn, err := dialer.Dial(session.ctx, nil, bad, nil); err == nil {
-			conn.Close()
-			t.Fatal("accepted an unrelated relay destination")
-		}
-	}
 	conn, err := dialer.Dial(session.ctx, nil, dest, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	if protections.Load() == 0 {
+		t.Fatal("direct TCP socket did not go through Android VPN protection")
+	}
 	peer, err := listener.Accept()
 	if err != nil {
 		t.Fatal(err)

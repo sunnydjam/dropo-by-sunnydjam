@@ -11,6 +11,7 @@ class _PlanetFlags extends ChangeNotifier {
   bool connected = false;
   bool error = false;
   bool busy = false;
+  bool connecting = false;
   bool enabled = true;
   bool reducedMotion = false;
   bool ticker = true;
@@ -18,6 +19,7 @@ class _PlanetFlags extends ChangeNotifier {
   bool mascotAvailable = true;
   int parentBuilds = 0;
   int buttonPresses = 0;
+  int landings = 0;
   void update(void Function() change) {
     change();
     notifyListeners();
@@ -63,10 +65,12 @@ Future<void> _pumpPlanet(WidgetTester tester, _PlanetFlags flags) async {
                           buildAtlasPlanetForTesting(
                             connected: flags.connected,
                             busy: flags.busy,
+                            connecting: flags.connecting,
                             hasError: flags.error,
                             motionEnabled: flags.enabled,
                             textureAvailable: flags.textureAvailable,
                             mascotAvailable: flags.mascotAvailable,
+                            onLanded: () => flags.landings++,
                             size: 320,
                           ),
                           FilledButton(
@@ -146,6 +150,49 @@ void main() {
     );
   });
   tearDown(() => debugMobileShellOverride = null);
+
+  testWidgets('fast connection still completes the flight and landing', (
+    tester,
+  ) async {
+    final flags = _PlanetFlags();
+    await _pumpPlanet(tester, flags);
+    String stage() => atlasPlanetFlightStageForTesting(_painter(tester));
+    const size = Size(320, 320);
+    Rect bounds() => atlasPlanetMascotBoundsForTesting(_painter(tester), size);
+    final seated = bounds();
+    final idleGlobe = atlasPlanetGlobeBoundsForTesting(_painter(tester), size);
+
+    flags.update(() => flags.connecting = true);
+    await tester.pump();
+    expect(stage(), 'launch');
+    flags.update(() {
+      flags.connecting = false;
+      flags.connected = true;
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(stage(), 'launch');
+    expect(bounds().center, isNot(seated.center));
+    expect(flags.landings, 0);
+    await tester.pump(const Duration(milliseconds: 440));
+    expect(stage(), 'orbit');
+    final departure = bounds();
+    await tester.pump(const Duration(milliseconds: 900));
+    expect(bounds().center, isNot(departure.center));
+    expect(flags.landings, 0);
+    await tester.pump(const Duration(milliseconds: 1850));
+    expect(stage(), 'landing');
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(
+      atlasPlanetGlobeBoundsForTesting(_painter(tester), size).width,
+      lessThan(idleGlobe.width),
+    );
+    expect(flags.landings, 0);
+    await tester.pump(const Duration(milliseconds: 260));
+    expect(stage(), 'landed');
+    expect(flags.landings, 1);
+    await tester.pumpWidget(const SizedBox.shrink());
+    flags.dispose();
+  });
 
   for (final (state, color) in const [
     ('disconnected', Color(0xFFAAB4B2)),

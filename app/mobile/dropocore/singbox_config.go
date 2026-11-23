@@ -16,7 +16,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v21-managed-ingress"
+	androidConfigSchema     = "android-package-routing-v23-regional-transports"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -292,9 +292,6 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 		}
 		node.Tag = "vpn-" + candidate.ID
 		out := proxyToSingBoxOutbound(node)
-		if candidate.FinlandRelayURI != "" {
-			out["finland_relay"] = candidate.FinlandRelayURI
-		}
 		outbounds = append(outbounds, out)
 		proxyTags = append(proxyTags, node.Tag)
 		candidates = append(candidates, androidSourceCandidate{ID: candidate.ID, Tag: node.Tag, NodeID: androidNodeID(node), OwnerID: candidate.OwnerID})
@@ -447,9 +444,8 @@ func appendAndroidProxyOutbounds(outbounds []interface{}, proxies []proxyConfig,
 }
 
 func proxyToSingBoxOutbound(proxy proxyConfig) map[string]interface{} {
-	managedFinland := ownedprofile.IsFinlandReserveID(strings.TrimPrefix(proxy.Tag, "vpn-")) &&
-		ownedprofile.IsFinlandReality(proxy.Server, proxy.ServerPort, proxy.Network, proxy.Security, proxy.SNI, proxy.PublicKey, proxy.ShortID, proxy.Fingerprint)
-	if proxy.Type == "vless" && (normalizeTransport(proxy.Network) == "xhttp" || managedFinland) {
+	managedReality := ownedprofile.IsManagedReality(proxy.Server, proxy.ServerPort, proxy.Network, proxy.Security, proxy.SNI, proxy.PublicKey, proxy.ShortID, proxy.Fingerprint)
+	if proxy.Type == "vless" && (normalizeTransport(proxy.Network) == "xhttp" || managedReality) {
 		// The bundled Android wrapper validates and replaces this placeholder
 		// with an authenticated in-process Xray bridge before libbox sees it.
 		// The source tag is preserved so probes traverse the actual transport.

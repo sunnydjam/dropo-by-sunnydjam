@@ -10,7 +10,16 @@ func ApplyXHTTPBudget(server string, port int, security, sni, host string, setti
 	path = strings.TrimSuffix(path, "/")
 	primary := (server == PrimaryIPv4 || server == legacyPrimaryIPv4 || server == primaryHostname) && sni == primaryHostname && host == primaryHostname
 	reserve := server == ReserveIPv4 && sni == ReserveHostname && host == ReserveHostname
-	if (!primary && !reserve) || port != 443 || security != "tls" || (path != "/managed/v1/free" && path != "/managed/v1/boost") {
+	regional := false
+	for tier, pool := range map[string]string{Free: "free", Boost: "boost"} {
+		endpoint := regionalEndpointFor(tier)
+		if port == 2446 && server == endpoint.ip && sni == endpoint.tlsName && host == endpoint.tlsName && path == "/managed/v1/"+pool {
+			regional = true
+			break
+		}
+	}
+	legacy := (primary || reserve) && port == 443 && (path == "/managed/v1/free" || path == "/managed/v1/boost")
+	if security != "tls" || !regional && !legacy {
 		return false
 	}
 	extra, _ := settings["extra"].(map[string]interface{})

@@ -529,6 +529,15 @@ void main() {
       final bridge = _DesktopServicesBridge();
       await _pump(tester, bridge, size: const Size(1200, 900));
       expect(find.byKey(const ValueKey('nav-services')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('home-routing-selected')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('home-routing-all-vpn')),
+        findsOneWidget,
+      );
+      expect(find.text('Подключиться'), findsOneWidget);
       await _open(tester);
       await _tap(tester, 'home-service-row-youtube');
       await _tap(tester, 'service-route-youtube-vpn');
@@ -539,6 +548,8 @@ void main() {
         findsNothing,
       );
       await _tap(tester, 'link-advanced');
+      expect(find.text('Режим маршрутизации'), findsNothing);
+      expect(find.text('Скрывать RU-трафик от провайдера'), findsNothing);
       expect(find.byKey(const ValueKey('link-service-settings')), findsNothing);
       await _tap(tester, 'nav-home');
       expect(find.byKey(const ValueKey('service-search')), findsOneWidget);

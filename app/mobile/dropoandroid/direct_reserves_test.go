@@ -7,7 +7,6 @@ import (
 	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
-	"github.com/xtls/xray-core/app/proxyman"
 	"strings"
 	"testing"
 )
@@ -31,13 +30,13 @@ func TestPlayManagedDirectReservesPassPinnedEngineConfig(t *testing.T) {
 		Config     string
 		Candidates []struct{ ID string }
 	}
-	if json.Unmarshal([]byte(BuildSingBoxConfig()), &runtime) != nil || !runtime.Success || len(runtime.Candidates) != 4 {
-		t.Fatal("expected four independent managed sources")
+	if json.Unmarshal([]byte(BuildSingBoxConfig()), &runtime) != nil || !runtime.Success || len(runtime.Candidates) != 6 {
+		t.Fatal("expected six regional transports")
 	}
 	regional := map[string]string{ownedprofile.Free + "-lv-quic": ownedprofile.Free, ownedprofile.Boost + "-fi-tcp": ownedprofile.Boost}
-	for i := 0; i < len(runtime.Candidates); i += 2 {
+	for i := 0; i < len(runtime.Candidates); i += 3 {
 		tier, ok := regional[runtime.Candidates[i].ID]
-		if !ok || runtime.Candidates[i+1].ID != tier+ownedprofile.MainSuffix {
+		if !ok || runtime.Candidates[i+1].ID != tier+ownedprofile.MainSuffix || runtime.Candidates[i+2].ID != tier+ownedprofile.ExtraSuffix {
 			t.Fatal("tier lost its regional or primary route")
 		}
 		delete(regional, runtime.Candidates[i].ID)
@@ -47,36 +46,20 @@ func TestPlayManagedDirectReservesPassPinnedEngineConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fi map[string]any
-	var relay string
 	for _, out := range graph.Outbounds {
 		if out["tag"] == "vpn-"+ownedprofile.Boost+"-fi-tcp" && out["type"] == xhttpOutboundType {
 			fi, _ = out["xray_outbound"].(map[string]any)
-			relay, _ = out["finland_relay"].(string)
+			if _, exists := out["finland_relay"]; exists {
+				t.Fatal("legacy HTTPS relay is still in the managed config")
+			}
 		}
 	}
 	if fi == nil {
 		t.Fatal("managed Finland source did not use embedded Xray")
 	}
-	raw, _ := json.Marshal(fi)
-	cfg, target, err := buildFinlandCarrier(raw, nil, relay)
-	if relay == "" || err != nil || len(cfg.Outbound) != 1 || target != ownedprofile.ReserveIPv4+":2444" {
-		t.Fatal("missing verified Finland carrier")
-	}
-	if _, _, err := buildFinlandCarrier(raw, nil, strings.Replace(relay, ownedprofile.ReserveIPv4, "192.0.2.10", 1)); err == nil {
-		t.Fatal("accepted tampered relay URI")
-	}
-	fast, exit, target, err := buildFastFinlandPath(raw, nil, relay)
-	if err != nil || fast == nil || exit == nil || target != dnspolicy.FinlandIPv4+":2444" {
-		t.Fatal("missing full accelerated Finnish path")
-	}
-	sender, err := exit.Outbound[0].SenderSettings.GetInstance()
-	if err != nil || sender.(*proxyman.SenderConfig).GetMultiplexSettings().GetEnabled() {
-		t.Fatal("Finnish exit would discard Android session context in a mux worker")
-	}
-	for _, badRelay := range []string{fixture, paid, strings.Replace(relay, "11111111", "99999999", 1)} {
-		if _, _, _, err := buildFastFinlandPath(raw, nil, badRelay); err == nil {
-			t.Fatal("accepted unrelated carrier credential")
-		}
+	servers := fi["settings"].(map[string]any)["vnext"].([]any)
+	if servers[0].(map[string]any)["address"] != dnspolicy.FinlandIPv4 {
+		t.Fatal("Finnish REALITY must connect directly")
 	}
 	normalized, _, err := normalizeXHTTPConfig(runtime.Config, nil, false)
 	if err != nil {
@@ -87,27 +70,20 @@ func TestPlayManagedDirectReservesPassPinnedEngineConfig(t *testing.T) {
 		t.Fatal("invalid graph")
 	}
 	tag := "vpn-" + ownedprofile.Boost + "-fi-tcp"
-	found := map[string]bool{}
+	found := false
 	for _, out := range internal.Outbounds {
-		switch out["tag"] {
-		case tag:
-			paths, _ := out["outbounds"].([]any)
-			if out["type"] != "urltest" || len(paths) != 2 || paths[0] != tag+"-via-lv" || paths[1] != tag+"-via-https" {
-				t.Fatal("Finnish path order or fallback changed")
-			}
-			found[tag] = true
-		case tag + "-via-lv", tag + "-via-https":
-			if out["type"] != "socks" || out["server"] != "127.0.0.1" || out["password"] == "" {
-				t.Fatal("unscoped internal path")
-			}
-			found[out["tag"].(string)] = true
+		if out["tag"] == tag {
+			found = out["type"] == "socks" && out["server"] == "127.0.0.1" && out["password"] != ""
+		}
+		if name, _ := out["tag"].(string); strings.HasPrefix(name, tag+"-via-") {
+			t.Fatal("Finnish entrance unexpectedly uses a relay")
 		}
 	}
-	if len(found) != 3 {
-		t.Fatal("incomplete Finnish path graph")
+	if !found {
+		t.Fatal("missing protected loopback bridge for direct Finnish REALITY")
 	}
 	stream, _ := fi["streamSettings"].(map[string]any)
-	if !managedFinlandStream(fi, stream) {
+	if !managedRegionalRealityStream(fi, stream) {
 		t.Fatal("missing managed TCP/REALITY stream")
 	}
 	for _, mutate := range []func(map[string]any){
@@ -127,7 +103,7 @@ func TestPlayManagedDirectReservesPassPinnedEngineConfig(t *testing.T) {
 		if _, err := buildXHTTPConfig(raw, nil); err == nil {
 			t.Fatal("accepted modified managed TCP transport")
 		}
-		if managedFinlandStream(changed, changed["streamSettings"].(map[string]any)) {
+		if managedRegionalRealityStream(changed, changed["streamSettings"].(map[string]any)) {
 			t.Fatal("Play accepted modified managed TCP transport")
 		}
 	}

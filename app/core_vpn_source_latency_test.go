@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +22,57 @@ func TestVPNSourceLatencyRankingStableAndFailSafe(t *testing.T) {
 	}
 	if tags[0] != "slow" {
 		t.Fatal("ranking mutated saved source priority")
+	}
+}
+
+func TestWindowsManagedMethodsRankOnceAndStayOnNextWorkingRoute(t *testing.T) {
+	var xhttpFailed atomic.Bool
+	a, ctx, generation := newVPNResponseTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "xhttp"):
+			if xhttpFailed.Load() {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			time.Sleep(30 * time.Millisecond)
+			fmt.Fprint(w, `{"delay":10}`)
+		case strings.Contains(r.URL.Path, "tcp"):
+			fmt.Fprint(w, `{"delay":30}`)
+		default:
+			fmt.Fprint(w, `{"delay":60}`)
+		}
+	})
+	routes := []VPNSource{
+		{ID: "hy2", PublicCatalogID: ownedprofile.Free, URI: ownedReserveFixture, SelectedNodeID: "hy2"},
+		{ID: "xhttp", PublicCatalogID: ownedprofile.Free + ownedprofile.MainSuffix, URI: ownedReserveFixture, SelectedNodeID: "xhttp"},
+		{ID: "tcp", PublicCatalogID: ownedprofile.Free + ownedprofile.ExtraSuffix, URI: ownedReserveFixture, SelectedNodeID: "tcp"},
+	}
+	var outbounds []interface{}
+	for _, route := range routes {
+		outbounds = append(outbounds, map[string]interface{}{"tag": "vpn-source-" + route.ID, "type": "socks"})
+	}
+	if err := a.storage.UpdateProfileVPNSources(1, routes, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.storage.UpdateProfileConfig(1, map[string]interface{}{"outbounds": outbounds}); err != nil {
+		t.Fatal(err)
+	}
+	a.vpnSourceHealth = make(map[string]vpnSourceHealthState)
+	a.selectInitialVPNSource(ctx, generation)
+	if want := []string{"vpn-source-xhttp", "vpn-source-tcp", "vpn-source-hy2"}; !reflect.DeepEqual(a.sessionVPNSourceTags(), want) || a.activeVPNSource() != want[0] {
+		t.Fatalf("initial route %q, queue %v", a.activeVPNSource(), a.sessionVPNSourceTags())
+	}
+	xhttpFailed.Store(true)
+	a.checkActiveVPNSource(ctx, generation)
+	a.checkActiveVPNSource(ctx, generation)
+	xhttpFailed.Store(false)
+	a.checkActiveVPNSource(ctx, generation)
+	if a.activeVPNSource() != "vpn-source-tcp" {
+		t.Fatalf("healthy failover was displaced: %s", a.activeVPNSource())
 	}
 }
 
