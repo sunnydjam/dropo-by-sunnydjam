@@ -810,7 +810,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
               subtitle: const Text(
-                'Первый ответивший вход в этой сети',
+                'Рабочий вход с меньшей задержкой',
                 style: TextStyle(color: _atlasMuted, fontSize: 12),
               ),
               onTap: controlsDisabled || autoSelect == true
@@ -858,6 +858,15 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                   ),
             ),
             onNode: (node) => _selectNode(source, node),
+            onIngress: (ingress) => _changeSource(
+              () => widget.bridge.callMap(
+                'SetManagedIngress',
+                args: [source.id, ingress],
+                timeout: const Duration(minutes: 3),
+              ),
+              'Сохраняем способ подключения…',
+              confirmationTitle: 'Изменить способ подключения?',
+            ),
             onSelect: () => _changeSource(
               () => widget.bridge.moveVpnSource(source.id, 0),
               'Выбираем подписку…',
@@ -1100,6 +1109,7 @@ class _VpnSourceTile extends StatefulWidget {
     required this.busy,
     required this.onEnabled,
     required this.onNode,
+    required this.onIngress,
     required this.onSelect,
     required this.onRemove,
     required this.onRename,
@@ -1113,6 +1123,7 @@ class _VpnSourceTile extends StatefulWidget {
   final bool? running, autoSelect;
   final ValueChanged<bool> onEnabled;
   final ValueChanged<int> onNode;
+  final ValueChanged<String> onIngress;
   final VoidCallback onSelect, onRemove, onRename, onRefresh;
   final VoidCallback? onOrder;
   final Future<bool> Function(String nodeId, bool favorite) onFavorite;
@@ -1170,7 +1181,8 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
   @override
   Widget build(BuildContext context) {
     final source = widget.source;
-    final managed = _ownedSourceFamily(source.publicCatalogId) != null;
+    final family = _ownedSourceFamily(source.publicCatalogId);
+    final managed = family != null;
     final active =
         widget.statusKnown &&
         widget.running == true &&
@@ -1373,6 +1385,43 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
           ],
           if (expanded) ...[
             const SizedBox(height: 8),
+            if (managed) ...[
+              Text(
+                _tr(context, 'Способы подключения', 'Connection methods'),
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              for (final (id, label) in [
+                ('', _tr(context, 'Автоматически', 'Automatic')),
+                ('xhttp', 'VLESS/XHTTP'),
+                ('tcp', 'VLESS TCP/REALITY'),
+                ('hysteria2', 'Hysteria 2 / QUIC'),
+              ])
+                ListTile(
+                  key: ValueKey('source-ingress-${source.id}-$id'),
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    source.managedIngress == id
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_off,
+                  ),
+                  title: Text(label),
+                  subtitle:
+                      active && id.isNotEmpty && source.activeIngress == id
+                      ? Text(
+                          _tr(context, 'Активен сейчас', 'Active now'),
+                          style: const TextStyle(color: _atlasMint),
+                        )
+                      : null,
+                  selected: source.managedIngress == id,
+                  onTap:
+                      widget.busy ||
+                          !widget.statusKnown ||
+                          source.disabled ||
+                          source.managedIngress == id
+                      ? null
+                      : () => widget.onIngress(id),
+                ),
+            ],
             Wrap(
               spacing: 8,
               runSpacing: 4,
@@ -1424,10 +1473,11 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
                 ),
               ],
             ),
-            Text(
-              '${_vpnServerCountLabel(source.nodeCount)}. Сервер внутри подписки выбираете вы; резерв — другие подписки.',
-              style: const TextStyle(color: _atlasMuted, fontSize: 12),
-            ),
+            if (!managed)
+              Text(
+                '${_vpnServerCountLabel(source.nodeCount)}. Сервер внутри подписки выбираете вы; резерв — другие подписки.',
+                style: const TextStyle(color: _atlasMuted, fontSize: 12),
+              ),
             if (source.lastUpdated.isNotEmpty)
               Text(
                 'Список обновлён: ${source.lastUpdated}',

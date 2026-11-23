@@ -245,6 +245,10 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 	s.sourceMu.Lock()
 	lastNetwork := s.sourceNetwork
 	s.sourceMu.Unlock()
+	rankManaged := slices.ContainsFunc(candidates, func(candidate sourceCandidate) bool {
+		return candidate.OwnerID != "" && candidate.OwnerID != candidate.ID
+	})
+	queue := candidates
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -257,7 +261,7 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 				s.sourceMu.Lock()
 				changed := lastNetwork != s.sourceNetwork
 				s.sourceMu.Unlock()
-				if automatic && changed {
+				if automatic && changed && !rankManaged {
 					initial = true
 				}
 			}
@@ -280,7 +284,13 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 			}
 			return true
 		}
-		if initial && automatic {
+		if initial && rankManaged {
+			sourcehistory.Race(cycleCtx, candidates, 6, probe, func(_ sourceCandidate, result sourceObservation) {
+				results = append(results, result)
+			})
+			queue = rankManagedSourceCandidates(candidates, results, automatic)
+			chosen = chooseSourceCandidate(queue, results, false)
+		} else if initial && automatic {
 			s.sourceMu.Lock()
 			network := s.sourceNetwork
 			lastNetwork = network
@@ -307,7 +317,7 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 					return committed
 				})...)
 				if !committed && cycleCtx.Err() == nil {
-					results = append(results, probeSourceCandidates(cycleCtx, candidates[end:], probe)...)
+					results = append(results, raceSourceCandidates(cycleCtx, candidates[end:], "", probe, nil)...)
 					chosen = chooseSourceCandidate(candidates[end:], results, false)
 				}
 			}
@@ -327,8 +337,13 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 			results = []sourceObservation{result}
 			if result.State != "ok" && cycleCtx.Err() == nil {
 				confirmedFailed = active
-				results = probeSourceCandidates(cycleCtx, candidates, probe)
-				chosen = chooseSourceAfterOutage(active, candidates, results)
+				if rankManaged {
+					fallback, observations := probeManagedFailover(cycleCtx, queue, active.ID, probe)
+					chosen, results = fallback, append(results, observations...)
+				} else {
+					results = probeSourceCandidates(cycleCtx, candidates, probe)
+					chosen = chooseSourceAfterOutage(active, candidates, results)
+				}
 			}
 		}
 		if cycleCtx.Err() != nil {
@@ -356,6 +371,59 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 			activeID = chosen
 		}
 	}
+}
+
+func rankManagedSourceCandidates(candidates []sourceCandidate, observations []sourceObservation, automatic bool) []sourceCandidate {
+	delays := make(map[string]int, len(observations))
+	for _, r := range observations {
+		if r.State == "ok" {
+			delays[r.SourceID] = r.LatencyMS
+		}
+	}
+	owners := make(map[string]int, len(candidates))
+	for i, c := range candidates {
+		if _, ok := owners[c.owner()]; !ok {
+			owners[c.owner()] = i
+		}
+	}
+	ranked := slices.Clone(candidates)
+	slices.SortStableFunc(ranked, func(a, b sourceCandidate) int {
+		if !automatic && a.owner() != b.owner() {
+			return owners[a.owner()] - owners[b.owner()]
+		}
+		da, db := delays[a.ID], delays[b.ID]
+		switch {
+		case da == db:
+			return 0
+		case da <= 0:
+			return 1
+		case db <= 0:
+			return -1
+		default:
+			return da - db
+		}
+	})
+	return ranked
+}
+
+func probeManagedFailover(ctx context.Context, queue []sourceCandidate, active string, probe func(context.Context, sourceCandidate) sourceObservation) (string, []sourceObservation) {
+	from := slices.IndexFunc(queue, func(c sourceCandidate) bool { return c.ID == active })
+	var observations []sourceObservation
+	for offset := 1; offset <= len(queue); offset++ {
+		if ctx.Err() != nil {
+			break
+		}
+		c := queue[(from+offset)%len(queue)]
+		if c.ID == active {
+			continue
+		}
+		result := probe(ctx, c)
+		observations = append(observations, result)
+		if result.State == "ok" && result.LatencyMS > 0 {
+			return c.ID, observations
+		}
+	}
+	return "", observations
 }
 
 func (s *CommandServer) beginSourceCycle(ctx context.Context, generation uint64) (context.Context, context.CancelFunc) {
@@ -404,20 +472,44 @@ func probeSourceCandidates(ctx context.Context, candidates []sourceCandidate, pr
 }
 
 func raceSourceCandidates(ctx context.Context, candidates []sourceCandidate, preferred string, probe func(context.Context, sourceCandidate) sourceObservation, choose func(sourceCandidate, sourceObservation) bool) []sourceObservation {
-	ordered := slices.Clone(candidates)
-	for i, c := range ordered {
-		if c.ID == preferred {
-			copy(ordered[1:i+1], ordered[:i])
-			ordered[0] = c
+	var groups [][]sourceCandidate
+	for _, candidate := range candidates {
+		if len(groups) == 0 || groups[len(groups)-1][0].owner() != candidate.owner() {
+			groups = append(groups, nil)
+		}
+		last := len(groups) - 1
+		groups[last] = append(groups[last], candidate)
+	}
+	for i, group := range groups {
+		if slices.ContainsFunc(group, func(c sourceCandidate) bool { return c.ID == preferred }) {
+			copy(groups[1:i+1], groups[:i])
+			groups[0] = group
 			break
 		}
 	}
-	results := make([]sourceObservation, 0, len(ordered))
+	results := make([]sourceObservation, 0, len(candidates))
 	selected := false
-	sourcehistory.Race(ctx, ordered, 4, probe, func(c sourceCandidate, r sourceObservation) {
-		results = append(results, r)
-		if !selected && r.State == "ok" && r.LatencyMS > 0 {
-			selected = choose(c, r)
+	sourcehistory.Race(ctx, groups, 4, func(ctx context.Context, group []sourceCandidate) []sourceObservation {
+		var observations []sourceObservation
+		for _, candidate := range group {
+			if ctx.Err() != nil {
+				break
+			}
+			result := probe(ctx, candidate)
+			observations = append(observations, result)
+			if result.State == "ok" && result.LatencyMS > 0 {
+				break
+			}
+		}
+		return observations
+	}, func(group []sourceCandidate, observations []sourceObservation) {
+		results = append(results, observations...)
+		if choose != nil && !selected && len(observations) > 0 {
+			last := len(observations) - 1
+			result := observations[last]
+			if result.State == "ok" && result.LatencyMS > 0 {
+				selected = choose(group[last], result)
+			}
 		}
 	})
 	return results

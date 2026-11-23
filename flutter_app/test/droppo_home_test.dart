@@ -172,7 +172,7 @@ void main() {
       ('connected', 'flying'),
       ('disconnected', 'waiting'),
       ('error', 'puzzled'),
-      ('connecting', 'waiting'),
+      ('connecting', 'flying'),
     ]) {
       testWidgets(
         'DrOppo $pose for $state fits $platform $viewport text $scale',
@@ -181,7 +181,13 @@ void main() {
           final bridge = _DrOppoBridge(state);
           await _pumpHome(tester, bridge, viewport, scale);
           expect(_key('planet-$state'), findsOneWidget);
-          expect(atlasPlanetMascotPoseForTesting(_painter(tester)), pose);
+          final expectedPose = platform == 'android' && state == 'connecting'
+              ? 'waiting'
+              : pose;
+          expect(
+            atlasPlanetMascotPoseForTesting(_painter(tester)),
+            expectedPose,
+          );
 
           final scene = tester.getRect(_key('atlas-planet-motion'));
           final localMascot = atlasPlanetMascotBoundsForTesting(
@@ -257,7 +263,7 @@ void main() {
               atlasPlanetMascotPoseForTesting(_painter(tester)),
               'waiting',
             );
-            expect(tester.getRect(action), actionRect);
+            expect(tester.getRect(action).center, scene.center);
           }
           await tester.pumpWidget(const SizedBox.shrink());
           expect(tester.takeException(), isNull);

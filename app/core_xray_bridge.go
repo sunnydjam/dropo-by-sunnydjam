@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
@@ -239,8 +238,6 @@ func BuildXrayBridgeConfig(proxies []ProxyConfig) XrayBridgeBuildResult {
 	rules := make([]interface{}, 0, len(proxies))
 	singBoxProxies := make([]ProxyConfig, 0, len(proxies))
 	usedPorts := map[int]bool{}
-	var balancers []any
-	var probeTags []string
 
 	for i, proxy := range proxies {
 		port := reserveLoopbackPort(XrayBridgePortStart, usedPorts)
@@ -264,25 +261,6 @@ func BuildXrayBridgeConfig(proxies []ProxyConfig) XrayBridgeBuildResult {
 
 		outbound := proxy.ToXrayOutbound(outboundTag)
 		rule := map[string]any{"type": "field", "inboundTag": []string{inboundTag}, "outboundTag": outboundTag}
-		if proxy.finlandRelay != nil {
-			outbound["streamSettings"].(map[string]any)["sockopt"] = map[string]any{"dialerProxy": proxy.finlandRelay["tag"]}
-			outbounds = append(outbounds, proxy.finlandRelay)
-		}
-		if proxy.finlandQUIC != nil && proxy.finlandRelay != nil {
-			fastTag := outboundTag + "-fi-fast"
-			balanceTag := outboundTag + "-fi-route"
-			fi := proxy
-			fi.Server = dnspolicy.FinlandIPv4
-			fast := fi.ToXrayOutbound(fastTag)
-			fast["streamSettings"].(map[string]any)["sockopt"] = map[string]any{"dialerProxy": proxy.finlandQUIC["tag"]}
-			// Reuse the authenticated tunnel for short TCP streams. Keep native UDP, including QUIC.
-			fast["mux"] = map[string]any{"enabled": true, "concurrency": 4, "xudpConcurrency": -1, "xudpProxyUDP443": "skip"}
-			outbounds = append(outbounds, proxy.finlandQUIC, fast)
-			probeTags = append(probeTags, fastTag)
-			balancers = append(balancers, map[string]any{"tag": balanceTag, "selector": []string{fastTag}, "strategy": map[string]any{"type": "leastPing"}, "fallbackTag": outboundTag})
-			delete(rule, "outboundTag")
-			rule["balancerTag"] = balanceTag
-		}
 		outbounds = append(outbounds, outbound)
 		rules = append(rules, rule)
 
@@ -302,10 +280,6 @@ func BuildXrayBridgeConfig(proxies []ProxyConfig) XrayBridgeBuildResult {
 
 	routing := map[string]any{"domainStrategy": "AsIs", "rules": rules}
 	config := map[string]any{"log": map[string]any{"loglevel": "info"}, "inbounds": inbounds, "outbounds": outbounds, "routing": routing}
-	if len(probeTags) > 0 {
-		routing["balancers"] = balancers
-		config["observatory"] = map[string]any{"subjectSelector": probeTags, "probeURL": vpnResponseProbeTarget, "probeInterval": "15s", "enableConcurrency": true}
-	}
 	return XrayBridgeBuildResult{SingBoxProxies: singBoxProxies, XrayConfig: config}
 }
 

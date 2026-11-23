@@ -63,7 +63,6 @@ func Move(sources []Source, id string, to int) ([]int, bool) {
 }
 
 type Candidate struct {
-	FinlandRelayURI  string
 	ID, OwnerID, URI string
 	Index            int // -1 for a runtime-only direct reserve.
 }
@@ -83,14 +82,11 @@ func Candidates(sources []Source, now time.Time) []Candidate {
 			result = append(result, Candidate{ID: primary.ID, OwnerID: primary.ID, URI: primary.URI, Index: group.Primary})
 			continue
 		}
+		preference := NormalizeIngress(primary.Provider, primary.ManagedIngress)
 		for _, direct := range DirectReserves(primary.Provider, primary.URI, now) {
-			if !occupied[direct.ID] {
-				result = append(result, Candidate{ID: direct.ID, OwnerID: primary.ID, URI: direct.URI, Index: -1, FinlandRelayURI: direct.FinlandRelayURI})
+			if !occupied[direct.ID] && (preference == "" || preference == direct.Ingress) {
+				result = append(result, Candidate{ID: direct.ID, OwnerID: primary.ID, URI: direct.URI, Index: -1})
 			}
-		}
-		id := primary.Provider + MainSuffix
-		if raw, err := MainURI(primary.Provider, primary.URI, now); err == nil && !occupied[id] {
-			result = append(result, Candidate{ID: id, OwnerID: primary.ID, URI: raw, Index: -1})
 		}
 	}
 	return result

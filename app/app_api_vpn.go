@@ -1342,7 +1342,7 @@ func (a *App) ensureActiveConfigForStart() error {
 		// is configured but the cached config has no VPN candidates (e.g. it was
 		// built before the subscription was added → VPN would never be used).
 		needsRebuild := subscriptionURL != "" && !profile.XrayConfigReady
-		if !needsRebuild && hasLegacyFinlandOutbound(config) {
+		if !needsRebuild && (hasLegacyFinlandOutbound(config) || hasLegacyFinlandCarrier(profile.XrayConfig)) {
 			a.writeLog("Rebuilding cached managed Finland REALITY transport")
 			needsRebuild = true
 		}

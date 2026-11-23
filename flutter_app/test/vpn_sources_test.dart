@@ -110,6 +110,13 @@ class _SourceBridge extends MockCoreBridge {
   }) async {
     if (method == 'SetManagedIngress') {
       ingressChoices.add(args);
+      sources = sources
+          .map(
+            (source) => source.id == args[0]
+                ? _copySource(source, managedIngress: args[1] as String)
+                : source,
+          )
+          .toList();
       return {'success': true};
     }
     if (method == 'SetVPNSourceNodeByID') {
@@ -349,6 +356,7 @@ Future<void> _pumpEditor(
 VpnSourceInfo _copySource(
   VpnSourceInfo source, {
   String? name,
+  String? managedIngress,
   int? selectedNode,
   List<String>? favorites,
   List<String>? nodeIds,
@@ -368,6 +376,8 @@ VpnSourceInfo _copySource(
   usingCache: source.usingCache,
   active: source.active,
   publicCatalogId: source.publicCatalogId,
+  managedIngress: managedIngress ?? source.managedIngress,
+  activeIngress: source.activeIngress,
   response: source.response,
 );
 
@@ -379,29 +389,53 @@ Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
-  testWidgets('Free shows a single selectable Latvian route on mobile', (
+  testWidgets('Free shows its active method and pins a method under More', (
     tester,
   ) async {
     final bridge = _SourceBridge()
-      ..running = false
+      ..running = true
       ..autoSelect = true
       ..sources = [
         VpnSourceInfo.fromJson({
           'id': 'free-id',
-          'name': 'Dropo Free · Латвия',
+          'name': 'Dropo Free',
           'public_catalog_id': 'dropo-individual-free',
+          'active': true,
+          'active_ingress': 'hysteria2',
           'node_count': 1,
           'selected_node': 0,
         }),
       ];
     await _pumpEditor(tester, bridge, size: const Size(390, 800));
-    expect(find.text('Dropo Free · Латвия'), findsWidgets);
+    expect(find.text('Dropo Free'), findsWidgets);
+    expect(find.text('Hysteria 2 / QUIC'), findsNothing);
+    await _tapVisible(
+      tester,
+      find.byKey(const PageStorageKey('source-details-free-id')),
+    );
+    expect(find.text('Hysteria 2 / QUIC'), findsOneWidget);
+    expect(find.text('Активен сейчас'), findsOneWidget);
     expect(find.textContaining('Финляндия'), findsNothing);
     await _tapVisible(
       tester,
-      find.byKey(const ValueKey('vpn-source-first-free-id')),
+      find.byKey(const ValueKey('source-ingress-free-id-xhttp')),
     );
-    expect(bridge.moves, [('free-id', 0)]);
+    expect(bridge.ingressChoices, isEmpty);
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('source-reconnect-confirm')),
+    );
+    expect(bridge.ingressChoices, [
+      ['free-id', 'xhttp'],
+    ]);
+    expect(
+      tester
+          .widget<ListTile>(
+            find.byKey(const ValueKey('source-ingress-free-id-xhttp')),
+          )
+          .selected,
+      isTrue,
+    );
   });
 
   testWidgets(

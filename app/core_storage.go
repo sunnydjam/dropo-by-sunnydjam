@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"dropocore/dnspolicy"
-	"dropocore/ownedprofile"
 	"dropocore/sourcehistory"
 	"encoding/json"
 	"fmt"
@@ -1657,13 +1656,21 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 	b.addWireGuardDNSNew(template, wireGuardConfigs)
 
 	updatedSources := append([]VPNSource(nil), sources...)
+	runtimeSources := make([]VPNSource, 0, len(updatedSources))
+	eligible := make(map[string]bool, len(updatedSources))
+	for _, group := range windowsRuntimeSourceGroups(updatedSources) {
+		runtimeSources = append(runtimeSources, group...)
+		for _, source := range group {
+			eligible[source.ID] = true
+		}
+	}
 	proxies := make([]ProxyConfig, 0, len(updatedSources))
 	xrayCandidates := make([]ProxyConfig, 0)
 	enabledSources := 0
 	sourceErrors := make([]string, 0)
 	for index := range updatedSources {
 		source := &updatedSources[index]
-		if source.Disabled || ownedSourceExpired(*source) {
+		if !eligible[source.ID] || source.Disabled || ownedSourceExpired(*source) {
 			continue
 		}
 		enabledSources++
@@ -1700,19 +1707,6 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 		}
 		selected := nodes[source.SelectedNode]
 		selected.Tag = "vpn-source-" + source.ID
-		if source.PublicCatalogID == ownedprofile.Boost {
-			_, relay, err := ownedprofile.Pair(windowsOwnedFamily(source.PublicCatalogID), source.URI)
-			carrier, ok := ownedprofile.FinlandRelayOutbound(relay, selected.UUID, selected.ServerPort, "fi-carrier-"+source.ID)
-			if err != nil || !ok {
-				return nil, fmt.Errorf("не удалось проверить финский маршрут Dropo")
-			}
-			fast, ok := ownedprofile.FinlandQUICCarrier(source.URI, selected.UUID, "fi-quic-"+source.ID)
-			if !ok {
-				return nil, fmt.Errorf("не удалось проверить ключ финского маршрута Dropo")
-			}
-			selected.finlandQUIC = fast
-			selected.finlandRelay = carrier
-		}
 		split := SplitProxyConfigs([]ProxyConfig{selected})
 		if split.AllFiltered || len(split.SingBox)+len(split.XrayBridge) == 0 {
 			sourceErr := fmt.Errorf("selected node %d uses an unsupported transport", source.SelectedNode)
@@ -1736,7 +1730,7 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 	if NormalizeRoutingMode(b.routingMode) == RoutingModeAllTraffic && len(proxies) == 0 {
 		return nil, fmt.Errorf("для режима «Всё через VPN» выберите и включите поддерживаемый VPN-источник: бесплатный публичный источник, свою подписку или VPN-ключ")
 	}
-	orderVPNSourceProxies(proxies, updatedSources)
+	orderVPNSourceProxies(proxies, runtimeSources)
 
 	// Generate outbounds
 	outbounds := b.generateOutbounds(template, proxies)
@@ -1818,13 +1812,7 @@ func (b *ConfigBuilderForStorage) fetchVPNSourceNodes(source VPNSource) ([]Proxy
 }
 
 func (b *ConfigBuilderForStorage) fetchVPNSourceNodesContext(ctx context.Context, source VPNSource) ([]ProxyConfig, error) {
-	if isMainIngress(source.PublicCatalogID) {
-		raw, err := ownedprofile.MainURI(windowsOwnedFamily(source.PublicCatalogID), source.URI, time.Now())
-		if err != nil {
-			return nil, err
-		}
-		source.URI = raw
-	} else if ownedprofile.IsPrimary(source.PublicCatalogID) {
+	if windowsRouteIngress(source.PublicCatalogID) != "" {
 		raw, err := windowsRegionalURI(source)
 		if err != nil {
 			return nil, err

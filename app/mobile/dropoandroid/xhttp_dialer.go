@@ -4,7 +4,6 @@ import (
 	"context"
 	"dropocore/dnspolicy"
 	"errors"
-	"golang.org/x/net/proxy"
 	"io"
 	"net"
 	"strconv"
@@ -20,8 +19,6 @@ import (
 type xhttpSessionKey struct{}
 
 type xhttpSocketSession struct {
-	finlandTarget       string
-	finlandCarrier      proxy.ContextDialer
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	protect             func(int32) error
@@ -179,20 +176,6 @@ func (protectedXHTTPDialer) Dial(ctx context.Context, _ xnet.Address, destinatio
 	network := destination.Network.SystemString()
 	if network != "tcp" && network != "udp" {
 		return nil, errors.New("Android XHTTP socket network is unsupported")
-	}
-	if session.finlandCarrier != nil {
-		if network != "tcp" || destination.NetAddr() != session.finlandTarget {
-			return nil, errors.New("unexpected Finland relay destination")
-		}
-		conn, err := session.finlandCarrier.DialContext(dialCtx, network, session.finlandTarget)
-		if err != nil {
-			return nil, err
-		}
-		tracked := &trackedXHTTPConn{Conn: conn, session: session}
-		if !session.trackPhysical(tracked, generation) {
-			return nil, context.Canceled
-		}
-		return tracked, nil
 	}
 	control := func(_, _ string, raw syscall.RawConn) error {
 		if session.ctx.Err() != nil || !session.physicalCurrent(generation) {

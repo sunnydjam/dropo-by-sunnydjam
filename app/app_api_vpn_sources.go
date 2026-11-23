@@ -3,6 +3,7 @@ package main
 import (
 	"dropocore/ownedprofile"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -19,12 +20,23 @@ func (a *App) GetVPNSources() map[string]interface{} {
 	running, now := a.isVPNRunning() && !a.vpnStopping.Load(), time.Now()
 	views := publicVPNSources(profile.VPNSources)
 	confirmedActive := ""
-	for _, view := range views {
-		tag := "vpn-source-" + view["id"].(string)
-		response := a.vpnSourceResponseSnapshot(tag, running, now)
-		confirmed := running && active == tag && response.State == "ok"
-		if confirmed {
-			confirmedActive = tag
+	for i, group := range windowsSourceGroups(profile.VPNSources) {
+		view := views[i]
+		owner := group[0]
+		ownerTag := "vpn-source-" + owner.ID
+		response := a.vpnSourceResponseSnapshot(ownerTag, running, now)
+		confirmed := false
+		for _, source := range group {
+			tag := "vpn-source-" + source.ID
+			sample := a.vpnSourceResponseSnapshot(tag, running, now)
+			if response.State != "ok" && sample.State == "ok" {
+				response = sample
+			}
+			if running && active == tag && sample.State == "ok" {
+				confirmed, confirmedActive, response = true, ownerTag, sample
+				view["active_ingress"] = windowsRouteIngress(source.PublicCatalogID)
+				break
+			}
 		}
 		view["active"], view["response"] = confirmed, response
 	}
@@ -142,27 +154,31 @@ func (a *App) SetVPNSourceEnabled(id string, enabled bool) map[string]interface{
 
 func (a *App) MoveVPNSource(id string, newIndex int) map[string]interface{} {
 	return a.changeVPNSources(func(profile *ProfileData) error {
-		if newIndex < 0 || newIndex >= len(profile.VPNSources) {
-			return fmt.Errorf("source index %d is outside range", newIndex)
+		if !moveWindowsSource(profile, normalizeVPNSourceID(id), newIndex) {
+			return fmt.Errorf("VPN source or position is unavailable")
 		}
-		id = normalizeVPNSourceID(id)
-		oldIndex := -1
-		for index, source := range profile.VPNSources {
-			if source.ID == id {
-				oldIndex = index
-				break
+		return nil
+	})
+}
+
+func (a *App) SetManagedIngress(id, ingress string) map[string]interface{} {
+	return a.changeVPNSources(func(profile *ProfileData) error {
+		index := slices.IndexFunc(profile.VPNSources, func(source VPNSource) bool { return source.ID == id })
+		if index >= 0 {
+			source := &profile.VPNSources[index]
+			if ownedprofile.ValidIngress(source.PublicCatalogID, ingress) && !source.Disabled && !ownedSourceExpired(*source) {
+				if ingress != "" && !slices.ContainsFunc(profile.VPNSources, func(route VPNSource) bool {
+					return sameWindowsOwnedFamily(route.PublicCatalogID, source.PublicCatalogID) && windowsRouteIngress(route.PublicCatalogID) == ingress && !route.Disabled && !ownedSourceExpired(route)
+				}) {
+					return fmt.Errorf("Этот вход сейчас недоступен.")
+				}
+				source.ManagedIngress = ingress
+				if ingress == "" || moveWindowsSource(profile, id, 0) {
+					return nil
+				}
 			}
 		}
-		if oldIndex < 0 {
-			return fmt.Errorf("VPN source %q not found", id)
-		}
-		source := profile.VPNSources[oldIndex]
-		profile.VPNSources = append(profile.VPNSources[:oldIndex], profile.VPNSources[oldIndex+1:]...)
-		profile.VPNSources = append(profile.VPNSources, VPNSource{})
-		copy(profile.VPNSources[newIndex+1:], profile.VPNSources[newIndex:])
-		profile.VPNSources[newIndex] = source
-		profile.VPNSourceSelectionMode = "priority"
-		return nil
+		return fmt.Errorf("Этот вход сейчас недоступен.")
 	})
 }
 
@@ -192,11 +208,14 @@ func (a *App) changeVPNSources(change func(*ProfileData) error) map[string]inter
 // reusable credentials through the JSON bridge.
 func publicVPNSources(sources []VPNSource) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(sources))
-	for _, source := range sources {
+	for _, group := range windowsSourceGroups(sources) {
+		source := group[0]
 		referenceOnly := ownedprofile.IsPrimary(source.PublicCatalogID) && ownedSourceExpired(source)
 		name := source.Name
+		ingress := ""
 		if ownedprofile.IsPrimary(source.PublicCatalogID) {
-			name = ownedprofile.RegionName(source.PublicCatalogID)
+			name = ownedprofile.DisplayName(source.PublicCatalogID, ownedprofile.Name(source.PublicCatalogID))
+			ingress = ownedprofile.NormalizeIngress(source.PublicCatalogID, source.ManagedIngress)
 		}
 		problem := source.LastError
 		if source.PublicCatalogID == managedFreeVPNProviderID && problem != "" {
@@ -204,6 +223,7 @@ func publicVPNSources(sources []VPNSource) []map[string]interface{} {
 		}
 		result = append(result, map[string]interface{}{
 			"id": source.ID, "name": name, "kind": source.Kind, "reference_only": referenceOnly,
+			"managed_ingress":   ingress,
 			"public_catalog_id": source.PublicCatalogID, "using_cache": source.UsingCache,
 			"disabled": source.Disabled, "selected_node": source.SelectedNode,
 			"selected_node_id": source.SelectedNodeID, "node_count": source.NodeCount,

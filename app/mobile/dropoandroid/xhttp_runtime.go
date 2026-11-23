@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"golang.org/x/net/proxy"
 	"io"
 	"net"
 	"sync"
@@ -93,10 +92,6 @@ type xhttpBridge struct {
 }
 
 func newXHTTPBridge(config *xcore.Config, protect func(int32) error, dnsServers func() []string, ownerEpochs ...uint64) (*xhttpBridge, error) {
-	return newRoutedXHTTPBridge(config, protect, dnsServers, nil, "", ownerEpochs...)
-}
-
-func newRoutedXHTTPBridge(config *xcore.Config, protect func(int32) error, dnsServers func() []string, carrier *xhttpBridge, target string, ownerEpochs ...uint64) (*xhttpBridge, error) {
 	epoch := currentXHTTPEpoch()
 	if len(ownerEpochs) > 0 {
 		epoch = ownerEpochs[0]
@@ -105,19 +100,6 @@ func newRoutedXHTTPBridge(config *xcore.Config, protect func(int32) error, dnsSe
 		return nil, errors.New("Android XHTTP runtime session was cancelled")
 	}
 	session := newXHTTPSocketSession(protect, dnsServers)
-	if carrier != nil {
-		d, err := proxy.SOCKS5("tcp", carrier.listener.Addr().String(), &proxy.Auth{User: carrier.username, Password: carrier.password}, &net.Dialer{})
-		if err != nil {
-			session.close()
-			return nil, err
-		}
-		dialer, ok := d.(proxy.ContextDialer)
-		if !ok {
-			session.close()
-			return nil, errXHTTPConfig
-		}
-		session.finlandTarget, session.finlandCarrier = target, dialer
-	}
 	managed := splithttp.NewManagedSession(session.ctx)
 	session.ctx = splithttp.ContextWithManagedSession(session.ctx, managed)
 	instance, err := xcore.NewWithContext(session.ctx, config)
@@ -443,7 +425,6 @@ func normalizeXHTTPConfig(content string, platform PlatformInterface, start bool
 			Type         string          `json:"type"`
 			Tag          string          `json:"tag"`
 			XrayOutbound json.RawMessage `json:"xray_outbound"`
-			FinlandRelay string          `json:"finland_relay"`
 		}
 		if json.Unmarshal(raw, &placeholder) != nil || placeholder.Type != xhttpOutboundType {
 			continue
@@ -467,57 +448,24 @@ func normalizeXHTTPConfig(content string, platform PlatformInterface, start bool
 		if err != nil {
 			return "", nil, err
 		}
-		makePath := func(tag string, exit, firstHop *xcore.Config, target string) (json.RawMessage, error) {
-			port, username, password := 1, "dropo-check", "dropo-check"
-			if start {
-				physicalDNS := func() []string { return physicalXHTTPDNSServers(platform) }
-				var carrier *xhttpBridge
-				if firstHop != nil {
-					carrier, err = newXHTTPBridge(firstHop, platform.AutoDetectInterfaceControl, physicalDNS, ownerEpochs...)
-					if err != nil {
-						return nil, err
-					}
-					runtime.bridges = append(runtime.bridges, carrier)
-				}
-				bridge, err := newRoutedXHTTPBridge(exit, platform.AutoDetectInterfaceControl, physicalDNS, carrier, target, ownerEpochs...)
-				if err != nil {
-					return nil, err
-				}
-				runtime.bridges = append(runtime.bridges, bridge)
-				port = bridge.listener.Addr().(*net.TCPAddr).Port
-				username, password = bridge.username, bridge.password
-			}
-			return json.Marshal(map[string]any{"type": "socks", "tag": tag, "server": "127.0.0.1", "server_port": port, "version": "5", "username": username, "password": password, "network": []string{"tcp", "udp"}})
-		}
-		if placeholder.FinlandRelay == "" {
-			outbounds[i], err = makePath(placeholder.Tag, built, nil, "")
+
+		port, username, password := 1, "dropo-check", "dropo-check"
+		if start {
+			physicalDNS := func() []string { return physicalXHTTPDNSServers(platform) }
+			bridge, err := newXHTTPBridge(built, platform.AutoDetectInterfaceControl, physicalDNS, ownerEpochs...)
 			if err != nil {
 				return "", nil, err
 			}
-			continue
+			runtime.bridges = append(runtime.bridges, bridge)
+			port = bridge.listener.Addr().(*net.TCPAddr).Port
+			username, password = bridge.username, bridge.password
 		}
-		relay, relayTarget, err := buildFinlandCarrier(placeholder.XrayOutbound, roots, placeholder.FinlandRelay)
+		outbounds[i], err = json.Marshal(map[string]any{"type": "socks", "tag": placeholder.Tag, "server": "127.0.0.1", "server_port": port, "version": "5", "username": username, "password": password, "network": []string{"tcp", "udp"}})
 		if err != nil {
 			return "", nil, err
 		}
-		fast, fastExit, fastTarget, err := buildFastFinlandPath(placeholder.XrayOutbound, roots, placeholder.FinlandRelay)
-		if err != nil {
-			return "", nil, err
-		}
-		fastTag, relayTag := placeholder.Tag+"-via-lv", placeholder.Tag+"-via-https"
-		fastPath, err := makePath(fastTag, fastExit, fast, fastTarget)
-		if err != nil {
-			return "", nil, err
-		}
-		relayPath, err := makePath(relayTag, built, relay, relayTarget)
-		if err != nil {
-			return "", nil, err
-		}
-		// Probe through the full Finnish exit on both paths. The source list and
-		// manual choice still identify one Boost subscription.
-		outbounds[i], _ = json.Marshal(map[string]any{"type": "urltest", "tag": placeholder.Tag, "outbounds": []string{fastTag, relayTag}, "url": sourceProbeTargets[0], "interval": "30s", "tolerance": 100, "interrupt_exist_connections": false})
-		outbounds = append(outbounds, fastPath, relayPath)
 	}
+
 	config["outbounds"], _ = json.Marshal(outbounds)
 	encoded, err := json.Marshal(config)
 	if err != nil {

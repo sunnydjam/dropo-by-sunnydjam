@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -247,5 +248,31 @@ func TestAutoCachedSixthEntryStartsEarlyAndKeepsWinner(t *testing.T) {
 	close(hold)
 	if n := <-done; n != 6 || len(picked) != 0 || candidates[0].ID != "primary" {
 		t.Fatal("changed winner, priority, or skipped background entries")
+	}
+}
+
+func TestManagedMethodsRankOnceThenTryTheNextInSequence(t *testing.T) {
+	candidates := []sourceCandidate{
+		{ID: "hy2", NodeID: "n1", OwnerID: "free"},
+		{ID: "xhttp", NodeID: "n2", OwnerID: "free"},
+		{ID: "tcp", NodeID: "n3", OwnerID: "free"},
+	}
+	result := func(c sourceCandidate, latency int) sourceObservation {
+		return sourceObservation{SourceID: c.ID, NodeID: c.NodeID, State: "ok", LatencyMS: latency}
+	}
+	results := []sourceObservation{result(candidates[0], 45), result(candidates[1], 15), result(candidates[2], 25)}
+	queue := rankManagedSourceCandidates(candidates, results, true)
+	if got := chooseSourceCandidate(queue, results, false); got != "xhttp" {
+		t.Fatalf("initial selection = %q", got)
+	}
+	var tried []string
+	healthy := func(_ context.Context, c sourceCandidate) sourceObservation {
+		tried = append(tried, c.ID)
+		return result(c, 120)
+	}
+	fallback, _ := probeManagedFailover(context.Background(), queue, "xhttp", healthy)
+	next, _ := probeManagedFailover(context.Background(), queue, fallback, healthy)
+	if fallback != "tcp" || next != "hy2" || !slices.Equal(tried, []string{"tcp", "hy2"}) {
+		t.Fatalf("failover rescored or skipped its next route: %v", tried)
 	}
 }

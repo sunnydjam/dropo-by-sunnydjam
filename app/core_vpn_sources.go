@@ -26,6 +26,7 @@ type VPNSource struct {
 	PublicCatalogID string        `json:"public_catalog_id,omitempty"`
 	URI             string        `json:"uri"`
 	Disabled        bool          `json:"disabled,omitempty"`
+	ManagedIngress  string        `json:"managed_ingress,omitempty"`
 	SelectedNode    int           `json:"selected_node"`
 	SelectedNodeID  string        `json:"selected_node_id,omitempty"`
 	NodeCount       int           `json:"node_count,omitempty"`

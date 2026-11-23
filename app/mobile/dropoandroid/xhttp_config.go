@@ -5,20 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
-	"strconv"
 	"strings"
 
 	core "dropocore"
-	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	xcore "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf"
-	_ "github.com/xtls/xray-core/proxy/hysteria"
 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
-	_ "github.com/xtls/xray-core/transport/internet/hysteria"
 	_ "github.com/xtls/xray-core/transport/internet/reality"
 	_ "github.com/xtls/xray-core/transport/internet/splithttp"
 	_ "github.com/xtls/xray-core/transport/internet/tcp"
@@ -40,7 +35,7 @@ func init() {
 	core.RegisterAndroidXHTTPValidator(androidXHTTPValidator{})
 }
 
-// Only VLESS XHTTP and the managed Finnish REALITY endpoint are accepted. No source-supplied
+// Only VLESS XHTTP and the managed regional REALITY endpoints are accepted. No source-supplied
 // inbound, file, listener, socket-option, detour, or arbitrary Xray app config
 // ever reaches the embedded runtime. All failures are credential-free.
 func buildXHTTPConfig(raw []byte, roots []string) (*xcore.Config, error) {
@@ -65,7 +60,7 @@ func buildXHTTPConfig(raw []byte, roots []string) (*xcore.Config, error) {
 	if !ok || outbound["protocol"] != "vless" {
 		return nil, errXHTTPConfig
 	}
-	if !validateXHTTPStream(stream, 0) && !managedFinlandStream(outbound, stream) {
+	if !validateXHTTPStream(stream, 0) && !managedRegionalRealityStream(outbound, stream) {
 		return nil, errXHTTPConfig
 	}
 	settings, ok := outbound["settings"].(map[string]any)
@@ -128,72 +123,8 @@ func compileBridgeOutbound(outbound map[string]any) (*xcore.Config, error) {
 	return built, nil
 }
 
-// Derive an encrypted first hop only for its matching managed Finnish credential.
-func buildFinlandCarrier(raw []byte, roots []string, relay string) (*xcore.Config, string, error) {
-	var o map[string]any
-	if json.Unmarshal(raw, &o) != nil {
-		return nil, "", errXHTTPConfig
-	}
-	stream, _ := o["streamSettings"].(map[string]any)
-	if !managedFinlandStream(o, stream) {
-		return nil, "", errXHTTPConfig
-	}
-	server := o["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
-	port := int(server["port"].(float64))
-	users, _ := server["users"].([]any)
-	if len(users) != 1 {
-		return nil, "", errXHTTPConfig
-	}
-	user, _ := users[0].(map[string]any)
-	id, _ := user["id"].(string)
-	firstHop, ok := ownedprofile.FinlandRelayOutbound(relay, id, port, "dropo-fi-carrier")
-	if !ok {
-		return nil, "", errXHTTPConfig
-	}
-	encoded, err := json.Marshal(firstHop)
-	if err != nil {
-		return nil, "", errXHTTPConfig
-	}
-	config, err := buildXHTTPConfig(encoded, roots)
-	return config, net.JoinHostPort(ownedprofile.ReserveIPv4, strconv.Itoa(port)), err
-}
-
-// Both outbounds are derived locally after validating the existing Finnish
-// exit and its matching live Boost relay. Imported Xray options are excluded.
-func buildFastFinlandPath(raw []byte, roots []string, relay string) (carrier, exit *xcore.Config, target string, err error) {
-	if _, err := buildXHTTPConfig(raw, roots); err != nil {
-		return nil, nil, "", err
-	}
-	var outbound map[string]any
-	if json.Unmarshal(raw, &outbound) != nil {
-		return nil, nil, "", errXHTTPConfig
-	}
-	stream, _ := outbound["streamSettings"].(map[string]any)
-	if !managedFinlandStream(outbound, stream) {
-		return nil, nil, "", errXHTTPConfig
-	}
-	server := outbound["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
-	user := server["users"].([]any)[0].(map[string]any)
-	id := user["id"].(string)
-	fast, ok := ownedprofile.FinlandRelayQUICCarrier(relay, id, "dropo-fi-quic")
-	if !ok {
-		return nil, nil, "", errXHTTPConfig
-	}
-	installXHTTPRoots(fast["streamSettings"].(map[string]any), roots)
-	carrier, err = compileBridgeOutbound(fast)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	server["address"] = dnspolicy.FinlandIPv4
-	outbound["tag"] = "dropo-fi-fast"
-	// Hysteria already shares its QUIC connection. Xray's separate VLESS mux
-	// creates workers on context.Background and loses Android socket protection.
-	exit, err = compileBridgeOutbound(outbound)
-	return carrier, exit, net.JoinHostPort(dnspolicy.FinlandIPv4, "2444"), err
-}
-
-// The TCP exception accepts only the generated managed REALITY endpoint.
-func managedFinlandStream(outbound, stream map[string]any) bool {
+// Accept only provisioned public endpoint identities for regional REALITY.
+func managedRegionalRealityStream(outbound, stream map[string]any) bool {
 	if outbound["protocol"] != "vless" || len(stream) != 3 || stream["network"] != "tcp" || stream["security"] != "reality" {
 		return false
 	}
@@ -213,7 +144,7 @@ func managedFinlandStream(outbound, stream map[string]any) bool {
 		return false
 	}
 	get := func(k string) string { v, _ := tls[k].(string); return v }
-	return ownedprofile.IsFinlandReality(addr, int(port), "tcp", "reality", get("serverName"), get("publicKey"), get("shortId"), get("fingerprint"))
+	return ownedprofile.IsManagedReality(addr, int(port), "tcp", "reality", get("serverName"), get("publicKey"), get("shortId"), get("fingerprint"))
 }
 
 func validateXHTTPStream(stream map[string]any, depth int) bool {

@@ -3,7 +3,6 @@ package main
 import (
 	"dropocore/ownedprofile"
 	"fmt"
-	"slices"
 	"time"
 )
 
@@ -32,12 +31,14 @@ func (a *App) applyOwnedVPNSource(provider, raw, expectedSourceID, expectedNodeI
 			if restore && (!ownedVPNRestoreReferenceMatches(observed, provider, expectedSourceID, expectedNodeID) || !ownedVPNRestoreCredentialsMatch(observed, provider, raw, reserveID, reserve)) {
 				return map[string]interface{}{"success": false, "error": "Профиль Dropo изменился. Повторите обновление источника."}
 			}
+			matched := 0
 			for _, source := range profile.VPNSources {
-				if source.PublicCatalogID == provider+ownedprofile.MainSuffix && source.URI == raw && source.NodeCount == 1 && slices.ContainsFunc(profile.VPNSources, func(parent VPNSource) bool {
-					return parent.PublicCatalogID == provider && parent.URI == raw && parent.NodeCount == 1
-				}) {
-					return map[string]interface{}{"success": true}
+				if windowsOwnedFamily(source.PublicCatalogID) == provider && windowsRouteIngress(source.PublicCatalogID) != "" && source.URI == raw {
+					matched++
 				}
+			}
+			if matched == 3 {
+				return map[string]interface{}{"success": true}
 			}
 		}
 	}
@@ -56,7 +57,7 @@ func ownedVPNRestoreCredentialsMatch(sources []VPNSource, primary, key, reserve,
 		if source.URI == "" {
 			continue
 		}
-		if (source.PublicCatalogID == primary || source.PublicCatalogID == primary+latviaSuffix || source.PublicCatalogID == primary+finlandSuffix || source.PublicCatalogID == primary+ownedprofile.MainSuffix) && source.URI != key || source.PublicCatalogID == reserve && source.URI != reserveKey {
+		if (source.PublicCatalogID == primary || source.PublicCatalogID == primary+latviaSuffix || source.PublicCatalogID == primary+finlandSuffix || source.PublicCatalogID == primary+ownedprofile.MainSuffix || source.PublicCatalogID == primary+ownedprofile.ExtraSuffix) && source.URI != key || source.PublicCatalogID == reserve && source.URI != reserveKey {
 			return false
 		}
 	}
@@ -164,7 +165,7 @@ func settingsWithoutOwnedSecrets(settings *SettingsFile) *SettingsFile {
 	return &copySettings
 }
 func ownedSourceExpired(s VPNSource) bool {
-	if isRegionalProvider(s.PublicCatalogID) || isMainIngress(s.PublicCatalogID) {
+	if isRegionalProvider(s.PublicCatalogID) || isMainIngress(s.PublicCatalogID) || isExtraIngress(s.PublicCatalogID) {
 		return ownedprofile.Expired(windowsOwnedFamily(s.PublicCatalogID), s.URI, time.Now())
 	}
 	return ownedprofile.Expired(s.PublicCatalogID, s.URI, time.Now())

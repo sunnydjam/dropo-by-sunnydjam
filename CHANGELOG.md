@@ -2,7 +2,18 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
-## Unreleased
+## 3.1.25
+
+- Use the Android-style Windows connect control and animate mascot takeoff,
+  orbit, and landing. Keep both routing modes on the Windows home screen.
+- Remove the duplicate routing selector and the legacy RU traffic setting from
+  Network & Diagnostics on Windows and Android.
+
+- Show one entry for Dropo Free and one for Dropo Turbo, with direct XHTTP,
+  VLESS TCP/REALITY and Hysteria 2 in Latvia and Finland, respectively.
+- Rank managed connection methods by verified HTTPS latency at connection
+  start and keep the active route until it fails. More shows the active route
+  and allows a manual choice.
 
 ## 3.1.23 — 2026-11-23
 

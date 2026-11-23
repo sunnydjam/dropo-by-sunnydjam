@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,54 +15,156 @@ import (
 // These identify Dropo's dedicated REALITY ingress, not a user credential.
 const finlandPublicKey = "TB8FIOdQ6nJc4M4pKScvt6isIN97rwcBjwzzhWSSPjs"
 const finlandShortID = "156fc43012055390"
+const latviaRealityName = "api.droponevedimka.in"
+const latviaPublicKey = "J26jwaXFR_4DrAswgMXV0Z-ME_c6HJc543f06CridSM"
+const latviaShortID = "3613ced3f53e2f97"
+const finlandTLSName = "fi1.dropo.fun"
+
+const (
+	Hysteria    = "hysteria2"
+	Reality     = "tcp"
+	XHTTP       = "xhttp"
+	ExtraSuffix = "-regional-extra"
+)
 
 func IsFinlandReserveID(id string) bool {
 	return id == Free+"-fi-tcp" || id == Boost+"-fi-tcp"
 }
 
-// IsFinlandReality identifies the managed endpoint whose server requires the
-// REALITY handshake supported by our pinned Xray client.
-func IsFinlandReality(server string, port int, network, security, sni, key, shortID, fingerprint string) bool {
-	return server == ReserveIPv4 && port == 2444 && network == "tcp" &&
-		security == "reality" && sni == dnspolicy.FinlandHostname && key == finlandPublicKey && shortID == finlandShortID && fingerprint == "chrome"
+type regionalEndpoint struct {
+	ip, tlsName, realityName, realityKey, shortID string
+	port                                          int
+}
+
+func regionalEndpointFor(provider string) regionalEndpoint {
+	if provider == Free {
+		return regionalEndpoint{dnspolicy.LatviaIPv4, dnspolicy.LatviaHostname, latviaRealityName, latviaPublicKey, latviaShortID, 2443}
+	}
+	return regionalEndpoint{dnspolicy.FinlandIPv4, finlandTLSName, dnspolicy.FinlandHostname, finlandPublicKey, finlandShortID, 2444}
+}
+
+// IsManagedReality recognizes the exact regional socket and public identity.
+func IsManagedReality(server string, port int, network, security, sni, key, shortID, fingerprint string) bool {
+	if network != "tcp" || security != "reality" || fingerprint != "chrome" {
+		return false
+	}
+	for _, tier := range []string{Free, Boost} {
+		e := regionalEndpointFor(tier)
+		if server == e.ip && port == e.port && sni == e.realityName && key == e.realityKey && shortID == e.shortID {
+			return true
+		}
+	}
+	return false
 }
 
 type DirectReserve struct {
-	FinlandRelayURI string
-	ID              string
-	Name            string
-	URI             string
+	ID, Name, URI, Ingress string
 }
 
 type Source struct {
 	ID, Provider, URI string
 	Disabled          bool
+	ManagedIngress    string
 }
 
-// DirectReserves adds one candidate per independent ingress. The protected
-// primary is authoritative for lifetime and identity; arbitrary keys never
-// acquire an owned reserve and no client sends a primary UUID to FI or LV.
+func ValidIngress(id, ingress string) bool {
+	return IsPrimary(id) && (ingress == "" || ingress == Hysteria || ingress == Reality || ingress == XHTTP)
+}
+
+func NormalizeIngress(id, ingress string) string {
+	if !IsPrimary(id) {
+		return ""
+	}
+	switch {
+	case ingress == "main":
+		return XHTTP
+	case ingress == "latvia" && id == Free:
+		return Hysteria
+	case ingress == "finland" && id == Boost:
+		return Reality
+	case ValidIngress(id, ingress):
+		return ingress
+	default:
+		return ""
+	}
+}
+
+// The first method only assigns the legacy tag ID. Session probes determine
+// priority independently of the order used when building the config.
+func RegionalIngress(id string) string {
+	if id == Free {
+		return Hysteria
+	}
+	if id == Boost {
+		return Reality
+	}
+	return ""
+}
+
+func ExtraIngress(id string) string {
+	if id == Free {
+		return Reality
+	}
+	return Hysteria
+}
+
+func CandidateIngress(provider, candidate string) string {
+	switch candidate {
+	case provider + "-lv-quic":
+		if provider == Free {
+			return Hysteria
+		}
+	case provider + "-fi-tcp":
+		if provider == Boost {
+			return Reality
+		}
+	case provider + MainSuffix:
+		return XHTTP
+	case provider + ExtraSuffix:
+		return ExtraIngress(provider)
+	}
+	return ""
+}
+
 func DirectReserves(id, raw string, now time.Time) []DirectReserve {
 	if !IsPrimary(id) || Expired(id, raw, now) {
 		return nil
 	}
 	primary, _ := url.Parse(raw)
 	key := strings.ToLower(primary.User.Username())
+	e := regionalEndpointFor(id)
+	port := strconv.Itoa(e.port)
+	tcpID, quicID, pool := id+ExtraSuffix, id+"-lv-quic", "free"
+	var uuid, auth string
 	if id == Free {
-		hash := scopedKey("lv1", key)
-		name := RegionName(id)
-		lv := url.URL{Scheme: "hysteria2", User: url.User(base64.RawURLEncoding.EncodeToString(hash[:])), Host: net.JoinHostPort(dnspolicy.LatviaIPv4, "2443"), Fragment: name,
-			RawQuery: url.Values{"sni": {dnspolicy.LatviaHostname}, "alpn": {"h3"}}.Encode()}
-		return []DirectReserve{{ID: id + "-lv-quic", Name: name, URI: lv.String()}}
+		lv := scopedKey("lv1", key)
+		auth = base64.RawURLEncoding.EncodeToString(lv[:])
+		uuid = keyUUID(regionalKey("vless", auth))
+	} else {
+		tcpID, quicID, pool = id+"-fi-tcp", id+ExtraSuffix, "boost"
+		uuid = keyUUID(scopedKey("fi1", key))
+		fi := regionalKey("hysteria2", uuid)
+		auth = base64.RawURLEncoding.EncodeToString(fi[:])
 	}
-	_, relayURI, err := Pair(id, raw)
-	if err != nil {
-		return nil
-	}
+
 	name := RegionName(id)
-	fi := url.URL{Scheme: "vless", User: url.User(finlandUUID(key)), Host: net.JoinHostPort(ReserveIPv4, "2444"), Fragment: name,
-		RawQuery: url.Values{"security": {"reality"}, "sni": {dnspolicy.FinlandHostname}, "type": {"tcp"}, "encryption": {"none"}, "fp": {"chrome"}, "pbk": {finlandPublicKey}, "sid": {finlandShortID}}.Encode()}
-	return []DirectReserve{{ID: id + "-fi-tcp", Name: name, URI: fi.String(), FinlandRelayURI: relayURI}}
+	quic := url.URL{Scheme: "hysteria2", User: url.User(auth), Host: net.JoinHostPort(e.ip, port),
+		Fragment: name + " · Hysteria 2", RawQuery: url.Values{"sni": {e.tlsName}, "alpn": {"h3"}}.Encode()}
+	tcp := url.URL{Scheme: "vless", User: url.User(uuid), Host: net.JoinHostPort(e.ip, port),
+		Fragment: name + " · TCP/REALITY",
+		RawQuery: url.Values{"security": {"reality"}, "sni": {e.realityName}, "type": {"tcp"}, "encryption": {"none"},
+			"fp": {"chrome"}, "pbk": {e.realityKey}, "sid": {e.shortID}}.Encode()}
+	xhttp := url.URL{Scheme: "vless", User: url.User(uuid), Host: net.JoinHostPort(e.ip, "2446"),
+		Fragment: name + " · XHTTP", RawQuery: url.Values{"security": {"tls"}, "sni": {e.tlsName}, "host": {e.tlsName},
+			"type": {"xhttp"}, "encryption": {"none"}, "path": {"/managed/v1/" + pool}, "mode": {"auto"},
+			"alpn": {"h2"}, "fp": {"chrome"}}.Encode()}
+	hysteria := DirectReserve{ID: quicID, Name: quic.Fragment, URI: quic.String(), Ingress: Hysteria}
+	reality := DirectReserve{ID: tcpID, Name: tcp.Fragment, URI: tcp.String(), Ingress: Reality}
+	routes := []DirectReserve{hysteria, {ID: id + MainSuffix, Name: xhttp.Fragment, URI: xhttp.String(), Ingress: XHTTP}, reality}
+	if id == Boost {
+		routes[0], routes[2] = routes[2], routes[0]
+	}
+	return routes
 }
 
 func RegionName(id string) string {
@@ -79,61 +182,13 @@ func scopedKey(node, primary string) [32]byte {
 	return sha256.Sum256([]byte("dropo-direct-reserve-v1\x00" + node + "\x00" + primary))
 }
 
-func finlandUUID(key string) string {
-	hash := scopedKey("fi1", key)
+func regionalKey(transport, key string) [32]byte {
+	return sha256.Sum256([]byte("dropo-regional-v1\x00" + transport + "\x00" + key))
+}
+
+func keyUUID(hash [32]byte) string {
 	hash[6] = hash[6]&0x0f | 0x40
 	hash[8] = hash[8]&0x3f | 0x80
 	value := hex.EncodeToString(hash[:16])
 	return value[:8] + "-" + value[8:12] + "-" + value[12:16] + "-" + value[16:20] + "-" + value[20:32]
-}
-
-// FinlandQUICCarrier uses the paying subscriber's independent Latvian key.
-// The second hop still authenticates to the Finnish Boost server.
-func FinlandQUICCarrier(raw, uuid, tag string) (map[string]any, bool) {
-	return finlandQUICCarrier(Boost, raw, uuid, tag)
-}
-
-// FinlandRelayQUICCarrier reconstructs the same first hop from the validated
-// Boost relay credential already carried by Android's prepared plan.
-func FinlandRelayQUICCarrier(raw, uuid, tag string) (map[string]any, bool) {
-	return finlandQUICCarrier(BoostReserve, raw, uuid, tag)
-}
-
-func finlandQUICCarrier(provider, raw, uuid, tag string) (map[string]any, bool) {
-	if Expired(provider, raw, time.Now()) {
-		return nil, false
-	}
-	u, _ := url.Parse(raw)
-	key := strings.ToLower(u.User.Username())
-	if finlandUUID(key) != uuid {
-		return nil, false
-	}
-	scoped := scopedKey("lv1", key)
-	return map[string]any{
-		"tag": tag, "protocol": "hysteria",
-		"settings": map[string]any{"version": 2, "address": dnspolicy.LatviaIPv4, "port": 2444},
-		"streamSettings": map[string]any{"network": "hysteria", "security": "tls",
-			"tlsSettings":      map[string]any{"serverName": dnspolicy.LatviaHostname, "alpn": []string{"h3"}},
-			"hysteriaSettings": map[string]any{"version": 2, "auth": base64.RawURLEncoding.EncodeToString(scoped[:])},
-		},
-	}, true
-}
-
-// FinlandRelayOutbound constructs only the operator's authenticated HTTPS first hop.
-// The Finnish credential must belong to the same subscription and tier.
-func FinlandRelayOutbound(raw, uuid string, port int, tag string) (map[string]any, bool) {
-	if port != 2444 || Expired(BoostReserve, raw, time.Now()) {
-		return nil, false
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.User == nil || finlandUUID(strings.ToLower(u.User.Username())) != uuid {
-		return nil, false
-	}
-	httpSettings := map[string]any{"host": ReserveHostname, "path": "/managed/v1/boost", "mode": "auto"}
-	ApplyXHTTPBudget(ReserveIPv4, 443, "tls", ReserveHostname, ReserveHostname, httpSettings)
-	return map[string]any{
-		"tag": tag, "protocol": "vless",
-		"settings":       map[string]any{"vnext": []any{map[string]any{"address": ReserveIPv4, "port": 443, "users": []any{map[string]any{"id": u.User.Username(), "encryption": "none"}}}}},
-		"streamSettings": map[string]any{"network": "xhttp", "security": "tls", "tlsSettings": map[string]any{"serverName": ReserveHostname, "fingerprint": "chrome", "alpn": []any{"h2"}}, "xhttpSettings": httpSettings},
-	}, true
 }
