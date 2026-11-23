@@ -4,6 +4,11 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
 ## Unreleased
 
+## 3.1.23 — 2026-11-23
+
+- Migrate cached configurations to the current managed DNS bootstrap address while preserving their routing and custom resolvers.
+- Refresh Windows and Android configurations that predate the current managed VPN ingress layout.
+
 ## 3.1.22 — 2026-11-23
 
 - Windows release assets are tied to the specific build run and attempt that passed validation.
