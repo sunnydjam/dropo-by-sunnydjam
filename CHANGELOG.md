@@ -2,6 +2,14 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.1.26
+
+- Rotate the Windows globe in every connection state and brighten its city
+  lights when connected. Centre the disconnect button and allow clicking the
+  globe to disconnect on Windows.
+- Move the Windows version to the Dropo brand header and keep the Free plan
+  offer close to the bottom with padding around its button in compact windows.
+
 ## 3.1.25
 
 - Use the Android-style Windows connect control and animate mascot takeoff,

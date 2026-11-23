@@ -33,7 +33,11 @@ CustomPainter _painter(WidgetTester tester) =>
 double _phase(WidgetTester tester) =>
     atlasPlanetPhaseForTesting(_painter(tester));
 
-Future<void> _pumpPlanet(WidgetTester tester, _PlanetFlags flags) async {
+Future<void> _pumpPlanet(
+  WidgetTester tester,
+  _PlanetFlags flags, {
+  bool desktopComposition = false,
+}) async {
   tester.view.physicalSize = const Size(420, 420);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
@@ -72,6 +76,7 @@ Future<void> _pumpPlanet(WidgetTester tester, _PlanetFlags flags) async {
                             motionEnabled: flags.enabled,
                             textureAvailable: flags.textureAvailable,
                             mascotAvailable: flags.mascotAvailable,
+                            desktopComposition: desktopComposition,
                             onLanded: () => flags.landings++,
                             size: 320,
                           ),
@@ -152,6 +157,60 @@ void main() {
     );
   });
   tearDown(() => debugMobileShellOverride = null);
+
+  testWidgets('Windows rotates the lit surface in every connection palette', (
+    tester,
+  ) async {
+    final flags = _PlanetFlags()..mascotAvailable = false;
+    await _pumpPlanet(tester, flags, desktopComposition: true);
+    Future<({List<int> pixels, int cityLights})> surface() async =>
+        (await tester.runAsync(() async {
+          final boundary = tester.renderObject<RenderRepaintBoundary>(
+            _key('atlas-planet'),
+          );
+          final image = await boundary.toImage();
+          try {
+            final bytes = (await image.toByteData())!.buffer.asUint8List();
+            final pixels = <int>[];
+            var cityLights = 0;
+            for (var y = 92; y < 226; y++) {
+              for (var x = 92; x < 226; x++) {
+                final i = (y * image.width + x) * 4;
+                final red = bytes[i], green = bytes[i + 1], blue = bytes[i + 2];
+                pixels.add((red << 16) | (green << 8) | blue);
+                if (red > 140 && green > 88 && red > blue + 20) cityLights++;
+              }
+            }
+            return (pixels: pixels, cityLights: cityLights);
+          } finally {
+            image.dispose();
+          }
+        }))!;
+
+    for (final (connected, busy, error) in [
+      (false, false, false),
+      (false, true, false),
+      (true, false, false),
+      (false, false, true),
+    ]) {
+      flags.update(() {
+        flags.connected = connected;
+        flags.busy = busy;
+        flags.error = error;
+      });
+      await tester.pump(const Duration(milliseconds: 700));
+      final before = await surface();
+      await tester.pump(const Duration(seconds: 2));
+      final after = await surface();
+      expect(before.cityLights + after.cityLights, greaterThan(20));
+      final changed = before.pixels.indexed
+          .where((entry) => entry.$2 != after.pixels[entry.$1])
+          .length;
+      expect(changed, greaterThan(before.pixels.length ~/ 10));
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+    flags.dispose();
+  });
 
   testWidgets('fast connection still completes the flight and landing', (
     tester,

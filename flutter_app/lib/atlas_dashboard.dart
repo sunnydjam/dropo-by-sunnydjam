@@ -44,7 +44,7 @@ class _AtlasHomeLayout extends StatelessWidget {
               16,
               _compactDesktopHome(context) ? 0 : 6,
               16,
-              _compactDesktopHome(context) ? 6 : 12,
+              _isMobileShell ? 12 : 6,
             ),
             child: Center(
               child: ConstrainedBox(
@@ -95,19 +95,23 @@ class _AtlasHomeLayout extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      if (!_isMobileShell) const SizedBox(height: 16),
                       routes,
-                      const SizedBox(height: 8),
+                      if (_isMobileShell) const SizedBox(height: 8),
                       if (!_compactDesktopHome(context))
                         SizedBox(
                           key: const ValueKey('home-update-slot'),
                           // Keep the connection scene stable when an update is
                           // discovered. The manual action has its own space,
                           // including two lines at larger accessibility scales.
-                          height: math.max(
-                            56,
-                            MediaQuery.textScalerOf(context).scale(14) * 2.6 +
-                                20,
-                          ),
+                          height:
+                              math.max(
+                                56,
+                                MediaQuery.textScalerOf(context).scale(14) *
+                                        2.6 +
+                                    20,
+                              ) -
+                              (_isMobileShell ? 0 : 8),
                           child: Align(
                             alignment: Alignment.centerRight,
                             child: updateNotice ?? const SizedBox.shrink(),
@@ -344,6 +348,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final largeText = MediaQuery.textScalerOf(context).scale(17) > 23;
+      final desktopComposition = animatedScene && !_isMobileShell;
       final planetSize = math.min(
         constraints.maxWidth,
         constraints.hasBoundedHeight ? constraints.maxHeight : 240.0,
@@ -407,6 +412,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
                       connecting: animatedScene && connecting,
                       connectionAttempt: animatedScene ? connectionAttempt : 0,
                       onLanded: onLanded,
+                      desktopComposition: desktopComposition,
                       hasError: hasError,
                       motionEnabled: motionEnabled,
                       size: planetSize,
@@ -421,6 +427,7 @@ class _AtlasConnectionPanel extends StatelessWidget {
                       sessionActive: sessionActive,
                       hasError: hasError,
                       onPressed: enabled ? onPressed : null,
+                      desktopComposition: desktopComposition,
                     )
                   else
                     SizedBox(
@@ -505,11 +512,13 @@ class _PlanetAction extends StatelessWidget {
     required this.sessionActive,
     required this.hasError,
     required this.onPressed,
+    required this.desktopComposition,
   });
 
   final double size;
   final Color accent;
   final bool connecting, stopping, sessionActive, hasError;
+  final bool desktopComposition;
   final VoidCallback? onPressed;
 
   @override
@@ -517,6 +526,19 @@ class _PlanetAction extends StatelessWidget {
     final waiting = connecting || stopping;
     final start = !sessionActive && !waiting;
     final powerSize = (size * .31).clamp(48.0, 78.0);
+    final hintFontSize = desktopComposition
+        ? (size * .11).clamp(20.0, 36.0)
+        : (size * .13).clamp(22.0, 34.0);
+    final arrowTop = size / 2 + powerSize * .25;
+    final arrowHeight = desktopComposition
+        ? math.max(
+            size * .15,
+            size -
+                arrowTop -
+                MediaQuery.textScalerOf(context).scale(hintFontSize) -
+                7,
+          )
+        : size * .27;
     final hint = hasError ? 'Попробовать снова' : 'Подключиться';
     final label = stopping
         ? 'Отключаем…'
@@ -574,34 +596,41 @@ class _PlanetAction extends StatelessWidget {
             ),
     );
 
-    return Stack(
+    final controls = Stack(
       alignment: Alignment.center,
       children: [
-        if (start && onPressed != null)
+        if ((start || (desktopComposition && sessionActive && !waiting)) &&
+            onPressed != null)
           ClipOval(
-            child: GestureDetector(
-              excludeFromSemantics: true,
-              behavior: HitTestBehavior.opaque,
-              onTap: onPressed,
-              child: SizedBox.square(dimension: size * .85),
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                excludeFromSemantics: true,
+                behavior: HitTestBehavior.opaque,
+                onTap: onPressed,
+                child: SizedBox.square(
+                  dimension:
+                      size * (desktopComposition ? (start ? .75 : .67) : .85),
+                ),
+              ),
             ),
           ),
         if (start) ...[
           power,
           Positioned(
-            top: size / 2 + powerSize * .25,
+            top: arrowTop,
             left: size / 2 + powerSize * .43,
             child: IgnorePointer(
               child: CustomPaint(
-                size: Size(size * .22, size * .27),
-                painter: const _ConnectArrow(),
+                size: Size(size * .22, arrowHeight),
+                painter: _ConnectArrow(compactHead: desktopComposition),
               ),
             ),
           ),
           Positioned(
             bottom: 0,
             left: 0,
-            right: 0,
+            right: desktopComposition ? size * .08 : 0,
             child: IgnorePointer(
               child: ExcludeSemantics(
                 child: FittedBox(
@@ -615,7 +644,8 @@ class _PlanetAction extends StatelessWidget {
                         color: Colors.white,
                         fontFamily: 'Caveat',
                         fontWeight: FontWeight.w600,
-                        fontSize: (size * .13).clamp(22.0, 34.0),
+                        fontSize: hintFontSize,
+                        height: desktopComposition ? 1 : null,
                         shadows: const [
                           Shadow(color: Colors.black, blurRadius: 8),
                         ],
@@ -628,7 +658,9 @@ class _PlanetAction extends StatelessWidget {
           ),
         ] else
           Align(
-            alignment: Alignment.bottomCenter,
+            alignment: desktopComposition && !waiting
+                ? Alignment.center
+                : Alignment.bottomCenter,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 5),
               child: power,
@@ -636,22 +668,29 @@ class _PlanetAction extends StatelessWidget {
           ),
       ],
     );
+    return desktopComposition
+        ? SizedBox.square(dimension: size, child: controls)
+        : controls;
   }
 }
 
 class _ConnectArrow extends CustomPainter {
-  const _ConnectArrow();
+  const _ConnectArrow({required this.compactHead});
+
+  final bool compactHead;
 
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width;
     final h = size.height;
+    final headWidth = compactHead ? math.min(w * .33, 17.0) : w * .33;
+    final headHeight = compactHead ? math.min(h * .24, 18.0) : h * .24;
     final arrow = Path()
       ..moveTo(w * .52, h)
       ..cubicTo(w * .99, h * .80, w * 1.04, h * .27, 0, 0)
-      ..moveTo(w * .33, h * .006)
+      ..moveTo(headWidth, h * .006)
       ..lineTo(0, 0)
-      ..lineTo(w * .14, h * .24);
+      ..lineTo(headWidth * (.14 / .33), headHeight);
     canvas.drawPath(
       arrow,
       Paint()
@@ -664,7 +703,8 @@ class _ConnectArrow extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _ConnectArrow oldDelegate) => false;
+  bool shouldRepaint(covariant _ConnectArrow oldDelegate) =>
+      oldDelegate.compactHead != compactHead;
 }
 
 class _AtlasRouteControls extends StatelessWidget {

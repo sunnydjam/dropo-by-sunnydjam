@@ -1286,7 +1286,7 @@ void main() {
   for (final size in [const Size(700, 500), const Size(390, 844)]) {
     for (final scale in [1.0, 2.0]) {
       testWidgets(
-        'Connect is centred and Disconnect sits below the planet at $size / $scale',
+        'Windows centres both actions and the globe disconnects at $size / $scale',
         (tester) async {
           final bridge = _HomeBridge();
           await bridge.saveSubscription('https://example.test/subscription');
@@ -1299,11 +1299,7 @@ void main() {
               find.byKey(const ValueKey('home-connect')),
             );
             expect(action.center.dx, closeTo(planet.center.dx, 0.1));
-            if (bridge.connected) {
-              expect(action.bottom, closeTo(planet.bottom, 0.1));
-            } else {
-              expect(action.center.dy, closeTo(planet.center.dy, 0.1));
-            }
+            expect(action.center.dy, closeTo(planet.center.dy, 0.1));
             expect(action.height, greaterThanOrEqualTo(48));
             expect(action.left, greaterThanOrEqualTo(planet.left));
             expect(action.right, lessThanOrEqualTo(planet.right));
@@ -1332,12 +1328,12 @@ void main() {
           );
           expect(find.text('Отключить'), findsOneWidget);
           expectActionPlacement();
-          await tester.tapAt(
-            tester.getCenter(find.byKey(const ValueKey('atlas-planet'))),
-          );
+          final globeFinder = find.byKey(const ValueKey('atlas-planet'));
+          await tester.ensureVisible(globeFinder);
           await tester.pump();
-          expect(bridge.toggles, 1);
-          await _tap(tester, 'home-connect');
+          final globe = tester.getRect(globeFinder);
+          await tester.tapAt(globe.center + Offset(0, globe.height * .24));
+          await tester.pump();
           await tester.pump(const Duration(seconds: 2));
           await tester.pump();
           expect(bridge.toggles, 2);

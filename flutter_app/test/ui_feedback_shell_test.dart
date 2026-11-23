@@ -134,9 +134,13 @@ void main() {
     await (FontLoader(
       'Inter',
     )..addFont(rootBundle.load('assets/fonts/InterVariable.ttf'))).load();
+    await (FontLoader('Caveat')
+          ..addFont(rootBundle.load('assets/android_home/vendor/Caveat.ttf')))
+        .load();
     await (FontLoader(
       'MaterialIcons',
     )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
+    expect(await preloadAtlasPlanetForTesting(), isTrue);
   });
 
   for (final size in [const Size(684, 461), const Size(820, 560)]) {
@@ -161,9 +165,19 @@ void main() {
         }
         expect(find.text('Отключено'), findsNothing);
         expect(_key('planet-disconnected'), findsOneWidget);
-        final actionLabel = tester.renderObject<RenderParagraph>(
-          find.text('Подключиться'),
-        );
+        final hint = find.text('Подключиться');
+        final actionLabel = tester.renderObject<RenderParagraph>(hint);
+        final hintRect = tester.getRect(hint);
+        final modesTop = tester.getTopLeft(_key('home-routing-selected')).dy;
+        final scene = tester.getRect(_key('atlas-planet-motion'));
+        final globe = atlasPlanetGlobeBoundsForTesting(
+          tester
+              .widget<CustomPaint>(_key('atlas-planet-motion'))
+              .foregroundPainter!,
+          scene.size,
+        ).shift(scene.topLeft);
+        expect(hintRect.top, greaterThan(globe.bottom));
+        expect(modesTop - hintRect.bottom, greaterThanOrEqualTo(16));
         expect(
           actionLabel.size.height,
           lessThanOrEqualTo(actionLabel.preferredLineHeight + 0.1),

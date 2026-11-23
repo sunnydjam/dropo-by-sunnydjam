@@ -139,6 +139,9 @@ void main() {
     await (FontLoader(
       'Inter',
     )..addFont(rootBundle.load('assets/fonts/InterVariable.ttf'))).load();
+    await (FontLoader('Caveat')
+          ..addFont(rootBundle.load('assets/android_home/vendor/Caveat.ttf')))
+        .load();
     await (FontLoader(
       'MaterialIcons',
     )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
@@ -195,6 +198,17 @@ void main() {
             scene.size,
           );
           final mascot = localMascot.shift(scene.topLeft);
+          if (platform == 'windows' && state == 'disconnected') {
+            final globe = atlasPlanetGlobeBoundsForTesting(
+              _painter(tester),
+              scene.size,
+            );
+            expect(
+              localMascot.height / globe.height,
+              inInclusiveRange(0.30, 0.35),
+            );
+            expect(localMascot.center.dx, closeTo(globe.center.dx, 1));
+          }
           final action = _key('home-connect');
           final actionRect = tester.getRect(action);
           expect(localMascot.isEmpty, isFalse);
@@ -263,7 +277,10 @@ void main() {
               atlasPlanetMascotPoseForTesting(_painter(tester)),
               'waiting',
             );
-            expect(tester.getRect(action).center, scene.center);
+            expect(
+              (tester.getRect(action).center - scene.center).distance,
+              lessThan(0.1),
+            );
           }
           await tester.pumpWidget(const SizedBox.shrink());
           expect(tester.takeException(), isNull);

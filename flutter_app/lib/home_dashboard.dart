@@ -113,7 +113,7 @@ class FreePlanBanner extends StatelessWidget {
           width: double.infinity,
           padding: EdgeInsets.symmetric(
             horizontal: 12,
-            vertical: compact ? 0 : 10,
+            vertical: compact ? 5 : 10,
           ),
           decoration: BoxDecoration(
             gradient: const LinearGradient(

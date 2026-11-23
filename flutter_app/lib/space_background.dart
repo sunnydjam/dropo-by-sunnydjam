@@ -7,9 +7,10 @@ class _AtlasSpaceBackground extends StatefulWidget {
     this.motionEnabled = true,
     this.active = true,
     this.initialSeconds = 0,
+    this.desktop = false,
   });
 
-  final bool motionEnabled, active;
+  final bool motionEnabled, active, desktop;
   final double initialSeconds;
 
   @override
@@ -38,10 +39,12 @@ class _AtlasSpaceBackgroundState extends State<_AtlasSpaceBackground>
     _visible = _isVisible(WidgetsBinding.instance.lifecycleState);
   }
 
-  // Only the canvas repaints. At most 15 background paints per second, even on
-  // high-refresh monitors; controls, layout and the planet are not rebuilt.
+  // Only the canvas repaints. Cap the faster desktop drift at 24 fps while
+  // keeping the mobile paint budget at 15 fps.
   void _advance() {
-    final frame = (_controller.value * _durationSeconds * 15).floor();
+    final framesPerSecond = widget.desktop ? 24 : 15;
+    final frame = (_controller.value * _durationSeconds * framesPerSecond)
+        .floor();
     if (frame == _lastFrame) return;
     _lastFrame = frame;
     _seconds.value = _controller.value * _durationSeconds;
@@ -104,6 +107,7 @@ class _AtlasSpaceBackgroundState extends State<_AtlasSpaceBackground>
             painter: _AtlasSpacePainter(
               seconds: _seconds,
               active: widget.active,
+              desktop: widget.desktop,
             ),
             child: const SizedBox.expand(),
           ),
@@ -121,18 +125,25 @@ class _AtlasStar {
     this.opacity,
     this.offset,
     this.period,
+    this.driftPeriod,
     this.twinkles,
   );
-  final double x, y, radius, opacity, offset, period;
+  final double x, y, radius, opacity, offset, period, driftPeriod;
   final bool twinkles;
 
-  Offset position(Size size, double seconds) {
-    final phase = seconds / 180 * math.pi * 2 + offset;
-    // A continuous tiny ellipse (peak speed < 2.4 px/min), not a scrolling
-    // particle field. Every parameter wraps seamlessly at 180 seconds.
+  Offset position(Size size, double seconds, {required bool desktop}) {
+    // Both animations close at 180 seconds. Larger, nearer stars move along a
+    // wider, faster path so their drift reads against the faint background.
+    final depth = (radius - 0.45) / 0.7;
+    final phase =
+        seconds * math.pi * 2 / (desktop ? driftPeriod : 180) + offset;
     return Offset(
-      5 + x * math.max(0, size.width - 10) + math.sin(phase) * 1.1,
-      5 + y * math.max(0, size.height - 10) + math.cos(phase) * 0.65,
+      5 +
+          x * math.max(0, size.width - 10) +
+          math.sin(phase) * (desktop ? 18 + depth * 36 : 1.1),
+      5 +
+          y * math.max(0, size.height - 10) +
+          math.cos(phase) * (desktop ? 12 + depth * 18 : 0.65),
     );
   }
 
@@ -143,11 +154,14 @@ class _AtlasStar {
 }
 
 class _AtlasSpacePainter extends CustomPainter {
-  _AtlasSpacePainter({required this.seconds, required this.active})
-    : super(repaint: seconds);
+  _AtlasSpacePainter({
+    required this.seconds,
+    required this.active,
+    required this.desktop,
+  }) : super(repaint: seconds);
 
   final ValueNotifier<double> seconds;
-  final bool active;
+  final bool active, desktop;
   static final _stars = _createStars();
   static const _periods = [12.0, 15.0, 18.0, 20.0, 22.5];
 
@@ -162,6 +176,7 @@ class _AtlasSpacePainter extends CustomPainter {
         0.12 + random.nextDouble() * 0.28,
         random.nextDouble() * math.pi * 2,
         _periods[index % _periods.length],
+        180 / (3 + index % 4),
         index % 3 == 0,
       ),
       growable: false,
@@ -190,8 +205,12 @@ class _AtlasSpacePainter extends CustomPainter {
       final star = _stars[index];
       starPaint.color = const Color(
         0xFFD5DEEC,
-      ).withValues(alpha: star.alpha(time));
-      canvas.drawCircle(star.position(size, time), star.radius, starPaint);
+      ).withValues(alpha: star.alpha(time) * (desktop ? 1.3 : 1));
+      canvas.drawCircle(
+        star.position(size, time, desktop: desktop),
+        star.radius * (desktop ? 1.18 : 1),
+        starPaint,
+      );
     }
 
     final visibility = sunVisibility(time);
@@ -240,7 +259,9 @@ class _AtlasSpacePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _AtlasSpacePainter oldDelegate) =>
-      oldDelegate.active != active || oldDelegate.seconds != seconds;
+      oldDelegate.active != active ||
+      oldDelegate.desktop != desktop ||
+      oldDelegate.seconds != seconds;
 }
 
 @visibleForTesting
@@ -248,10 +269,12 @@ Widget buildAtlasSpaceBackgroundForTesting({
   bool motionEnabled = true,
   bool active = true,
   double initialSeconds = 0,
+  bool desktop = false,
 }) => _AtlasSpaceBackground(
   motionEnabled: motionEnabled,
   active: active,
   initialSeconds: initialSeconds,
+  desktop: desktop,
 );
 
 @visibleForTesting
@@ -265,12 +288,16 @@ double atlasSpacePhaseForTesting(CustomPainter painter) =>
 @visibleForTesting
 List<(Offset, double, double)> atlasSpaceStarsForTesting(
   Size size,
-  double seconds,
-) => _AtlasSpacePainter._stars
+  double seconds, {
+  bool desktop = false,
+}) => _AtlasSpacePainter._stars
     .take(_AtlasSpacePainter.starCount(size))
     .map(
-      (star) =>
-          (star.position(size, seconds), star.radius, star.alpha(seconds)),
+      (star) => (
+        star.position(size, seconds, desktop: desktop),
+        star.radius,
+        star.alpha(seconds),
+      ),
     )
     .toList(growable: false);
 

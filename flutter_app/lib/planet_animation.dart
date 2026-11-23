@@ -14,10 +14,12 @@ class _AtlasAnimatedPlanet extends StatefulWidget {
     this.textureAvailable = true,
     this.mascotAvailable = true,
     this.onLanded,
+    this.desktopComposition = false,
   });
   final bool connected, busy, connecting, hasError, motionEnabled;
   final int connectionAttempt;
   final bool textureAvailable, mascotAvailable;
+  final bool desktopComposition;
   final double size;
   final VoidCallback? onLanded;
 
@@ -48,6 +50,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     progress: 0,
   ));
   _AtlasSceneAssets? _assets;
+  ui.FragmentShader? _desktopShader;
   bool _visible = true;
   int _lastFrame = -1;
   double _previousPhase = 0;
@@ -69,11 +72,22 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     _lights.value = _lit ? 1 : 0;
     _assets = _AtlasSceneAssets.ready;
     if (_assets == null) unawaited(_loadAssets());
+    if (widget.desktopComposition) {
+      _desktopShader = _DesktopGlobeAssets.ready?.createShader();
+      if (_desktopShader == null) unawaited(_loadDesktopGlobe());
+    }
   }
 
   Future<void> _loadAssets() async {
     final assets = await _AtlasSceneAssets.load();
     if (mounted) setState(() => _assets = assets);
+  }
+
+  Future<void> _loadDesktopGlobe() async {
+    final assets = await _DesktopGlobeAssets.load();
+    if (mounted && assets != null) {
+      setState(() => _desktopShader = assets.createShader());
+    }
   }
 
   // Decorative painting is capped at 30 fps. It never rebuilds home controls.
@@ -195,6 +209,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
+    _desktopShader?.dispose();
     _phase.dispose();
     _lights.dispose();
     _flight.dispose();
@@ -225,6 +240,10 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
                   texture: widget.textureAvailable ? _assets?.textures : null,
                   mascots: widget.mascotAvailable ? _assets?.mascots : null,
                   palette: palette,
+                  desktopComposition: widget.desktopComposition,
+                  desktopShader: widget.textureAvailable
+                      ? _desktopShader
+                      : null,
                 ),
               ),
             ),
@@ -354,6 +373,42 @@ class _AtlasSceneAssets {
         if (sprites[index] != null) pose: sprites[index]!,
     });
   }
+}
+
+class _DesktopGlobeAssets {
+  const _DesktopGlobeAssets(this.program, this.atlas);
+
+  final ui.FragmentProgram program;
+  final ui.Image atlas;
+  static Future<_DesktopGlobeAssets?>? _pending;
+  static _DesktopGlobeAssets? ready;
+
+  static Future<_DesktopGlobeAssets?> load() => _pending ??= _create();
+
+  static Future<_DesktopGlobeAssets?> _create() async {
+    try {
+      final program = await ui.FragmentProgram.fromAsset(
+        'shaders/desktop_earth.frag',
+      );
+      final bytes = await rootBundle.load('assets/maps/earth_night_atlas.png');
+      final codec = await ui.instantiateImageCodec(
+        bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+      );
+      try {
+        final frame = await codec.getNextFrame();
+        return ready = _DesktopGlobeAssets(program, frame.image);
+      } finally {
+        codec.dispose();
+      }
+    } catch (_) {
+      // Keep the existing bundled still surface available on renderers that
+      // cannot load the shader or the atlas.
+      return null;
+    }
+  }
+
+  ui.FragmentShader createShader() =>
+      program.fragmentShader()..setImageSampler(0, atlas);
 }
 
 class _AtlasGlobeTexture {
@@ -567,6 +622,8 @@ class _AtlasGlobePainter extends CustomPainter {
     required this.texture,
     required this.mascots,
     required this.palette,
+    required this.desktopComposition,
+    required this.desktopShader,
   }) : super(repaint: Listenable.merge([phase, lights, flight]));
 
   final ValueNotifier<double> phase, lights;
@@ -574,6 +631,8 @@ class _AtlasGlobePainter extends CustomPainter {
   final Map<_AtlasPlanetPalette, ui.Image>? texture;
   final Map<_DrOppoPose, _DrOppoSprite>? mascots;
   final _AtlasPlanetPalette palette;
+  final bool desktopComposition;
+  final ui.FragmentShader? desktopShader;
   Color get tone => palette.tone;
   bool get _inFlight => switch (flight.value.stage) {
     _AtlasFlightStage.launch ||
@@ -595,10 +654,14 @@ class _AtlasGlobePainter extends CustomPainter {
   double _float(Size size) =>
       math.sin(phase.value * 2 * math.pi) *
       math.min(3.0, size.shortestSide * 0.006);
+  double get _globeScale => desktopComposition
+      ? 0.75 - 0.08 * _landingZoom
+      : 0.85 - 0.10 * _landingZoom;
+
   Rect globeBounds(Size size) => Rect.fromCenter(
     center: size.center(Offset(0, _float(size))),
-    width: size.shortestSide * (0.85 - 0.10 * _landingZoom),
-    height: size.shortestSide * (0.85 - 0.10 * _landingZoom),
+    width: size.shortestSide * _globeScale,
+    height: size.shortestSide * _globeScale,
   );
 
   Rect _restingBounds(Size size, _DrOppoPose pose) {
@@ -615,7 +678,7 @@ class _AtlasGlobePainter extends CustomPainter {
         d * 0.39,
         d * 0.035,
         d * 0.22,
-        d * 0.155,
+        d * (desktopComposition ? 0.24 : 0.155),
       ),
       _DrOppoPose.puzzled => Rect.fromLTWH(
         d * 0.675,
@@ -636,11 +699,15 @@ class _AtlasGlobePainter extends CustomPainter {
     // Use the contact point on each alpha-trimmed pose and the visible rim
     // inside the atmospheric padding of the globe texture.
     final anchor = switch (pose) {
-      _DrOppoPose.waiting => const Offset(0.46, 0.805),
+      _DrOppoPose.waiting => Offset(0.46, desktopComposition ? 0.72 : 0.805),
       _DrOppoPose.puzzled => const Offset(0.47, 0.99),
       _DrOppoPose.flying => const Offset(0.34, 0.94),
     };
-    final radius = d * (0.367 - 0.043 * _landingZoom);
+    final radius =
+        d *
+        (desktopComposition
+            ? _globeScale * 0.432
+            : 0.367 - 0.043 * _landingZoom);
     final dx = rect.left + rect.width * anchor.dx - d * 0.5;
     final rimY =
         d * 0.504 - math.sqrt(math.max(0.0, radius * radius - dx * dx));
@@ -743,6 +810,37 @@ class _AtlasGlobePainter extends CustomPainter {
     canvas.restore();
   }
 
+  void _paintDesktopGlobe(
+    Canvas canvas,
+    Rect globe,
+    ui.FragmentShader shader,
+    _AtlasPlanetPalette surface,
+  ) {
+    final radius = globe.width * .432;
+    if (radius <= 0) return;
+    final (red, green, blue) = switch (surface) {
+      _AtlasPlanetPalette.connected => (1.07, 1.6, 1.24),
+      _AtlasPlanetPalette.disconnected => (1.01, 1.06, 1.22),
+      _AtlasPlanetPalette.connecting => (1.50, 1.26, .88),
+      _AtlasPlanetPalette.error => (1.60, .89, .93),
+    };
+    shader
+      ..setFloat(0, radius)
+      // The shared 70-second controller wraps after exactly two revolutions.
+      ..setFloat(1, .04 - phase.value * 2)
+      ..setFloat(2, .65 + .35 * lights.value)
+      ..setFloat(3, red)
+      ..setFloat(4, green)
+      ..setFloat(5, blue);
+    canvas.save();
+    canvas.translate(globe.center.dx, globe.center.dy);
+    canvas.drawRect(
+      Rect.fromCircle(center: Offset.zero, radius: radius * 1.01),
+      Paint()..shader = shader,
+    );
+    canvas.restore();
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
@@ -752,6 +850,11 @@ class _AtlasGlobePainter extends CustomPainter {
     final surface = orbiting ? _AtlasPlanetPalette.connecting : palette;
     final image = texture?[surface];
     if (behind) _paintMascot(canvas, size);
+    if (desktopShader case final shader?) {
+      _paintDesktopGlobe(canvas, globe, shader, surface);
+      if (!behind) _paintMascot(canvas, size);
+      return;
+    }
     canvas.save();
     canvas.translate(center.dx, center.dy + _float(size));
     canvas.rotate(tilt);
@@ -818,6 +921,8 @@ class _AtlasGlobePainter extends CustomPainter {
       oldDelegate.flight != flight ||
       oldDelegate.texture != texture ||
       oldDelegate.mascots != mascots ||
+      oldDelegate.desktopComposition != desktopComposition ||
+      oldDelegate.desktopShader != desktopShader ||
       oldDelegate.palette != palette;
 }
 
@@ -831,6 +936,7 @@ Widget buildAtlasPlanetForTesting({
   bool motionEnabled = true,
   bool textureAvailable = true,
   bool mascotAvailable = true,
+  bool desktopComposition = false,
   VoidCallback? onLanded,
   double size = 280,
 }) => _AtlasAnimatedPlanet(
@@ -842,14 +948,17 @@ Widget buildAtlasPlanetForTesting({
   motionEnabled: motionEnabled,
   textureAvailable: textureAvailable,
   mascotAvailable: mascotAvailable,
+  desktopComposition: desktopComposition,
   onLanded: onLanded,
   size: size,
 );
 
 @visibleForTesting
-Future<bool> preloadAtlasPlanetForTesting() async =>
-    (await _AtlasSceneAssets.load()).textures.length ==
-    _AtlasPlanetPalette.values.length;
+Future<bool> preloadAtlasPlanetForTesting() async {
+  await _DesktopGlobeAssets.load();
+  return (await _AtlasSceneAssets.load()).textures.length ==
+      _AtlasPlanetPalette.values.length;
+}
 
 // Borrowed cached image: test callers must not dispose it.
 @visibleForTesting

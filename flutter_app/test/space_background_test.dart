@@ -25,6 +25,7 @@ Future<void> _pumpBackground(
   WidgetTester tester,
   _SpaceFlags flags, {
   double initialSeconds = 0,
+  bool desktop = false,
 }) async {
   tester.view.physicalSize = const Size(820, 560);
   tester.view.devicePixelRatio = 1;
@@ -50,6 +51,7 @@ Future<void> _pumpBackground(
                       motionEnabled: flags.enabled,
                       active: flags.active,
                       initialSeconds: initialSeconds,
+                      desktop: desktop,
                     ),
                     Center(
                       child: FilledButton(
@@ -148,31 +150,59 @@ void main() {
     }
   });
 
-  testWidgets('canvas repaints at most 15 fps without rebuilding controls', (
-    tester,
-  ) async {
-    final flags = _SpaceFlags();
-    await _pumpBackground(tester, flags);
-    final painter = _painter(tester);
-    final builds = flags.builds;
-    final rect = tester.getRect(_key('foreground-control'));
-    var repaints = 0;
-    void onRepaint() => repaints++;
-    painter.addListener(onRepaint);
-    for (var frame = 0; frame < 120; frame++) {
-      await tester.pump(const Duration(microseconds: 8333));
-    }
-    expect(repaints, inInclusiveRange(14, 16));
-    expect(flags.builds, builds);
-    expect(identical(painter, _painter(tester)), isTrue);
-    expect(tester.getRect(_key('foreground-control')), rect);
-    await tester.tap(_key('foreground-control'));
-    expect(flags.taps, 1, reason: 'The decorative layer never absorbs clicks');
-    painter.removeListener(onRepaint);
-    await tester.pumpWidget(const SizedBox.shrink());
-    expect(tester.binding.transientCallbackCount, 0);
-    flags.dispose();
-  });
+  test(
+    'desktop stars visibly drift and close their paths after 180 seconds',
+    () {
+      const size = Size(684, 461);
+      final initial = atlasSpaceStarsForTesting(size, 0, desktop: true);
+      final moved = atlasSpaceStarsForTesting(size, 2, desktop: true);
+      final finalFrame = atlasSpaceStarsForTesting(size, 180, desktop: true);
+      var visibleChanges = 0;
+      for (var index = 0; index < initial.length; index++) {
+        if ((initial[index].$1 - moved[index].$1).distance > 5) {
+          visibleChanges++;
+        }
+        expect(
+          (initial[index].$1 - finalFrame[index].$1).distance,
+          lessThan(0.0001),
+        );
+      }
+      expect(visibleChanges, greaterThan(initial.length / 2));
+    },
+  );
+
+  for (final (desktop, fps) in [(false, 15), (true, 24)]) {
+    testWidgets(
+      'canvas repaints at most $fps fps without rebuilding controls',
+      (tester) async {
+        final flags = _SpaceFlags();
+        await _pumpBackground(tester, flags, desktop: desktop);
+        final painter = _painter(tester);
+        final builds = flags.builds;
+        final rect = tester.getRect(_key('foreground-control'));
+        var repaints = 0;
+        void onRepaint() => repaints++;
+        painter.addListener(onRepaint);
+        for (var frame = 0; frame < 120; frame++) {
+          await tester.pump(const Duration(microseconds: 8333));
+        }
+        expect(repaints, inInclusiveRange(fps - 1, fps + 1));
+        expect(flags.builds, builds);
+        expect(identical(painter, _painter(tester)), isTrue);
+        expect(tester.getRect(_key('foreground-control')), rect);
+        await tester.tap(_key('foreground-control'));
+        expect(
+          flags.taps,
+          1,
+          reason: 'The decorative layer never absorbs clicks',
+        );
+        painter.removeListener(onRepaint);
+        await tester.pumpWidget(const SizedBox.shrink());
+        expect(tester.binding.transientCallbackCount, 0);
+        flags.dispose();
+      },
+    );
+  }
 
   for (final gate in ['setting', 'reduced-motion', 'ticker', 'page']) {
     testWidgets('$gate freezes and resumes the existing background phase', (
