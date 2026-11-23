@@ -10,6 +10,8 @@ Significant changes in the `Dropo by sunnydjam` fork are documented here.
   Network & Diagnostics on Windows and Android.
 - Reveal the Android routing controls after the connection animation lands,
   including connections that become ready during takeoff.
+- Preserve the connect control and animation in the Android native fallback
+  if WebView fails to start or its renderer exits.
 
 - Show one entry for Dropo Free and one for Dropo Turbo, with direct XHTTP,
   VLESS TCP/REALITY and Hysteria 2 in Latvia and Finland, respectively.

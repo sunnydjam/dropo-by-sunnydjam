@@ -3929,7 +3929,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   int updateTotal = 0;
   bool homeRoutesExpanded = false;
   bool preparingFullVpnSource = false;
-  int desktopConnectionAttempt = 0;
+  int connectionAttempt = 0;
   bool _androidAwaitingPermission = false;
   bool _androidCancelPending = false;
   int _androidConnectionAttempt = 0;
@@ -5158,7 +5158,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         busyTasks[target ? 'vpn-connect' : 'vpn-disconnect'] = target
             ? 'Запускаем VPN и безопасные маршруты...'
             : 'Останавливаем VPN...';
-        if (target && !_isMobileShell) desktopConnectionAttempt++;
+        if (target) connectionAttempt++;
         statusMessage = target ? 'Подключаем VPN' : 'Отключаем VPN';
         connectionHint = target
             ? 'Проверяем конфиг и запускаем VPN; стратегии сервисов проверятся в фоне.'
@@ -6698,19 +6698,33 @@ class _DropoHomePageState extends State<DropoHomePage>
               onServices: () =>
                   setState(() => homeRoutesExpanded = !homeRoutesExpanded),
               onHelp: () => unawaited(_selectMenuSection('guided-help')),
-              fallback: Column(
+              fallback: (onLanded) => Column(
                 children: [
-                  _HomeConnectionPanel(
-                    atlas: true,
-                    status: status,
-                    online: online,
-                    booting: booting,
-                    busy: isBusy,
-                    disconnecting: status.disconnecting,
-                    routingMode: appConfig.routingMode,
-                    enabled: powerEnabled,
-                    onPressed: _toggleConnection,
-                    motionEnabled: false,
+                  Expanded(
+                    child: _HomeConnectionPanel(
+                      atlas: true,
+                      animatedScene: true,
+                      connectionAttempt: connectionAttempt,
+                      status: status,
+                      online: online,
+                      booting: booting,
+                      busy: isBusy,
+                      starting:
+                          busyTasks.containsKey('vpn-connect') &&
+                          !status.connected,
+                      disconnecting:
+                          status.disconnecting ||
+                          busyTasks.containsKey('vpn-disconnect'),
+                      routingMode: appConfig.routingMode,
+                      enabled: powerEnabled,
+                      onPressed: _toggleConnection,
+                      operationError: connectionHintDanger && !status.connected,
+                      motionEnabled:
+                          !appConfig.reduceMotion &&
+                          windowVisible &&
+                          activeMenuSection == 'home',
+                      onLanded: onLanded,
+                    ),
                   ),
                   if (showHint)
                     Padding(
@@ -6748,8 +6762,8 @@ class _DropoHomePageState extends State<DropoHomePage>
           : null,
       connection: _HomeConnectionPanel(
         atlas: true,
-        desktopScene: !_isMobileShell,
-        connectionAttempt: desktopConnectionAttempt,
+        animatedScene: !_isMobileShell,
+        connectionAttempt: connectionAttempt,
         status: status,
         online: online,
         booting: booting,
