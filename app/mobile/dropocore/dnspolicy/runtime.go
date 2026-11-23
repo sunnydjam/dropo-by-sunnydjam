@@ -71,6 +71,15 @@ func ConfigureRuntimeFailover(config map[string]interface{}) {
 	servers, _ := config["servers"].([]interface{})
 	rules, _ := config["rules"].([]interface{})
 	final, _ := config["final"].(string)
+	byTag := make(map[string]map[string]interface{}, len(servers))
+	for _, raw := range servers {
+		server, _ := raw.(map[string]interface{})
+		tag, _ := server["tag"].(string)
+		byTag[tag] = server
+		if isManagedDoH(server, tag) && server["server"] == legacyBootstrapIPv4 {
+			server["server"] = BootstrapIPv4
+		}
+	}
 	for _, raw := range rules {
 		rule, _ := raw.(map[string]interface{})
 		tag, _ := rule["tag"].(string)
@@ -78,18 +87,11 @@ func ConfigureRuntimeFailover(config map[string]interface{}) {
 			return
 		}
 	}
-	byTag := make(map[string]map[string]interface{}, len(servers))
-	for _, raw := range servers {
-		server, _ := raw.(map[string]interface{})
-		tag, _ := server["tag"].(string)
-		byTag[tag] = server
-	}
 	managed := make(map[string]bool, 2)
 	for _, raw := range servers {
 		server, _ := raw.(map[string]interface{})
 		tag, _ := server["tag"].(string)
-		tls, _ := server["tls"].(map[string]interface{})
-		if tag != "dns-direct" && tag != "dns-remote" || server["type"] != "https" || server["server"] != BootstrapIPv4 || server["path"] != QueryPath || tls["enabled"] != true || tls["server_name"] != Hostname || tls["insecure"] == true {
+		if !isManagedDoH(server, tag) || server["server"] != BootstrapIPv4 {
 			continue
 		}
 		reserves := []map[string]interface{}{
@@ -148,4 +150,10 @@ func ConfigureRuntimeFailover(config map[string]interface{}) {
 		appendChain(map[string]interface{}{"action": "route", "domain_regex": []string{"^.+$"}}, final)
 	}
 	config["servers"], config["rules"] = servers, expanded
+}
+
+func isManagedDoH(server map[string]interface{}, tag string) bool {
+	tls, _ := server["tls"].(map[string]interface{})
+	return (tag == "dns-direct" || tag == "dns-remote") && server["type"] == "https" &&
+		server["path"] == QueryPath && tls["enabled"] == true && tls["server_name"] == Hostname && tls["insecure"] != true
 }

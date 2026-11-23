@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -18,6 +19,27 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+func TestRuntimeFailoverMigratesAlreadyExpandedBootstrap(t *testing.T) {
+	primary := map[string]interface{}{
+		"tag": "dns-remote", "type": "https", "server": legacyBootstrapIPv4, "path": QueryPath,
+		"tls": map[string]interface{}{"enabled": true, "server_name": Hostname}, "detour": "proxy",
+	}
+	foreign := maps.Clone(primary)
+	foreign["tag"] = "dns-direct"
+	foreign["tls"] = map[string]interface{}{"enabled": true, "server_name": "other.example"}
+	config := map[string]interface{}{
+		"servers": []interface{}{primary, foreign},
+		"rules":   []interface{}{map[string]interface{}{"action": "evaluate", "tag": "dropo-dns-0", "server": "dns-remote"}},
+	}
+	ConfigureRuntimeFailover(config)
+	if primary["server"] != BootstrapIPv4 || primary["detour"] != "proxy" {
+		t.Fatal("cached built-in resolver did not retain its detour on migration")
+	}
+	if foreign["server"] != legacyBootstrapIPv4 || len(config["rules"].([]interface{})) != 1 {
+		t.Fatal("custom resolver or expanded rules were changed")
+	}
+}
 
 func TestPolicyRejectsForeignAndPrivateBootstrap(t *testing.T) {
 	for _, change := range []func(*Policy){func(p *Policy) { p.Resolvers[0].Hostname = "evil.invalid" }, func(p *Policy) { p.Resolvers[0].IPv4 = []string{"127.0.0.1"} }, func(p *Policy) { p.Resolvers[0].IPv4 = []string{"198.18.0.1"} }, func(p *Policy) { p.Resolvers[0].Path = "/other" }} {

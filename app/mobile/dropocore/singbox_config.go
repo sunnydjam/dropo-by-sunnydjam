@@ -16,7 +16,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v20-managed-primary"
+	androidConfigSchema     = "android-package-routing-v21-managed-ingress"
 )
 
 const androidSingBoxVersion = "1.14.4"
