@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1344,6 +1345,15 @@ func (a *App) ensureActiveConfigForStart() error {
 		if !needsRebuild && hasLegacyFinlandOutbound(config) {
 			a.writeLog("Rebuilding cached managed Finland REALITY transport")
 			needsRebuild = true
+		}
+		if !needsRebuild {
+			outbounds, _ := config["outbounds"].([]interface{})
+			for _, source := range profile.VPNSources {
+				if ownedprofile.IsReserve(source.PublicCatalogID) && outboundTagExists(outbounds, "vpn-source-"+source.ID) {
+					needsRebuild = true
+					break
+				}
+			}
 		}
 		if !needsRebuild && !configSupportsDiscordRealtimeRouting(config) {
 			a.writeLog("Active config predates Discord realtime routing; rebuilding before start")

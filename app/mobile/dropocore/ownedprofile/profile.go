@@ -14,6 +14,8 @@ const Boost = "dropo-individual-boost"
 const FreeReserve = "dropo-individual-free-reserve"
 const BoostReserve = "dropo-individual-boost-reserve"
 const PrimaryIPv4 = "109.120.152.117"
+const primaryHostname = "cdn.droponevedimka.ru"
+const legacyPrimaryIPv4 = "193.233.88.97"
 const MainSuffix = "-main"
 const ReserveIPv4 = "91.229.239.99"
 const ReserveHostname = "ms-api.ordaflow.net"
@@ -98,13 +100,13 @@ func Validate(id, raw string) (int64, error) {
 	if err != nil || u.Scheme != "vless" || u.User == nil || u.Path != "" || u.Opaque != "" {
 		return 0, errors.New("untrusted owned ingress")
 	}
-	hostname := "cdn.droponevedimka.ru"
+	hostname := primaryHostname
 	if IsReserve(id) {
 		hostname = ReserveHostname
 		if u.Host != ReserveIPv4+":443" {
 			return 0, errors.New("untrusted owned reserve")
 		}
-	} else if u.Host != "cdn.droponevedimka.ru:443" && u.Host != PrimaryIPv4+":443" && u.Host != "193.233.88.97:443" {
+	} else if u.Host != primaryHostname+":443" && u.Host != PrimaryIPv4+":443" && u.Host != legacyPrimaryIPv4+":443" {
 		return 0, errors.New("untrusted owned ingress")
 	}
 	credential := u.User.Username()
