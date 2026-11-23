@@ -324,8 +324,9 @@ class _AtlasConnectionPanel extends StatelessWidget {
     this.hasError = false,
     this.motionEnabled = true,
     this.connecting = false,
-    this.desktopScene = false,
+    this.animatedScene = false,
     this.connectionAttempt = 0,
+    this.onLanded,
   });
   final String title;
   final Color accent;
@@ -335,8 +336,9 @@ class _AtlasConnectionPanel extends StatelessWidget {
   final VoidCallback onPressed;
 
   final bool checking;
-  final bool connecting, desktopScene;
+  final bool connecting, animatedScene;
   final int connectionAttempt;
+  final VoidCallback? onLanded;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -402,15 +404,16 @@ class _AtlasConnectionPanel extends StatelessWidget {
                     child: _AtlasAnimatedPlanet(
                       connected: connected,
                       busy: busy,
-                      connecting: desktopScene && connecting,
-                      connectionAttempt: connectionAttempt,
+                      connecting: animatedScene && connecting,
+                      connectionAttempt: animatedScene ? connectionAttempt : 0,
+                      onLanded: onLanded,
                       hasError: hasError,
                       motionEnabled: motionEnabled,
                       size: planetSize,
                     ),
                   ),
-                  if (desktopScene)
-                    _DesktopPlanetAction(
+                  if (animatedScene)
+                    _PlanetAction(
                       size: planetSize,
                       accent: accent,
                       connecting: connecting || checking,
@@ -493,8 +496,8 @@ class _AtlasConnectionPanel extends StatelessWidget {
   );
 }
 
-class _DesktopPlanetAction extends StatelessWidget {
-  const _DesktopPlanetAction({
+class _PlanetAction extends StatelessWidget {
+  const _PlanetAction({
     required this.size,
     required this.accent,
     required this.connecting,
@@ -591,7 +594,7 @@ class _DesktopPlanetAction extends StatelessWidget {
             child: IgnorePointer(
               child: CustomPaint(
                 size: Size(size * .22, size * .27),
-                painter: const _DesktopConnectArrow(),
+                painter: const _ConnectArrow(),
               ),
             ),
           ),
@@ -636,8 +639,8 @@ class _DesktopPlanetAction extends StatelessWidget {
   }
 }
 
-class _DesktopConnectArrow extends CustomPainter {
-  const _DesktopConnectArrow();
+class _ConnectArrow extends CustomPainter {
+  const _ConnectArrow();
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -661,7 +664,7 @@ class _DesktopConnectArrow extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _DesktopConnectArrow oldDelegate) => false;
+  bool shouldRepaint(covariant _ConnectArrow oldDelegate) => false;
 }
 
 class _AtlasRouteControls extends StatelessWidget {

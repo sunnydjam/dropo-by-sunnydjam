@@ -135,7 +135,7 @@ class _AndroidAnimatedHome extends StatefulWidget {
   final ValueChanged<bool> onConnectionRequested;
   final VoidCallback onCancel, onSources, onServices, onHelp;
   final ValueChanged<String> onMode;
-  final Widget fallback;
+  final Widget Function(VoidCallback onLanded) fallback;
   final VoidCallback onPresented;
   final double sceneHeight;
   final Widget connectedFooter;
@@ -293,9 +293,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
       case 'failed':
         _fail();
       case 'landed':
-        if (widget.connected && !widget.disconnecting && !_landed) {
-          setState(() => _landed = true);
-        }
+        _markLanded();
       case 'connect':
         if (widget.enabled && !widget.connected) {
           widget.onConnectionRequested(true);
@@ -318,6 +316,12 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
         }
       case 'help':
         widget.onHelp();
+    }
+  }
+
+  void _markLanded() {
+    if (mounted && widget.connected && !widget.disconnecting && !_landed) {
+      setState(() => _landed = true);
     }
   }
 
@@ -396,7 +400,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   }
 
   Widget _buildScene() {
-    if (_failed) return widget.fallback;
+    if (_failed) return widget.fallback(_markLanded);
     final controller = _controller;
     if (controller == null) return const SizedBox.expand();
     WidgetsBinding.instance.addPostFrameCallback((_) => _synchronize());
@@ -408,8 +412,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
 
   @override
   Widget build(BuildContext context) {
-    final showFooter =
-        widget.connected && !widget.disconnecting && (_failed || _landed);
+    final showFooter = widget.connected && !widget.disconnecting && _landed;
     final animate =
         widget.motionEnabled && !MediaQuery.disableAnimationsOf(context);
     return Column(
