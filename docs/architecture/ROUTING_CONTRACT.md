@@ -39,6 +39,23 @@ reverse proxy могут обслуживать несколько незави�
 Добавление EA, Riot, Steam или другой незаблокированной программы в специальный
 direct-список поэтому не является основным способом исправления.
 
+### Игровые клиенты в Windows
+
+В режиме «По сервисам» Steam, EA app, Epic Games Launcher, Battle.net и Riot
+пользуются прямым маршрутом для своих обычных запросов. Совпадение адреса CDN
+и порта с выбранным сервисом не меняет маршрут. TLS ClientHello, HTTP-запрос,
+QUIC Initial и STUN сами по себе не идентифицируют сервис. Для такого признака
+классификатору нужен совпадающий домен или, если имя неизвестно, процесс этого
+сервиса. Если лаунчер обращается к синтетическому адресу выбранного сервиса,
+новый сокет следует текущей политике сервиса. При смене политики уже открытые
+сокеты сохраняют исходный маршрут.
+
+Встроенная диагностика проверяет магазин Steam и публичные службы авторизации
+EA, Epic, Battle.net и Riot. Для четырёх служб авторизации успех требует
+HTTP 200 и JSON с ожидаемым полем `issuer`. Эта проверка доступна без аккаунта.
+Проверки владельца сокета, внешнего IP и сохранения соединений при смене
+политики выполняются отдельно в тестовой Windows VM.
+
 ## Реализация по платформам
 
 ### Windows selected-services runtime
@@ -51,15 +68,28 @@ direct-список поэтому не является основным спо
   a claim that all Windows proxy settings remain untouched during a session.
 - `all_traffic` and Hide-RU retain the sing-box TUN path. They must not use the
   selective fake-IP/relay path as a substitute for full route coverage.
-- Client DNS receives session-stable addresses from `198.18.0.0/15` only for a
-  positively classified service whose terminal route is `VPN`. Direct,
-  work-network and unrelated DNS packets pass byte-for-byte unchanged.
-- Dropo-owned runtime processes bypass fake DNS and selective classification.
+- Windows issues synthetic IPv4 addresses in `198.18.0.0/15` for selected
+  VPN names and exact bootstrap names on the Zapret route. The PAC preserves
+  exact names, suffixes and work-network exceptions. A launcher with a Direct
+  process rule still uses the terminal relay for an already-issued address.
+  Ordinary lookups use the network resolver. At mapping capacity, selected
+  queries receive SERVFAIL. Idle aliases can be evicted and never reassigned
+  within a session. The relay finishes established flows on their original
+  exit. A cached alias whose service became Direct is dialled by name using
+  the system resolver. An expired alias requires a fresh DNS lookup.
+- STUN alone identifies NAT traversal. Routing it as Discord requires service
+  context. A game and a voice client can share a destination IP. UDP reflection
+  assigns distinct peer ports when different sessions share a client port.
+- Dropo-owned runtime processes bypass fake DNS and classification of ordinary egress.
   This prevents sing-box DNS and VPN egress from recursively entering the
   relay after the original client flow has already reached its terminal path.
 - Selected TCP and UDP/QUIC flows are reflected into bounded in-process relays,
   then forwarded through the loopback SOCKS5 inbound. Relay responses are
   restored to the original tuple by the same single WinDivert owner.
+  The Windows firewall rules apply only to the running core executable, the
+  relay's chosen port and the two reflection peers (198.18.0.1 and
+  2001:db8:d20::1). Windows enforces its existing firewall policies. Stop
+  removes both rules. The next selective start replaces stale session rules.
 - Browser/Electron routing is decided by the requested host in the PAC file,
   before origin address selection. A selected host therefore keeps its VPN
   route when Chromium Secure DNS is enabled; HTTP/3 is not permitted to escape
@@ -100,6 +130,24 @@ direct-список поэтому не является основным спо
 необходимые для предотвращения proxy loop. При возврате в `blocked_only`
 сохранённые политики сервисов снова применяются.
 
+## DNS в Windows и Android
+
+| Назначение | Как разрешается имя |
+|---|---|
+| Обычный сайт или сервис с явным Direct | Системный DNS текущей сети. На Android запрос привязан к физической сети под VPN, включая настройки частного DNS этой сети. |
+| Выбранный VPN-сервис, а в Windows также имя выбранной стратегии | Защищённый резолвер Dropo. В Windows для нативного клиента первым ответом может быть локальный синтетический адрес. |
+| Полный туннель | Публичные запросы идут через VPN к защищённому DNS. |
+| Рабочие и локальные зоны | Соответствующий корпоративный или системный резолвер имеет приоритет. |
+| Запуск самого транспорта | Служебное разрешение адресов VPN и инфраструктуры может использовать отдельный защищённый bootstrap до установления туннеля. |
+
+При сборке общего каталога исключаются общие имена Cloudflare ECH,
+Pages и Workers. Записи отдельных сайтов на этих платформах сохраняются.
+Само присутствие в общем каталоге блокировок не меняет прямой маршрут Windows.
+Собственный DNS-over-HTTPS игры или браузера может оставаться непрозрачным.
+Выбор политики по общему IP CDN или внешнему имени ECH не применяется.
+Для выбранных синтетических имён AAAA, HTTPS и SVCB получают пустой ответ,
+чтобы клиент использовал выданный IPv4. Клиенту для этого пути необходим IPv4.
+
 ## Переключение при активном VPN
 
 - **Главная** и **Настройки → Маршрутизация** переключают «По сервисам» и
@@ -112,10 +160,12 @@ direct-список поэтому не является основным спо
   личной подписки. Текущий физический узел, включая резервный, остаётся
   выбранным, пока он доступен. VpnService, разрешение Android и счётчик времени
   сессии сохраняются. При перезагрузке ядра открытые соединения могут прерваться.
-- На Windows Dropo применяет выбор транзакционным переподключением с прежними
-  профилем, источниками и порядком. «По сервисам» и «Всё через VPN» могут
-  использовать разные конфигурации Windows-сессии. Фоновая проверка доступности
-  источников выполняется для новой сессии. Открытые соединения могут прерваться.
+- В Windows изменение одного сервиса обновляет план и системные правила имён
+  внутри выборочного сеанса, если открытый фильтр уже покрывает новый маршрут.
+  Работающие соединения продолжают обмен через прежний выход. Переход между
+  выборочным и полным режимами либо добавление области захвата требует
+  переподключения. В полном режиме настройки отдельных сервисов сохраняются
+  до следующего включения выборочного режима.
 - Если применение или запись нового выбора не удались, Dropo восстанавливает
   прежнюю политику и сообщает об ошибке. Отмена подключения имеет приоритет
   над подготовкой и восстановлением. Индикация успеха следует за применением.

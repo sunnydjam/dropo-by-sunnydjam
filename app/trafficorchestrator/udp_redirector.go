@@ -32,36 +32,75 @@ type udpRedirectEntry struct {
 }
 
 type UDPRedirectRegistry struct {
-	mu      sync.Mutex
-	now     func() time.Time
-	entries map[udpRedirectKey]udpRedirectEntry
+	mu        sync.Mutex
+	nextPrune time.Time
+	now       func() time.Time
+	entries   map[udpRedirectKey]udpRedirectEntry
+	forward   map[FlowTuple]udpRedirectKey
+	nextPort  uint16
 }
 
 func NewUDPRedirectRegistry() *UDPRedirectRegistry {
-	return &UDPRedirectRegistry{now: time.Now, entries: make(map[udpRedirectKey]udpRedirectEntry)}
+	return &UDPRedirectRegistry{now: time.Now, entries: make(map[udpRedirectKey]udpRedirectEntry), forward: make(map[FlowTuple]udpRedirectKey), nextPort: 49152}
 }
 
 func (registry *UDPRedirectRegistry) Register(target UDPRedirectTarget) error {
+	_, err := registry.register(target)
+	return err
+}
+
+func (registry *UDPRedirectRegistry) register(target UDPRedirectTarget) (uint16, error) {
 	if registry == nil || !target.Flow.valid() || target.Flow.Network != NetworkUDP {
-		return errors.New("valid UDP redirect flow is required")
+		return 0, errors.New("valid UDP redirect flow is required")
 	}
-	if target.Route != ServiceRouteVPN || target.ServiceID == "" {
-		return errors.New("UDP redirect target must be a named VPN service")
+	if (target.Route != ServiceRouteVPN && !(target.Route == ServiceRouteDirect && selectiveVPNFakeIPv4Prefix.Contains(target.Flow.Destination) && target.Host != "")) || target.ServiceID == "" {
+		return 0, errors.New("UDP redirect target must be a named VPN service")
 	}
 	target.Host = normalizeHost(target.Host)
-	key := udpRedirectKey{remoteIP: target.Flow.Destination.Unmap(), clientPort: target.Flow.SourcePort}
+	key := udpRedirectKey{remoteIP: relayPeer(target.Flow.Destination.Unmap()), clientPort: target.Flow.SourcePort}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	now := registry.now()
 	registry.pruneLocked(now)
-	if existing, ok := registry.entries[key]; ok && !sameUDPRedirectIdentity(existing.target, target) {
-		return errors.New("UDP redirect tuple is ambiguous")
+	if assigned, exists := registry.forward[target.Flow]; exists {
+		entry := registry.entries[assigned]
+		if now.Before(entry.expires) {
+			if !sameUDPRedirectIdentity(entry.target, target) {
+				return 0, errors.New("UDP route changed for active flow")
+			}
+			entry.expires = now.Add(udpRedirectTTL)
+			registry.entries[assigned] = entry
+			return assigned.clientPort, nil
+		}
+		delete(registry.entries, assigned)
+		delete(registry.forward, target.Flow)
 	}
 	if len(registry.entries) >= maxUDPRedirects {
-		return errors.New("UDP redirect registry is full")
+		return 0, errors.New("UDP redirect registry is full")
 	}
-	registry.entries[key] = udpRedirectEntry{target: target, expires: now.Add(udpRedirectTTL)}
-	return nil
+	// Two destinations behind the same relay IP may share a client socket.
+	// Give each reflected flow a unique peer port and restore it on replies.
+	for i := 0; i <= maxUDPRedirects; i++ {
+		if _, used := registry.entries[key]; !used {
+			registry.entries[key] = udpRedirectEntry{target: target, expires: now.Add(udpRedirectTTL)}
+			registry.forward[target.Flow] = key
+			return key.clientPort, nil
+		}
+		key.clientPort = registry.nextPort
+		registry.nextPort++
+		if registry.nextPort < 49152 {
+			registry.nextPort = 49152
+		}
+	}
+	return 0, errors.New("no UDP reflection port available")
+}
+
+func (registry *UDPRedirectRegistry) targetForFlow(flow FlowTuple) (UDPRedirectTarget, bool) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	key, ok := registry.forward[flow]
+	entry := registry.entries[key]
+	return entry.target, ok && registry.now().Before(entry.expires)
 }
 
 func sameUDPRedirectIdentity(left, right UDPRedirectTarget) bool {
@@ -78,7 +117,7 @@ func (registry *UDPRedirectRegistry) Lookup(remoteIP netip.Addr, clientPort uint
 	now := registry.now()
 	registry.pruneLocked(now)
 	entry, ok := registry.entries[key]
-	if !ok {
+	if !ok || !now.Before(entry.expires) {
 		return UDPRedirectTarget{}, false
 	}
 	entry.expires = now.Add(udpRedirectTTL)
@@ -98,9 +137,14 @@ func (registry *UDPRedirectRegistry) ResolvePeer(peer *net.UDPAddr) (UDPRedirect
 }
 
 func (registry *UDPRedirectRegistry) pruneLocked(now time.Time) {
+	if now.Before(registry.nextPrune) {
+		return
+	}
+	registry.nextPrune = now.Add(time.Second)
 	for key, entry := range registry.entries {
 		if !now.Before(entry.expires) {
 			delete(registry.entries, key)
+			delete(registry.forward, entry.target.Flow)
 		}
 	}
 }
@@ -121,11 +165,13 @@ func (redirector *UDPPacketRedirector) ReflectClientPacket(parsed parsedPacket, 
 	if redirector == nil || parsed.network != NetworkUDP || parsed.flowTuple() != target.Flow {
 		return nil, errors.New("UDP packet does not match redirect target")
 	}
-	if err := redirector.registry.Register(target); err != nil {
+	port, err := redirector.registry.register(target)
+	if err != nil {
 		return nil, err
 	}
 	packet := append([]byte(nil), parsed.bytes...)
-	swapPacketAddresses(packet, parsed)
+	setPacketEndpoints(packet, parsed, relayPeer(target.Flow.Destination), target.Flow.Source)
+	binary.BigEndian.PutUint16(packet[parsed.transportOffset:parsed.transportOffset+2], port)
 	binary.BigEndian.PutUint16(packet[parsed.transportOffset+2:parsed.transportOffset+4], redirector.relayPort)
 	calculateChecksums(packet)
 	return packet, nil
@@ -140,8 +186,9 @@ func (redirector *UDPPacketRedirector) RestoreRelayPacket(parsed parsedPacket) (
 		return nil, UDPRedirectTarget{}, true, errors.New("UDP relay response has no active redirect flow")
 	}
 	packet := append([]byte(nil), parsed.bytes...)
-	swapPacketAddresses(packet, parsed)
+	setPacketEndpoints(packet, parsed, target.Flow.Destination, target.Flow.Source)
 	binary.BigEndian.PutUint16(packet[parsed.transportOffset:parsed.transportOffset+2], target.Flow.DestinationPort)
+	binary.BigEndian.PutUint16(packet[parsed.transportOffset+2:parsed.transportOffset+4], target.Flow.SourcePort)
 	calculateChecksums(packet)
 	return packet, target, true, nil
 }

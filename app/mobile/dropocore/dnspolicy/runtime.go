@@ -64,6 +64,25 @@ func EnsurePreferredDialResolver(dns map[string]any, tag string) string {
 	return target
 }
 
+// IsDropoDirectResolver recognizes only the stock direct resolver serialized
+// by earlier releases. User and enterprise resolver definitions stay intact.
+func IsDropoDirectResolver(server map[string]any) bool {
+	if server["tag"] != "dns-direct" {
+		return false
+	}
+	for _, viaVPN := range []bool{false, true} {
+		expected := Server("dns-direct", viaVPN)
+		if sameServer(server, expected) {
+			return true
+		}
+		expected["server"] = legacyBootstrapIPv4
+		if sameServer(server, expected) {
+			return true
+		}
+	}
+	return sameServer(server, map[string]any{"type": "udp", "tag": "dns-direct", "server": "77.88.8.8"})
+}
+
 // ConfigureRuntimeFailover expands only verified built-ins. sing-box 1.14's
 // evaluate/respond rules bound each attempt and preserve the original detour.
 // Explicit domain-resolver lookups keep their existing bootstrap transport.

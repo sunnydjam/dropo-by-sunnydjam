@@ -532,10 +532,7 @@ func TestAndroidBlockedOnlyRoutesOnlyBlockedServicesThroughVPN(t *testing.T) {
 	if defaultResolver["server"] != "dns-direct" {
 		t.Fatalf("default_domain_resolver = %v, want dns-direct", defaultResolver["server"])
 	}
-	dnsDirect := androidDNSServerByTag(config, "dns-direct")
-	if dnsDirect["detour"] != "proxy" {
-		t.Fatalf("public DNS must remain reachable through VPN even for direct traffic: %#v", dnsDirect)
-	}
+	assertAndroidSystemDNS(t, config)
 	dnsRemote := androidDNSServerByTag(config, "dns-remote")
 	if dnsRemote["detour"] != "proxy" {
 		t.Fatalf("dns-remote detour = %v, want proxy", dnsRemote["detour"])

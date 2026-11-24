@@ -41,12 +41,24 @@ func assertAndroidEncryptedDNSTransport(t *testing.T, config map[string]interfac
 	}
 }
 
+func assertAndroidSystemDNS(t *testing.T, config map[string]any) {
+	t.Helper()
+	server := androidDNSServerByTag(config, "dns-direct")
+	if len(server) != 2 || server["type"] != "local" || server["tag"] != "dns-direct" {
+		t.Fatalf("direct DNS is not the underlying network resolver: %#v", server)
+	}
+}
+
 func TestAndroidPublicDNSUsesVPNWithoutChangingTrafficRoutes(t *testing.T) {
 	for _, mode := range []string{"blocked_only", "all_traffic"} {
 		t.Run(mode, func(t *testing.T) {
 			text, _, err := buildAndroidSingBoxConfig(androidDNSFixture, "error", mode, false, "", map[string]string{"meta": "direct", "telegram": "vpn"})
 			config := decodeAndroidDNSFixture(t, text, err)
-			assertAndroidEncryptedDNSTransport(t, config, "dns-direct", true)
+			if mode == "blocked_only" {
+				assertAndroidSystemDNS(t, config)
+			} else {
+				assertAndroidEncryptedDNSTransport(t, config, "dns-direct", true)
+			}
 			assertAndroidEncryptedDNSTransport(t, config, "dns-remote", true)
 			assertAndroidEncryptedDNSTransport(t, config, "dns-bootstrap", false)
 
@@ -117,7 +129,8 @@ func TestAndroidDNSWithoutProxyHasNoDanglingDetour(t *testing.T) {
 	outbounds, tags := buildAndroidOutbounds(nil)
 	text, err := marshalAndroidSingBoxConfig(outbounds, tags, "error", "blocked_only", false, "direct", nil)
 	config := decodeAndroidDNSFixture(t, text, err)
-	for _, tag := range []string{"dns-direct", "dns-remote", "dns-bootstrap"} {
+	assertAndroidSystemDNS(t, config)
+	for _, tag := range []string{"dns-remote", "dns-bootstrap"} {
 		assertAndroidEncryptedDNSTransport(t, config, tag, false)
 	}
 	if androidContainsOutbound(config, "proxy") {
@@ -151,5 +164,5 @@ func TestAndroidDNSPolicyInvalidatesCachedDirectResolverConfig(t *testing.T) {
 		t.Fatal("the previous DNS policy survived an application upgrade")
 	}
 	config := decodeAndroidDNSFixture(t, response.Config, nil)
-	assertAndroidEncryptedDNSTransport(t, config, "dns-direct", true)
+	assertAndroidSystemDNS(t, config)
 }

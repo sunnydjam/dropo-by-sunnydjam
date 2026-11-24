@@ -220,7 +220,8 @@ func (e *Engine) run() {
 			continue
 		}
 		e.capturedPackets.Add(1)
-		original := append([]byte(nil), buffer[:length]...)
+		// Receive reuses this buffer only after all synchronous sends finish.
+		original := buffer[:length]
 		decisionStarted := time.Now()
 		decision := e.processor.Process(original)
 		decisionElapsed := time.Since(decisionStarted)

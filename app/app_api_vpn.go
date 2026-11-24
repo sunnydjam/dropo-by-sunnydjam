@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
@@ -997,7 +998,17 @@ func pinSelectiveVPNInbound(config map[string]interface{}) error {
 		"inbound":  []interface{}{inboundTag},
 		"outbound": terminal,
 	}
-	route["rules"] = append([]interface{}{pinned}, filtered...)
+	head := []any{pinned}
+	dns, _ := config["dns"].(map[string]any)
+	servers, _ := dns["servers"].([]any)
+	for _, raw := range servers {
+		server, _ := raw.(map[string]any)
+		if terminal != "direct" && server["tag"] == "dns-remote" {
+			head = []any{map[string]any{"inbound": []any{inboundTag}, "action": "resolve"}, pinned}
+			break
+		}
+	}
+	route["rules"] = append(head, filtered...)
 	return nil
 }
 
@@ -1358,6 +1369,17 @@ func (a *App) ensureActiveConfigForStart() error {
 		if !needsRebuild && !configSupportsDiscordRealtimeRouting(config) {
 			a.writeLog("Active config predates Discord realtime routing; rebuilding before start")
 			needsRebuild = true
+		}
+		if !needsRebuild && NormalizeRoutingMode(appSettings.RoutingMode) == RoutingModeBlockedOnly {
+			dns, _ := config["dns"].(map[string]any)
+			servers, _ := dns["servers"].([]any)
+			for _, raw := range servers {
+				server, _ := raw.(map[string]any)
+				if dnspolicy.IsDropoDirectResolver(server) {
+					needsRebuild = true
+					break
+				}
+			}
 		}
 		if !needsRebuild && configNeedsBlockedOnlyContractMigration(config, appSettings.RoutingMode) {
 			a.writeLog("Active config predates final-direct blocked-only routing; rebuilding before start")

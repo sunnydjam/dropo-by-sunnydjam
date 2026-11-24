@@ -343,7 +343,7 @@ func TestProcessorSkipsIdentityLookupWhenPlanDoesNotUseProcesses(t *testing.T) {
 	}
 }
 
-func TestUnclassifiedFlowIsRecordedDirectAndInvalidatedByPlanRevision(t *testing.T) {
+func TestEstablishedUnclassifiedFlowKeepsDirectAcrossPlanRevision(t *testing.T) {
 	plan := testPlan()
 	plan.Services[0].ProcessNames = nil
 	processor, err := NewProcessor(plan)
@@ -365,8 +365,8 @@ func TestUnclassifiedFlowIsRecordedDirectAndInvalidatedByPlanRevision(t *testing
 	if err := processor.ApplyPlan(plan); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := processor.LookupFlowDecision(tuple); ok {
-		t.Fatal("flow decision survived an immutable plan revision")
+	if current, ok := processor.LookupFlowDecision(tuple); !ok || current.Disposition != FlowDirect || current.PlanRevision != plan.Revision {
+		t.Fatal("established direct flow lost on plan revision")
 	}
 }
 
@@ -431,16 +431,17 @@ func TestProcessorReflectsVPNFlowAndRestoresRelayResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reflected.source.String() != "1.1.1.1" || reflected.destination.String() != "10.0.0.1" || reflected.sourcePort != 50000 || reflected.destinationPort != 34010 {
+	if reflected.source != relayPeer4 || reflected.destination.String() != "10.0.0.1" || reflected.sourcePort != 50000 || reflected.destinationPort != 34010 {
 		t.Fatalf("reflected tuple = %+v", reflected.flowTuple())
 	}
 	local := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 34010}
-	remote := &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 50000}
+	remote := &net.TCPAddr{IP: relayPeer4.AsSlice(), Port: 50000}
 	if _, ok := registry.ConsumeAccepted(local, remote); !ok {
 		t.Fatal("reflected flow was not accepted by registry")
 	}
 
 	response := append([]byte(nil), original...)
+	copy(response[16:20], relayPeer4.AsSlice())
 	binary.BigEndian.PutUint16(response[20:22], 34010)
 	binary.BigEndian.PutUint16(response[22:24], 50000)
 	calculateChecksums(response)

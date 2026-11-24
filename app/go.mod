@@ -5,6 +5,7 @@ go 1.27.4
 require (
 	dropocore v0.0.0
 	github.com/energye/systray v1.0.3
+	github.com/go-ole/go-ole v1.3.0
 	github.com/metacubex/utls v1.8.4
 	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0

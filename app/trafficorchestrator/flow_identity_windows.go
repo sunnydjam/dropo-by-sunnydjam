@@ -42,8 +42,9 @@ type ownerTableKind struct {
 }
 
 type ownerTableSnapshot struct {
-	loaded time.Time
-	owners map[FlowTuple]uint32
+	loaded          time.Time
+	nextMissRefresh time.Time
+	owners          map[FlowTuple]uint32
 }
 
 type cachedProcessIdentity struct {
@@ -108,10 +109,12 @@ func (resolver *windowsFlowIdentityResolver) ResolveProcessName(tuple FlowTuple)
 	// Discord voice discovery exchange may contain only a few UDP datagrams.
 	// Refresh once immediately for either transport. This is bounded, does not
 	// sleep, and a second miss still passes unchanged.
-	if pid == 0 && (tuple.Network == NetworkTCP || tuple.Network == NetworkUDP) && !refreshed {
+	if pid == 0 && (tuple.Network == NetworkTCP || tuple.Network == NetworkUDP) && !refreshed && !now.Before(table.nextMissRefresh) {
+		table.nextMissRefresh = now.Add(25 * time.Millisecond)
+		resolver.tables[kind] = table
 		owners, err := resolver.loadOwnerTable(kind)
 		if err == nil {
-			table = ownerTableSnapshot{loaded: now, owners: owners}
+			table.loaded, table.owners = now, owners
 			resolver.tables[kind] = table
 			pid = ownerPID(table.owners, tuple)
 		}
@@ -160,17 +163,36 @@ func ownerPID(owners map[FlowTuple]uint32, tuple FlowTuple) uint32 {
 }
 
 func (resolver *windowsFlowIdentityResolver) cacheFlow(tuple FlowTuple, name string, expires time.Time) {
-	if len(resolver.flows) >= maxFlowIdentityEntries {
-		clear(resolver.flows)
-	}
+	makeIdentityCacheRoom(resolver.flows, tuple, maxFlowIdentityEntries)
 	resolver.flows[tuple] = cachedProcessIdentity{name: name, expires: expires}
 }
 
 func (resolver *windowsFlowIdentityResolver) cacheProcess(pid uint32, name string, expires time.Time) {
-	if len(resolver.processes) >= maxProcessIdentityEntries {
-		clear(resolver.processes)
-	}
+	makeIdentityCacheRoom(resolver.processes, pid, maxProcessIdentityEntries)
 	resolver.processes[pid] = cachedProcessIdentity{name: name, expires: expires}
+}
+
+// On pressure evict the earliest expiry among a bounded sample.
+func makeIdentityCacheRoom[K comparable](entries map[K]cachedProcessIdentity, key K, capacity int) {
+	if len(entries) < capacity {
+		return
+	}
+	if _, exists := entries[key]; exists {
+		return
+	}
+	var oldest K
+	var expires time.Time
+	count := 0
+	for candidate, entry := range entries {
+		if count == 0 || entry.expires.Before(expires) {
+			oldest, expires = candidate, entry.expires
+		}
+		count++
+		if count == 8 {
+			break
+		}
+	}
+	delete(entries, oldest)
 }
 
 func ownerLookupTuple(tuple FlowTuple) FlowTuple {

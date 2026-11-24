@@ -38,7 +38,7 @@ func StartUDPRelay(registry *UDPRedirectRegistry, proxyAddress string, port int,
 	if err := validateLoopbackProxyAddress(proxyAddress); err != nil {
 		return nil, err
 	}
-	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
 	if err != nil {
 		return nil, fmt.Errorf("listen UDP redirect relay: %w", err)
 	}
@@ -80,7 +80,7 @@ func (relay *UDPRelay) readLoop() {
 		if !ok || length == 0 {
 			continue
 		}
-		key := udpRedirectKey{remoteIP: target.Flow.Destination.Unmap(), clientPort: target.Flow.SourcePort}
+		key := udpRedirectKey{remoteIP: target.Flow.Destination.Unmap(), clientPort: uint16(peer.Port)}
 		session := relay.session(key, target, peer)
 		if session == nil {
 			continue
@@ -127,12 +127,32 @@ func (relay *UDPRelay) runSession(session *udpRelaySession) {
 		}
 		relay.mu.Unlock()
 	}()
-	association, err := OpenLoopbackSOCKS5UDP(relay.ctx, relay.proxy)
-	if err != nil {
-		relay.log(fmt.Sprintf("service=%s UDP associate failed: %v", session.target.ServiceID, err))
-		return
+	var send func([]byte) error
+	var receive func([]byte) (int, error)
+	var closeConn func() error
+	if session.target.Route == ServiceRouteDirect {
+		conn, err := DialRetiredFakeHost(relay.ctx, "udp", session.target.Host, session.target.Flow.DestinationPort)
+		if err != nil {
+			return
+		}
+		send = func(payload []byte) error { _, err := conn.Write(payload); return err }
+		receive, closeConn = conn.Read, conn.Close
+	} else {
+		association, err := OpenLoopbackSOCKS5UDP(relay.ctx, relay.proxy)
+		if err != nil {
+			relay.log(fmt.Sprintf("service=%s UDP associate failed: %v", session.target.ServiceID, err))
+			return
+		}
+		host := session.target.Host
+		if host == "" {
+			host = session.target.Flow.Destination.String()
+		}
+		send = func(payload []byte) error {
+			return association.Send(host, session.target.Flow.DestinationPort, payload)
+		}
+		receive, closeConn = association.Receive, association.Close
 	}
-	defer association.Close()
+	defer closeConn()
 	responses := make(chan []byte, 8)
 	receiveErrors := make(chan error, 1)
 	receiveDone := make(chan struct{})
@@ -140,7 +160,7 @@ func (relay *UDPRelay) runSession(session *udpRelaySession) {
 	go func() {
 		buffer := make([]byte, 65535)
 		for {
-			length, receiveErr := association.Receive(buffer)
+			length, receiveErr := receive(buffer)
 			if receiveErr != nil {
 				select {
 				case receiveErrors <- receiveErr:
@@ -158,11 +178,6 @@ func (relay *UDPRelay) runSession(session *udpRelaySession) {
 	}()
 	idle := time.NewTimer(udpRedirectTTL)
 	defer idle.Stop()
-	host := session.target.Host
-	if host == "" {
-		host = session.target.Flow.Destination.String()
-	}
-	port := session.target.Flow.DestinationPort
 	for {
 		select {
 		case payload := <-session.input:
@@ -173,7 +188,7 @@ func (relay *UDPRelay) runSession(session *udpRelaySession) {
 				}
 			}
 			idle.Reset(udpRedirectTTL)
-			if err := association.Send(host, port, payload); err != nil {
+			if err := send(payload); err != nil {
 				relay.log(fmt.Sprintf("service=%s UDP send failed: %v", session.target.ServiceID, err))
 				return
 			}

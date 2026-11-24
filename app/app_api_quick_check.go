@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -30,14 +31,15 @@ const (
 )
 
 type clientQuickCheckService struct {
-	Index         int
-	Name          string
-	URL           string
-	Category      string
-	ServiceTag    string
-	ExpectedRoute string
-	Regional      bool
-	EndpointOnly  bool
+	Index           int
+	Name            string
+	URL             string
+	Category        string
+	ServiceTag      string
+	ExpectedRoute   string
+	Regional        bool
+	EndpointOnly    bool
+	DiscoveryIssuer string
 }
 
 type clientQuickHTTPResult struct {
@@ -135,8 +137,11 @@ var clientQuickCheckServices = []clientQuickCheckService{
 	{Index: 52, Name: "Steam Store", URL: "https://store.steampowered.com", Category: "Direct-Game"},
 	{Index: 53, Name: "Steam Community", URL: "https://steamcommunity.com", Category: "Direct-Game"},
 	{Index: 54, Name: "Steam Static", URL: "https://clientconfig.akamai.steamstatic.com", Category: "Direct-Game"},
-	{Index: 55, Name: "EA", URL: "https://www.ea.com", Category: "Direct-Game"},
+	{Index: 55, Name: "EA app", URL: "https://accounts.ea.com/.well-known/openid-configuration", Category: "Direct-Game", EndpointOnly: true, DiscoveryIssuer: "accounts.ea.com"},
 	{Index: 56, Name: "Apex Legends", URL: "https://www.ea.com/games/apex-legends", Category: "Direct-Game"},
+	{Index: 57, Name: "Epic Games", URL: "https://api.epicgames.dev/epic/oauth/v2/.well-known/openid-configuration", Category: "Direct-Game", EndpointOnly: true, DiscoveryIssuer: "https://api.epicgames.dev/epic/oauth/v2"},
+	{Index: 58, Name: "Battle.net", URL: "https://oauth.battle.net/.well-known/openid-configuration", Category: "Direct-Game", EndpointOnly: true, DiscoveryIssuer: "https://oauth.battle.net"},
+	{Index: 59, Name: "Riot Client", URL: "https://auth.riotgames.com/.well-known/openid-configuration", Category: "Direct-Game", EndpointOnly: true, DiscoveryIssuer: "https://auth.riotgames.com"},
 }
 
 // RunClientQuickCheck performs the in-app service availability check. It is
@@ -465,7 +470,7 @@ func runSingleClientQuickCheck(
 	normalChecked := !usesProxy && routeClient != nil
 	proxyChecked := usesProxy && proxyClient != nil
 	if normalChecked {
-		normal = invokeQuickCheckURL(ctx, routeClient, svc.URL)
+		normal = invokeQuickCheckURL(ctx, routeClient, svc)
 	} else if expectedRoute == clientQuickCheckRouteZapret {
 		normal.Error = "scoped Zapret probe proxy is unavailable"
 	} else if usesProxy {
@@ -480,7 +485,7 @@ func runSingleClientQuickCheck(
 		case <-ctx.Done():
 		case <-time.After(clientQuickCheckRetryDelay):
 			retryCtx, cancel := context.WithTimeout(ctx, clientQuickCheckRetryTimeout)
-			retry := invokeQuickCheckURL(retryCtx, routeClient, svc.URL)
+			retry := invokeQuickCheckURL(retryCtx, routeClient, svc)
 			cancel()
 			if retry.Success {
 				normal = retry
@@ -488,7 +493,7 @@ func runSingleClientQuickCheck(
 		}
 	}
 	if proxyChecked {
-		proxy = invokeQuickCheckURL(ctx, proxyClient, svc.URL)
+		proxy = invokeQuickCheckURL(ctx, proxyClient, svc)
 	}
 
 	statusText := "FAIL"
@@ -559,9 +564,9 @@ func quickCheckRetryableError(errText string) bool {
 	return false
 }
 
-func invokeQuickCheckURL(ctx context.Context, client *http.Client, target string) clientQuickHTTPResult {
+func invokeQuickCheckURL(ctx context.Context, client *http.Client, svc clientQuickCheckService) clientQuickHTTPResult {
 	startedAt := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, svc.URL, nil)
 	if err != nil {
 		return clientQuickHTTPResult{TimeMS: time.Since(startedAt).Milliseconds(), Error: err.Error()}
 	}
@@ -572,6 +577,22 @@ func invokeQuickCheckURL(ctx context.Context, client *http.Client, target string
 		return clientQuickHTTPResult{TimeMS: elapsed, Error: compactProbeError(err)}
 	}
 	defer resp.Body.Close()
+	if svc.DiscoveryIssuer != "" {
+		// These public documents exercise the launcher's identity service without a login.
+		const maxDocument = 64 << 10
+		var document struct{ Issuer string }
+		result := clientQuickHTTPResult{Status: resp.StatusCode}
+		if resp.StatusCode == http.StatusOK {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxDocument+1))
+			result.Success = readErr == nil && len(body) <= maxDocument &&
+				json.Unmarshal(body, &document) == nil && document.Issuer == svc.DiscoveryIssuer
+		}
+		if !result.Success {
+			result.Error = "Unexpected identity service response"
+		}
+		result.TimeMS = time.Since(startedAt).Milliseconds()
+		return result
+	}
 	_, _ = io.CopyN(io.Discard, resp.Body, 512)
 	return clientQuickHTTPResult{
 		Success: resp.StatusCode >= 200 && resp.StatusCode < 500,

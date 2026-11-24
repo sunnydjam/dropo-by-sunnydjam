@@ -5,3 +5,4 @@
 /flutter_app/pubspec.lock text eol=lf
 /tools/runtime-source/go.mod text eol=lf
 /tools/runtime-source/go.sum text eol=lf
+/dependencies/filters/*.lst text eol=lf

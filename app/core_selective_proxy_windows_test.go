@@ -39,7 +39,7 @@ func TestSelectivePACUnchangedPlanKeepsOneURL(t *testing.T) {
 		}},
 		Routes: []traffic.ServiceRoute{{ServiceID: "youtube", Kind: traffic.ServiceRouteVPN}},
 	}
-	script, domains, err := buildSelectiveProxyPAC("127.0.0.1:2088", "127.0.0.1:2089", selectedVPNDomainSuffixes(plan), selectedZapretDomainSuffixes(plan), nil)
+	script, domains, err := buildSelectiveProxyPAC("127.0.0.1:2088", "127.0.0.1:2089", selectiveDomainsForPlan(plan))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@ package trafficorchestrator
 import (
 	"encoding/binary"
 	"errors"
+	"net/netip"
 )
 
 type PacketDirection uint8
@@ -35,16 +36,13 @@ func (redirector *TCPPacketRedirector) ReflectClientPacket(parsed parsedPacket, 
 	if redirector == nil || parsed.network != NetworkTCP || target.Flow != parsed.flowTuple() {
 		return nil, errors.New("TCP packet does not match redirect target")
 	}
-	if !redirector.registry.contains(target) {
-		if !parsed.isInitialTCPSYN() {
-			return nil, errors.New("TCP redirect flow did not start with an initial SYN")
-		}
-		if err := redirector.registry.Register(target); err != nil {
-			return nil, err
-		}
+	peer, err := redirector.registry.registerPacket(target, parsed.isInitialTCPSYN())
+	if err != nil {
+		return nil, err
 	}
 	packet := append([]byte(nil), parsed.bytes...)
-	swapPacketAddresses(packet, parsed)
+	setPacketEndpoints(packet, parsed, peer.peerIP, target.Flow.Source)
+	binary.BigEndian.PutUint16(packet[parsed.transportOffset:parsed.transportOffset+2], peer.clientPort)
 	binary.BigEndian.PutUint16(packet[parsed.transportOffset+2:parsed.transportOffset+4], redirector.relayPort)
 	calculateChecksums(packet)
 	return packet, nil
@@ -61,7 +59,8 @@ func (redirector *TCPPacketRedirector) RestoreRelayPacket(parsed parsedPacket) (
 		return nil, TCPRedirectTarget{}, true, errors.New("relay response has no active redirect flow")
 	}
 	packet := append([]byte(nil), parsed.bytes...)
-	swapPacketAddresses(packet, parsed)
+	setPacketEndpoints(packet, parsed, target.Flow.Destination, target.Flow.Source)
+	binary.BigEndian.PutUint16(packet[parsed.transportOffset+2:parsed.transportOffset+4], target.Flow.SourcePort)
 	binary.BigEndian.PutUint16(packet[parsed.transportOffset:parsed.transportOffset+2], target.Flow.DestinationPort)
 	calculateChecksums(packet)
 	return packet, target, true, nil
@@ -87,4 +86,26 @@ func swapPacketAddresses(packet []byte, parsed parsedPacket) {
 	copy(temporary[:], packet[8:24])
 	copy(packet[8:24], packet[24:40])
 	copy(packet[24:40], temporary[:])
+}
+
+// Reflected sockets use two reserved, non-public addresses, so a session never
+// needs a firewall exception for an Internet peer or a whole network.
+var relayPeer4 = netip.MustParseAddr("198.18.0.1")
+var relayPeer6 = netip.MustParseAddr("2001:db8:d20::1")
+
+func relayPeer(address netip.Addr) netip.Addr {
+	if address.Is4() {
+		return relayPeer4
+	}
+	return relayPeer6
+}
+
+func setPacketEndpoints(packet []byte, parsed parsedPacket, source, destination netip.Addr) {
+	if parsed.ipVersion == 4 {
+		copy(packet[12:16], source.AsSlice())
+		copy(packet[16:20], destination.AsSlice())
+	} else {
+		copy(packet[8:24], source.AsSlice())
+		copy(packet[24:40], destination.AsSlice())
+	}
 }

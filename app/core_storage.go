@@ -2601,6 +2601,10 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 	if servers, ok := dns["servers"].([]interface{}); ok {
 		for i, value := range servers {
 			server, ok := value.(map[string]interface{})
+			if ok && b.routingMode != RoutingModeAllTraffic && dnspolicy.IsDropoDirectResolver(server) {
+				servers[i] = map[string]any{"type": "local", "tag": "dns-direct"}
+				continue
+			}
 			if !ok || len(server) != 3 || server["type"] != "udp" {
 				continue
 			}
@@ -2653,12 +2657,49 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 		}
 		return
 	}
+	// PAC and the native VPN relay share this loopback inbound. Unlike the
+	// system's ordinary DNS queries, a name arriving here already has a VPN
+	// decision. Preserve work/local rules above, including during live changes.
+	if shouldUseSelectiveWindowsSession(settings) {
+		inbounds, _ := template["inbounds"].([]any)
+		for _, raw := range inbounds {
+			in, _ := raw.(map[string]any)
+			if in["type"] == "mixed" {
+				tag, _ := in["tag"].(string)
+				if tag == "" {
+					tag = "dropo-selective-vpn-in"
+				}
+				rules = append(rules, map[string]any{"inbound": []string{tag}, "action": "route", "server": "dns-remote"})
+				break
+			}
+		}
+	}
 	if b.routingMode != RoutingModeAllTraffic && len(DirectDomainSuffixes) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": DirectDomainSuffixes,
 			"action":        "route",
 			"server":        "dns-direct",
 		})
+	}
+
+	for _, svc := range DefaultFreeAccessServices {
+		if len(svc.ExactHosts)+len(svc.DomainSuffixes) == 0 {
+			continue
+		}
+		outbound := FreeAccessServiceRouteOutboundForSettings(svc, settings, hasVPNProxy)
+		if outbound == "" {
+			continue
+		}
+		server := "dns-remote"
+		if outbound == "direct" {
+			server = "dns-direct"
+		}
+		if len(svc.ExactHosts) > 0 {
+			rules = append(rules, map[string]any{"domain": svc.ExactHosts, "action": "route", "server": server})
+		}
+		if len(svc.DomainSuffixes) > 0 {
+			rules = append(rules, map[string]any{"domain_suffix": svc.DomainSuffixes, "action": "route", "server": server})
+		}
 	}
 
 	ruDNSServer := b.ruDNSServer(settings)
@@ -2674,25 +2715,6 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 			"domain_keyword": RuDomainKeywords,
 			"action":         "route",
 			"server":         ruDNSServer,
-		})
-	}
-
-	for _, svc := range DefaultFreeAccessServices {
-		if len(svc.DomainSuffixes) == 0 {
-			continue
-		}
-		outbound := FreeAccessServiceRouteOutboundForSettings(svc, settings, hasVPNProxy)
-		if outbound == "" {
-			continue
-		}
-		server := "dns-remote"
-		if outbound == "direct" {
-			server = "dns-direct"
-		}
-		rules = append(rules, map[string]interface{}{
-			"domain_suffix": svc.DomainSuffixes,
-			"action":        "route",
-			"server":        server,
 		})
 	}
 

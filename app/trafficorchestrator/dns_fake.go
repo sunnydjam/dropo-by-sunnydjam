@@ -9,6 +9,7 @@ import (
 const (
 	dnsTypeA     = 1
 	dnsTypeAAAA  = 28
+	dnsTypeSVCB  = 64
 	dnsTypeHTTPS = 65
 	dnsClassIN   = 1
 	dnsFakeTTL   = 30
@@ -35,11 +36,11 @@ func (responder *DNSFakeResponder) Respond(parsed parsedPacket) ([]byte, FakeIPT
 	if err != nil || queryClass != dnsClassIN {
 		return nil, FakeIPTarget{}, false, nil
 	}
-	if queryType != dnsTypeA && queryType != dnsTypeAAAA && queryType != dnsTypeHTTPS {
+	if queryType != dnsTypeA && queryType != dnsTypeAAAA && queryType != dnsTypeHTTPS && queryType != dnsTypeSVCB {
 		return nil, FakeIPTarget{}, false, nil
 	}
 	target, matched := responder.directory.ResolveHost(host)
-	if !matched {
+	if !matched && target.ServiceID == "" {
 		return nil, FakeIPTarget{}, false, nil
 	}
 
@@ -49,6 +50,9 @@ func (responder *DNSFakeResponder) Respond(parsed parsedPacket) ([]byte, FakeIPT
 	// Standard response, recursion desired/available, no error. Preserve only
 	// the request ID; request flags and additional records are untrusted input.
 	responseFlags := uint16(0x8180)
+	if !matched {
+		responseFlags |= 2
+	} // SERVFAIL rather than leaking a selected query at capacity
 	binary.BigEndian.PutUint16(responsePayload[2:4], responseFlags)
 	binary.BigEndian.PutUint16(responsePayload[4:6], 1)
 	binary.BigEndian.PutUint16(responsePayload[8:10], 0)

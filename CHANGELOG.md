@@ -2,6 +2,13 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 3.1.27
+
+- Windows diagnostics now validate the public identity services of EA, Epic Games, Battle.net and Riot alongside the Steam Store check.
+- Windows selective routing keeps unrelated launcher traffic on its direct route when a CDN address or transport signature is shared with a selected service. Existing reflected connections retain their exit when policy changes.
+- Direct destinations use the current network's DNS on Windows and Android. Selected VPN destinations use Dropo's encrypted resolver. Work-network DNS retains priority.
+- See the [3.1.27 tester notes](docs/release/3.1.27-testing.md) for the Windows results, Android coverage and checks to run on a real device.
+
 ## 3.1.26
 
 - Rotate the Windows globe in every connection state and brighten its city

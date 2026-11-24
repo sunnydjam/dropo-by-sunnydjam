@@ -54,68 +54,70 @@ func selectedFakeHostMappings(plan traffic.TrafficPlan, directory *traffic.FakeI
 	return result
 }
 
-// selectedFakeHostsConflictScope keeps the existing VPN suffix behavior but
-// adds only exact Zapret bootstrap names. Dynamic Zapret suffixes continue to
-// resolve normally and therefore cannot disturb unrelated native applications.
-func selectedFakeHostsConflictScope(plan traffic.TrafficPlan) map[string]struct{} {
-	result := selectedVPNDomainSuffixes(plan)
-	zapret := make(map[string]bool, len(plan.Routes))
-	for _, route := range plan.Routes {
-		zapret[route.ServiceID] = route.Kind == traffic.ServiceRouteZapret
+type selectiveDomains struct {
+	exact  map[string]struct{}
+	suffix map[string]struct{}
+}
+
+func newSelectiveDomains() selectiveDomains {
+	return selectiveDomains{exact: make(map[string]struct{}), suffix: make(map[string]struct{})}
+}
+
+func (d selectiveDomains) matches(host string) bool {
+	host = normalizeProxyHost(host)
+	if _, ok := d.exact[host]; ok {
+		return true
 	}
-	for _, service := range plan.Services {
-		if !zapret[service.ID] {
-			continue
-		}
-		for _, host := range service.ExactHosts {
-			host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-			if host != "" {
-				result[host] = struct{}{}
+	return hostMatchesSelectedSuffix(host, d.suffix)
+}
+
+type selectiveDomainPlan struct {
+	direct, vpn, zapret selectiveDomains
+}
+
+func selectiveDomainsForPlan(plan traffic.TrafficPlan) selectiveDomainPlan {
+	result := selectiveDomainPlan{newSelectiveDomains(), newSelectiveDomains(), newSelectiveDomains()}
+	add := func(set map[string]struct{}, hosts []string) {
+		for _, h := range hosts {
+			if host := normalizeProxyHost(h); host != "" {
+				set[host] = struct{}{}
 			}
 		}
 	}
-	return result
-}
-
-func selectedVPNDomainSuffixes(plan traffic.TrafficPlan) map[string]struct{} {
-	return selectedDomainSuffixesForRoute(plan, traffic.ServiceRouteVPN)
-}
-
-func selectedZapretDomainSuffixes(plan traffic.TrafficPlan) map[string]struct{} {
-	return selectedDomainSuffixesForRoute(plan, traffic.ServiceRouteZapret)
-}
-
-func selectedDomainSuffixesForRoute(plan traffic.TrafficPlan, kind traffic.ServiceRouteKind) map[string]struct{} {
-	vpn := make(map[string]bool, len(plan.Routes))
-	for _, route := range plan.Routes {
-		vpn[route.ServiceID] = route.Kind == kind
+	for _, work := range plan.WorkNetworks {
+		add(result.direct.suffix, work.DomainSuffixes)
 	}
-	result := make(map[string]struct{})
-	for _, service := range plan.Services {
-		if !vpn[service.ID] {
-			continue
-		}
-		for _, host := range append(append([]string(nil), service.ExactHosts...), service.DomainSuffixes...) {
-			host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-			if host != "" {
-				result[host] = struct{}{}
-			}
-		}
-	}
-	return result
-}
-
-func directDomainSuffixesForPlan(plan traffic.TrafficPlan) map[string]struct{} {
-	result := make(map[string]struct{})
 	for _, rule := range plan.DirectRules {
-		for _, host := range rule.DomainSuffixes {
-			host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-			if host != "" {
-				result[host] = struct{}{}
-			}
+		add(result.direct.suffix, rule.DomainSuffixes)
+	}
+	routes := make(map[string]traffic.ServiceRouteKind, len(plan.Routes))
+	for _, route := range plan.Routes {
+		routes[route.ServiceID] = route.Kind
+	}
+	for _, svc := range plan.Services {
+		var d selectiveDomains
+		switch routes[svc.ID] {
+		case traffic.ServiceRouteVPN:
+			d = result.vpn
+		case traffic.ServiceRouteZapret:
+			d = result.zapret
+		case traffic.ServiceRouteDirect:
+			d = result.direct
+		default:
+			continue
 		}
+		add(d.exact, svc.ExactHosts)
+		add(d.suffix, svc.DomainSuffixes)
 	}
 	return result
+}
+
+func (p selectiveDomainPlan) needsFake(host string) bool {
+	if p.direct.matches(host) {
+		return false
+	}
+	_, exactZapret := p.zapret.exact[normalizeProxyHost(host)]
+	return p.vpn.matches(host) || exactZapret
 }
 
 // installSelectiveFakeHosts appends only exact, positively classified service
@@ -184,7 +186,7 @@ func restoreSelectiveHostsContent(input []byte) ([]byte, int) {
 // selective VPN. Mixed records are left byte-for-byte unchanged and reported
 // as conflicts, because disabling an unrelated name would violate the direct
 // routing contract.
-func disableSelectedVPNHostsMappings(input []byte, suffixes map[string]struct{}) ([]byte, int, int) {
+func disableSelectedVPNHostsMappings(input []byte, matches func(string) bool) ([]byte, int, int) {
 	restored, _ := restoreSelectedVPNHostsMappings(input)
 	lines := splitLinesPreservingEndings(string(restored))
 	disabled := 0
@@ -206,7 +208,7 @@ func disableSelectedVPNHostsMappings(input []byte, suffixes map[string]struct{})
 				break
 			}
 			hosts++
-			if hostMatchesSelectedSuffix(field, suffixes) {
+			if matches(field) {
 				matched++
 			}
 		}

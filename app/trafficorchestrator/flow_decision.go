@@ -1,6 +1,7 @@
 package trafficorchestrator
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
@@ -31,11 +32,13 @@ type FlowDecision struct {
 type cachedFlowDecision struct {
 	decision FlowDecision
 	expires  time.Time
+	order    *list.Element
 }
 
 type flowDecisionTable struct {
 	mu      sync.Mutex
 	entries map[FlowTuple]cachedFlowDecision
+	order   list.List
 	now     func() time.Time
 }
 
@@ -49,10 +52,20 @@ func (table *flowDecisionTable) store(tuple FlowTuple, decision FlowDecision) {
 	}
 	table.mu.Lock()
 	defer table.mu.Unlock()
-	if len(table.entries) >= maxFlowDecisions {
-		clear(table.entries)
+	entry, found := table.entries[tuple]
+	if found {
+		table.order.MoveToFront(entry.order)
+	} else {
+		if len(table.entries) >= maxFlowDecisions {
+			oldest := table.order.Back()
+			delete(table.entries, oldest.Value.(FlowTuple))
+			table.order.Remove(oldest)
+		}
+		entry.order = table.order.PushFront(tuple)
 	}
-	table.entries[tuple] = cachedFlowDecision{decision: decision, expires: table.now().Add(flowDecisionTTL(tuple))}
+	entry.decision = decision
+	entry.expires = table.now().Add(flowDecisionTTL(tuple))
+	table.entries[tuple] = entry
 }
 
 func (table *flowDecisionTable) lookup(tuple FlowTuple, revision uint64) (FlowDecision, bool) {
@@ -65,10 +78,12 @@ func (table *flowDecisionTable) lookup(tuple FlowTuple, revision uint64) (FlowDe
 	now := table.now()
 	if !ok || entry.decision.PlanRevision != revision || !now.Before(entry.expires) {
 		if ok {
+			table.order.Remove(entry.order)
 			delete(table.entries, tuple)
 		}
 		return FlowDecision{}, false
 	}
+	table.order.MoveToFront(entry.order)
 	entry.expires = now.Add(flowDecisionTTL(tuple))
 	table.entries[tuple] = entry
 	return entry.decision, true
@@ -81,11 +96,18 @@ func flowDecisionTTL(tuple FlowTuple) time.Duration {
 	return 2 * time.Minute
 }
 
-func (table *flowDecisionTable) clear() {
-	if table == nil {
-		return
-	}
+// An established direct stream cannot be spliced into a relay midstream.
+func (table *flowDecisionTable) advanceRevision(revision uint64) {
 	table.mu.Lock()
-	clear(table.entries)
-	table.mu.Unlock()
+	defer table.mu.Unlock()
+	now := table.now()
+	for key, entry := range table.entries {
+		if entry.decision.Disposition == FlowDirect && now.Before(entry.expires) {
+			entry.decision.PlanRevision = revision
+			table.entries[key] = entry
+		} else {
+			table.order.Remove(entry.order)
+			delete(table.entries, key)
+		}
+	}
 }

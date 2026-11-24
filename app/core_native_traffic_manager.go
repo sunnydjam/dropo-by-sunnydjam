@@ -135,6 +135,27 @@ func (m *NativeTrafficManager) ConfigureSelectiveSession(proxyAddress string, ca
 	return nil
 }
 
+// Compare the effective capture expressions, not just service IDs. DNS-only
+// additions do not require a new handle; new discovery ranges sometimes do.
+func (m *NativeTrafficManager) coversSelectiveSettings(settings GlobalAppSettings) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.engine == nil || m.selective == nil || m.relay == nil {
+		return false
+	}
+	current := m.selective.catalog
+	required := append(append([]traffic.ServiceRule(nil), current...), nativeSelectiveCaptureCatalogForSettings(settings)...)
+	filter := func(rules []traffic.ServiceRule) (string, error) {
+		return traffic.BuildSelectiveWinDivertFilterForModeAndZapretProxy(rules, m.relay.Port(), m.selective.captureProtocolEvidence, zapretConnectSourcePorts)
+	}
+	existing, err := filter(current)
+	if err != nil {
+		return false
+	}
+	combined, err := filter(required)
+	return err == nil && combined == existing
+}
+
 func (m *NativeTrafficManager) ConfigureTUNSession() error {
 	if m == nil {
 		return errors.New("traffic engine manager is nil")
@@ -254,6 +275,8 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 		if err == nil {
 			relay, err = traffic.StartTCPRelayWithDialer(registry, func(ctx context.Context, target traffic.TCPRedirectTarget) (net.Conn, error) {
 				switch target.Route {
+				case traffic.ServiceRouteDirect:
+					return traffic.DialRetiredFakeHost(ctx, "tcp", target.Host, target.Flow.DestinationPort)
 				case traffic.ServiceRouteVPN:
 					host := target.Host
 					if host == "" {
@@ -290,7 +313,7 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 					processor, err = traffic.NewProcessorWithScopedZapretRuntime(plan, traffic.NewWindowsFlowIdentityResolver(), redirector, udpRedirector, directory, zapretConnectSourcePorts)
 				}
 				if err == nil {
-					backend, err = traffic.OpenWinDivertBackendWithFilter(m.dllPath(), filter)
+					backend, err = traffic.OpenSelectiveWinDivertBackend(m.dllPath(), filter, relay.Port())
 				}
 			}
 		}
@@ -510,9 +533,7 @@ func sameSelectivePlanScope(previous, next traffic.TrafficPlan) bool {
 }
 
 func sameSelectiveRoutingOverlay(previous, next traffic.TrafficPlan) bool {
-	return reflect.DeepEqual(selectedVPNDomainSuffixes(previous), selectedVPNDomainSuffixes(next)) &&
-		reflect.DeepEqual(selectedZapretDomainSuffixes(previous), selectedZapretDomainSuffixes(next)) &&
-		reflect.DeepEqual(directDomainSuffixesForPlan(previous), directDomainSuffixesForPlan(next))
+	return reflect.DeepEqual(selectiveDomainsForPlan(previous), selectiveDomainsForPlan(next))
 }
 
 func selectiveServiceScopes(services []traffic.ServiceRule) []traffic.ServiceRule {

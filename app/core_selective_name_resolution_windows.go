@@ -40,7 +40,7 @@ func (lease *windowsSelectiveNameResolutionLease) Update(update selectiveNameRes
 	if lease == nil || strings.TrimSpace(lease.hostsPath) == "" {
 		return errors.New("selective name-resolution lease is not initialized")
 	}
-	suffixes := selectedFakeHostsConflictScope(update.Plan)
+	domains := selectiveDomainsForPlan(update.Plan)
 
 	selectiveHostsMutationMutex.Lock()
 	defer selectiveHostsMutationMutex.Unlock()
@@ -49,8 +49,9 @@ func (lease *windowsSelectiveNameResolutionLease) Update(update selectiveNameRes
 	if err != nil {
 		return fmt.Errorf("read Windows hosts file: %w", err)
 	}
-	withoutStaleFake, _ := removeSelectiveFakeHosts(input)
-	output, disabled, conflicts := disableSelectedVPNHostsMappings(withoutStaleFake, suffixes)
+	restored, _ := restoreSelectedVPNHostsMappings(input)
+	withoutStaleFake, _ := removeSelectiveFakeHosts(restored)
+	output, disabled, conflicts := disableSelectedVPNHostsMappings(withoutStaleFake, domains.needsFake)
 	if conflicts > 0 {
 		return fmt.Errorf("Windows hosts file has %d mixed selected/direct mapping(s)", conflicts)
 	}

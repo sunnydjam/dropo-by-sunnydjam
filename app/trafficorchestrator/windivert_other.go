@@ -25,3 +25,7 @@ func (*WinDivertBackend) Send([]byte, *PacketAddress) error {
 func (*WinDivertBackend) Close() error {
 	return nil
 }
+
+func OpenSelectiveWinDivertBackend(string, string, int) (*WinDivertBackend, error) {
+	return nil, errors.New("WinDivert is available only on Windows")
+}

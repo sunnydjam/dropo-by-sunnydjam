@@ -924,6 +924,15 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	// must always be authoritative and immediately undo an old disabled value.
 	settings.FreeAccessServices[tag] = true
 
+	// In full-tunnel mode this preference only takes effect at the next split
+	// session. A selective session can change policies live if its immutable
+	// filter already covers the newly requested traffic.
+	if isRunning && a.canApplyLiveServicePolicy(settings) {
+		result := a.applyLiveServicePolicy(previousSettings, settings, "")
+		result["tag"], result["method"] = tag, normalized
+		return result
+	}
+
 	transactionGeneration := uint64(0)
 	if isRunning {
 		transactionGeneration = a.beginVPNTransactionalReconnect("Применяем маршрут сервиса")
@@ -980,6 +989,49 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	}
 }
 
+func (a *App) canApplyLiveServicePolicy(settings GlobalAppSettings) bool {
+	return NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic ||
+		(a.trafficEngine != nil && a.trafficEngine.coversSelectiveSettings(settings))
+}
+
+func (a *App) applyLiveServicePolicy(previous, next GlobalAppSettings, resetStrategy string) map[string]any {
+	if err := a.storage.UpdateAppSettings(next); err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	if NormalizeRoutingMode(next.RoutingMode) == RoutingModeAllTraffic {
+		if resetStrategy != "" {
+			a.removeServiceStrategyCacheEntry(resetStrategy)
+		}
+		return map[string]any{"success": true, "restarted": false, "restartCancelled": false}
+	}
+	// Fence pending probe commits before building a new plan. The session's
+	// sing-box, relay sockets, source selection and kernel handle stay active.
+	a.invalidateRouteStrategySession()
+	if resetStrategy != "" {
+		a.removeServiceStrategyCacheEntry(resetStrategy)
+	}
+	err := a.RebuildActiveProfileConfig()
+	if err == nil {
+		a.serviceEngineComposeMu.Lock()
+		selections, _ := a.resolveServiceSelections(a.serviceHostlistDir(), a.loadServiceStrategyCache())
+		plan, buildErr := a.buildNativeTrafficPlan(selections)
+		err = buildErr
+		if err == nil {
+			err = a.trafficEngine.StartPlan(plan)
+		}
+		a.serviceEngineComposeMu.Unlock()
+	}
+	if err != nil {
+		rollback, ok := a.restoreServicePolicy(previous)
+		if ok {
+			a.startWindowsUnifiedServiceValidationAsync(FreeAccessServiceUsesZapret(previous, "discord"))
+		}
+		return map[string]any{"success": false, "error": err.Error() + rollback}
+	}
+	a.startWindowsUnifiedServiceValidationAsync(FreeAccessServiceUsesZapret(next, "discord"))
+	return map[string]any{"success": true, "restarted": false, "restartCancelled": false}
+}
+
 // SetZapretServiceStrategy configures the strategy inside an explicit Zapret
 // service route. Auto forgets the network-specific result and starts a fresh
 // bounded search; manual locks one concrete typed strategy until changed.
@@ -1029,6 +1081,22 @@ func (a *App) SetZapretServiceStrategy(tag string, mode string, strategyTag stri
 		settings.ZapretStrategies[tag] = selected.Tag
 	} else {
 		delete(settings.ZapretStrategies, tag)
+	}
+
+	if isRunning && a.canApplyLiveServicePolicy(settings) {
+		resetStrategy := ""
+		if mode == ZapretStrategyModeAuto {
+			resetStrategy = tag
+		}
+		result := a.applyLiveServicePolicy(previousSettings, settings, resetStrategy)
+		if apiResultSucceeded(result) {
+			result["tag"], result["mode"] = tag, mode
+			result["searchStarted"] = mode == ZapretStrategyModeAuto && shouldUseSelectiveWindowsSession(settings) && FreeAccessServiceUsesZapret(settings, tag)
+			for key, value := range zapretStrategySummary(settings, tag, a.loadServiceStrategyCache()) {
+				result[key] = value
+			}
+		}
+		return result
 	}
 
 	transactionGeneration := uint64(0)

@@ -205,6 +205,11 @@ func excludeNamedServiceDomains(domains []string) []string {
 	}
 	result := domains[:0]
 	for _, domain := range domains {
+		// Shared ECH names and public hosting suffixes cannot identify a tenant.
+		switch domain {
+		case "cloudflare-ech.com", "pages.dev", "workers.dev":
+			continue
+		}
 		named := false
 		for _, suffix := range suffixes {
 			if domain == suffix || strings.HasSuffix(domain, "."+suffix) {

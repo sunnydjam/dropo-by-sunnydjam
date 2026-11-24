@@ -33,11 +33,11 @@ func TestProcessorReflectsAndRestoresSelectiveVPNUDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reflected.source != target.Address || reflected.destination.String() != "192.0.2.1" || reflected.sourcePort != 40000 || reflected.destinationPort != 34010 {
+	if reflected.source != relayPeer4 || reflected.destination.String() != "192.0.2.1" || reflected.sourcePort != 40000 || reflected.destinationPort != 34010 {
 		t.Fatalf("reflected UDP tuple = %+v", reflected.flowTuple())
 	}
 
-	response := testIPv4UDPPacket(target.Address.String(), 40000, []byte("reply"))
+	response := testIPv4UDPPacket(relayPeer4.String(), 40000, []byte("reply"))
 	binary.BigEndian.PutUint16(response[20:22], 34010)
 	calculateChecksums(response)
 	restoredDecision := processor.Process(response)
@@ -53,7 +53,7 @@ func TestProcessorReflectsAndRestoresSelectiveVPNUDP(t *testing.T) {
 	}
 }
 
-func TestUDPRedirectRegistryRejectsAmbiguousClientTuple(t *testing.T) {
+func TestUDPRedirectRegistrySeparatesSharedClientTuple(t *testing.T) {
 	registry := NewUDPRedirectRegistry()
 	first := UDPRedirectTarget{
 		Flow: FlowTuple{Network: NetworkUDP, Source: testMustAddr("192.0.2.1"), SourcePort: 40000, Destination: testMustAddr("198.18.1.1"), DestinationPort: 443},
@@ -64,8 +64,13 @@ func TestUDPRedirectRegistryRejectsAmbiguousClientTuple(t *testing.T) {
 	}
 	second := first
 	second.Flow.Source = testMustAddr("192.0.2.2")
-	if err := registry.Register(second); err == nil {
-		t.Fatal("ambiguous UDP client tuple was accepted")
+	port, err := registry.register(second)
+	if err != nil || port == first.Flow.SourcePort {
+		t.Fatalf("shared socket port alias %d: %v", port, err)
+	}
+	restored, ok := registry.Lookup(relayPeer4, port)
+	if !ok || restored.Flow != second.Flow {
+		t.Fatal("reply alias lost original flow")
 	}
 }
 

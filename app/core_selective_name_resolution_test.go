@@ -10,7 +10,7 @@ import (
 
 func TestSelectiveHostsOverlayIsScopedAndReversible(t *testing.T) {
 	input := []byte("# keep\r\n23.227.38.74 discord.com\r\n203.0.113.8 game.example steam.example # direct\r\n")
-	output, disabled, conflicts := disableSelectedVPNHostsMappings(input, map[string]struct{}{"discord.com": {}})
+	output, disabled, conflicts := disableSelectedVPNHostsMappings(input, selectiveDomains{suffix: map[string]struct{}{"discord.com": {}}}.matches)
 	if disabled != 1 || conflicts != 0 {
 		t.Fatalf("disabled=%d conflicts=%d", disabled, conflicts)
 	}
@@ -28,7 +28,7 @@ func TestSelectiveHostsOverlayIsScopedAndReversible(t *testing.T) {
 
 func TestSelectiveHostsOverlayRejectsMixedServiceRecord(t *testing.T) {
 	input := []byte("203.0.113.8 discord.com game.example\n")
-	output, disabled, conflicts := disableSelectedVPNHostsMappings(input, map[string]struct{}{"discord.com": {}})
+	output, disabled, conflicts := disableSelectedVPNHostsMappings(input, selectiveDomains{suffix: map[string]struct{}{"discord.com": {}}}.matches)
 	if disabled != 0 || conflicts != 1 || !bytes.Equal(output, input) {
 		t.Fatalf("mixed mapping changed: disabled=%d conflicts=%d output=%q", disabled, conflicts, output)
 	}
@@ -36,7 +36,7 @@ func TestSelectiveHostsOverlayRejectsMixedServiceRecord(t *testing.T) {
 
 func TestSelectiveHostsOverlayDoesNotMatchDeceptiveSuffix(t *testing.T) {
 	input := []byte("203.0.113.8 notdiscord.com\n")
-	output, disabled, conflicts := disableSelectedVPNHostsMappings(input, map[string]struct{}{"discord.com": {}})
+	output, disabled, conflicts := disableSelectedVPNHostsMappings(input, selectiveDomains{suffix: map[string]struct{}{"discord.com": {}}}.matches)
 	if disabled != 0 || conflicts != 0 || !bytes.Equal(output, input) {
 		t.Fatalf("deceptive suffix changed: disabled=%d conflicts=%d output=%q", disabled, conflicts, output)
 	}

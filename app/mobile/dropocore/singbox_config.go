@@ -16,7 +16,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v23-regional-transports"
+	androidConfigSchema     = "android-package-routing-v24-split-dns"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -574,7 +574,7 @@ func addTransport(out map[string]interface{}, proxy proxyConfig) {
 }
 
 func buildAndroidDNSPolicy(throughVPN bool, routingMode string, hideRuTraffic bool, effectiveRoutePolicies map[string]string) map[string]interface{} {
-	dnsServers := buildAndroidDNSServers(throughVPN)
+	dnsServers := buildAndroidDNSServers(throughVPN, routingMode == "all_traffic")
 	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies)
 	finalDNSServer := androidFinalDNSServer(routingMode)
 	dns := map[string]interface{}{
@@ -585,14 +585,15 @@ func buildAndroidDNSPolicy(throughVPN bool, routingMode string, hideRuTraffic bo
 	return dns
 }
 
-func buildAndroidDNSServers(throughVPN bool) []interface{} {
-	// "direct" describes the application's traffic route, not the transport
-	// used to reach our encrypted resolver. A reachable VPN must also carry DNS
-	// for unselected domains when the resolver's public address is blocked.
+func buildAndroidDNSServers(throughVPN bool, fullTunnel bool) []interface{} {
+	direct := map[string]any{"type": "local", "tag": "dns-direct"}
+	if fullTunnel {
+		direct = dnspolicy.Server("dns-direct", throughVPN)
+	}
 	return []interface{}{
 		map[string]interface{}{"type": "local", "tag": "dns-local"},
 		dnspolicy.Server("dns-bootstrap", false),
-		dnspolicy.Server("dns-direct", throughVPN),
+		direct,
 		dnspolicy.Server("dns-remote", throughVPN),
 	}
 }

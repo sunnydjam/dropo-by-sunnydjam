@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -35,20 +36,23 @@ var invalidWinDivertHandle = ^uintptr(0)
 
 // WinDivertBackend is the only production owner of a WinDivert handle.
 type WinDivertBackend struct {
-	dll          *windows.LazyDLL
-	handle       uintptr
-	ownerMutex   windows.Handle
-	procRecv     *windows.LazyProc
-	procRecvEx   *windows.LazyProc
-	procSend     *windows.LazyProc
-	procSendEx   *windows.LazyProc
-	procShutdown *windows.LazyProc
-	procClose    *windows.LazyProc
-	closeOnce    sync.Once
-	closeErr     error
-	pending      []capturedPacket
-	batchPackets []byte
-	batchAddrs   []PacketAddress
+	dll           *windows.LazyDLL
+	handle        uintptr
+	ownerMutex    windows.Handle
+	procRecv      *windows.LazyProc
+	procRecvEx    *windows.LazyProc
+	procSend      *windows.LazyProc
+	procSendEx    *windows.LazyProc
+	procShutdown  *windows.LazyProc
+	procClose     *windows.LazyProc
+	opMu          sync.RWMutex
+	closing       atomic.Bool
+	relayFirewall bool
+	closeOnce     sync.Once
+	closeErr      error
+	pending       []capturedPacket
+	batchPackets  []byte
+	batchAddrs    []PacketAddress
 }
 
 type capturedPacket struct {
@@ -141,6 +145,11 @@ func (b *WinDivertBackend) Receive(buffer []byte) (int, PacketAddress, error) {
 	if b == nil || b.handle == 0 {
 		return 0, PacketAddress{}, ErrBackendClosed
 	}
+	b.opMu.RLock()
+	defer b.opMu.RUnlock()
+	if b.closing.Load() {
+		return 0, PacketAddress{}, ErrBackendClosed
+	}
 	if len(buffer) == 0 {
 		return 0, PacketAddress{}, errors.New("receive buffer is empty")
 	}
@@ -171,7 +180,7 @@ func (b *WinDivertBackend) Receive(buffer []byte) (int, PacketAddress, error) {
 		0,
 	)
 	if result == 0 {
-		if b.handle == 0 {
+		if b.closing.Load() {
 			return 0, PacketAddress{}, ErrBackendClosed
 		}
 		return 0, PacketAddress{}, windowsCallError("WinDivertRecv", callErr)
@@ -191,7 +200,9 @@ func (b *WinDivertBackend) Receive(buffer []byte) (int, PacketAddress, error) {
 			return 0, PacketAddress{}, fmt.Errorf("decode WinDivert batch packet %d: %w", index, err)
 		}
 		b.pending = append(b.pending, capturedPacket{
-			data: append([]byte(nil), packetBuffer[offset:offset+packetLength]...), address: addresses[index],
+			// This batch stays valid until all queued packets have been copied
+			// into the caller's buffer and the next receive begins.
+			data: packetBuffer[offset : offset+packetLength], address: addresses[index],
 		})
 		offset += packetLength
 	}
@@ -235,6 +246,11 @@ func (b *WinDivertBackend) Send(packet []byte, address *PacketAddress) error {
 	if b == nil || b.handle == 0 {
 		return ErrBackendClosed
 	}
+	b.opMu.RLock()
+	defer b.opMu.RUnlock()
+	if b.closing.Load() {
+		return ErrBackendClosed
+	}
 	if len(packet) == 0 || address == nil {
 		return errors.New("packet and address are required")
 	}
@@ -261,6 +277,11 @@ func (b *WinDivertBackend) Send(packet []byte, address *PacketAddress) error {
 // unrelated direct handshakes are not held behind dozens of driver syscalls.
 func (b *WinDivertBackend) SendBatch(packets [][]byte, addresses []PacketAddress) error {
 	if b == nil || b.handle == 0 {
+		return ErrBackendClosed
+	}
+	b.opMu.RLock()
+	defer b.opMu.RUnlock()
+	if b.closing.Load() {
 		return ErrBackendClosed
 	}
 	if len(packets) == 0 || len(packets) != len(addresses) {
@@ -310,13 +331,18 @@ func (b *WinDivertBackend) Close() error {
 	}
 	b.closeOnce.Do(func() {
 		handle := b.handle
-		b.handle = 0
+		b.closing.Store(true)
 		if handle != 0 {
 			_, _, _ = b.procShutdown.Call(handle, winDivertShutdownBoth)
+			b.opMu.Lock() // wait for the shutdown receive/send calls before closing the native handle
 			result, _, callErr := b.procClose.Call(handle)
+			b.opMu.Unlock()
 			if result == 0 {
 				b.closeErr = windowsCallError("WinDivertClose", callErr)
 			}
+		}
+		if b.relayFirewall {
+			b.closeErr = errors.Join(b.closeErr, configureRelayFirewall(0))
 		}
 		b.releaseOwnerMutex()
 	})
@@ -337,17 +363,16 @@ func acquireEngineOwnerMutex() (windows.Handle, error) {
 		return 0, err
 	}
 	handle, err := windows.CreateMutex(nil, false, name)
+	// The name stays occupied while this process holds its handle. Unlike
+	// ownership of a waited mutex, this lifetime is independent of Go's OS thread.
+	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		if handle != 0 {
+			_ = windows.CloseHandle(handle)
+		}
+		return 0, errors.New("another Dropo traffic engine already owns WinDivert")
+	}
 	if err != nil {
 		return 0, fmt.Errorf("create traffic engine mutex: %w", err)
-	}
-	status, err := windows.WaitForSingleObject(handle, 0)
-	if err != nil {
-		_ = windows.CloseHandle(handle)
-		return 0, fmt.Errorf("wait for traffic engine mutex: %w", err)
-	}
-	if status != windows.WAIT_OBJECT_0 && status != windows.WAIT_ABANDONED {
-		_ = windows.CloseHandle(handle)
-		return 0, errors.New("another Dropo traffic engine already owns WinDivert")
 	}
 	return handle, nil
 }
@@ -356,7 +381,6 @@ func (b *WinDivertBackend) releaseOwnerMutex() {
 	if b.ownerMutex == 0 {
 		return
 	}
-	_ = windows.ReleaseMutex(b.ownerMutex)
 	_ = windows.CloseHandle(b.ownerMutex)
 	b.ownerMutex = 0
 }

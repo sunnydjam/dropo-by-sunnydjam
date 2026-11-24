@@ -20,7 +20,7 @@ func TestTCPRedirectRegistryConsumesReflectedTupleOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 34010}
-	remote := &net.TCPAddr{IP: net.ParseIP("66.22.200.1"), Port: 51000}
+	remote := &net.TCPAddr{IP: relayPeer4.AsSlice(), Port: 51000}
 	got, ok := registry.ConsumeAccepted(local, remote)
 	if !ok || got.ServiceID != "discord" || got.Host != "gateway.discord.com" || got.Flow.DestinationPort != 443 {
 		t.Fatalf("redirect target = %+v, found=%t", got, ok)
@@ -47,7 +47,7 @@ func TestTCPRedirectRegistryExpiresAndRejectsDirect(t *testing.T) {
 	}
 	now = now.Add(tcpRedirectPendingTTL)
 	local := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 34010}
-	remote := &net.TCPAddr{IP: net.ParseIP("66.22.200.1"), Port: 51000}
+	remote := &net.TCPAddr{IP: relayPeer4.AsSlice(), Port: 51000}
 	if _, ok := registry.ConsumeAccepted(local, remote); ok {
 		t.Fatal("expired redirect target was consumed")
 	}
@@ -79,7 +79,7 @@ func TestTCPRedirectRegistryAllowsPendingRelayHandshake(t *testing.T) {
 	if err := registry.Register(target); err != nil {
 		t.Fatal(err)
 	}
-	resolved, ok := registry.lookupReflected(target.Flow.Source, target.Flow.Destination, target.Flow.SourcePort)
+	resolved, ok := registry.lookupReflected(target.Flow.Source, relayPeer4, target.Flow.SourcePort)
 	if !ok || !sameTCPRedirectIdentity(resolved, target) {
 		t.Fatalf("pending reflected handshake was not resolved: %#v %v", resolved, ok)
 	}

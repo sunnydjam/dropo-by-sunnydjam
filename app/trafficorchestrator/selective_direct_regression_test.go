@@ -6,6 +6,14 @@ import (
 	"testing"
 )
 
+var launcherFixtures = []struct{ name, host string }{
+	{"steamwebhelper.exe", "store.steampowered.com"},
+	{"EADesktop.exe", "accounts.ea.com"},
+	{"EpicGamesLauncher.exe", "api.epicgames.dev"},
+	{"Battle.net.exe", "oauth.battle.net"},
+	{"RiotClientServices.exe", "auth.riotgames.com"},
+}
+
 func TestSelectiveRuntimeLeavesSteamAndGameTrafficByteForByteDirect(t *testing.T) {
 	plan := fakeIPTestPlan()
 	plan.DirectRules = []DirectRule{{
@@ -17,15 +25,18 @@ func TestSelectiveRuntimeLeavesSteamAndGameTrafficByteForByteDirect(t *testing.T
 		ProcessNames: []string{
 			"steam.exe",
 			"steamwebhelper.exe",
+			"RiotClientServices.exe",
 			"MistfallHunter-Win64-Shipping.exe",
 		},
 	}}
 
-	tests := []struct {
-		name        string
-		processName string
-		packet      func(*testing.T) []byte
-	}{
+	type packetCase struct {
+		name          string
+		processName   string
+		packet        func(*testing.T) []byte
+		defaultDirect bool
+	}
+	tests := []packetCase{
 		{
 			name:        "Steam TLS on a shared selected-service address",
 			processName: `C:\Program Files (x86)\Steam\bin\cef\cef.win64\steamwebhelper.exe`,
@@ -63,6 +74,12 @@ func TestSelectiveRuntimeLeavesSteamAndGameTrafficByteForByteDirect(t *testing.T
 		},
 	}
 
+	for _, client := range launcherFixtures {
+		tests = append(tests, packetCase{name: client.name + " TLS on shared address", processName: client.name, defaultDirect: client.name != "steamwebhelper.exe" && client.name != "RiotClientServices.exe", packet: func(t *testing.T) []byte {
+			return testIPv4TCPPacketTo(t, "66.22.200.1", client.host)
+		}})
+	}
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			directory, err := NewFakeIPDirectory(plan)
@@ -84,15 +101,20 @@ func TestSelectiveRuntimeLeavesSteamAndGameTrafficByteForByteDirect(t *testing.T
 			}
 
 			original := test.packet(t)
+			before := bytes.Clone(original)
 			decision := processor.Process(original)
 			if decision.Dropped || decision.Transformed || len(decision.Packets) != 1 {
 				t.Fatalf("direct decision = %+v", decision)
 			}
-			if !bytes.Equal(decision.Packets[0], original) {
+			if !bytes.Equal(decision.Packets[0], before) {
 				t.Fatal("selective runtime changed a direct Steam/game packet")
 			}
-			if decision.Reason != "reserved for direct rule latency-sensitive-direct" {
-				t.Fatalf("direct reason = %q", decision.Reason)
+			reason := "reserved for direct rule latency-sensitive-direct"
+			if test.defaultDirect {
+				reason = "service not classified"
+			}
+			if decision.Reason != reason {
+				t.Fatalf("direct reason = %q, want %q", decision.Reason, reason)
 			}
 		})
 	}
@@ -136,6 +158,20 @@ func TestEveryFlowseal1102StrategyKeepsSteamDirect(t *testing.T) {
 			}
 			if decision.Reason != "reserved for direct rule steam-direct" {
 				t.Fatalf("direct reason = %q", decision.Reason)
+			}
+			for _, client := range launcherFixtures {
+				t.Run(client.name, func(t *testing.T) {
+					p, err := NewProcessorWithIdentityResolver(plan, &fixedFlowIdentityResolver{name: client.name})
+					if err != nil {
+						t.Fatal(err)
+					}
+					input := testIPv4TCPPacketTo(t, "66.22.200.1", client.host)
+					before := bytes.Clone(input)
+					got := p.Process(input)
+					if got.Dropped || got.Transformed || len(got.Packets) != 1 || !bytes.Equal(got.Packets[0], before) {
+						t.Fatalf("selected service strategy affected %s", client.host)
+					}
+				})
 			}
 		})
 	}

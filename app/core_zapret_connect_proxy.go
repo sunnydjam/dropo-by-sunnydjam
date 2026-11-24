@@ -37,8 +37,8 @@ type zapretConnectServiceScope struct {
 }
 
 type zapretConnectScope struct {
-	directSuffixes []string
-	services       []zapretConnectServiceScope
+	direct   selectiveDomains
+	services []zapretConnectServiceScope
 }
 
 type zapretSourcePortPool struct {
@@ -403,13 +403,8 @@ func compileZapretConnectScope(plan traffic.TrafficPlan) (*zapretConnectScope, e
 		routes[route.ServiceID] = route.Kind
 	}
 	scope := &zapretConnectScope{}
-	for _, rule := range plan.DirectRules {
-		for _, suffix := range rule.DomainSuffixes {
-			if normalized := normalizeProxyHost(suffix); normalized != "" {
-				scope.directSuffixes = append(scope.directSuffixes, normalized)
-			}
-		}
-	}
+	domains := selectiveDomainsForPlan(plan)
+	scope.direct = domains.direct
 	for _, service := range plan.Services {
 		if routes[service.ID] != traffic.ServiceRouteZapret {
 			continue
@@ -449,10 +444,8 @@ func (scope *zapretConnectScope) allows(host string, port int) bool {
 	if host == "" || port < 1 || port > 65535 {
 		return false
 	}
-	for _, suffix := range scope.directSuffixes {
-		if proxyHostMatches(host, suffix) {
-			return false
-		}
+	if scope.direct.matches(host) {
+		return false
 	}
 	for _, service := range scope.services {
 		if _, allowed := service.ports[port]; !allowed {

@@ -59,6 +59,8 @@ type strategyOutputLoad struct {
 // Processor owns the immutable plan snapshot but no driver handle. It is used
 // by both the real Windows engine and deterministic packet replay tests.
 type Processor struct {
+	applyMu       sync.Mutex   // serialize plan writers while compiling off the packet path
+	revisionMu    sync.RWMutex // publish the DNS, flow and classifier revision together
 	snapshot      atomic.Pointer[processorSnapshot]
 	identity      FlowIdentityResolver
 	redirector    *TCPPacketRedirector
@@ -121,6 +123,8 @@ func (p *Processor) ApplyPlan(plan TrafficPlan) error {
 	if p == nil {
 		return errors.New("processor is nil")
 	}
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
 	current := p.snapshot.Load()
 	if current != nil && plan.Revision <= current.plan.Revision {
 		return fmt.Errorf("plan revision %d is not newer than active revision %d", plan.Revision, current.plan.Revision)
@@ -168,13 +172,13 @@ func (p *Processor) ApplyPlan(plan TrafficPlan) error {
 	for _, route := range plan.Routes {
 		snapshot.routes[route.ServiceID] = route.Kind
 	}
+	p.revisionMu.Lock()
+	defer p.revisionMu.Unlock()
 	if p.fakeIPs != nil {
-		if err := p.fakeIPs.ApplyPlan(plan); err != nil {
-			return fmt.Errorf("apply fake-IP routing revision: %w", err)
-		}
+		p.fakeIPs.applyRouting(plan, classifier)
 	}
 	p.snapshot.Store(snapshot)
-	p.flows.clear()
+	p.flows.advanceRevision(plan.Revision)
 	p.loadMu.Lock()
 	clear(p.strategyLoad)
 	p.loadMu.Unlock()
@@ -234,6 +238,8 @@ func (p *Processor) Revision() uint64 {
 }
 
 func (p *Processor) Process(packet []byte) PacketDecision {
+	p.revisionMu.RLock()
+	defer p.revisionMu.RUnlock()
 	snapshot := p.snapshot.Load()
 	if snapshot == nil {
 		return passDecision(0, packet, "no active plan")
@@ -243,31 +249,6 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 		return passDecision(snapshot.plan.Revision, packet, "unsupported or malformed packet")
 	}
 	tuple := parsed.flowTuple()
-	evidence := parsed.flowEvidence()
-	if p.identity != nil && tuple.valid() && (snapshot.usesProcessIdentity || p.fakeIPs != nil) {
-		evidence.ProcessName = p.identity.ResolveProcessName(tuple)
-	}
-	trustedRuntime := isTrustedSelectiveRuntimeProcess(evidence.ProcessName)
-	if p.dnsFake != nil && !trustedRuntime {
-		response, target, handled, responseErr := p.dnsFake.Respond(parsed)
-		if handled {
-			if responseErr != nil {
-				return passDecision(snapshot.plan.Revision, packet, "fake DNS response failed safe: "+responseErr.Error())
-			}
-			reason := "selected service domain mapped to fake IP"
-			route := target.Route
-			if target.ServiceID == "" {
-				reason = "encrypted DNS endpoint denied in selective mode"
-				route = ""
-			} else {
-				p.bump(target.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Transformed++ })
-			}
-			return PacketDecision{
-				PlanRevision: snapshot.plan.Revision, ServiceID: target.ServiceID, Route: route,
-				Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{response}, Reason: reason,
-			}
-		}
-	}
 	if p.redirector != nil {
 		restored, target, recognized, restoreErr := p.redirector.RestoreRelayPacket(parsed)
 		if recognized {
@@ -296,28 +277,87 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			}
 		}
 	}
+	var processName string
+	ownerResolved := false
+	resolveOwner := func() string {
+		if !ownerResolved && p.identity != nil && tuple.valid() && (snapshot.usesProcessIdentity || p.fakeIPs != nil) {
+			processName = p.identity.ResolveProcessName(tuple)
+			ownerResolved = true
+		}
+		return processName
+	}
+	if p.dnsFake != nil && parsed.network == NetworkUDP && parsed.destinationPort == 53 && !isTrustedSelectiveRuntimeProcess(resolveOwner()) {
+		response, target, handled, responseErr := p.dnsFake.Respond(parsed)
+		if handled {
+			if responseErr != nil {
+				return passDecision(snapshot.plan.Revision, packet, "fake DNS response failed safe: "+responseErr.Error())
+			}
+			reason := "selected service domain mapped to fake IP"
+			route := target.Route
+			if !target.Address.IsValid() {
+				reason = "selected DNS mapping capacity exhausted"
+				p.bump(target.ServiceID, func(value *ServiceCounters) { value.Errors++ })
+			} else {
+				p.bump(target.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Transformed++ })
+			}
+			return PacketDecision{
+				PlanRevision: snapshot.plan.Revision, ServiceID: target.ServiceID, Route: route,
+				Direction: PacketDirectionInbound, Transformed: true, Packets: [][]byte{response}, Reason: reason,
+			}
+		}
+	}
+	var fake FakeIPTarget
+	var fakeDestination bool
+	if p.fakeIPs != nil {
+		fake, fakeDestination = p.fakeIPs.LookupAddress(parsed.destination)
+	}
+	// The two endpoints of a live relayed socket must keep using the same
+	// translation across plan revisions, including UDP packets without a name.
+	pinned := false
+	if parsed.network == NetworkUDP && p.udpRedirector != nil {
+		if target, ok := p.udpRedirector.registry.targetForFlow(tuple); ok {
+			fake.Host, fake.ServiceID, fake.Route = target.Host, target.ServiceID, target.Route
+			pinned = true
+		}
+	}
+	if parsed.network == NetworkTCP && p.redirector != nil && !parsed.isInitialTCPSYN() {
+		if target, ok := p.redirector.registry.targetForFlow(tuple); ok {
+			fake.Host, fake.ServiceID, fake.Route = target.Host, target.ServiceID, target.Route
+			pinned = true
+		}
+	}
+	// DNS has already committed the client to a synthetic address. Every such
+	// connection must terminate in a relay even for a Direct-listed launcher.
+	if !fakeDestination && !pinned {
+		if p.fakeIPs != nil && p.fakeIPs.wasIssued(parsed.destination) {
+			return PacketDecision{PlanRevision: snapshot.plan.Revision, Dropped: true, Reason: "expired synthetic destination requires fresh DNS"}
+		}
+		if previous, ok := p.flows.lookup(tuple, snapshot.plan.Revision); ok && previous.Disposition == FlowDirect && !parsed.isInitialTCPSYN() {
+			return passDecision(snapshot.plan.Revision, packet, "preserved established direct flow")
+		}
+	}
+	trustedRuntime := !fakeDestination && !pinned && isTrustedSelectiveRuntimeProcess(resolveOwner())
 	// The relay hands selected destinations to sing-box over loopback. Any
 	// subsequent sing-box/Xray/WireGuard egress is already on its terminal path
 	// and must never be classified back into the selective redirector.
 	if trustedRuntime && !portRangeContains(p.zapretPorts, int(tuple.SourcePort)) {
 		return passDecision(snapshot.plan.Revision, packet, "trusted Dropo runtime egress")
 	}
-	fakeDestination := false
-	if p.fakeIPs != nil {
-		if target, matched := p.fakeIPs.LookupAddress(parsed.destination); matched {
-			fakeDestination = true
-			evidence.Host = target.Host
-		}
+	var evidence FlowEvidence
+	if !fakeDestination && !pinned {
+		evidence = parsed.flowEvidence()
 	}
-	// Preserve a prior direct disposition for the complete captured flow. This
-	// is especially important when a TCP SYN passed before process/SNI evidence
-	// became available: redirecting its later ClientHello would tear down an
-	// already-established Steam/Electron/native application connection.
-	if previous, ok := p.flows.lookup(tuple, snapshot.plan.Revision); ok && previous.Disposition == FlowDirect {
-		return passDecision(snapshot.plan.Revision, packet, "preserved established direct flow")
+	evidence.ProcessName = processName
+	classification := Classification{}
+	var route ServiceRouteKind
+	if fakeDestination || pinned {
+		evidence.Host = fake.Host
+		classification = Classification{Matched: true, ServiceID: fake.ServiceID}
+		route = fake.Route
+	} else {
+		classification = snapshot.classifier.Classify(evidence)
+		route = snapshot.routes[classification.ServiceID]
 	}
-	classification := snapshot.classifier.Classify(evidence)
-	route := snapshot.routes[classification.ServiceID]
 	if route == "" && classification.Matched {
 		if _, selected := snapshot.selected[classification.ServiceID]; selected {
 			route = ServiceRouteZapret
@@ -335,7 +375,7 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 	if !classification.Matched {
 		return passDecision(snapshot.plan.Revision, packet, "service not classified")
 	}
-	if route == ServiceRouteDirect {
+	if route == ServiceRouteDirect && !fakeDestination {
 		p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
 		decision := passDecision(snapshot.plan.Revision, packet, "service explicitly routed direct")
 		decision.ServiceID = classification.ServiceID
@@ -353,7 +393,7 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			Dropped: true, Reason: "selected Zapret fake-IP UDP forces TCP fallback",
 		}
 	}
-	usesTCPRelay := route == ServiceRouteVPN || (route == ServiceRouteZapret && fakeDestination)
+	usesTCPRelay := route == ServiceRouteVPN || fakeDestination
 	if usesTCPRelay {
 		if parsed.network == NetworkUDP {
 			if p.udpRedirector == nil {
@@ -380,6 +420,9 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "unsupported selective TCP relay transport"}
 		}
 		if p.redirector == nil {
+			if fakeDestination {
+				return PacketDecision{PlanRevision: snapshot.plan.Revision, Dropped: true, Reason: "synthetic address has no TCP relay"}
+			}
 			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
 			reason := "service requires selective TCP relay"
 			if route == ServiceRouteVPN {
@@ -394,7 +437,7 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			Flow: tuple, Host: evidence.Host, ServiceID: classification.ServiceID, Route: route,
 		})
 		if redirectErr != nil {
-			if !parsed.isInitialTCPSYN() {
+			if !fakeDestination && !parsed.isInitialTCPSYN() {
 				p.flows.store(tuple, FlowDecision{
 					PlanRevision: snapshot.plan.Revision, Disposition: FlowDirect,
 					ProcessName: normalizeProcessName(evidence.ProcessName),

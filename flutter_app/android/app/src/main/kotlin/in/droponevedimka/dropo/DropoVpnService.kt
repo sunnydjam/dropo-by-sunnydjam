@@ -697,7 +697,31 @@ class DropoVpnService :
         sessionFence.commit(engineGeneration) { showForeground("VPN работает") }
     }
 
-    override fun localDNSTransport(): LocalDNSTransport? = null
+    override fun localDNSTransport(): LocalDNSTransport = object : LocalDNSTransport {
+        override fun raw() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+        override fun lookup(ctx: dropoandroid.ExchangeContext, network: String, domain: String) {
+            val underlying = physicalNetwork() ?: throw java.io.IOException("No underlying DNS network")
+            try {
+                val addresses = underlying.getAllByName(domain).filter {
+                    when (network) {
+                        "ip4" -> it is java.net.Inet4Address
+                        "ip6" -> it is Inet6Address
+                        else -> true
+                    }
+                }
+                ctx.success(addresses.joinToString("\n") { it.hostAddress.orEmpty() })
+            } catch (e: java.net.UnknownHostException) {
+                ctx.errorCode(2)
+            }
+        }
+
+        @RequiresApi(Build.VERSION_CODES.Q)
+        override fun exchange(ctx: dropoandroid.ExchangeContext, message: ByteArray) {
+            val underlying = physicalNetwork() ?: throw java.io.IOException("No underlying DNS network")
+            ctx.rawSuccess(PhysicalNetworkDns.exchange(underlying, message))
+        }
+    }
 
     override fun serviceStop() {
         val protection = publishVpnProtection()

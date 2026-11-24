@@ -8,9 +8,11 @@ import (
 func TestSelectiveProxyPACRoutesOnlySelectedDomains(t *testing.T) {
 	script, domains, err := buildSelectiveProxyPAC(
 		"127.0.0.1:2088", "127.0.0.1:2089",
-		map[string]struct{}{"chatgpt.com": {}},
-		map[string]struct{}{"youtube.com": {}, "discord.com": {}},
-		map[string]struct{}{"steamcommunity.com": {}, "steamstatic.com": {}},
+		selectiveDomainPlan{
+			vpn:    selectiveDomains{suffix: map[string]struct{}{"chatgpt.com": {}}},
+			zapret: selectiveDomains{suffix: map[string]struct{}{"youtube.com": {}, "discord.com": {}}},
+			direct: selectiveDomains{suffix: map[string]struct{}{"steamcommunity.com": {}, "steamstatic.com": {}}},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)

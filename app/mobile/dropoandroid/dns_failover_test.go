@@ -26,12 +26,16 @@ import (
 )
 
 func TestPinnedRuntimeDNSFailsOverOnTLSFailureAndSERVFAIL(t *testing.T) {
+	var directAtProtected atomic.Bool
 	doh := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wire, err := io.ReadAll(r.Body)
 		var query dns.Msg
 		if err != nil || query.Unpack(wire) != nil || len(query.Question) != 1 {
 			w.WriteHeader(http.StatusBadRequest)
 			return
+		}
+		if query.Question[0].Name == "game.direct.test." {
+			directAtProtected.Store(true)
 		}
 		code := dns.RcodeServerFailure
 		if strings.HasPrefix(query.Question[0].Name, "missing.") {
@@ -55,6 +59,8 @@ func TestPinnedRuntimeDNSFailsOverOnTLSFailureAndSERVFAIL(t *testing.T) {
 			return
 		}
 		switch query.Question[0].Name {
+		case "game.direct.test.":
+			directAtProtected.Store(true)
 		case "working.example.com.":
 			workingAtDoT.Store(true)
 		case "missing.example.com.":
@@ -66,12 +72,40 @@ func TestPinnedRuntimeDNSFailsOverOnTLSFailureAndSERVFAIL(t *testing.T) {
 	})}
 	go dot.ActivateAndServe()
 	t.Cleanup(func() { dot.Shutdown(); listener.Close() })
-	const tag = "dns-direct"
-	config := map[string]interface{}{"servers": []interface{}{dnspolicy.Server(tag, false)}, "final": tag}
+	const tag = "dns-remote"
+	// This local UDP server stands in for the physical network DNS. It sees
+	// only the direct control name. Test builders separately enforce type local.
+	networkDNS, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var protectedAtDirect, sawDirect atomic.Bool
+	system := &dns.Server{PacketConn: networkDNS, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
+		if len(q.Question) != 1 {
+			return
+		}
+		if q.Question[0].Name == "game.direct.test." {
+			sawDirect.Store(true)
+		} else {
+			protectedAtDirect.Store(true)
+		}
+		a := new(dns.Msg).SetReply(q)
+		a.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: q.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30}, A: net.IPv4(192, 0, 2, 7)}}
+		_ = w.WriteMsg(a)
+	})}
+	go system.ActivateAndServe()
+	t.Cleanup(func() { system.Shutdown(); networkDNS.Close() })
+	config := map[string]interface{}{
+		"servers": []any{dnspolicy.Server(tag, false), map[string]any{"type": "udp", "tag": "dns-direct", "server": "127.0.0.1", "server_port": networkDNS.LocalAddr().(*net.UDPAddr).Port}},
+		"rules":   []any{map[string]any{"domain_suffix": []string{"example.com"}, "action": "route", "server": tag}}, "final": "dns-direct",
+	}
 	dnspolicy.ConfigureRuntimeFailover(config)
 	certificate := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: doh.Certificate().Raw}))
 	for _, item := range config["servers"].([]interface{}) {
 		server := item.(map[string]interface{})
+		if server["tag"] == "dns-direct" {
+			continue
+		}
 		server["server"] = "127.0.0.1"
 		tlsOptions := server["tls"].(map[string]interface{})
 		tlsOptions["server_name"] = "127.0.0.1"
@@ -111,12 +145,15 @@ func TestPinnedRuntimeDNSFailsOverOnTLSFailureAndSERVFAIL(t *testing.T) {
 	for _, want := range []struct {
 		name string
 		code int
-	}{{"missing.example.com.", dns.RcodeNameError}, {"working.example.com.", dns.RcodeSuccess}} {
+	}{{"missing.example.com.", dns.RcodeNameError}, {"working.example.com.", dns.RcodeSuccess}, {"game.direct.test.", dns.RcodeSuccess}} {
 		query := new(dns.Msg).SetQuestion(want.name, dns.TypeA)
 		answer, err := router.Exchange(queryCtx, query, adapter.DNSQueryOptions{})
 		if err != nil || answer == nil || answer.Rcode != want.code || want.code == dns.RcodeSuccess && len(answer.Answer) != 1 {
 			t.Fatalf("%s: want DNS status %d, got %v, %v", want.name, want.code, answer, err)
 		}
+	}
+	if !sawDirect.Load() || directAtProtected.Load() || protectedAtDirect.Load() {
+		t.Fatal("DNS reached a resolver outside the service policy")
 	}
 	if !workingAtDoT.Load() || missingAtDoT.Load() {
 		t.Fatal("DoT must see the failed DoH lookup and must not retry NXDOMAIN")

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -22,12 +23,68 @@ func TestQuickCheckTreatsRedirectLimitAsReachable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	result := invokeQuickCheckURL(ctx, newQuickCheckHTTPClient(nil), server.URL)
+	result := invokeQuickCheckURL(ctx, newQuickCheckHTTPClient(nil), clientQuickCheckService{URL: server.URL})
 	if !result.Success {
 		t.Fatalf("redirecting service should be considered reachable: status=%d err=%q", result.Status, result.Error)
 	}
 	if result.Status != http.StatusFound {
 		t.Fatalf("expected final redirect response, got status %d", result.Status)
+	}
+}
+
+func TestLauncherDiscoveryRequiresExpectedIssuerOnChosenRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		ok     bool
+	}{
+		{"metadata", 200, `{"issuer":"expected"}`, true},
+		{"login wall", 403, `{"issuer":"expected"}`, false},
+		{"captive portal", 200, "<html>sign in</html>", false},
+		{"wrong issuer", 200, `{"issuer":"other"}`, false},
+		{"oversize", 200, `{"issuer":"expected"}` + strings.Repeat(" ", 64<<10), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			for _, mode := range []RoutingMode{RoutingModeBlockedOnly, RoutingModeAllTraffic} {
+				svc := clientQuickCheckService{URL: server.URL, Category: "Direct-Game", DiscoveryIssuer: "expected", EndpointOnly: true}
+				svc.ExpectedRoute = (&App{}).clientQuickCheckExpectedRoute(GlobalAppSettings{RoutingMode: mode}, nil, svc)
+				var direct, proxy *http.Client
+				if mode == RoutingModeAllTraffic {
+					proxy = server.Client()
+				} else {
+					direct = server.Client()
+				}
+				got := runSingleClientQuickCheck(context.Background(), svc, direct, proxy, nil)
+				if got.Success != tc.ok || got.RouteVerified || got.CheckScope != "endpoint_reachability" ||
+					got.ProxyChecked != (proxy != nil) || got.NormalChecked != (direct != nil) {
+					t.Fatalf("%s: %+v", mode, got)
+				}
+			}
+		})
+	}
+}
+
+func TestLauncherDiscoveryCatalog(t *testing.T) {
+	want := map[string]string{"EA app": "accounts.ea.com", "Epic Games": "api.epicgames.dev", "Battle.net": "oauth.battle.net", "Riot Client": "auth.riotgames.com"}
+	for _, svc := range clientQuickCheckServices {
+		host, required := want[svc.Name]
+		if !required {
+			continue
+		}
+		u, err := url.Parse(svc.URL)
+		if err != nil || u.Scheme != "https" || u.Host != host || svc.DiscoveryIssuer == "" || !svc.EndpointOnly || !includeClientQuickCheckService(svc) {
+			t.Fatalf("invalid launcher probe %s", svc.Name)
+		}
+		delete(want, svc.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing launcher diagnostics: %v", want)
 	}
 }
 

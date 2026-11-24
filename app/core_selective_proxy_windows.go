@@ -49,7 +49,7 @@ type windowsSelectiveProxyLease struct {
 func prepareSelectiveProxyRouting(plan traffic.TrafficPlan, vpnProxyAddress, zapretProxyAddress string) (selectiveProxyRoutingLease, error) {
 	script, domains, err := buildSelectiveProxyPAC(
 		vpnProxyAddress, zapretProxyAddress,
-		selectedVPNDomainSuffixes(plan), selectedZapretDomainSuffixes(plan), directDomainSuffixesForPlan(plan),
+		selectiveDomainsForPlan(plan),
 	)
 	if err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func (lease *windowsSelectiveProxyLease) Update(plan traffic.TrafficPlan) error 
 	}
 	script, domains, err := buildSelectiveProxyPAC(
 		lease.vpnProxy, lease.zapretProxy,
-		selectedVPNDomainSuffixes(plan), selectedZapretDomainSuffixes(plan), directDomainSuffixesForPlan(plan),
+		selectiveDomainsForPlan(plan),
 	)
 	if err != nil {
 		return err

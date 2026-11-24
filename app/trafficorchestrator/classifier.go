@@ -179,7 +179,7 @@ func (r compiledServiceRule) portAllows(network Network, port int) bool {
 func (r compiledServiceRule) score(host string, address netip.Addr, hasAddress bool, processName string, fingerprints map[string]struct{}, port int) (int, []string, bool) {
 	score := 0
 	primary := false
-	evidence := make([]string, 0, 5)
+	var evidence []string
 	hostMatched := false
 	fingerprintMatched := false
 	processMatched := false
@@ -199,6 +199,16 @@ func (r compiledServiceRule) score(host string, address netip.Addr, hasAddress b
 	}
 	for fingerprint := range fingerprints {
 		if _, ok := r.fingerprints[fingerprint]; ok {
+			// Generic transports cannot identify a service on a shared edge.
+			switch fingerprint {
+			case "stun", "tls-client-hello", "http-request", "quic-initial":
+				if !hostMatched {
+					_, owned := r.processNames[processName]
+					if host != "" || processName == "" || !owned {
+						continue
+					}
+				}
+			}
 			score += 110
 			primary = true
 			fingerprintMatched = true
@@ -257,7 +267,7 @@ func longestDomainSuffix(host string, suffixes map[string]struct{}) (string, boo
 }
 
 func longestIPPrefixBits(address netip.Addr, prefixes map[netip.Prefix]struct{}) int {
-	if !address.IsValid() {
+	if len(prefixes) == 0 || !address.IsValid() {
 		return -1
 	}
 	for bits := address.BitLen(); bits >= 0; bits-- {

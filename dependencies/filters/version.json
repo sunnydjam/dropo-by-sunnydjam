@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "filters_version": "07112026",
   "updated_at": "2026-11-07T06:18:29.0000000Z",
   "source": "https://github.com/1andrevich/Re-filter-lists",
@@ -11,14 +11,19 @@
       "refilter_ips",
       "discord_ips"
     ],
-    "rationale": "Only specific blocked IP ranges are compiled; broad shared provider ranges pass directly."
+    "rationale": "Only specific blocked IP ranges are compiled; broad shared provider ranges pass directly.",
+    "excluded_shared_domains": [
+      "cloudflare-ech.com",
+      "pages.dev",
+      "workers.dev"
+    ]
   },
   "files": {
     "domains_all": {
       "file": "domains_all.lst",
       "source_url": "https://github.com/1andrevich/Re-filter-lists/releases/download/07112026/domains_all.lst",
-      "sha256": "ec998ad04cf0ba1a483f317f43a93ff43988b35966559ac5ad3675a3d9032e46",
-      "entries": 82146
+      "sha256": "069317630e34c6136fd8f3bdfb20ded5d3f1f82ee0cc60643c9f53a0246def13",
+      "entries": 82144
     },
     "ipsum": {
       "file": "ipsum.lst",
@@ -29,8 +34,8 @@
     "refilter_domains": {
       "file": "refilter_domains.srs",
       "source_url": "https://github.com/1andrevich/Re-filter-lists/releases/download/07112026/domains_all.lst",
-      "sha256": "2c7a33729ed9ddce5f4e92052bfb3e671687597a2a252a76d42c45a6ae2d4bb3",
-      "entries": 82146
+      "sha256": "82278519ce99d8bdf0b0dcd14597a779793106ef3bf79fb174b915a7dd7b9016",
+      "entries": 82144
     },
     "refilter_ips": {
       "file": "refilter_ips.srs",
@@ -41,8 +46,8 @@
     "community_domains": {
       "file": "community_domains.srs",
       "source_url": "https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/community.lst",
-      "sha256": "fa7bc5862e9c799639ba6d810827b8759fedddb8f6d7ae116bce56323b0ad442",
-      "entries": 690
+      "sha256": "db9c18b30967df9375d37b221a884248f24714a21a54d47c4ae0f0e795fdff63",
+      "entries": 689
     },
     "community_ips": {
       "file": "community_ips.srs",

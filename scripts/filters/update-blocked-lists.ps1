@@ -17,6 +17,7 @@ if (-not $RepositoryRoot) {
 }
 
 $FiltersDirectory = Join-Path $RepositoryRoot "dependencies\filters"
+$ExcludedSharedDomains = @("cloudflare-ech.com", "pages.dev", "workers.dev")
 $VersionPath = Join-Path $FiltersDirectory "version.json"
 $RequiredFiles = @(
     "domains_all.lst",
@@ -60,6 +61,9 @@ function Read-NormalizedList {
         }
         if ($Kind -eq "Domain") {
             $value = ($value -replace '^\|\|', '' -replace '\^$', '').TrimStart(".").TrimEnd(".").ToLowerInvariant()
+            if ($value -in $ExcludedSharedDomains) {
+                continue
+            }
             if ($value -notmatch '^[a-z0-9_*-]+(?:\.[a-z0-9_*-]+)+$' -or $value.Contains("*")) {
                 continue
             }
@@ -87,7 +91,7 @@ function Read-NormalizedList {
 
 function Write-Utf8Lines {
     param([string]$Path, [string[]]$Lines)
-    [System.IO.File]::WriteAllLines($Path, $Lines, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($Path, [string]::Join([char]10, $Lines) + [char]10, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Test-SpecificBlockedPrefix {
@@ -161,7 +165,7 @@ function Test-CurrentBundle {
         return $false
     }
     $specificIPRuleSets = @($version.routing_policy.specific_ip_rule_sets)
-    if ([int]$version.schema_version -lt 4 -or
+    if ([int]$version.schema_version -lt 5 -or
         [int]$version.routing_policy.max_ip_host_bits -ne 4 -or
         $specificIPRuleSets -notcontains "refilter_ips" -or
         $specificIPRuleSets -notcontains "discord_ips") {
@@ -306,13 +310,14 @@ try {
         $fileMetadata[$key] = $entry
     }
     $versionPayload = [ordered]@{
-        schema_version  = 4
+        schema_version  = 5
         filters_version = $latestTag
         updated_at      = ([DateTime]$latest.published_at).ToUniversalTime().ToString("o")
         source          = "https://github.com/1andrevich/Re-filter-lists"
         release_url     = [string]$latest.html_url
         max_age_days    = 30
         routing_policy  = [ordered]@{
+            excluded_shared_domains = $ExcludedSharedDomains
             max_ip_host_bits     = 4
             specific_ip_rule_sets = @("refilter_ips", "discord_ips")
             rationale            = "Only specific blocked IP ranges are compiled; broad shared provider ranges pass directly."

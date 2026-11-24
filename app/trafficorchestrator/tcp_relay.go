@@ -21,8 +21,7 @@ const (
 )
 
 // TCPRedirectTarget is immutable metadata registered before a reflected SYN is
-// injected. The accepted relay peer encodes Destination.Addr plus the original
-// client source port, following WinDivert's documented stream reflection model.
+// injected. The accepted relay peer and port identify the registered original flow.
 type TCPRedirectTarget struct {
 	Flow      FlowTuple
 	Host      string
@@ -36,9 +35,9 @@ type TCPRedirectTarget struct {
 type TCPRelayDialer func(context.Context, TCPRedirectTarget) (net.Conn, error)
 
 type tcpRedirectKey struct {
-	localIP          netip.Addr
-	originalRemoteIP netip.Addr
-	clientPort       uint16
+	localIP    netip.Addr
+	peerIP     netip.Addr
+	clientPort uint16
 }
 
 type pendingTCPRedirect struct {
@@ -47,55 +46,72 @@ type pendingTCPRedirect struct {
 }
 
 type TCPRedirectRegistry struct {
-	mu      sync.Mutex
-	now     func() time.Time
-	pending map[tcpRedirectKey]pendingTCPRedirect
-	active  map[tcpRedirectKey]pendingTCPRedirect
+	mu        sync.Mutex
+	now       func() time.Time
+	nextSweep time.Time
+	forward   map[FlowTuple]tcpRedirectKey
+	nextPort  uint16
+	pending   map[tcpRedirectKey]pendingTCPRedirect
+	active    map[tcpRedirectKey]pendingTCPRedirect
 }
 
 func NewTCPRedirectRegistry() *TCPRedirectRegistry {
 	return &TCPRedirectRegistry{
-		now: time.Now, pending: make(map[tcpRedirectKey]pendingTCPRedirect), active: make(map[tcpRedirectKey]pendingTCPRedirect),
+		now: time.Now, forward: make(map[FlowTuple]tcpRedirectKey), nextPort: 49152, pending: make(map[tcpRedirectKey]pendingTCPRedirect), active: make(map[tcpRedirectKey]pendingTCPRedirect),
 	}
 }
 
 func (registry *TCPRedirectRegistry) Register(target TCPRedirectTarget) error {
+	_, err := registry.registerPacket(target, true)
+	return err
+}
+
+func (registry *TCPRedirectRegistry) registerPacket(target TCPRedirectTarget, initialSYN bool) (tcpRedirectKey, error) {
 	if registry == nil || !target.Flow.valid() || target.Flow.Network != NetworkTCP {
-		return errors.New("valid TCP redirect flow is required")
+		return tcpRedirectKey{}, errors.New("valid TCP redirect flow is required")
 	}
-	if (target.Route != ServiceRouteVPN && target.Route != ServiceRouteZapret) || target.ServiceID == "" {
-		return errors.New("TCP redirect target must be a named VPN or Zapret service")
+	if (target.Route != ServiceRouteVPN && target.Route != ServiceRouteZapret && !(target.Route == ServiceRouteDirect && selectiveVPNFakeIPv4Prefix.Contains(target.Flow.Destination) && target.Host != "")) || target.ServiceID == "" {
+		return tcpRedirectKey{}, errors.New("TCP redirect target must be a named VPN or Zapret service")
 	}
 	if target.Host != "" && normalizeHost(target.Host) == "" {
-		return errors.New("TCP redirect host is invalid")
-	}
-	key := tcpRedirectKey{
-		localIP:          target.Flow.Source.Unmap(),
-		originalRemoteIP: target.Flow.Destination.Unmap(),
-		clientPort:       target.Flow.SourcePort,
+		return tcpRedirectKey{}, errors.New("TCP redirect host is invalid")
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	now := registry.now()
-	registry.pruneLocked(now)
-	target.Host = normalizeHost(target.Host)
-	if existing, ok := registry.active[key]; ok {
-		if sameTCPRedirectIdentity(existing.target, target) {
-			return nil
+	key, exists := registry.forward[target.Flow]
+	registry.pruneLocked(key, now)
+	if exists {
+		if entry, ok := registry.lookupLocked(key, now); ok {
+			if sameTCPRedirectIdentity(entry, target) {
+				return key, nil
+			}
+			return tcpRedirectKey{}, errors.New("TCP route changed for active socket")
 		}
-		return errors.New("active TCP redirect tuple belongs to a different target")
 	}
-	if existing, ok := registry.pending[key]; ok {
-		if sameTCPRedirectIdentity(existing.target, target) {
-			return nil
-		}
-		return errors.New("TCP redirect tuple already belongs to a different target")
+	if !initialSYN {
+		return tcpRedirectKey{}, errors.New("TCP redirect flow did not start with an initial SYN")
 	}
 	if len(registry.pending) >= maxPendingTCPRedirects {
-		return errors.New("TCP redirect registry is full")
+		return tcpRedirectKey{}, errors.New("TCP redirect registry is full")
 	}
-	registry.pending[key] = pendingTCPRedirect{target: target, expires: now.Add(tcpRedirectPendingTTL)}
-	return nil
+	key = tcpRedirectKey{localIP: target.Flow.Source.Unmap(), peerIP: relayPeer(target.Flow.Source.Unmap()), clientPort: target.Flow.SourcePort}
+	for n := 0; n <= maxPendingTCPRedirects+maxActiveTCPRedirects; n++ {
+		_, pending := registry.pending[key]
+		_, active := registry.active[key]
+		if !pending && !active {
+			target.Host = normalizeHost(target.Host)
+			registry.pending[key] = pendingTCPRedirect{target: target, expires: now.Add(tcpRedirectPendingTTL)}
+			registry.forward[target.Flow] = key
+			return key, nil
+		}
+		key.clientPort = registry.nextPort
+		registry.nextPort++
+		if registry.nextPort < 49152 {
+			registry.nextPort = 49152
+		}
+	}
+	return tcpRedirectKey{}, errors.New("no TCP reflection port available")
 }
 
 func sameTCPRedirectIdentity(left, right TCPRedirectTarget) bool {
@@ -104,26 +120,16 @@ func sameTCPRedirectIdentity(left, right TCPRedirectTarget) bool {
 	return left.Flow == right.Flow && left.ServiceID == right.ServiceID && left.Route == right.Route
 }
 
-func (registry *TCPRedirectRegistry) contains(target TCPRedirectTarget) bool {
-	if registry == nil || !target.Flow.valid() || target.Flow.Network != NetworkTCP {
-		return false
-	}
-	key := tcpRedirectKey{
-		localIP:          target.Flow.Source.Unmap(),
-		originalRemoteIP: target.Flow.Destination.Unmap(),
-		clientPort:       target.Flow.SourcePort,
-	}
+func (registry *TCPRedirectRegistry) targetForFlow(flow FlowTuple) (TCPRedirectTarget, bool) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	key, ok := registry.forward[flow]
+	if !ok {
+		return TCPRedirectTarget{}, false
+	}
 	now := registry.now()
-	registry.pruneLocked(now)
-	if entry, ok := registry.active[key]; ok {
-		return sameTCPRedirectIdentity(entry.target, target)
-	}
-	if entry, ok := registry.pending[key]; ok {
-		return sameTCPRedirectIdentity(entry.target, target)
-	}
-	return false
+	registry.pruneLocked(key, now)
+	return registry.lookupLocked(key, now)
 }
 
 // ConsumeAccepted resolves one reflected connection exactly once. A normal LAN
@@ -142,17 +148,18 @@ func (registry *TCPRedirectRegistry) ConsumeAccepted(local, remote net.Addr) (TC
 	if !localOK || !remoteOK {
 		return TCPRedirectTarget{}, false
 	}
-	key := tcpRedirectKey{localIP: localAddr.Unmap(), originalRemoteIP: remoteAddr.Unmap(), clientPort: uint16(remoteTCP.Port)}
+	key := tcpRedirectKey{localIP: localAddr.Unmap(), peerIP: remoteAddr.Unmap(), clientPort: uint16(remoteTCP.Port)}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	now := registry.now()
-	registry.pruneLocked(now)
+	registry.pruneLocked(key, now)
 	entry, ok := registry.pending[key]
 	if !ok {
 		return TCPRedirectTarget{}, false
 	}
 	delete(registry.pending, key)
 	if len(registry.active) >= maxActiveTCPRedirects {
+		delete(registry.forward, entry.target.Flow)
 		return TCPRedirectTarget{}, false
 	}
 	entry.expires = now.Add(tcpRedirectActiveTTL)
@@ -160,15 +167,19 @@ func (registry *TCPRedirectRegistry) ConsumeAccepted(local, remote net.Addr) (TC
 	return entry.target, true
 }
 
-func (registry *TCPRedirectRegistry) lookupReflected(localIP, originalRemoteIP netip.Addr, clientPort uint16) (TCPRedirectTarget, bool) {
-	if registry == nil || !localIP.IsValid() || !originalRemoteIP.IsValid() || clientPort == 0 {
+func (registry *TCPRedirectRegistry) lookupReflected(localIP, peerIP netip.Addr, clientPort uint16) (TCPRedirectTarget, bool) {
+	if registry == nil || !localIP.IsValid() || !peerIP.IsValid() || clientPort == 0 {
 		return TCPRedirectTarget{}, false
 	}
-	key := tcpRedirectKey{localIP: localIP.Unmap(), originalRemoteIP: originalRemoteIP.Unmap(), clientPort: clientPort}
+	key := tcpRedirectKey{localIP: localIP.Unmap(), peerIP: peerIP.Unmap(), clientPort: clientPort}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	now := registry.now()
-	registry.pruneLocked(now)
+	registry.pruneLocked(key, now)
+	return registry.lookupLocked(key, now)
+}
+
+func (registry *TCPRedirectRegistry) lookupLocked(key tcpRedirectKey, now time.Time) (TCPRedirectTarget, bool) {
 	entry, ok := registry.active[key]
 	if ok {
 		entry.expires = now.Add(tcpRedirectActiveTTL)
@@ -186,15 +197,29 @@ func (registry *TCPRedirectRegistry) lookupReflected(localIP, originalRemoteIP n
 	return entry.target, true
 }
 
-func (registry *TCPRedirectRegistry) pruneLocked(now time.Time) {
+func (registry *TCPRedirectRegistry) pruneLocked(key tcpRedirectKey, now time.Time) {
+	if now.Before(registry.nextSweep) {
+		if entry, ok := registry.pending[key]; ok && !now.Before(entry.expires) {
+			delete(registry.pending, key)
+			delete(registry.forward, entry.target.Flow)
+		}
+		if entry, ok := registry.active[key]; ok && !now.Before(entry.expires) {
+			delete(registry.active, key)
+			delete(registry.forward, entry.target.Flow)
+		}
+		return
+	}
+	registry.nextSweep = now.Add(time.Second)
 	for key, entry := range registry.pending {
 		if !now.Before(entry.expires) {
 			delete(registry.pending, key)
+			delete(registry.forward, entry.target.Flow)
 		}
 	}
 	for key, entry := range registry.active {
 		if !now.Before(entry.expires) {
 			delete(registry.active, key)
+			delete(registry.forward, entry.target.Flow)
 		}
 	}
 }
@@ -240,7 +265,7 @@ func StartTCPRelayWithDialer(registry *TCPRedirectRegistry, dialer TCPRelayDiale
 	if dialer == nil {
 		return nil, errors.New("TCP relay dialer is required")
 	}
-	listener, err := net.Listen("tcp4", "0.0.0.0:0")
+	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		return nil, fmt.Errorf("listen TCP redirect relay: %w", err)
 	}

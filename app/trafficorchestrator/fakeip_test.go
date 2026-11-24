@@ -72,8 +72,8 @@ func TestFakeIPDirectoryAppliesTypedRouteRevision(t *testing.T) {
 	if _, ok := directory.ResolveHost("m.youtube.com"); ok {
 		t.Fatal("direct route received a new fake IP after revision")
 	}
-	if _, ok := directory.LookupAddress(target.Address); ok {
-		t.Fatal("stale fake IP remained active after service became direct")
+	if stale, ok := directory.LookupAddress(target.Address); !ok || stale.Route != ServiceRouteDirect || stale.Host != target.Host {
+		t.Fatal("cached fake IP lost its terminal direct route")
 	}
 }
 
@@ -131,13 +131,14 @@ func TestProcessorRedirectsExactZapretFakeIPFromInitialSYN(t *testing.T) {
 	if decision.Dropped || !decision.Transformed || decision.ServiceID != "discord" || decision.Route != ServiceRouteZapret {
 		t.Fatalf("fake-IP Zapret decision = %+v", decision)
 	}
-	if !registry.contains(TCPRedirectTarget{
+	expected := TCPRedirectTarget{
 		Flow: FlowTuple{
 			Network: NetworkTCP, Source: testMustAddr("10.0.0.1"), SourcePort: 50000,
 			Destination: target.Address, DestinationPort: 443,
 		},
 		Host: "updates.discord.com", ServiceID: "discord", Route: ServiceRouteZapret,
-	}) {
+	}
+	if got, ok := registry.targetForFlow(expected.Flow); !ok || got != expected {
 		t.Fatal("Zapret fake-IP redirect target was not registered")
 	}
 }
@@ -168,13 +169,14 @@ func TestProcessorRedirectsFakeIPFromInitialSYN(t *testing.T) {
 	if decision.Dropped || !decision.Transformed || decision.ServiceID != "youtube" || decision.Route != ServiceRouteVPN || decision.Direction != PacketDirectionInbound {
 		t.Fatalf("fake-IP VPN decision = %+v", decision)
 	}
-	if !registry.contains(TCPRedirectTarget{
+	expected := TCPRedirectTarget{
 		Flow: FlowTuple{
 			Network: NetworkTCP, Source: testMustAddr("10.0.0.1"), SourcePort: 50000,
 			Destination: target.Address, DestinationPort: 443,
 		},
 		Host: "www.youtube.com", ServiceID: "youtube", Route: ServiceRouteVPN,
-	}) {
+	}
+	if got, ok := registry.targetForFlow(expected.Flow); !ok || got != expected {
 		t.Fatal("fake-IP redirect target was not registered")
 	}
 }
