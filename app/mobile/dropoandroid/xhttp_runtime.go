@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	core "dropocore"
+	"dropocore/residential"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -92,6 +94,10 @@ type xhttpBridge struct {
 }
 
 func newXHTTPBridge(config *xcore.Config, protect func(int32) error, dnsServers func() []string, ownerEpochs ...uint64) (*xhttpBridge, error) {
+	return newXHTTPBridgeWithDirectory(config, protect, dnsServers, nil, ownerEpochs...)
+}
+
+func newXHTTPBridgeWithDirectory(config *xcore.Config, protect func(int32) error, dnsServers func() []string, directory *residential.Client, ownerEpochs ...uint64) (*xhttpBridge, error) {
 	epoch := currentXHTTPEpoch()
 	if len(ownerEpochs) > 0 {
 		epoch = ownerEpochs[0]
@@ -100,6 +106,7 @@ func newXHTTPBridge(config *xcore.Config, protect func(int32) error, dnsServers 
 		return nil, errors.New("Android XHTTP runtime session was cancelled")
 	}
 	session := newXHTTPSocketSession(protect, dnsServers)
+	session.directory = directory
 	managed := splithttp.NewManagedSession(session.ctx)
 	session.ctx = splithttp.ContextWithManagedSession(session.ctx, managed)
 	instance, err := xcore.NewWithContext(session.ctx, config)
@@ -452,7 +459,21 @@ func normalizeXHTTPConfig(content string, platform PlatformInterface, start bool
 		port, username, password := 1, "dropo-check", "dropo-check"
 		if start {
 			physicalDNS := func() []string { return physicalXHTTPDNSServers(platform) }
-			bridge, err := newXHTTPBridge(built, platform.AutoDetectInterfaceControl, physicalDNS, ownerEpochs...)
+			var out map[string]any
+			if json.Unmarshal(placeholder.XrayOutbound, &out) != nil {
+				return "", nil, errXHTTPConfig
+			}
+			directory, _, err := residential.FromOutbound(out)
+			if err != nil {
+				return "", nil, errXHTTPConfig
+			}
+			if directory != nil {
+				if err := directory.UsePlatformRoots(roots); err != nil {
+					return "", nil, errXHTTPConfig
+				}
+				directory.CacheAt(core.ResidentialCacheDirectory())
+			}
+			bridge, err := newXHTTPBridgeWithDirectory(built, platform.AutoDetectInterfaceControl, physicalDNS, directory, ownerEpochs...)
 			if err != nil {
 				return "", nil, err
 			}

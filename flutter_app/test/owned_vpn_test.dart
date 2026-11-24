@@ -56,6 +56,24 @@ class _RestoreBridge implements CoreBridge {
   final added = <String>[];
   final restoreReferences = <String>[];
   final restoreNodeIDs = <String>[];
+  bool autoSelect = true;
+  final moves = <String>[];
+  @override
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async =>
+      VpnSourcesSnapshot.fromJson({
+        'sources': references,
+        'autoSelect': autoSelect,
+        'running': false,
+      });
+  @override
+  Future<Map<String, dynamic>> moveVpnSource(String id, int index) async {
+    final previous = references.indexWhere((s) => s['id'] == id);
+    references.insert(index, references.removeAt(previous));
+    moves.add(id);
+    autoSelect = false;
+    return {'success': true};
+  }
+
   bool deleteAfterSnapshot = false;
   bool replaceNodeAfterSnapshot = false;
   @override
@@ -236,6 +254,51 @@ void main() {
       expect(bridge.restoreNodeIDs, ['', '']);
     },
   );
+  test(
+    'active Turbo wins on launch, Free survives reconnect until relaunch',
+    () async {
+      seed({
+        'freeKey': 'cached-free',
+        'boostKey': 'cached-boost',
+        'boostUntil': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 86400,
+      });
+      final bridge = _RestoreBridge([
+        {'id': 'free', 'public_catalog_id': 'dropo-individual-free'},
+        {'id': 'paid', 'public_catalog_id': 'dropo-individual-boost'},
+      ]);
+      final session = client();
+      await session.restore(bridge);
+      expect(bridge.moves, ['paid']);
+      await bridge.moveVpnSource('free', 0);
+      await session.restore(bridge);
+      expect(bridge.moves, ['paid', 'free']);
+      await client().restore(bridge);
+      expect(bridge.moves, ['paid', 'free', 'paid']);
+      expect(bridge.references.first['id'], 'paid');
+      expect(bridge.autoSelect, false);
+    },
+  );
+  test('expired or disabled Turbo cannot replace Free at launch', () async {
+    for (final disabled in [false, true]) {
+      seed({
+        'freeKey': 'cached-free',
+        'boostKey': 'cached-boost',
+        'boostUntil':
+            DateTime.now().millisecondsSinceEpoch ~/ 1000 +
+            (disabled ? 3600 : -1),
+      });
+      final bridge = _RestoreBridge([
+        {'id': 'free', 'public_catalog_id': 'dropo-individual-free'},
+        {
+          'id': 'paid',
+          'public_catalog_id': 'dropo-individual-boost',
+          'disabled': disabled,
+        },
+      ]);
+      await client().restore(bridge);
+      expect(bridge.moves, isEmpty);
+    }
+  });
   test(
     'offline restore never recreates a removed family or pending deletion',
     () async {

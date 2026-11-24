@@ -171,6 +171,7 @@ void main() {
 
   tearDown(() {
     debugMobileShellOverride = null;
+    debugAndroidPlatformOverride = null;
     debugAccountTransport = null;
     debugAccountSessionToken = null;
     TestWidgetsFlutterBinding.instance.platformDispatcher.views.first
@@ -183,7 +184,8 @@ void main() {
     testWidgets('Turbo offer before connection follows $tier entitlement', (
       tester,
     ) async {
-      final api = _DisplayTransport();
+      final api = _DisplayTransport()
+        ..firstProfile = Completer<Map<String, dynamic>>();
       if (tier != 'free') {
         api.turboUntil = DateTime.now().add(
           Duration(days: tier == 'turbo' ? 1 : -1),
@@ -192,6 +194,10 @@ void main() {
       debugAccountTransport = api;
       debugAccountSessionToken = 'fixture-restored-session';
       await _pump(tester, size: const Size(1200, 820), mode: 'all_traffic');
+      expect(api.profileReads, 1);
+      expect(find.byKey(const ValueKey('free-plan-banner')), findsNothing);
+      api.firstProfile!.complete(api.profile);
+      await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('free-plan-banner')),
         tier == 'turbo' ? findsNothing : findsOneWidget,
@@ -206,6 +212,25 @@ void main() {
     });
   }
 
+  testWidgets('Android purchase button stays hidden while Turbo restores', (
+    tester,
+  ) async {
+    debugAndroidPlatformOverride = true;
+    final api = _DisplayTransport()
+      ..firstProfile = Completer<Map<String, dynamic>>()
+      ..turboUntil = DateTime.now().add(const Duration(days: 1));
+    debugAccountTransport = api;
+    debugAccountSessionToken = 'fixture-restored-session';
+    await _pump(tester, size: const Size(390, 844), mobile: true);
+    final purchase = find.byKey(const ValueKey('android-buy-boost'));
+    expect(api.profileReads, 1);
+    expect(purchase, findsNothing);
+    api.firstProfile!.complete(api.profile);
+    await tester.pumpAndSettle();
+    expect(purchase, findsNothing);
+    expect(find.text(api.name), findsOneWidget);
+  });
+
   for (final (name, size, mobile, scale) in [
     ('windows', const Size(1200, 820), false, 1.0),
     ('compact', const Size(684, 461), false, 1.0),
@@ -216,6 +241,7 @@ void main() {
     testWidgets(
       'bottom Turbo card fits $name and keeps the primary action reachable',
       (tester) async {
+        debugAccountTransport = _DisplayTransport();
         await _pump(
           tester,
           size: size,
@@ -436,6 +462,7 @@ void main() {
         'Аккаунт',
       );
       expect(service.paths, ['/v1/capabilities', '/v1/me']);
+      expect(find.byKey(const ValueKey('free-plan-banner')), findsNothing);
       expect(
         find.byKey(const ValueKey('home-connect')).hitTestable(),
         findsOneWidget,

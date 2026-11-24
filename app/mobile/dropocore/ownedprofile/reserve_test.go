@@ -22,12 +22,15 @@ func TestManagedGroupsKeepPersonalSourcesAndOwnReserveOrder(t *testing.T) {
 		{ID: "turbo-relay", Provider: BoostReserve, URI: boostRelay},
 	}
 	plan := Candidates(sources, time.Unix(1000, 0))
-	want := []string{"personal", Boost + "-fi-tcp", Boost + MainSuffix, Boost + ExtraSuffix, Free + "-lv-quic", Free + MainSuffix, Free + ExtraSuffix}
+	want := []string{"personal",
+		MoscowCandidateID(Boost, XHTTP), MoscowCandidateID(Boost, Reality), MoscowCandidateID(Boost, Hysteria), Boost + "-fi-tcp", Boost + MainSuffix, Boost + ExtraSuffix, Boost + ResidentialSuffix,
+		MoscowCandidateID(Free, XHTTP), MoscowCandidateID(Free, Reality), MoscowCandidateID(Free, Hysteria), Free + "-lv-quic", Free + MainSuffix, Free + ExtraSuffix, Free + ResidentialSuffix,
+	}
 	if len(plan) != len(want) {
 		t.Fatalf("expected %d candidates, got %d", len(want), len(plan))
 	}
 	for i, candidate := range plan {
-		if candidate.ID != want[i] || (i >= 1 && i <= 3 && candidate.OwnerID != "turbo") || (i >= 4 && candidate.OwnerID != "free") {
+		if candidate.ID != want[i] || (i >= 1 && i <= 7 && candidate.OwnerID != "turbo") || (i >= 8 && candidate.OwnerID != "free") {
 			t.Fatalf("incorrect candidate ownership or order at index %d", i)
 		}
 	}

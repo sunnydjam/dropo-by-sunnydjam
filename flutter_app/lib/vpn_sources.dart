@@ -112,6 +112,9 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   String recentlyAddedId = '';
   List<VpnSourceInfo> sources = const [];
   List<PublicVpnProviderInfo> providers = const [];
+  final _expandedManagedSources = <String>{};
+  Timer? _routeRefreshTimer;
+  bool _routeRefreshInFlight = false;
 
   @override
   void initState() {
@@ -121,6 +124,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
 
   @override
   void dispose() {
+    _routeRefreshTimer?.cancel();
     controller.dispose();
     nameController.dispose();
     nameFocus.dispose();
@@ -148,6 +152,61 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
 
   bool _hasPersonalSource(List<VpnSourceInfo> value) =>
       value.any((source) => !source.isPublic);
+
+  void _setManagedRoutesExpanded(String id, bool expanded) {
+    if (expanded) {
+      _expandedManagedSources.add(id);
+      _routeRefreshTimer ??= Timer.periodic(const Duration(seconds: 2), (_) {
+        unawaited(_refreshVisibleRoutes());
+      });
+      unawaited(_refreshVisibleRoutes());
+    } else {
+      _expandedManagedSources.remove(id);
+      if (_expandedManagedSources.isEmpty) {
+        _routeRefreshTimer?.cancel();
+        _routeRefreshTimer = null;
+      }
+    }
+  }
+
+  Future<void> _refreshVisibleRoutes() async {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (busy ||
+        loading ||
+        !widget.enabled ||
+        _routeRefreshInFlight ||
+        !sources.any((source) => _expandedManagedSources.contains(source.id)) ||
+        lifecycle == AppLifecycleState.paused ||
+        lifecycle == AppLifecycleState.hidden ||
+        ModalRoute.isCurrentOf(context) == false) {
+      return;
+    }
+    final before = sources;
+    _routeRefreshInFlight = true;
+    try {
+      final snapshot = await widget.bridge.vpnSourcesSnapshot().timeout(
+        const Duration(seconds: 3),
+      );
+      if (!mounted ||
+          busy ||
+          !identical(sources, before) ||
+          _expandedManagedSources.isEmpty) {
+        return;
+      }
+      setState(() {
+        sources = snapshot.sources;
+        running = snapshot.running;
+        autoSelect = snapshot.autoSelect;
+        autoSelectSupported = snapshot.autoSelectSupported;
+        fallbackSupported = snapshot.fallbackSupported;
+        sourcesFresh = true;
+      });
+    } catch (_) {
+      // Keep the last visible snapshot. Observation age still expires normally.
+    } finally {
+      _routeRefreshInFlight = false;
+    }
+  }
 
   Future<bool> _load({bool refreshCatalog = true}) async {
     if (refreshCatalog) {
@@ -221,6 +280,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
     String success = 'Настройки источников сохранены.',
     String Function(Map<String, dynamic> result)? successText,
     bool metadataOnly = false,
+    bool selectsSource = false,
     String confirmationTitle = 'Применить изменение?',
     bool leavesDisconnected = false,
   }) async {
@@ -266,9 +326,18 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
     });
     var completed = false;
     try {
+      final apply =
+          selectsSource &&
+              sources.any(
+                (s) =>
+                    s.publicCatalogId == 'dropo-individual-boost' &&
+                    !s.disabled,
+              )
+          ? () => _ownedVPNClient._applyUserSourceChoice(operation)
+          : operation;
       final result = !metadataOnly && widget.onApplyChange != null
-          ? await widget.onApplyChange!(operation)
-          : await operation();
+          ? await widget.onApplyChange!(apply)
+          : await apply();
       if (!mounted) return false;
       if (result['success'] != true) {
         if (!metadataOnly) {
@@ -569,6 +638,18 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
   Widget build(BuildContext context) {
     final disabled = busy || loading || !widget.enabled;
     final controlsDisabled = disabled || !sourcesFresh;
+    // Product cards stay in tariff order even when Free is selected.
+    // Checkmarks and the priority editor use the actual native order.
+    final cards = sources.toList();
+    final turboIndex = cards.indexWhere(
+      (s) => s.publicCatalogId == 'dropo-individual-boost',
+    );
+    final freeIndex = cards.indexWhere(
+      (s) => s.publicCatalogId == 'dropo-individual-free',
+    );
+    if (freeIndex >= 0 && turboIndex > freeIndex) {
+      cards.insert(freeIndex, cards.removeAt(turboIndex));
+    }
     final firstEnabled = sources
         .where((source) => !source.disabled)
         .firstOrNull;
@@ -781,6 +862,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                 : () => _changeSource(
                     () => widget.bridge.moveVpnSource(recentlyAddedId, 0),
                     'Выбираем подписку…',
+                    selectsSource: true,
                   ),
             child: Text(
               _tr(
@@ -818,6 +900,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                   : () => _changeSource(
                       widget.bridge.enableVpnSourceAutoSelect,
                       'Включаем автовыбор…',
+                      selectsSource: true,
                       success:
                           'Автовыбор включён. Сервер внутри подписки сохраняется.',
                       confirmationTitle: 'Включить автовыбор?',
@@ -835,7 +918,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
               style: const TextStyle(color: _atlasMint),
             ),
           ),
-        for (final source in sources)
+        for (final source in cards)
           _VpnSourceTile(
             key: ValueKey('vpn-source-${source.id}'),
             source: source,
@@ -858,6 +941,8 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                   ),
             ),
             onNode: (node) => _selectNode(source, node),
+            onManagedRoutesExpanded: (expanded) =>
+                _setManagedRoutesExpanded(source.id, expanded),
             onIngress: (ingress) => _changeSource(
               () => widget.bridge.callMap(
                 'SetManagedIngress',
@@ -865,11 +950,13 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                 timeout: const Duration(minutes: 3),
               ),
               'Сохраняем способ подключения…',
+              selectsSource: ingress.isNotEmpty,
               confirmationTitle: 'Изменить способ подключения?',
             ),
             onSelect: () => _changeSource(
               () => widget.bridge.moveVpnSource(source.id, 0),
               'Выбираем подписку…',
+              selectsSource: true,
               confirmationTitle: 'Подключиться через «${source.name}»?',
             ),
             onRemove: () => _remove(source),
@@ -951,6 +1038,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                                 i - 1,
                               ),
                               'Сохраняем порядок…',
+                              selectsSource: true,
                             ),
                       child: Text(_tr(context, 'Выше', 'Move up')),
                     ),
@@ -964,6 +1052,7 @@ class _VpnSourcesDialogState extends State<VpnSourcesDialog> {
                                 i + 1,
                               ),
                               'Сохраняем порядок…',
+                              selectsSource: true,
                             ),
                       child: Text(_tr(context, 'Ниже', 'Move down')),
                     ),
@@ -1097,6 +1186,153 @@ String _vpnServerCountLabel(int count) {
   return '$value $suffix';
 }
 
+class _ManagedSourceRoutes extends StatelessWidget {
+  const _ManagedSourceRoutes({
+    required this.source,
+    required this.turbo,
+    required this.active,
+    required this.running,
+    required this.onPreference,
+  });
+
+  final VpnSourceInfo source;
+  final bool turbo, active, running;
+  final ValueChanged<String>? onPreference;
+
+  static const methods = [
+    ('xhttp', 'VLESS/XHTTP'),
+    ('tcp', 'VLESS TCP/REALITY'),
+    ('hysteria2', 'Hysteria 2 / QUIC'),
+  ];
+
+  Widget _route(
+    BuildContext context,
+    String method,
+    String label, {
+    required bool moscow,
+  }) {
+    final route = moscow ? 'moscow-$method' : method;
+    final selected = moscow && source.managedIngress == method;
+    final current = active && source.activeIngress == route;
+    final snapshot = source.ingressResponses[route];
+    final status = switch (snapshot?.observationAt(DateTime.now())) {
+      VpnResponseObservation.available => _tr(
+        context,
+        '${snapshot!.latencyMs} мс',
+        '${snapshot.latencyMs} ms',
+      ),
+      VpnResponseObservation.failed => _tr(
+        context,
+        'Нет ответа',
+        'No response',
+      ),
+      VpnResponseObservation.stale => _tr(
+        context,
+        'Замер устарел',
+        'Check expired',
+      ),
+      _ when running && moscow => _tr(
+        context,
+        'Ожидает замера',
+        'Waiting for a check',
+      ),
+      _ when running => _tr(context, 'Ещё не проверялся', 'Not checked yet'),
+      _ => '',
+    };
+    final detail = [
+      if (current) _tr(context, 'Активен сейчас', 'Active now'),
+      if (status.isNotEmpty) status,
+    ].join(' · ');
+    return ListTile(
+      key: ValueKey(
+        moscow
+            ? 'source-ingress-${source.id}-$method'
+            : 'source-direct-${source.id}-$method',
+      ),
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        moscow
+            ? selected
+                  ? Icons.radio_button_checked
+                  : Icons.radio_button_off
+            : current
+            ? Icons.check_circle_outline
+            : Icons.alt_route,
+        size: 18,
+        color: current ? _atlasMint : null,
+      ),
+      title: Text(label),
+      subtitle: detail.isEmpty
+          ? null
+          : Text(
+              detail,
+              style: TextStyle(color: current ? _atlasMint : _atlasMuted),
+            ),
+      selected: selected,
+      onTap: !moscow || selected || onPreference == null
+          ? null
+          : () => onPreference!(method),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final automatic = source.managedIngress.isEmpty;
+    final country = turbo
+        ? _tr(context, 'Финляндия', 'Finland')
+        : _tr(context, 'Латвия', 'Latvia');
+    const heading = TextStyle(fontWeight: FontWeight.w700);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ListTile(
+          key: ValueKey('source-ingress-${source.id}-'),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          leading: Icon(
+            automatic ? Icons.radio_button_checked : Icons.radio_button_off,
+            size: 18,
+          ),
+          title: Text(
+            _tr(
+              context,
+              'Автоматически по отклику',
+              'Automatic by response time',
+            ),
+          ),
+          selected: automatic,
+          onTap: automatic || onPreference == null
+              ? null
+              : () => onPreference!(''),
+        ),
+        const SizedBox(height: 6),
+        Text(_tr(context, 'Туннель МСК', 'Moscow tunnel'), style: heading),
+        for (final (method, label) in methods)
+          _route(context, method, label, moscow: true),
+        const Divider(height: 18),
+        Text(
+          _tr(context, 'Напрямую · $country', 'Direct · $country'),
+          style: heading,
+        ),
+        Text(
+          _tr(
+            context,
+            'Проверяется после отказа всех входов МСК',
+            'Checked after all Moscow routes fail',
+          ),
+          style: const TextStyle(color: _atlasMuted, fontSize: 12),
+        ),
+        for (final (method, label) in methods)
+          _route(context, method, label, moscow: false),
+        _route(context, 'residential-xhttp',
+          _tr(context, 'Резервный шлюз · $country', 'Residential reserve · $country'),
+          moscow: false),
+      ],
+    );
+  }
+}
+
 class _VpnSourceTile extends StatefulWidget {
   const _VpnSourceTile({
     super.key,
@@ -1110,6 +1346,7 @@ class _VpnSourceTile extends StatefulWidget {
     required this.onEnabled,
     required this.onNode,
     required this.onIngress,
+    required this.onManagedRoutesExpanded,
     required this.onSelect,
     required this.onRemove,
     required this.onRename,
@@ -1124,6 +1361,7 @@ class _VpnSourceTile extends StatefulWidget {
   final ValueChanged<bool> onEnabled;
   final ValueChanged<int> onNode;
   final ValueChanged<String> onIngress;
+  final ValueChanged<bool> onManagedRoutesExpanded;
   final VoidCallback onSelect, onRemove, onRename, onRefresh;
   final VoidCallback? onOrder;
   final Future<bool> Function(String nodeId, bool favorite) onFavorite;
@@ -1303,7 +1541,10 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
               ),
               TextButton(
                 key: PageStorageKey('source-details-${source.id}'),
-                onPressed: () => setState(() => expanded = !expanded),
+                onPressed: () {
+                  setState(() => expanded = !expanded);
+                  if (managed) widget.onManagedRoutesExpanded(expanded);
+                },
                 style: TextButton.styleFrom(
                   foregroundColor: _atlasMuted,
                   minimumSize: const Size(48, 48),
@@ -1385,43 +1626,17 @@ class _VpnSourceTileState extends State<_VpnSourceTile> {
           ],
           if (expanded) ...[
             const SizedBox(height: 8),
-            if (managed) ...[
-              Text(
-                _tr(context, 'Способы подключения', 'Connection methods'),
-                style: const TextStyle(fontWeight: FontWeight.w600),
+            if (family != null)
+              _ManagedSourceRoutes(
+                source: source,
+                turbo: family.endsWith('-boost'),
+                active: active,
+                running: widget.statusKnown && widget.running == true,
+                onPreference:
+                    widget.busy || !widget.statusKnown || source.disabled
+                    ? null
+                    : widget.onIngress,
               ),
-              for (final (id, label) in [
-                ('', _tr(context, 'Автоматически', 'Automatic')),
-                ('xhttp', 'VLESS/XHTTP'),
-                ('tcp', 'VLESS TCP/REALITY'),
-                ('hysteria2', 'Hysteria 2 / QUIC'),
-              ])
-                ListTile(
-                  key: ValueKey('source-ingress-${source.id}-$id'),
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(
-                    source.managedIngress == id
-                        ? Icons.radio_button_checked
-                        : Icons.radio_button_off,
-                  ),
-                  title: Text(label),
-                  subtitle:
-                      active && id.isNotEmpty && source.activeIngress == id
-                      ? Text(
-                          _tr(context, 'Активен сейчас', 'Active now'),
-                          style: const TextStyle(color: _atlasMint),
-                        )
-                      : null,
-                  selected: source.managedIngress == id,
-                  onTap:
-                      widget.busy ||
-                          !widget.statusKnown ||
-                          source.disabled ||
-                          source.managedIngress == id
-                      ? null
-                      : () => widget.onIngress(id),
-                ),
-            ],
             Wrap(
               spacing: 8,
               runSpacing: 4,

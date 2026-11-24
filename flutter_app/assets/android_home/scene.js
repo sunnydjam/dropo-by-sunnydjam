@@ -14,11 +14,11 @@
   const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
   const mix = (a, b, p) => a + (b - a) * p;
   const smooth = x => { const p = clamp(x); return p * p * (3 - 2 * p); };
-  const artInfo = {
-    waiting: { crop: [.13716108, .04066986, .63955343, .90271132], aspect: 1.41147132 },
-    flying: { crop: [.02472089, .14593301, .93859649, .73763955], aspect: .78589635 },
-    puzzled: { crop: [.17224880, .03508772, .63636364, .93062201], aspect: 1.46240602 },
-  };
+  // Eye midpoints in the trimmed images, matching Flutter's sprite registration.
+  const eyes = {waiting:[.585,.525], flying:[.77,.36], puzzled:[.54,.37],
+    rising:[.72,.39], pushOff:[.75,.29], recovering:[.55,.39]};
+  const spriteKinds = Object.keys(eyes);
+  const artInfo = {};
   let host = { connected: false, connecting: false, disconnecting: false, busy: true,
     enabled: false, canCancel: false, active: false, motion: true, mode: 'blocked_only',
     language: 'ru', source: '', responseMs: null, message: '', error: false };
@@ -140,13 +140,22 @@
       d: mix(big, Math.min(240, w * .66), zoom), big };
   }
   function seated() {
-    const b = layout(0), width = 104 * b.d / b.big;
-    return { x: b.cx, y: b.cy - b.d * .432 - width * artInfo.waiting.aspect * .22,
+    const b = layout(0), radius = b.d * .432;
+    const right = radius * .20;
+    const surfaceY = x => b.cy - Math.sqrt(Math.max(0, radius * radius - x * x));
+    const discY = surfaceY(right) + radius * .018;
+    const aspect = artInfo.waiting.aspect;
+    const width = Math.min(118 * b.d / b.big, radius * .74,
+      Math.max(1, discY - b.d * .002) / (.90 * aspect));
+    const height = width * aspect, left = right - width;
+    const top = Math.max(discY - height * .90,
+      surfaceY(left + width * .24) + radius * .012 - height * .95);
+    return { x: b.cx + left + width / 2, y: top + height / 2,
       width, z: b.d * .56, yaw: 0, roll: 0 };
   }
   function puzzled() {
     const b = layout(0), width = 100 * b.d / b.big;
-    return { x: b.cx, y: b.cy - b.d * .432 - width * artInfo.puzzled.aspect * .30,
+    return { x: b.cx, y: b.cy - b.d * .432 - width * artInfo.puzzled.aspect * .49,
       width, z: b.d * .56, yaw: 0, roll: 0 };
   }
   function hero() {
@@ -172,10 +181,20 @@
       pose: connected ? hero() : error ? puzzled() : seated(),
       weights: { waiting: connected || error ? 0 : 1, flying: connected ? 1 : 0, puzzled: error ? 1 : 0 } };
   }
+  function blendWeights(a, b, p) {
+    return Object.fromEntries(spriteKinds.map(kind =>
+      [kind, mix(a[kind] || 0, b[kind] || 0, p)]));
+  }
+  function poseSequence(from, via, to, progress) {
+    const frames = [from, ...via.map(kind => ({[kind]: 1})), to];
+    const position = clamp(progress) * (frames.length - 1);
+    const i = Math.min(Math.floor(position), frames.length - 2);
+    return blendWeights(frames[i], frames[i + 1], smooth((position - i - .25) * 2));
+  }
   function blendView(a, b, p) {
     const view = { pose: blendPose(a.pose, b.pose, p), weights: {} };
     for (const key of ['zoom', 'glow', 'error']) view[key] = mix(a[key], b[key], p);
-    for (const kind of Object.keys(artInfo)) view.weights[kind] = mix(a.weights[kind], b.weights[kind], p);
+    view.weights = blendWeights(a.weights, b.weights, p);
     return view;
   }
   function setPhase(next, seconds = 1, now = performance.now()) {
@@ -218,9 +237,9 @@
   }
 
   function createSprite(T, image, kind) {
-    const info = artInfo[kind], texture = new T.Texture(image), c = info.crop;
+    const info = artInfo[kind], texture = new T.Texture(image);
     texture.colorSpace = T.SRGBColorSpace;
-    texture.offset.set(c[0], 1 - c[1] - c[3]); texture.repeat.set(c[2], c[3]); texture.needsUpdate = true;
+    texture.needsUpdate = true;
     const material = new T.MeshBasicMaterial({ map: texture, transparent: true,
       alphaTest: .008, depthWrite: false, side: T.DoubleSide, toneMapped: false });
     // Keep DrOppo's original green colors in every pose, including errors.
@@ -229,7 +248,7 @@
     return { mesh, material };
   }
   function createFlyingVolume(T,frontImage,rearImage){
-    const info=artInfo.flying,crop=info.crop.map((value,i)=>value*(i%2?frontImage.height:frontImage.width)),aspect=info.aspect,nx=128,ny=100,stride=nx+1,count=stride*(ny+1);
+    const info=artInfo.flying,crop=[0,0,frontImage.width,frontImage.height],aspect=info.aspect,nx=128,ny=100,stride=nx+1,count=stride*(ny+1);
     const sample=document.createElement('canvas');sample.width=stride;sample.height=ny+1;const ctx=sample.getContext('2d',{willReadFrequently:true});ctx.drawImage(frontImage,...crop,0,0,stride,ny+1);const pixels=ctx.getImageData(0,0,stride,ny+1).data;
     const inside=new Uint8Array(count),dist=new Float32Array(count);
     for(let i=0;i<count;i++){inside[i]=pixels[i*4+3]>20?1:0;dist[i]=inside[i]?1000:0;}
@@ -256,7 +275,7 @@
     const geometry=new T.BufferGeometry();geometry.setAttribute('position',new T.Float32BufferAttribute(positions,3));geometry.setAttribute('uv',new T.Float32BufferAttribute(uvs,2));geometry.setAttribute('color',new T.Float32BufferAttribute(colors,3));geometry.setIndex([...front,...back,...sides]);geometry.addGroup(0,front.length,0);geometry.addGroup(front.length,back.length,1);geometry.addGroup(front.length+back.length,sides.length,2);geometry.computeVertexNormals();
     function texture(im,bounds){const tex=new T.Texture(im);tex.colorSpace=T.SRGBColorSpace;tex.offset.set(bounds[0],1-bounds[1]-bounds[3]);tex.repeat.set(bounds[2],bounds[3]);tex.needsUpdate=true;return tex;}
     const frontTex=texture(frontImage,crop.map((n,i)=>n/(i%2?frontImage.height:frontImage.width)));
-    const rearTex=texture(rearImage,[35/1254,168/1254,1128/1254,973/1254]);
+    const rearTex=texture(rearImage,[0,0,1,1]);
     const frontMaterial=new T.MeshBasicMaterial({map:frontTex,transparent:true,alphaTest:.012,depthWrite:true,toneMapped:false});
     const backMaterial=new T.MeshBasicMaterial({map:rearTex,transparent:true,depthWrite:true,toneMapped:false});
     const sideMaterial=new T.MeshBasicMaterial({vertexColors:true,transparent:true,depthWrite:true,toneMapped:false});
@@ -299,18 +318,19 @@
       void main(){
         vec3 c=texture2D(map,texUv).rgb;float lum=dot(c,vec3(.2126,.7152,.0722));
         float gold=clamp((c.r-c.b-.031)/.216,0.,1.)*clamp((c.g-c.b-.012)/.176,0.,1.)*clamp((lum-.11)/.33,0.,1.);
-        float terrain=mix(lum,min(lum,.106),gold);vec3 gray=vec3(.035+terrain*1.10);
+        float terrain=mix(lum,min(lum,.106),gold);vec3 gray=vec3(.055+terrain*.94);
         float g=max(c.g,.071+lum*1.12);vec3 green=mix(vec3(min(c.r,g*.74),g,min(c.b,g*.82)),c,gold);
         vec3 red=vec3(.075+lum*1.30,.019+lum*.22,.025+lum*.19);
         float facing=max(normalize(viewNormal).z,0.);float shading=.70+.30*pow(facing,.38);
         vec3 col=mix(mix(gray,green,glow),red,error)*shading;
         float rim=pow(1.-facing,3.5);
-        col+=mix(mix(vec3(.10,.12,.12),vec3(.04,.29,.21),glow),vec3(.40,.035,.045),error)*rim;
+        col+=mix(mix(vec3(.105),vec3(.04,.29,.21),glow),vec3(.40,.035,.045),error)*rim;
         gl_FragColor=vec4(col,1.);
       }
     ` });
     earth = new T.Mesh(new T.SphereGeometry(1, 128, 80), material); world.add(earth);
-    sprites = Object.fromEntries(Object.keys(artInfo).map(kind => [kind, createSprite(T, images[kind], kind)]));
+    for (const kind of spriteKinds) artInfo[kind] = {aspect: images[kind].height / images[kind].width};
+    sprites = Object.fromEntries(spriteKinds.map(kind => [kind, createSprite(T, images[kind], kind)]));
     sprites.flying.mesh.visible = false;
     flight = createFlyingVolume(T, images.flying, images.rear);
     main.dataset.mascotArt = 'canonical-droppo';
@@ -319,7 +339,7 @@
   function drawHalo(b, view) {
     halo.clearRect(0, 0, w, h);
     const r = b.d * .432, g = halo.createRadialGradient(b.cx,b.cy,r*.97,b.cx,b.cy,r*1.12);
-    const rgb = [mix(mix(191,103,view.glow),255,view.error),mix(mix(204,232,view.glow),86,view.error),mix(mix(199,191,view.glow),99,view.error)].map(Math.round).join(',');
+    const rgb = [mix(mix(164,103,view.glow),255,view.error),mix(mix(164,232,view.glow),86,view.error),mix(mix(164,191,view.glow),99,view.error)].map(Math.round).join(',');
     g.addColorStop(0,`rgba(${rgb},0)`);g.addColorStop(.35,`rgba(${rgb},.22)`);g.addColorStop(1,`rgba(${rgb},0)`);
     halo.fillStyle=g;halo.beginPath();halo.arc(b.cx,b.cy,r*1.12,0,Math.PI*2);halo.fill();
   }
@@ -343,6 +363,7 @@
     } else if (phase === 'launch') {
       const target = { ...restingView('connected'), zoom: 0, glow: .18, pose: orbit(0) };
       view = blendView(transitionFrom, target, s);
+      view.weights = poseSequence(transitionFrom.weights, ['rising', 'pushOff'], target.weights, p);
       view.pose.y -= Math.sin(p * Math.PI) * 10;
       if (p >= 1) setPhase('orbit', orbitSeconds, now);
     } else if (phase === 'orbit') {
@@ -361,13 +382,15 @@
       if (p >= 1) setPhase('connected', 1, now);
     } else if (phase === 'return') {
       view = blendView(transitionFrom, restingView('idle'), s);
+      view.weights = poseSequence(transitionFrom.weights, ['recovering', 'rising'], {waiting: 1}, p);
       if (p >= 1) setPhase('idle', 1, now);
     } else if (phase === 'error') {
       view = transitionFrom ? blendView(transitionFrom, restingView('error'), s) : restingView('error');
+      if (transitionFrom && p < 1) view.weights = poseSequence(transitionFrom.weights, ['recovering'], {puzzled: 1}, p);
     } else view = restingView(logicalState);
-    if (settings.motion && ['idle', 'error'].includes(phase)) {
+    if (settings.motion && phase === 'error') {
       view.pose.y += Math.sin(t * .9) * .65;
-      view.pose.roll += phase === 'error' ? Math.sin(t * .85) * .035 : Math.sin(t * .65) * .018;
+      view.pose.roll += Math.sin(t * .85) * .035;
     }
     lastView = view;
     const inFlight = settings.motion && ['launch', 'orbit', 'arrive', 'return'].includes(phase);
@@ -379,24 +402,37 @@
     if (haloState !== haloKey) { drawHalo(b, view); haloKey = haloState; }
     if (renderer) {
       earth.position.set(b.cx-w/2,h/2-b.cy,0);earth.scale.setScalar(b.d*.432);
-      earth.rotation.set(.21,-1.77+t*Math.PI*2/100,-.08,'XYZ');
+      earth.rotation.set(.21,-1.77+t*Math.PI*2*.55/100,-.08,'XYZ');
       earthUniforms.glow.value=view.glow;earthUniforms.error.value=view.error;
+      const pose = view.pose;
+      // Interpolate height and register the eyes before blending unlike silhouettes.
+      let height = 0, eyeX = 0, eyeY = 0;
+      for (const kind of spriteKinds) {
+        const weight = view.weights[kind] || 0;
+        height += pose.width * artInfo[kind].aspect * weight;
+        eyeX += (eyes[kind][0] - .5) / artInfo[kind].aspect * weight;
+        eyeY += (eyes[kind][1] - .5) * weight;
+      }
+      function place(mesh, kind) {
+        const width = height / artInfo[kind].aspect;
+        const x = eyeX * height - (eyes[kind][0] - .5) * width;
+        const y = eyeY * height - (eyes[kind][1] - .5) * height;
+        mesh.position.set(pose.x-w/2+x,h/2-pose.y-y,pose.z);
+        mesh.scale.setScalar(width);
+      }
       for (const [kind, sprite] of Object.entries(sprites)) {
-        const alpha = view.weights[kind], pose = view.pose;
+        const alpha = view.weights[kind] || 0;
         sprite.mesh.visible = alpha > .001 && !(inFlight && kind === 'flying');
+        if (!sprite.mesh.visible) continue;
         sprite.material.opacity = alpha;
-        // Keep the approved face facing the viewer through the orbit.
         sprite.mesh.rotation.set(0,0,pose.roll);
-        sprite.mesh.position.set(pose.x-w/2,h/2-pose.y,pose.z);
-        sprite.mesh.scale.setScalar(pose.width);
+        place(sprite.mesh, kind);
         sprite.mesh.renderOrder = kind === 'flying' ? 2 : 3;
       }
-      const pose = view.pose;
       flight.mesh.visible = inFlight && view.weights.flying > .001;
       if (flight.mesh.visible) {
-        flight.mesh.position.set(pose.x - w / 2, h / 2 - pose.y, pose.z);
+        place(flight.mesh, 'flying');
         flight.mesh.rotation.set(0, pose.yaw, pose.roll, 'ZYX');
-        flight.mesh.scale.setScalar(pose.width);
         flight.mesh.renderOrder = 2;
         flight.uniforms.time.value = t;
         flight.materials.forEach(material => {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"dropocore/ownedprofile"
 	"dropocore/sourcehistory"
 	"encoding/json"
 	"errors"
@@ -28,10 +29,11 @@ const sourceProbeTimeout = 6 * time.Second
 var sourceProbeTargets = []string{"https://www.gstatic.com/generate_204", "https://cp.cloudflare.com/generate_204"}
 
 type sourceCandidate struct {
-	ID      string `json:"id"`
-	Tag     string `json:"tag"`
-	NodeID  string `json:"nodeId"`
-	OwnerID string `json:"ownerId,omitempty"`
+	ID        string `json:"id"`
+	Tag       string `json:"tag"`
+	NodeID    string `json:"nodeId"`
+	OwnerID   string `json:"ownerId,omitempty"`
+	Preferred bool   `json:"preferred,omitempty"`
 }
 
 func (c sourceCandidate) owner() string {
@@ -248,7 +250,15 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 	rankManaged := slices.ContainsFunc(candidates, func(candidate sourceCandidate) bool {
 		return candidate.OwnerID != "" && candidate.OwnerID != candidate.ID
 	})
-	queue := candidates
+	moscow, direct := partitionMoscowCandidates(candidates)
+	var home []sourceCandidate
+	for _, candidate := range direct {
+		if ownedprofile.IsResidential(candidate.ID) {
+			home = append(home, candidate)
+		}
+	}
+	direct = slices.DeleteFunc(direct, func(c sourceCandidate) bool { return ownedprofile.IsResidential(c.ID) })
+	directMeasured := false
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -285,11 +295,21 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 			return true
 		}
 		if initial && rankManaged {
-			sourcehistory.Race(cycleCtx, candidates, 6, probe, func(_ sourceCandidate, result sourceObservation) {
-				results = append(results, result)
-			})
-			queue = rankManagedSourceCandidates(candidates, results, automatic)
-			chosen = chooseSourceCandidate(queue, results, false)
+			moscow, results = measureManagedCandidates(cycleCtx, moscow, automatic, probe)
+			chosen = chooseSourceCandidate(moscow, results, false)
+			if chosen == "" && cycleCtx.Err() == nil {
+				var observations []sourceObservation
+				direct, observations = measureManagedCandidates(cycleCtx, direct, automatic, probe)
+				directMeasured = true
+				chosen = chooseSourceCandidate(direct, observations, false)
+				results = append(results, observations...)
+			}
+			if chosen == "" && cycleCtx.Err() == nil {
+				var observations []sourceObservation
+				home, observations = measureManagedCandidates(cycleCtx, home, automatic, probe)
+				chosen = chooseSourceCandidate(home, observations, false)
+				results = append(results, observations...)
+			}
 		} else if initial && automatic {
 			s.sourceMu.Lock()
 			network := s.sourceNetwork
@@ -338,8 +358,23 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 			if result.State != "ok" && cycleCtx.Err() == nil {
 				confirmedFailed = active
 				if rankManaged {
-					fallback, observations := probeManagedFailover(cycleCtx, queue, active.ID, probe)
-					chosen, results = fallback, append(results, observations...)
+					var observations []sourceObservation
+					chosen, observations = probeManagedFailover(cycleCtx, moscow, active.ID, probe)
+					results = append(results, observations...)
+					if chosen == "" && cycleCtx.Err() == nil {
+						if directMeasured {
+							chosen, observations = probeManagedFailover(cycleCtx, direct, active.ID, probe)
+						} else {
+							direct, observations = measureManagedCandidates(cycleCtx, direct, automatic, probe)
+							directMeasured = true
+							chosen = chooseSourceCandidate(direct, observations, false)
+						}
+						results = append(results, observations...)
+					}
+					if chosen == "" && cycleCtx.Err() == nil {
+						chosen, observations = probeManagedFailover(cycleCtx, home, active.ID, probe)
+						results = append(results, observations...)
+					}
 				} else {
 					results = probeSourceCandidates(cycleCtx, candidates, probe)
 					chosen = chooseSourceAfterOutage(active, candidates, results)
@@ -373,6 +408,25 @@ func (s *CommandServer) runSourceSelection(ctx context.Context, generation uint6
 	}
 }
 
+func partitionMoscowCandidates(candidates []sourceCandidate) (moscow, direct []sourceCandidate) {
+	for _, candidate := range candidates {
+		if ownedprofile.IsMoscowCandidate(candidate.ID) {
+			moscow = append(moscow, candidate)
+		} else {
+			direct = append(direct, candidate)
+		}
+	}
+	return
+}
+
+func measureManagedCandidates(ctx context.Context, candidates []sourceCandidate, automatic bool, probe func(context.Context, sourceCandidate) sourceObservation) ([]sourceCandidate, []sourceObservation) {
+	var observations []sourceObservation
+	sourcehistory.Race(ctx, candidates, 6, probe, func(_ sourceCandidate, result sourceObservation) {
+		observations = append(observations, result)
+	})
+	return rankManagedSourceCandidates(candidates, observations, automatic), observations
+}
+
 func rankManagedSourceCandidates(candidates []sourceCandidate, observations []sourceObservation, automatic bool) []sourceCandidate {
 	delays := make(map[string]int, len(observations))
 	for _, r := range observations {
@@ -392,6 +446,12 @@ func rankManagedSourceCandidates(candidates []sourceCandidate, observations []so
 			return owners[a.owner()] - owners[b.owner()]
 		}
 		da, db := delays[a.ID], delays[b.ID]
+		if first, second := a.Preferred && da > 0, b.Preferred && db > 0; first != second {
+			if first {
+				return -1
+			}
+			return 1
+		}
 		switch {
 		case da == db:
 			return 0

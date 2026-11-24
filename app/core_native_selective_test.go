@@ -7,6 +7,42 @@ import (
 	traffic "dropo/trafficorchestrator"
 )
 
+func TestTelegramAssignedTCPPortsInSelectiveVPN(t *testing.T) {
+	settings := GlobalAppSettings{FreeAccessMethods: DefaultFreeAccessServiceMethodState()}
+	settings.FreeAccessMethods["telegram"] = FreeAccessMethodVPN
+	services := nativeSelectiveCaptureCatalogForSettings(settings)
+	if len(services) != 1 || services[0].ID != "telegram" {
+		t.Fatalf("selective catalog = %+v", services)
+	}
+	filter, err := traffic.BuildSelectiveWinDivertFilterForMode(services, 32000, false)
+	if err != nil || !strings.Contains(filter, "149.154.160.0") {
+		t.Fatalf("capture filter lacks Telegram's network: %s, %v", filter, err)
+	}
+	if len(services[0].TCPPorts) != 0 {
+		t.Errorf("DC capture excludes assigned MTProto ports: %v", services[0].TCPPorts)
+	}
+	plan := traffic.TrafficPlan{Revision: 1, CatalogRevision: traffic.BuiltinCatalogRevision,
+		Services: services, Routes: []traffic.ServiceRoute{{ServiceID: "telegram", Kind: traffic.ServiceRouteVPN}}}
+	classifier, err := traffic.NewClassifier(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []int{443, 5222, 15321} {
+		flow := traffic.FlowEvidence{Network: traffic.NetworkTCP, Port: port, Destination: "149.154.167.51", ProcessName: "Telegram.exe"}
+		if got := classifier.Classify(flow); got.ServiceID != "telegram" {
+			t.Errorf("Telegram.exe port %d: %+v", port, got)
+		}
+		flow.ProcessName = "unknown.exe"
+		if got := classifier.Classify(flow); got.Matched {
+			t.Errorf("unrelated process at the same IP and port %d: %+v", port, got)
+		}
+		flow.ProcessName, flow.Destination = "Telegram.exe", "10.0.0.1"
+		if got := classifier.Classify(flow); !got.WorkNetwork {
+			t.Errorf("private destination port %d: %+v", port, got)
+		}
+	}
+}
+
 func TestNativeSelectiveCaptureCatalogIsBounded(t *testing.T) {
 	catalog := nativeSelectiveCaptureCatalog()
 	filter, err := traffic.BuildSelectiveWinDivertFilter(catalog, 32000)

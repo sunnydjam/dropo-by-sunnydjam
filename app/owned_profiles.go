@@ -37,7 +37,7 @@ func (a *App) applyOwnedVPNSource(provider, raw, expectedSourceID, expectedNodeI
 					matched++
 				}
 			}
-			if matched == 3 {
+			if matched == 7 {
 				return map[string]interface{}{"success": true}
 			}
 		}
@@ -57,7 +57,7 @@ func ownedVPNRestoreCredentialsMatch(sources []VPNSource, primary, key, reserve,
 		if source.URI == "" {
 			continue
 		}
-		if (source.PublicCatalogID == primary || source.PublicCatalogID == primary+latviaSuffix || source.PublicCatalogID == primary+finlandSuffix || source.PublicCatalogID == primary+ownedprofile.MainSuffix || source.PublicCatalogID == primary+ownedprofile.ExtraSuffix) && source.URI != key || source.PublicCatalogID == reserve && source.URI != reserveKey {
+		if (windowsOwnedFamily(source.PublicCatalogID) == primary && !ownedprofile.IsReserve(source.PublicCatalogID)) && source.URI != key || source.PublicCatalogID == reserve && source.URI != reserveKey {
 			return false
 		}
 	}
@@ -165,7 +165,7 @@ func settingsWithoutOwnedSecrets(settings *SettingsFile) *SettingsFile {
 	return &copySettings
 }
 func ownedSourceExpired(s VPNSource) bool {
-	if isRegionalProvider(s.PublicCatalogID) || isMainIngress(s.PublicCatalogID) || isExtraIngress(s.PublicCatalogID) {
+	if isRegionalProvider(s.PublicCatalogID) || isMainIngress(s.PublicCatalogID) || isExtraIngress(s.PublicCatalogID) || ownedprofile.IsMoscowCandidate(s.PublicCatalogID) || ownedprofile.IsResidential(s.PublicCatalogID) {
 		return ownedprofile.Expired(windowsOwnedFamily(s.PublicCatalogID), s.URI, time.Now())
 	}
 	return ownedprofile.Expired(s.PublicCatalogID, s.URI, time.Now())

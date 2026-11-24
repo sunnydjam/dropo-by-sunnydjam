@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
+	"dropocore/residential"
 	"encoding/json"
 	"fmt"
+	"net"
 	"reflect"
 	"slices"
 	"sort"
@@ -139,9 +142,14 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		t.Fatalf("managed pair add failed: %v", result)
 	}
 	profile, _ := storage.GetActiveProfile()
-	if len(profile.VPNSources) != 3 {
+	if len(profile.VPNSources) != 7 {
 		t.Fatal("missing independent managed ingress")
 	}
+	raw, err := json.Marshal(profile.XrayConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyWindowsResidentialBridge(t, raw)
 	for _, s := range profile.VPNSources {
 		if s.NodeCount != 1 {
 			t.Fatal("reserve is not one authoritative source node")
@@ -153,7 +161,7 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 		out := raw.(map[string]interface{})
 		if out["tag"] == "auto-select" {
 			found = true
-			if reflect.ValueOf(out["outbounds"]).Len() != 3 {
+			if reflect.ValueOf(out["outbounds"]).Len() != 7 {
 				t.Fatal("reserve missing from selector")
 			}
 		}
@@ -178,6 +186,57 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 	profile, _ = storage.GetActiveProfile()
 	if len(profile.VPNSources) != 0 {
 		t.Fatal("family removal left a source reference")
+	}
+}
+
+func verifyWindowsResidentialBridge(t *testing.T, config []byte) {
+	t.Helper()
+	var original, prepared struct{ Outbounds []map[string]any }
+	if err := json.Unmarshal(config, &original); err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	result, err := prepareResidentialBridges(ctx, config, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(result, &prepared); err != nil {
+		t.Fatal(err)
+	}
+	var listener string
+	for i, out := range original.Outbounds {
+		client, node, err := residential.FromOutbound(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client == nil {
+			continue
+		}
+		if len(appendEndpointHost(nil, node["address"])) != 0 {
+			t.Fatal("private discovery locator reached Windows route resolution")
+		}
+		rewritten := prepared.Outbounds[i]["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
+		if rewritten["address"] != "127.0.0.1" || !reflect.DeepEqual(out["streamSettings"], prepared.Outbounds[i]["streamSettings"]) {
+			t.Fatal("residential Xray bridge lost its local endpoint or regional TLS identity")
+		}
+		listener = net.JoinHostPort("127.0.0.1", strconv.Itoa(int(rewritten["port"].(float64))))
+	}
+	if listener == "" {
+		t.Fatal("stored managed profile did not generate a private residential bridge")
+	}
+	stop()
+	deadline := time.Now().Add(time.Second)
+	for {
+		connection, err := net.DialTimeout("tcp4", listener, 40*time.Millisecond)
+		if err != nil {
+			return
+		}
+		connection.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("listener outlived the VPN session")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -277,7 +336,9 @@ func TestWindowsManagedIngressIsOneSourceWithPersistentManualChoice(t *testing.T
 	requireAPISuccess(t, app.AddManagedVPNSource(ownedprofile.Free, "", ownedReserveFixture, true))
 
 	profile, _ := storage.GetActiveProfile()
-	owner, backup := profile.VPNSources[0], profile.VPNSources[1]
+	owner := profile.VPNSources[0]
+	moscow := windowsRuntimeSourceGroups(profile.VPNSources)[0][0]
+	moscowTag := "vpn-source-" + moscow.ID
 	views := publicVPNSources(profile.VPNSources)
 	if len(views) != 1 || views[0]["id"] != owner.ID || views[0]["name"] != "Dropo Free" {
 		t.Fatalf("expected one visible Free profile, got %v", views)
@@ -286,8 +347,8 @@ func TestWindowsManagedIngressIsOneSourceWithPersistentManualChoice(t *testing.T
 		t.Fatal("Free accepted a Finnish ingress")
 	}
 	requireAPISuccess(t, app.SetManagedIngress(owner.ID, ownedprofile.XHTTP))
-	if got := app.configuredVPNSourceTags(); !slices.Equal(got, []string{"vpn-source-" + backup.ID}) {
-		t.Fatalf("manual XHTTP selection did not pin its route: %v", got)
+	if got := app.configuredVPNSourceTags(); len(got) != 7 || got[0] != moscowTag {
+		t.Fatalf("manual XHTTP selection lost priority or fallbacks: %v", got)
 	}
 
 	if err := storage.Load(); err != nil {
@@ -298,11 +359,11 @@ func TestWindowsManagedIngressIsOneSourceWithPersistentManualChoice(t *testing.T
 		t.Fatal("manual ingress was lost after opening the saved profile")
 	}
 	requireAPISuccess(t, app.RestoreManagedVPNSource(ownedprofile.Free, ownedReserveFixture, owner.ID, ""))
-	if got := app.configuredVPNSourceTags(); !slices.Equal(got, []string{"vpn-source-" + backup.ID}) {
-		t.Fatalf("vault restore lost the pinned transport: %v", got)
+	if got := app.configuredVPNSourceTags(); len(got) != 7 || got[0] != moscowTag {
+		t.Fatalf("vault restore lost the preferred transport: %v", got)
 	}
 	requireAPISuccess(t, app.SetManagedIngress(owner.ID, ""))
-	if got := app.configuredVPNSourceTags(); !slices.Equal(got, []string{"vpn-source-" + owner.ID, "vpn-source-" + backup.ID, "vpn-source-" + profile.VPNSources[2].ID}) {
+	if got := app.configuredVPNSourceTags(); len(got) != 7 || got[0] != moscowTag || got[3] != "vpn-source-"+owner.ID {
 		t.Fatalf("automatic Free order is wrong: %v", got)
 	}
 }
@@ -367,10 +428,17 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(profile.VPNSources) != 3 || profile.VPNSources[1].PublicCatalogID != tier.id+ownedprofile.MainSuffix {
+				if len(profile.VPNSources) != 7 || profile.VPNSources[1].PublicCatalogID != tier.id+ownedprofile.MainSuffix {
 					t.Fatal("expected regional and restored main ingress")
 				}
-				want := []string{"vpn-source-" + profile.VPNSources[0].ID, "vpn-source-" + profile.VPNSources[1].ID, "vpn-source-" + profile.VPNSources[2].ID}
+				routes := windowsRuntimeSourceGroups(profile.VPNSources)[0]
+				want := make([]string, 0, len(routes))
+				for index, route := range routes {
+					if ownedprofile.IsMoscowCandidate(route.PublicCatalogID) != (index < 3) || ownedprofile.IsResidential(route.PublicCatalogID) != (index == 6) {
+						t.Fatal("Moscow routes must precede direct routes")
+					}
+					want = append(want, "vpn-source-"+route.ID)
+				}
 				app.rememberRouteProbeResults([]routeProbeServiceResult{
 					{Tag: "openai", Success: true, MethodKind: "vpn", MethodTag: want[0]},
 				})
@@ -392,14 +460,9 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 				if got := interfaceStringSlice(selector["outbounds"]); !reflect.DeepEqual(got, want) || selector["type"] != "selector" || selector["default"] != want[0] {
 					t.Fatalf("runtime selector lost independent transports: %v", got)
 				}
-				protocol := "hysteria2"
-				if tier.id == ownedprofile.Boost {
-					protocol = "socks"
-				}
 				for i := range want {
-					if i == 1 || i == 2 && tier.id == ownedprofile.Free {
-						protocol = "socks"
-					} else if i == 2 {
+					protocol := "socks"
+					if windowsRouteIngress(routes[i].PublicCatalogID) == ownedprofile.Hysteria {
 						protocol = "hysteria2"
 					}
 					if getOutbound(config, want[i])["type"] != protocol {
@@ -414,17 +477,9 @@ func TestWindowsOwnedReservesRemainInRuntimeSelectorWithCachedServiceProbe(t *te
 					if err != nil {
 						t.Fatal(err)
 					}
-					stream, _ := getOutbound(bridge, "xray-out-0")["streamSettings"].(map[string]any)
-					if stream["network"] != "tcp" {
-						t.Fatal("Finland REALITY missing")
-					}
-					servers := getOutbound(bridge, "xray-out-0")["settings"].(map[string]any)["vnext"].([]any)
-					if servers[0].(map[string]any)["address"] != dnspolicy.FinlandIPv4 || hasLegacyFinlandCarrier(bridge) {
-						t.Fatal("Finnish REALITY is not direct")
-					}
 					hosts := collectXrayEndpointHosts(bridge)
-					if !slices.Contains(hosts, dnspolicy.FinlandIPv4) || slices.Contains(hosts, ownedprofile.PrimaryIPv4) || slices.Contains(hosts, ownedprofile.ReserveIPv4) {
-						t.Fatal("Windows must protect only the regional Xray endpoint")
+					if !slices.Contains(hosts, dnspolicy.FinlandIPv4) || !slices.Contains(hosts, ownedprofile.PrimaryIPv4) || slices.Contains(hosts, ownedprofile.ReserveIPv4) || hasLegacyFinlandCarrier(bridge) {
+						t.Fatal("missing Moscow or direct Finnish endpoint, or found retired relay")
 					}
 				}
 			})

@@ -63,6 +63,8 @@ class GuestIdentityCoordinator extends ChangeNotifier {
       ? 'guest'
       : 'registered';
   bool get suppressed => _locallySuppressed || _record['suppressed'] == true;
+  bool get confirmedSignedOut =>
+      state == 'signed_out' && !_changingIdentity && token == null;
   int get identityEpoch => _epoch;
   Map<String, dynamic>? get account =>
       _account == null ? null : Map.unmodifiable(_account!);

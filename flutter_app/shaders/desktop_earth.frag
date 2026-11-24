@@ -5,6 +5,7 @@ uniform float uRadius;
 uniform float uLongitude;
 uniform float uCityBrightness;
 uniform vec3 uTerrainTint;
+uniform float uGrayscale;
 uniform sampler2D uAtlas;
 
 out vec4 fragColor;
@@ -42,6 +43,11 @@ void main() {
   vec3 surface = mix(terrain, city, emission * uCityBrightness);
   surface += (vec3(0.13, 0.26, 0.25) * uTerrainTint) *
       pow(1.0 - depth, 4.0);
+  float luma = dot(sampleColor, vec3(0.2126, 0.7152, 0.0722));
+  float unlit = mix(luma, min(luma, 0.125), emission);
+  float gray = (0.035 + unlit * 1.14) * (0.63 + 0.49 * depth) +
+      0.11 * pow(1.0 - depth, 4.0);
+  surface = mix(surface, vec3(gray), uGrayscale);
 
   float alpha = 1.0 - smoothstep(0.985, 1.006, sqrt(radiusSquared));
   fragColor = vec4(clamp(surface, 0.0, 1.0) * alpha, alpha);

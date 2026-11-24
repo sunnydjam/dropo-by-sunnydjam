@@ -26,17 +26,30 @@ func (a *App) GetVPNSources() map[string]interface{} {
 		ownerTag := "vpn-source-" + owner.ID
 		response := a.vpnSourceResponseSnapshot(ownerTag, running, now)
 		confirmed := false
+		ingresses := make(map[string]vpnResponse, len(group))
 		for _, source := range group {
 			tag := "vpn-source-" + source.ID
 			sample := a.vpnSourceResponseSnapshot(tag, running, now)
+			ingress := windowsRouteIngress(source.PublicCatalogID)
+			if ownedprofile.IsResidential(source.PublicCatalogID) {
+				ingress = "residential-xhttp"
+			}
+			if ownedprofile.IsMoscowCandidate(source.PublicCatalogID) {
+				ingress = "moscow-" + ingress
+			}
+			if ingress != "" {
+				ingresses[ingress] = sample
+			}
 			if response.State != "ok" && sample.State == "ok" {
 				response = sample
 			}
 			if running && active == tag && sample.State == "ok" {
 				confirmed, confirmedActive, response = true, ownerTag, sample
-				view["active_ingress"] = windowsRouteIngress(source.PublicCatalogID)
-				break
+				view["active_ingress"] = ingress
 			}
+		}
+		if len(ingresses) > 0 {
+			view["ingress_responses"] = ingresses
 		}
 		view["active"], view["response"] = confirmed, response
 	}

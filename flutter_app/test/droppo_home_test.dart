@@ -203,11 +203,25 @@ void main() {
               _painter(tester),
               scene.size,
             );
-            expect(
-              localMascot.height / globe.height,
-              inInclusiveRange(0.30, 0.35),
-            );
-            expect(localMascot.center.dx, closeTo(globe.center.dx, 1));
+            final radius = globe.width * .432;
+            expect(localMascot.center.dx, lessThan(globe.center.dx));
+            expect(localMascot.center.dy, lessThan(globe.center.dy - radius));
+            // Corners enclosing the entire metal chestpiece, and seated hip.
+            for (final point in const [
+              Offset(.78, .90),
+              Offset(1, .90),
+              Offset(.78, .995),
+              Offset(1, .995),
+              Offset(.24, .95),
+            ]) {
+              final pixel =
+                  localMascot.topLeft +
+                  Offset(
+                    point.dx * localMascot.width,
+                    point.dy * localMascot.height,
+                  );
+              expect((pixel - globe.center).distance, lessThan(radius));
+            }
           }
           final action = _key('home-connect');
           final actionRect = tester.getRect(action);

@@ -16,6 +16,11 @@ import (
 // Public verification key; the corresponding signing seed never enters builds.
 const publicKey = "3TD8w4fTcxEAObafXvUVKlt75iXDN2yShIBDBOsexH8"
 
+func VerifyDeploymentSignature(body, signature []byte) bool {
+	key, _ := base64.RawURLEncoding.DecodeString(publicKey)
+	return ed25519.Verify(ed25519.PublicKey(key), body, signature)
+}
+
 type Payload struct {
 	SchemaVersion  int              `json:"schemaVersion"`
 	ServiceID      string           `json:"serviceId"`

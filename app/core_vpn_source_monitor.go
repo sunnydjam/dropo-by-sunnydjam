@@ -318,6 +318,7 @@ func (a *App) startVPNSourceMonitor() {
 	a.vpnSourceObservations = make(map[string]vpnSourceObservation)
 	a.vpnSourceManual = ""
 	a.vpnSourceRankedTags = nil
+	a.vpnSourceDirectRanked = false
 	a.vpnSourceLastSwitch = time.Time{}
 	a.vpnSourceHealthKnown = false
 	a.vpnSourceAvailable = false
@@ -393,6 +394,7 @@ func (a *App) stopVPNSourceMonitor() {
 	a.vpnSourceHealth = nil
 	a.vpnSourceObservations = nil
 	a.vpnSourceRankedTags = nil
+	a.vpnSourceDirectRanked = false
 	a.vpnSourceHealthKnown = false
 	a.vpnSourceAvailable = false
 	a.vpnSourceHealthError = ""
@@ -445,7 +447,29 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 	}
 	activeIndex := slices.Index(tags, active)
 	fallback := append(slices.Clone(tags[activeIndex+1:]), tags[:activeIndex]...)
+	moscow, _, home := a.managedSourceTags()
+	if len(moscow) > 0 {
+		slices.SortStableFunc(fallback, func(left, right string) int {
+			if home[left] != home[right] {
+				if home[left] {
+					return 1
+				}
+				return -1
+			}
+			if moscow[left] == moscow[right] {
+				return 0
+			}
+			if moscow[left] {
+				return -1
+			}
+			return 1
+		})
+	}
 	for _, tag := range fallback {
+		if len(moscow) > 0 && !moscow[tag] && a.needsDirectRanking(generation) {
+			a.selectDirectAfterMoscowOutage(ctx, generation, active, moscow)
+			return
+		}
 		canAttempt, current := a.vpnSourceCanAttemptForMonitor(generation, tag, now)
 		if !current {
 			return
@@ -460,10 +484,15 @@ func (a *App) checkActiveVPNSource(ctx context.Context, generation uint64) {
 		if _, current = a.recordVPNSourceHealthForMonitor(generation, tag, candidateHealthy, now); !current {
 			return
 		}
-		if candidateHealthy && a.switchVPNSourceForMonitor(ctx, generation, tag) {
-			a.setVPNSourceAvailabilityForMonitor(generation, true, "")
-			a.writeLog(fmt.Sprintf("[VPNSources] failed over from %s to %s; no sibling node was selected", active, tag))
-			return
+		if candidateHealthy {
+			if a.switchVPNSourceForMonitor(ctx, generation, tag) {
+				a.setVPNSourceAvailabilityForMonitor(generation, true, "")
+				a.writeLog(fmt.Sprintf("[VPNSources] failed over from %s to %s; no sibling node was selected", active, tag))
+				return
+			}
+			if moscow[tag] {
+				return
+			}
 		}
 	}
 	a.setVPNSourceAvailabilityForMonitor(generation, false, vpnSourceUnavailableMessage)

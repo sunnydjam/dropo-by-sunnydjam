@@ -42,8 +42,12 @@ typedef _AtlasFlightFrame = ({_AtlasFlightStage stage, double progress});
 
 class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  // Two rotations in this period, 55% of the previous 70-second rotation rate.
+  static const _rotationPeriod = Duration(milliseconds: 127273);
+  static const _periodSeconds = 127.273;
   late final AnimationController _controller;
   final _phase = ValueNotifier<double>(0);
+  final _mascotMotion = _MascotMotion();
   final _lights = ValueNotifier<double>(0);
   final _flight = ValueNotifier<_AtlasFlightFrame>((
     stage: _AtlasFlightStage.resting,
@@ -63,10 +67,8 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 70),
-    )..addListener(_advance);
+    _controller = AnimationController(vsync: this, duration: _rotationPeriod)
+      ..addListener(_advance);
     WidgetsBinding.instance.addObserver(this);
     _visible = _isVisible(WidgetsBinding.instance.lifecycleState);
     _lights.value = _lit ? 1 : 0;
@@ -92,14 +94,15 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
 
   // Decorative painting is capped at 30 fps. It never rebuilds home controls.
   void _advance() {
-    final frame = (_controller.value * 2100).floor();
+    final frame = (_controller.value * _periodSeconds * 30).floor();
     if (frame == _lastFrame) return;
     _lastFrame = frame;
     final delta = (_controller.value - _previousPhase) % 1;
     _previousPhase = _controller.value;
-    _advanceFlight(delta * 70);
+    final seconds = delta * _periodSeconds;
+    _advanceFlight(seconds);
     if (_lit && _lights.value < 1) {
-      _lightElapsed += delta * 70;
+      _lightElapsed += seconds;
       final progress = (_lightElapsed / 0.6).clamp(0.0, 1.0);
       _lights.value = progress * progress * (3 - 2 * progress);
     }
@@ -237,6 +240,8 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
                   phase: _phase,
                   lights: _lights,
                   flight: _flight,
+                  mascotMotion: _mascotMotion,
+                  animateMascot: _controller.isAnimating,
                   texture: widget.textureAvailable ? _assets?.textures : null,
                   mascots: widget.mascotAvailable ? _assets?.mascots : null,
                   palette: palette,
@@ -257,7 +262,7 @@ class _AtlasAnimatedPlanetState extends State<_AtlasAnimatedPlanet>
 // State colors are baked once into each cached raster, including its land,
 // ocean and clouds. This avoids renderer-dependent drawVertices tinting.
 enum _AtlasPlanetPalette {
-  disconnected(0xFFAAB4B2, 0xFF1A1A1A),
+  disconnected(0xFFADADAD, 0xFF1A1A1A),
   connected(0xFF5CF0B0, 0xFF03251A),
   error(0xFFFF6969, 0xFF321012),
   connecting(0xFFFFCF78, 0xFF322511);
@@ -281,11 +286,16 @@ enum _AtlasPlanetPalette {
 }
 
 enum _DrOppoPose {
-  flying('assets/mascot/droppo_flying.png'),
-  waiting('assets/mascot/droppo_waiting.png'),
-  puzzled('assets/mascot/droppo_puzzled.png');
+  flying('assets/mascot/droppo_flying.png', Offset(0.77, 0.36)),
+  waiting('assets/mascot/droppo_waiting.png', Offset(0.585, 0.525)),
+  puzzled('assets/mascot/droppo_puzzled.png', Offset(0.54, 0.37)),
+  rising('assets/mascot/droppo_rising.png', Offset(0.72, 0.39)),
+  pushOff('assets/mascot/droppo_push_off.png', Offset(0.75, 0.29)),
+  recovering('assets/mascot/droppo_recovering.png', Offset(0.55, 0.39));
 
-  const _DrOppoPose(this.asset);
+  const _DrOppoPose(this.asset, this.eyes);
+  // Eye midpoint within the alpha-trimmed image, for frame registration.
+  final Offset eyes;
   final String asset;
   static _DrOppoPose forPalette(_AtlasPlanetPalette palette) =>
       switch (palette) {
@@ -485,7 +495,7 @@ class _AtlasGlobeTexture {
           channel(blue * (1 - light) + b * light),
         );
       case _AtlasPlanetPalette.disconnected:
-        final gray = channel(9 + terrain * 1.10);
+        final gray = channel(16 + terrain * 0.92);
         return (gray, gray, gray);
       case _AtlasPlanetPalette.error:
         return (
@@ -614,11 +624,89 @@ class _AtlasGlobeTexture {
   }
 }
 
+typedef _MascotFrame = ({
+  Rect bounds,
+  double roll,
+  Map<_DrOppoPose, double> weights,
+});
+
+// Keep the last visible frame so a retry or cancellation starts exactly there.
+class _MascotMotion {
+  _MascotFrame? last, departure;
+  _DrOppoPose? target;
+  Size? viewport;
+  double started = 0;
+  List<_DrOppoPose> via = const [];
+
+  _MascotFrame sample(
+    _DrOppoPose next,
+    Rect bounds,
+    double roll,
+    Size size,
+    double seconds,
+    bool animate,
+    Iterable<_DrOppoPose> available,
+  ) {
+    final end = (bounds: bounds, roll: roll, weights: {next: 1.0});
+    if (!animate || viewport != size || last == null) {
+      departure = null;
+    } else if (target != next) {
+      departure = last;
+      started = seconds;
+      via = (switch (next) {
+        _DrOppoPose.flying => [_DrOppoPose.rising, _DrOppoPose.pushOff],
+        _DrOppoPose.waiting => [_DrOppoPose.recovering, _DrOppoPose.rising],
+        _ => [_DrOppoPose.recovering],
+      }).where(available.contains).toList();
+    }
+    target = next;
+    viewport = size;
+    final from = departure;
+    final elapsed =
+        (seconds - started) % _AtlasAnimatedPlanetState._periodSeconds;
+    final duration = next == _DrOppoPose.flying
+        ? _AtlasFlightStage.launch.seconds
+        : 0.55;
+    if (from == null || elapsed >= duration) {
+      departure = null;
+      return last = end;
+    }
+    final p = (elapsed / duration).clamp(0.0, 1.0);
+    final frames = [
+      from.weights,
+      for (final pose in via) {pose: 1.0},
+      end.weights,
+    ];
+    final segment = p * (frames.length - 1);
+    final index = segment.floor().clamp(0, frames.length - 2);
+    final t = Curves.easeInOut.transform(
+      ((segment - index - 0.25) * 2).clamp(0.0, 1.0),
+    );
+    final weights = <_DrOppoPose, double>{};
+    for (final key in {...frames[index].keys, ...frames[index + 1].keys}) {
+      final value = ui.lerpDouble(
+        frames[index][key] ?? 0,
+        frames[index + 1][key] ?? 0,
+        t,
+      )!;
+      if (value > 0) weights[key] = value;
+    }
+    final travel = Curves.easeInOut.transform(p);
+    return last = (
+      bounds: Rect.lerp(from.bounds, bounds, travel)!,
+      roll: ui.lerpDouble(from.roll, roll, travel)!,
+      weights: weights,
+    );
+  }
+}
+
 class _AtlasGlobePainter extends CustomPainter {
   _AtlasGlobePainter({
     required this.phase,
     required this.lights,
     required this.flight,
+    required this.mascotMotion,
+    required this.animateMascot,
     required this.texture,
     required this.mascots,
     required this.palette,
@@ -628,6 +716,8 @@ class _AtlasGlobePainter extends CustomPainter {
 
   final ValueNotifier<double> phase, lights;
   final ValueNotifier<_AtlasFlightFrame> flight;
+  final _MascotMotion mascotMotion;
+  final bool animateMascot;
   final Map<_AtlasPlanetPalette, ui.Image>? texture;
   final Map<_DrOppoPose, _DrOppoSprite>? mascots;
   final _AtlasPlanetPalette palette;
@@ -652,8 +742,10 @@ class _AtlasGlobePainter extends CustomPainter {
   double _orbitAngle(double progress) => math.pi * (0.1 + 2 * progress);
   double get tilt => math.sin(phase.value * 2 * math.pi) * math.pi / 180;
   double _float(Size size) =>
-      math.sin(phase.value * 2 * math.pi) *
-      math.min(3.0, size.shortestSide * 0.006);
+      desktopComposition && palette == _AtlasPlanetPalette.disconnected
+      ? 0
+      : math.sin(phase.value * 2 * math.pi) *
+            math.min(3.0, size.shortestSide * 0.006);
   double get _globeScale => desktopComposition
       ? 0.75 - 0.08 * _landingZoom
       : 0.85 - 0.10 * _landingZoom;
@@ -675,33 +767,49 @@ class _AtlasGlobePainter extends CustomPainter {
         d * 0.235,
       ),
       _DrOppoPose.waiting => Rect.fromLTWH(
-        d * 0.39,
-        d * 0.035,
-        d * 0.22,
-        d * (desktopComposition ? 0.24 : 0.155),
+        0,
+        0,
+        d * 0.28,
+        d * (desktopComposition ? 0.275 : 0.245),
       ),
-      _DrOppoPose.puzzled => Rect.fromLTWH(
-        d * 0.675,
-        d * 0.015,
-        d * 0.23,
-        d * 0.235,
-      ),
+      _ => Rect.fromLTWH(d * 0.675, d * 0.015, d * 0.23, d * 0.235),
     };
     final source =
         mascots?[pose]?.source.size ??
         switch (pose) {
           _DrOppoPose.flying => const Size(1.55, 1),
-          _DrOppoPose.waiting => const Size(0.80, 1),
-          _DrOppoPose.puzzled => const Size(0.95, 1),
+          _DrOppoPose.waiting => const Size(1.125, 1),
+          _ => const Size(0.7, 1),
         };
     final fitted = applyBoxFit(BoxFit.contain, source, box.size).destination;
+    if (pose == _DrOppoPose.waiting) {
+      final globe = globeBounds(size);
+      final radius = globe.width * .432;
+      // Keep the entire diaphragm in front of the crown. Its upper-right
+      // corner is farthest from the center of the planet in this sprite.
+      final right = radius * .20;
+      double surfaceY(double x) =>
+          globe.center.dy - math.sqrt(math.max(0.0, radius * radius - x * x));
+      final discY = surfaceY(right) + radius * .018;
+      final height = math.min(
+        fitted.height,
+        (discY - origin.dy - d * .002) / .90,
+      );
+      final width = height * source.aspectRatio;
+      final left = right - width;
+      // The back of the seated thigh must also bear weight on the globe.
+      final top = math.max(
+        discY - height * .90,
+        surfaceY(left + width * .24) + radius * .012 - height * .95,
+      );
+      return Rect.fromLTWH(globe.center.dx + left, top, width, height);
+    }
     var rect = Alignment.bottomCenter.inscribe(fitted, box);
     // Use the contact point on each alpha-trimmed pose and the visible rim
     // inside the atmospheric padding of the globe texture.
     final anchor = switch (pose) {
-      _DrOppoPose.waiting => Offset(0.46, desktopComposition ? 0.72 : 0.805),
-      _DrOppoPose.puzzled => const Offset(0.47, 0.99),
       _DrOppoPose.flying => const Offset(0.34, 0.94),
+      _ => const Offset(0.47, 0.99),
     };
     final radius =
         d *
@@ -767,46 +875,67 @@ class _AtlasGlobePainter extends CustomPainter {
       _AtlasFlightStage.launch => 0.13 * _flightProgress,
       _ => 0.0,
     };
-    if (flight.value.stage == _AtlasFlightStage.launch) {
-      final seated = _restingBounds(size, _DrOppoPose.waiting);
-      _drawMascot(
-        canvas,
-        _DrOppoPose.waiting,
-        seated.shift(bounds.center - seated.center),
-        1 - _flightProgress,
-        roll,
-      );
-    }
-    _drawMascot(
-      canvas,
+    final sprites = mascots;
+    if (sprites == null || sprites.isEmpty) return;
+    final frame = mascotMotion.sample(
       pose,
       bounds,
-      flight.value.stage == _AtlasFlightStage.launch ? _flightProgress : 1,
       roll,
+      size,
+      phase.value * _AtlasAnimatedPlanetState._periodSeconds,
+      animateMascot,
+      sprites.keys,
     );
-  }
-
-  void _drawMascot(
-    Canvas canvas,
-    _DrOppoPose pose,
-    Rect bounds,
-    double opacity,
-    double roll,
-  ) {
-    final mascot = mascots?[pose];
-    if (mascot == null || opacity == 0) return;
+    final height = frame.bounds.height;
+    final layers = [
+      for (final entry in frame.weights.entries)
+        if (sprites[entry.key] case final sprite?)
+          (
+            sprite: sprite,
+            weight: entry.value,
+            eyes: entry.key.eyes,
+            width: height * sprite.source.width / sprite.source.height,
+          ),
+    ];
+    var eyeCenter = Offset.zero;
+    for (final layer in layers) {
+      eyeCenter +=
+          Offset(
+            (layer.eyes.dx - .5) * layer.width,
+            (layer.eyes.dy - .5) * height,
+          ) *
+          layer.weight;
+    }
     canvas.save();
-    canvas.translate(bounds.center.dx, bounds.center.dy);
-    canvas.rotate(roll);
-    canvas.translate(-bounds.center.dx, -bounds.center.dy);
-    canvas.drawImageRect(
-      mascot.image,
-      mascot.source,
-      bounds,
-      Paint()
-        ..filterQuality = FilterQuality.medium
-        ..color = Colors.white.withValues(alpha: opacity),
-    );
+    canvas.translate(frame.bounds.center.dx, frame.bounds.center.dy);
+    canvas.rotate(frame.roll);
+    final blending = layers.length > 1;
+    if (blending) {
+      // Sum premultiplied sprite colors on a transparent layer. Overlapping
+      // faces stay opaque even halfway between two hand-drawn poses.
+      canvas.saveLayer(
+        Rect.fromCircle(center: Offset.zero, radius: height * 1.5),
+        Paint(),
+      );
+    }
+    for (final layer in layers) {
+      final rect = Rect.fromLTWH(
+        eyeCenter.dx - layer.eyes.dx * layer.width,
+        eyeCenter.dy - layer.eyes.dy * height,
+        layer.width,
+        height,
+      );
+      canvas.drawImageRect(
+        layer.sprite.image,
+        layer.sprite.source,
+        rect,
+        Paint()
+          ..filterQuality = FilterQuality.medium
+          ..blendMode = blending ? BlendMode.plus : BlendMode.srcOver
+          ..color = Colors.white.withValues(alpha: layer.weight),
+      );
+    }
+    if (blending) canvas.restore();
     canvas.restore();
   }
 
@@ -820,18 +949,19 @@ class _AtlasGlobePainter extends CustomPainter {
     if (radius <= 0) return;
     final (red, green, blue) = switch (surface) {
       _AtlasPlanetPalette.connected => (1.07, 1.6, 1.24),
-      _AtlasPlanetPalette.disconnected => (1.01, 1.06, 1.22),
+      _AtlasPlanetPalette.disconnected => (1.16, 1.16, 1.16),
       _AtlasPlanetPalette.connecting => (1.50, 1.26, .88),
       _AtlasPlanetPalette.error => (1.60, .89, .93),
     };
     shader
       ..setFloat(0, radius)
-      // The shared 70-second controller wraps after exactly two revolutions.
+      // The shared controller wraps after exactly two revolutions.
       ..setFloat(1, .04 - phase.value * 2)
       ..setFloat(2, .65 + .35 * lights.value)
       ..setFloat(3, red)
       ..setFloat(4, green)
-      ..setFloat(5, blue);
+      ..setFloat(5, blue)
+      ..setFloat(6, surface == _AtlasPlanetPalette.disconnected ? 1 : 0);
     canvas.save();
     canvas.translate(globe.center.dx, globe.center.dy);
     canvas.drawRect(
@@ -919,6 +1049,7 @@ class _AtlasGlobePainter extends CustomPainter {
       oldDelegate.phase != phase ||
       oldDelegate.lights != lights ||
       oldDelegate.flight != flight ||
+      oldDelegate.animateMascot != animateMascot ||
       oldDelegate.texture != texture ||
       oldDelegate.mascots != mascots ||
       oldDelegate.desktopComposition != desktopComposition ||
@@ -976,6 +1107,12 @@ Future<ui.Image?> atlasPlanetTextureForTesting({
 @visibleForTesting
 Future<int> atlasPlanetMascotAssetCountForTesting() async =>
     (await _AtlasSceneAssets.load()).mascots.length;
+
+@visibleForTesting
+Map<String, double> atlasPlanetPaintedPosesForTesting(CustomPainter painter) =>
+    (painter as _AtlasGlobePainter).mascotMotion.last!.weights.map(
+      (pose, weight) => MapEntry(pose.name, weight),
+    );
 
 @visibleForTesting
 double atlasPlanetPhaseForTesting(CustomPainter painter) =>

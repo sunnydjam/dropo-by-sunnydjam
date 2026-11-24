@@ -6,6 +6,7 @@ import (
 	core "dropocore"
 	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
+	"dropocore/residential"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -30,29 +31,47 @@ func TestPlayManagedDirectReservesPassPinnedEngineConfig(t *testing.T) {
 		Config     string
 		Candidates []struct{ ID string }
 	}
-	if json.Unmarshal([]byte(BuildSingBoxConfig()), &runtime) != nil || !runtime.Success || len(runtime.Candidates) != 6 {
-		t.Fatal("expected six regional transports")
+	if json.Unmarshal([]byte(BuildSingBoxConfig()), &runtime) != nil || !runtime.Success || len(runtime.Candidates) != 14 {
+		t.Fatal("expected six Moscow, six regional, and two residential routes")
 	}
 	regional := map[string]string{ownedprofile.Free + "-lv-quic": ownedprofile.Free, ownedprofile.Boost + "-fi-tcp": ownedprofile.Boost}
-	for i := 0; i < len(runtime.Candidates); i += 3 {
-		tier, ok := regional[runtime.Candidates[i].ID]
-		if !ok || runtime.Candidates[i+1].ID != tier+ownedprofile.MainSuffix || runtime.Candidates[i+2].ID != tier+ownedprofile.ExtraSuffix {
+	for i := 0; i < len(runtime.Candidates); i += 7 {
+		directID := runtime.Candidates[i+3].ID
+		tier, ok := regional[directID]
+		if !ok || runtime.Candidates[i+4].ID != tier+ownedprofile.MainSuffix || runtime.Candidates[i+5].ID != tier+ownedprofile.ExtraSuffix || runtime.Candidates[i+6].ID != tier+ownedprofile.ResidentialSuffix {
 			t.Fatal("tier lost its regional or primary route")
 		}
-		delete(regional, runtime.Candidates[i].ID)
+		for offset, method := range []string{ownedprofile.XHTTP, ownedprofile.Reality, ownedprofile.Hysteria} {
+			if runtime.Candidates[i+offset].ID != ownedprofile.MoscowCandidateID(tier, method) {
+				t.Fatal("Moscow routes must precede direct routes")
+			}
+		}
+		delete(regional, directID)
 	}
 	var graph struct{ Outbounds []map[string]any }
 	if err := json.Unmarshal([]byte(runtime.Config), &graph); err != nil {
 		t.Fatal(err)
 	}
 	var fi map[string]any
+	residentialRoutes := 0
 	for _, out := range graph.Outbounds {
+		if tag, _ := out["tag"].(string); strings.HasSuffix(tag, ownedprofile.ResidentialSuffix) {
+			native, _ := out["xray_outbound"].(map[string]any)
+			client, _, err := residential.FromOutbound(native)
+			if err != nil || client == nil {
+				t.Fatal("managed residential candidate could not open its private directory", tag, err)
+			}
+			residentialRoutes++
+		}
 		if out["tag"] == "vpn-"+ownedprofile.Boost+"-fi-tcp" && out["type"] == xhttpOutboundType {
 			fi, _ = out["xray_outbound"].(map[string]any)
 			if _, exists := out["finland_relay"]; exists {
 				t.Fatal("legacy HTTPS relay is still in the managed config")
 			}
 		}
+	}
+	if residentialRoutes != 2 {
+		t.Fatal("expected private entries for both managed profiles")
 	}
 	if fi == nil {
 		t.Fatal("managed Finland source did not use embedded Xray")

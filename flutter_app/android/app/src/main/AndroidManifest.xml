@@ -120,5 +120,6 @@
         <!-- Telegram also uses IP-only endpoints outside the configured DC ranges. -->
         <package android:name="org.telegram.messenger" />
         <package android:name="org.telegram.messenger.web" />
+        <package android:name="org.thunderdog.challegram" />
     </queries>
 </manifest>

@@ -1,11 +1,7 @@
 part of 'main.dart';
 
-typedef OwnedVPNSave = Future<Map<String, dynamic>> Function(
-  String,
-  String,
-  String,
-  bool,
-);
+typedef OwnedVPNSave =
+    Future<Map<String, dynamic>> Function(String, String, String, bool);
 
 String? _ownedSourceFamily(Object? provider) {
   for (final pool in ['free', 'boost']) {
@@ -116,6 +112,36 @@ class OwnedVPNClient {
   final Duration subscriptionTimeout;
   final NativeAccountSessionStore _store;
   final ProtectedAccountIdentityStore _identityStore;
+  // Kept in this UI session only. Reconnecting or refreshing the account
+  // must leave a subsequent manual source choice alone.
+  bool _turboSelectionHandled = false;
+
+  Future<Map<String, dynamic>> _applyUserSourceChoice(
+    Future<Map<String, dynamic>> Function() choose,
+  ) => _serialize(() async {
+    final result = await choose();
+    if (result['success'] == true) _turboSelectionHandled = true;
+    return result;
+  });
+
+  Future<void> _preferTurboOnce(CoreBridge bridge) async {
+    if (_turboSelectionHandled) return;
+    final snapshot = await bridge.vpnSourcesSnapshot();
+    final turbo = snapshot.sources
+        .where(
+          (s) => s.publicCatalogId == 'dropo-individual-boost' && !s.disabled,
+        )
+        .firstOrNull;
+    if (turbo == null) return;
+    if (snapshot.sources.first.id == turbo.id && snapshot.autoSelect == false) {
+      _turboSelectionHandled = true;
+      return;
+    }
+    if (snapshot.running == true) return;
+    final result = await bridge.moveVpnSource(turbo.id, 0);
+    if (result['success'] == true) _turboSelectionHandled = true;
+  }
+
   Future<void> _operations = Future<void>.value();
   Future<T> _serialize<T>(Future<T> Function() operation) {
     final result = _operations.then((_) => operation());
@@ -148,8 +174,9 @@ class OwnedVPNClient {
         }
         if (source['installationId'] != null &&
             (source['installationId'] is! String ||
-                !RegExp(r'^[A-Za-z0-9_-]{8,128}$')
-                    .hasMatch(source['installationId'] as String))) {
+                !RegExp(
+                  r'^[A-Za-z0-9_-]{8,128}$',
+                ).hasMatch(source['installationId'] as String))) {
           throw const FormatException(
             'Invalid protected installation identity.',
           );
@@ -243,8 +270,15 @@ class OwnedVPNClient {
     OwnedVPNSave save,
     Future<Map<String, dynamic>> Function(String, int) verify, {
     String? registeredToken,
+    CoreBridge? bridge,
   }) => _serialize(
-    () => _enroll(api, save, verify, registeredToken: registeredToken),
+    () => _enroll(
+      api,
+      save,
+      verify,
+      registeredToken: registeredToken,
+      bridge: bridge,
+    ),
   );
 
   Future<Map<String, dynamic>> _enroll(
@@ -252,6 +286,7 @@ class OwnedVPNClient {
     OwnedVPNSave save,
     Future<Map<String, dynamic>> Function(String, int) verify, {
     String? registeredToken,
+    CoreBridge? bridge,
   }) async {
     await _ownedStep('protected_storage_read', _load);
     if (_record?['deletionPending'] == true) {
@@ -288,7 +323,7 @@ class OwnedVPNClient {
       standaloneGuest =
           account['demoAccount'] == true || account['authMethod'] == 'password';
       if (standaloneGuest) {
-        if (_record?['linked'] == true) return _apply(save);
+        if (_record?['linked'] == true) return _apply(save, bridge);
         accountToken = null;
       }
     }
@@ -448,11 +483,16 @@ class OwnedVPNClient {
         throw const AccountIdentityChanged();
       }
     }
+    if (((_record?['boostUntil'] as num?)?.toInt() ?? 0) <=
+            DateTime.now().millisecondsSinceEpoch ~/ 1000 ||
+        boost == null) {
+      _turboSelectionHandled = false;
+    }
     _record!['freeKey'] = free;
     _record!['boostKey'] = boost;
     _record!['boostUntil'] = until;
     await _persist();
-    return _apply(save);
+    return _apply(save, bridge);
   }
 
   Future<String> _downloadKey(Object? value, int until) async {
@@ -558,17 +598,22 @@ class OwnedVPNClient {
         }
       }
       await _store.clear();
+      _turboSelectionHandled = false;
       _record = null;
       return {'success': true};
     } catch (_) {
       return {
         'success': false,
-        'error': 'Не удалось удалить ключи Dropo с устройства. Повторите очистку; свои подписки сохранятся.',
+        'error':
+            'Не удалось удалить ключи Dropo с устройства. Повторите очистку; свои подписки сохранятся.',
       };
     }
   });
 
-  Future<Map<String, dynamic>> _apply(OwnedVPNSave save) async {
+  Future<Map<String, dynamic>> _apply(
+    OwnedVPNSave save,
+    CoreBridge? bridge,
+  ) async {
     final free = _record?['freeKey'];
     if (free is! String) {
       return {
@@ -580,7 +625,8 @@ class OwnedVPNClient {
     if (first['success'] != true) {
       return {
         'success': false,
-        'error': 'Профиль сохранён защищённо. Отключите VPN и повторите обновление профиля для применения.',
+        'error':
+            'Профиль сохранён защищённо. Отключите VPN и повторите обновление профиля для применения.',
       };
     }
     final boost = _record?['boostKey'];
@@ -596,9 +642,11 @@ class OwnedVPNClient {
       if (result['success'] != true) {
         return {
           'success': false,
-          'error': 'Free готов. Отключите VPN и повторите обновление профиля для применения Boost.',
+          'error':
+              'Free готов. Отключите VPN и повторите обновление профиля для применения Boost.',
         };
       }
+      if (bridge != null) await _preferTurboOnce(bridge);
     }
     return {
       'success': true,
@@ -653,11 +701,14 @@ class OwnedVPNClient {
         // Native rechecks this exact family reference inside the mutation.
         // A deletion or replacement after the snapshot must win over restore;
         // only explicit enrollment may add a family that no longer exists.
-        await bridge.callMap(
+        final restored = await bridge.callMap(
           'RestoreManagedVPNSource',
           args: [id, key, sourceID, expectedNodeID],
           timeout: const Duration(seconds: 8),
         );
+        if (pool == 'boost' && restored['success'] == true) {
+          await _preferTurboOnce(bridge);
+        }
       }
     } catch (_) {
       /* Never erase credentials or fall back to plaintext on a read error. */
@@ -712,6 +763,7 @@ class OwnedVPNClient {
       final result = await bridge.removeVpnSource(source['id'].toString());
       if (result['success'] != true) return result;
     }
+    _turboSelectionHandled = false;
     _record!.remove('boostKey');
     _record!['boostUntil'] = 0;
     await _persist();
@@ -746,7 +798,8 @@ class OwnedVPNClient {
       if (_record?['standaloneGuest'] == true) {
         return {
           'success': false,
-          'error': 'На устройстве сохранён отдельный бесплатный профиль. Удалите его отдельной кнопкой в аккаунте, затем обновите профиль VPN для привязки и Турбо.',
+          'error':
+              'На устройстве сохранён отдельный бесплатный профиль. Удалите его отдельной кнопкой в аккаунте, затем обновите профиль VPN для привязки и Турбо.',
         };
       }
       if (identity['accountKind'] == 'registered' &&
@@ -814,6 +867,7 @@ class OwnedVPNClient {
         (raw, min) =>
             bridge.callMap('ValidateManagedCatalog', args: [raw, min]),
         registeredToken: token,
+        bridge: bridge,
       );
       if (result['success'] == true && _record?['boostKey'] == null) {
         final view = await bridge.callMap('GetVPNSources');
@@ -829,7 +883,8 @@ class OwnedVPNClient {
     } catch (_) {
       return {
         'success': false,
-        'error': 'Не удалось обновить профиль VPN. Сохранённые источники доступны; повторите позже.',
+        'error':
+            'Не удалось обновить профиль VPN. Сохранённые источники доступны; повторите позже.',
       };
     } finally {
       api.close();
@@ -851,7 +906,8 @@ class OwnedVPNClient {
       if (_record!['linked'] == true) {
         return {
           'success': false,
-          'error': 'Профиль привязан к аккаунту. Управляйте им после входа через Telegram.',
+          'error':
+              'Профиль привязан к аккаунту. Управляйте им после входа через Telegram.',
         };
       }
       final independentGuest = _record!['standaloneGuest'] == true;
@@ -930,12 +986,14 @@ class OwnedVPNClient {
         }
       }
       await _store.clear();
+      _turboSelectionHandled = false;
       _record = null;
       return {'success': true, 'independentGuest': independentGuest};
     } catch (_) {
       return {
         'success': false,
-        'error': 'Удаление пока не завершено. Сохранён защищённый запрос; повторите удаление при доступном интернете.',
+        'error':
+            'Удаление пока не завершено. Сохранён защищённый запрос; повторите удаление при доступном интернете.',
       };
     } finally {
       if (transport == null) api.close();

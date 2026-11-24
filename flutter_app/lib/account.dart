@@ -116,6 +116,7 @@ class AccountDisplaySnapshot {
     required this.displayName,
     this.telegramUsername = '',
     this.turboUntil,
+    this.hasConfirmedPlan = false,
     this.registered = true,
   });
 
@@ -129,9 +130,15 @@ class AccountDisplaySnapshot {
         .trim();
     final name = String.fromCharCodes(clean.runes.take(80));
     final username = json['telegramUsername']?.toString() ?? '';
+    final expiry = json['speedBoostUntil'];
+    final turboUntil = DateTime.tryParse(expiry?.toString() ?? '');
     return AccountDisplaySnapshot(
       displayName: name.isEmpty ? 'Аккаунт' : name,
-      turboUntil: DateTime.tryParse(json['speedBoostUntil']?.toString() ?? ''),
+      turboUntil: turboUntil,
+      hasConfirmedPlan:
+          json['id'] is String &&
+          (json['id'] as String).isNotEmpty &&
+          (expiry == null || turboUntil != null),
       telegramUsername: RegExp(r'^[A-Za-z0-9_]{1,32}$').hasMatch(username)
           ? username
           : '',
@@ -141,6 +148,7 @@ class AccountDisplaySnapshot {
 
   final String displayName, telegramUsername;
   final DateTime? turboUntil;
+  final bool hasConfirmedPlan;
   final bool registered;
 }
 

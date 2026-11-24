@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -89,6 +90,10 @@ func (a *App) runRouteProbeAndApply(configPath string, activeFreeAccessTags []st
 	}
 
 	proxySpecs := collectVPNProbeCandidateSpecs(config)
+	managed, allowedManaged := a.managedRouteProbeSelection()
+	proxySpecs = slices.DeleteFunc(proxySpecs, func(spec routeProbeCandidate) bool {
+		return managed[spec.Tag] && spec.Tag != allowedManaged
+	})
 	hasVPNProxy := len(proxySpecs) > 0
 	services := enabledRouteProbeServices(settings, hasVPNProxy)
 	freeTags := activeFreeAccessTags
@@ -172,6 +177,9 @@ func (a *App) runRouteProbeAndApply(configPath string, activeFreeAccessTags []st
 		})
 
 		result := a.probeServiceCandidates(svc, serviceCandidates)
+		if result.MethodKind == "vpn" && managed[result.MethodTag] {
+			result.MethodTag = FreeAccessMethodVPN
+		}
 		report.Services = append(report.Services, result)
 		a.emitRouteProbe("route-probe-service", result)
 	}
@@ -198,6 +206,35 @@ func (a *App) runRouteProbeAndApply(configPath string, activeFreeAccessTags []st
 	}
 
 	return report, nil
+}
+
+// The source monitor alone can graduate from Moscow to an independent
+// regional egress. Service probes follow that selector.
+func (a *App) managedRouteProbeSelection() (map[string]bool, string) {
+	managed := make(map[string]bool)
+	if a.storage == nil {
+		return managed, ""
+	}
+	profile, err := a.storage.GetActiveProfile()
+	if err != nil {
+		return managed, ""
+	}
+	for _, source := range profile.VPNSources {
+		if windowsRouteIngress(source.PublicCatalogID) != "" {
+			managed["vpn-source-"+source.ID] = true
+		}
+	}
+	active := a.activeVPNSource()
+	if managed[active] {
+		return managed, active
+	}
+	moscow, _, _ := a.managedSourceTags()
+	for _, tag := range a.configuredVPNSourceTags() {
+		if moscow[tag] {
+			return managed, tag
+		}
+	}
+	return managed, ""
 }
 
 func enabledRouteProbeServices(settings GlobalAppSettings, hasVPNProxy bool) []FreeAccessService {

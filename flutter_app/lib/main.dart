@@ -867,6 +867,7 @@ class HttpCoreBridge implements CoreBridge {
       id,
       consent,
       requireIndividual: true,
+      bridge: this,
       save: (providerId, name, uri, accepted) => callMap(
         'AddManagedVPNSource',
         args: [providerId, name, uri, accepted],
@@ -1605,6 +1606,7 @@ class ChannelCoreBridge implements CoreBridge {
         id,
         consent,
         requireIndividual: true,
+        bridge: this,
         save: (providerId, name, uri, accepted) => callMap(
           'AddManagedVPNSource',
           args: [providerId, name, uri, accepted],
@@ -2837,9 +2839,11 @@ class VpnSourceInfo {
     this.nodeIds = const [],
     this.favoriteNodeIds = const [],
     this.response = const VpnResponseSnapshot(),
+    this.ingressResponses = const {},
   });
 
   final VpnResponseSnapshot response;
+  final Map<String, VpnResponseSnapshot> ingressResponses;
   final String id;
   final String name;
   final String kind;
@@ -2877,6 +2881,10 @@ class VpnSourceInfo {
       usingCache: json['using_cache'] == true,
       active: json['active'] == true,
       response: VpnResponseSnapshot.fromJson(_asMap(json['response'])),
+      ingressResponses: _asMap(json['ingress_responses']).map(
+        (route, value) =>
+            MapEntry(route, VpnResponseSnapshot.fromJson(_asMap(value))),
+      ),
     );
   }
 }
@@ -3959,13 +3967,26 @@ class _DropoHomePageState extends State<DropoHomePage>
   void _identityChanged() {
     _incidents.synchronizeIdentity();
     final account = _guestIdentity.account;
+    final token = _guestIdentity.token;
+    if (token == null && _accountDisplay.value == null) {
+      // A confirmed sign-out can replace startup without changing the avatar.
+      _accountDisplayChanged();
+      return;
+    }
     _accountDisplay.publish(
-      account != null
+      token != null && account != null
           ? AccountDisplaySnapshot.fromJson(account)
-          : _guestIdentity.token != null
+          : token != null
           ? const AccountDisplaySnapshot(displayName: 'Аккаунт')
           : null,
     );
+  }
+
+  bool get _showTurboOffer {
+    final display = _accountDisplay.value;
+    if (display == null) return _guestIdentity.confirmedSignedOut;
+    return display.hasConfirmedPlan &&
+        !(display.turboUntil?.isAfter(DateTime.now()) ?? false);
   }
 
   void _accountDisplayChanged() {
@@ -6859,10 +6880,8 @@ class _DropoHomePageState extends State<DropoHomePage>
               ],
             ),
       updateNotice: _buildUpdateNotice(),
-      turboOffer:
-          (_accountDisplay.value?.turboUntil?.isAfter(DateTime.now()) ?? false)
-          ? null
-          : FreePlanBanner(
+      turboOffer: _showTurboOffer
+          ? FreePlanBanner(
               signedIn: _accountDisplay.value?.registered == true,
               onTurbo: () {
                 setState(
@@ -6871,7 +6890,8 @@ class _DropoHomePageState extends State<DropoHomePage>
                 );
                 unawaited(_selectMenuSection('account'));
               },
-            ),
+            )
+          : null,
       servicesExpanded:
           homeRoutesExpanded && appConfig.routingMode == 'blocked_only',
       servicesVisible: appConfig.routingMode == 'blocked_only',
@@ -7133,9 +7153,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       version: status.version.version,
       accountDisplay: _accountDisplay.value,
       onBoost: _openBoost,
-      offerBoost:
-          !(_accountDisplay.value?.turboUntil?.isAfter(DateTime.now()) ??
-              false),
+      offerBoost: _showTurboOffer,
       onAbout: quitting ? null : _openAbout,
       visible: windowVisible,
       motionEnabled: !appConfig.reduceMotion,

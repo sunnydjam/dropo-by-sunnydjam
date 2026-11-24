@@ -108,6 +108,8 @@ profile handle their own data under their respective privacy policies.
 
 ## Network requests and recipients
 
+When the Moscow and direct routes for a managed Free or Turbo profile are unavailable, the app can request its assigned residential gateway over HTTPS. The directory receives a lookup identifier derived from the installation's regional credential and checks the entitlement. The device verifies and decrypts a signed, expiring address and port. Only the encrypted assignment is cached. The gateway can see the connecting IP and forwards the encrypted connection to the regional service for that plan. Subscribers receive no directory of other subscribers or their devices.
+
 - Configured VPN, proxy and WireGuard endpoints receive traffic routed to them.
   Personal subscription import and refresh contact the user-supplied URL.
 - Service health checks contact the relevant service domains. Connectivity and

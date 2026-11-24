@@ -140,7 +140,7 @@ func managedRegionalRealityStream(outbound, stream map[string]any) bool {
 	server, _ := servers[0].(map[string]any)
 	addr, _ := server["address"].(string)
 	port, _ := server["port"].(float64)
-	if port != 2443 && port != 2444 {
+	if port != 2443 && port != 2444 && port != 2453 && port != 2454 {
 		return false
 	}
 	get := func(k string) string { v, _ := tls[k].(string); return v }

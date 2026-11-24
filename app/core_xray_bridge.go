@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
@@ -34,9 +35,10 @@ type XrayBridgeManager struct {
 	workDir string
 	logger  func(string)
 
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stopping bool
+	mu               sync.Mutex
+	cmd              *exec.Cmd
+	stopping         bool
+	closeResidential context.CancelFunc
 }
 
 func NewXrayBridgeManager(basePath, resourcesPath string, logger func(string)) *XrayBridgeManager {
@@ -74,6 +76,18 @@ func (m *XrayBridgeManager) Start(config []byte) error {
 		m.mu.Unlock()
 		return fmt.Errorf("%s not found: %s", XrayExeName, m.exePath)
 	}
+	session, stopResidential := context.WithCancel(context.Background())
+	started := false
+	defer func() {
+		if !started {
+			stopResidential()
+		}
+	}()
+	config, err := prepareResidentialBridges(session, config, m.workDir)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	if err := m.testConfig(config); err != nil {
 		m.mu.Unlock()
 		return err
@@ -98,11 +112,14 @@ func (m *XrayBridgeManager) Start(config []byte) error {
 	attachManagedCmdToJob(cmd, "xray bridge", m.log)
 
 	m.cmd = cmd
+	m.closeResidential = stopResidential
+	started = true
 	m.log(fmt.Sprintf("started pid=%d config=stdin", cmd.Process.Pid))
 	go m.logOutput(stdout, "OUT")
 	go m.logOutput(stderr, "ERR")
 	go func() {
 		err := cmd.Wait()
+		stopResidential()
 		m.mu.Lock()
 		stopping := m.stopping || m.cmd != cmd
 		if m.cmd == cmd {
@@ -134,6 +151,10 @@ func (m *XrayBridgeManager) Start(config []byte) error {
 func (m *XrayBridgeManager) Stop() {
 	m.mu.Lock()
 	cmd := m.cmd
+	if m.closeResidential != nil {
+		m.closeResidential()
+		m.closeResidential = nil
+	}
 	m.cmd = nil
 	if cmd != nil {
 		m.stopping = true

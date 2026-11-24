@@ -3,6 +3,7 @@ package dropoandroid
 import (
 	"context"
 	"dropocore/dnspolicy"
+	"dropocore/residential"
 	"errors"
 	"io"
 	"net"
@@ -19,6 +20,7 @@ import (
 type xhttpSessionKey struct{}
 
 type xhttpSocketSession struct {
+	directory           *residential.Client
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	protect             func(int32) error
@@ -197,6 +199,20 @@ func (protectedXHTTPDialer) Dial(ctx context.Context, _ xnet.Address, destinatio
 	}
 	dialer := net.Dialer{Control: control, Timeout: 16 * time.Second, KeepAlive: 45 * time.Second}
 	dialer.SetMultipathTCP(false)
+	if destination.Address.Family().IsDomain() && residential.Reserved(destination.Address.Domain()) {
+		if network != "tcp" || session.directory == nil {
+			return nil, errors.New("residential route unavailable")
+		}
+		conn, err := session.directory.Connect(dialCtx, dialer.DialContext)
+		if err != nil {
+			return nil, err
+		}
+		tracked := &trackedXHTTPConn{Conn: conn, session: session}
+		if !session.trackPhysical(tracked, generation) {
+			return nil, context.Canceled
+		}
+		return tracked, nil
+	}
 	if destination.Address.Family().IsDomain() {
 		resolver := dnspolicy.Resolver{Policy: dnspolicy.Default(), Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			resolverDialer := net.Dialer{Control: control, Timeout: 5 * time.Second}

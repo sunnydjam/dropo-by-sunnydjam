@@ -76,6 +76,73 @@ func TestWindowsManagedMethodsRankOnceAndStayOnNextWorkingRoute(t *testing.T) {
 	}
 }
 
+func TestWindowsManagedDirectRoutesWaitForMoscowOutage(t *testing.T) {
+	var allMoscowFailed atomic.Bool
+	var xhttpFailed atomic.Bool
+	var directProbes atomic.Int32
+	a, ctx, generation := newVPNResponseTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if strings.Contains(r.URL.Path, "moscow") {
+			if allMoscowFailed.Load() || (strings.Contains(r.URL.Path, "xhttp") && xhttpFailed.Load()) {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			if strings.Contains(r.URL.Path, "xhttp") {
+				fmt.Fprint(w, `{"delay":20}`)
+				return
+			}
+			fmt.Fprint(w, `{"delay":40}`)
+			return
+		}
+		directProbes.Add(1)
+		fmt.Fprint(w, `{"delay":5}`)
+	})
+	routes := []VPNSource{{ID: "direct", Name: ownedprofile.RegionName(ownedprofile.Free), PublicCatalogID: ownedprofile.Free, URI: ownedReserveFixture, SelectedNodeID: "direct"}}
+	for _, method := range []string{ownedprofile.XHTTP, ownedprofile.Reality, ownedprofile.Hysteria} {
+		id := ownedprofile.MoscowCandidateID(ownedprofile.Free, method)
+		routes = append(routes, VPNSource{ID: id, PublicCatalogID: id, URI: ownedReserveFixture, SelectedNodeID: id})
+	}
+	var outbounds []interface{}
+	for _, route := range routes {
+		outbounds = append(outbounds, map[string]interface{}{"tag": "vpn-source-" + route.ID, "type": "socks"})
+	}
+	if err := a.storage.UpdateProfileVPNSources(1, routes, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.storage.UpdateProfileConfig(1, map[string]interface{}{"outbounds": outbounds}); err != nil {
+		t.Fatal(err)
+	}
+	a.vpnSourceHealth = make(map[string]vpnSourceHealthState)
+	a.selectInitialVPNSource(ctx, generation)
+	if a.activeVPNSource() != "vpn-source-"+ownedprofile.MoscowCandidateID(ownedprofile.Free, ownedprofile.XHTTP) || directProbes.Load() != 0 {
+		t.Fatalf("initial route %s, direct probes %d", a.activeVPNSource(), directProbes.Load())
+	}
+	checkOutage := func() {
+		for i := 0; i < vpnSourceFailureThreshold; i++ {
+			a.checkActiveVPNSource(ctx, generation)
+		}
+	}
+	xhttpFailed.Store(true)
+	checkOutage()
+	if !strings.Contains(a.activeVPNSource(), "moscow") || directProbes.Load() != 0 {
+		t.Fatalf("skipped the healthy Moscow alternatives: %s", a.activeVPNSource())
+	}
+	allMoscowFailed.Store(true)
+	checkOutage()
+	if a.activeVPNSource() != "vpn-source-direct" || directProbes.Load() == 0 {
+		t.Fatalf("complete Moscow outage did not promote direct: %s, direct probes %d", a.activeVPNSource(), directProbes.Load())
+	}
+	allMoscowFailed.Store(false)
+	xhttpFailed.Store(false)
+	a.checkActiveVPNSource(ctx, generation)
+	if a.activeVPNSource() != "vpn-source-direct" {
+		t.Fatal("healthy direct fallback was displaced")
+	}
+}
+
 func TestVPNSourceLatencyMigrationPreservesExistingPriority(t *testing.T) {
 	legacy := ProfileData{VPNSources: []VPNSource{{ID: "first"}, {ID: "second"}}}
 	normalizeProfileVPNSources(&legacy)

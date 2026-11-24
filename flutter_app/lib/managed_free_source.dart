@@ -37,6 +37,7 @@ class ManagedFreeSourceClient {
     save,
     Future<Map<String, dynamic>> Function(String, int)? verifyCatalog,
     bool requireIndividual = false,
+    CoreBridge? bridge,
   }) async {
     if (!consent || id != 'dropo-free') {
       return {
@@ -60,7 +61,7 @@ class ManagedFreeSourceClient {
         if (verifyCatalog == null) return _unavailable();
         return await _ownedVPNForEndpoint(
           endpoint,
-        ).enroll(api, save, verifyCatalog);
+        ).enroll(api, save, verifyCatalog, bridge: bridge);
       }
       if (requireIndividual) return _unavailable();
       final response = await api.request('GET', '/v1/vpn/free-source');

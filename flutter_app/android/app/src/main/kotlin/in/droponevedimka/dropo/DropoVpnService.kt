@@ -798,7 +798,9 @@ class DropoVpnService :
     }
 
     override fun writeDebugMessage(message: String?) {
-        val text = message.orEmpty().trim()
+        // Native diagnostics can include ANSI escapes. Pass printable text across
+        // JNI so Android's JSON formatter never has to encode terminal controls.
+        val text = nativeLogControls.replace(message.orEmpty().take(4000), "").trim()
         if (text.isEmpty()) return
         if (isDebugBuild()) {
             Log.d("sing-box", text)
@@ -1160,6 +1162,7 @@ class DropoVpnService :
         private const val NOTIFICATION_ID = 5001
         private const val ACTION_START = "in.droponevedimka.dropo.START_VPN"
         private const val ACTION_STOP = "in.droponevedimka.dropo.STOP_VPN"
+        private val nativeLogControls = Regex("""\x1B\[[0-?]*[ -/]*[@-~]|[\x00-\x1F\x7F]""")
 
         private val libboxSetup = AtomicBoolean(false)
         private val certificateCache = mutableListOf<String>()

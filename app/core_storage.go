@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"dropocore/dnspolicy"
+	"dropocore/residential"
 	"dropocore/sourcehistory"
 	"encoding/json"
 	"fmt"
@@ -1145,7 +1146,7 @@ func collectXrayEndpointHosts(xrayConfig map[string]interface{}) []string {
 
 func appendEndpointHost(hosts []string, value interface{}) []string {
 	for _, item := range interfaceStringSlice(value) {
-		if host := normalizeEndpointHost(item); host != "" && !isLoopbackHost(host) {
+		if host := normalizeEndpointHost(item); host != "" && !isLoopbackHost(host) && !residential.Reserved(host) {
 			hosts = append(hosts, host)
 		}
 	}

@@ -183,6 +183,11 @@ func nativeServiceRule(service FreeAccessService, strategyIDs []string) traffic.
 	if len(rule.IPCIDRs) > 0 {
 		rule.IPMatchPolicy = traffic.IPMatchRequireContext
 	}
+	if service.Tag == "telegram" {
+		// MTProto DCs may assign any TCP port. Native capture remains scoped
+		// to the DC prefixes and routing still requires service identity.
+		rule.TCPPorts = nil
+	}
 	if service.Tag == "discord" {
 		rule.TCPPorts = append(rule.TCPPorts, normalizedDiscordTCPPorts(nil)...)
 		rule.ProcessDiscoveryTCPPorts = discordProcessDiscoveryTCPPorts()

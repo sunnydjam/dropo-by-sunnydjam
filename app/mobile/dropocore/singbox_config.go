@@ -294,7 +294,7 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 		out := proxyToSingBoxOutbound(node)
 		outbounds = append(outbounds, out)
 		proxyTags = append(proxyTags, node.Tag)
-		candidates = append(candidates, androidSourceCandidate{ID: candidate.ID, Tag: node.Tag, NodeID: androidNodeID(node), OwnerID: candidate.OwnerID})
+		candidates = append(candidates, androidSourceCandidate{ID: candidate.ID, Tag: node.Tag, NodeID: androidNodeID(node), OwnerID: candidate.OwnerID, Preferred: candidate.Preferred})
 	}
 	if len(candidates) == 0 {
 		return androidSourceError("Включённые источники не содержат выбранных серверов. Обновите подписки или выберите сервер.")

@@ -11,10 +11,11 @@ import (
 // A prepared candidate always represents one independent source and exactly
 // its authoritative node. No credentials or remote endpoints cross this API.
 type androidSourceCandidate struct {
-	ID      string `json:"id"`
-	Tag     string `json:"tag"`
-	NodeID  string `json:"nodeId"`
-	OwnerID string `json:"ownerId,omitempty"`
+	Preferred bool   `json:"preferred,omitempty"`
+	ID        string `json:"id"`
+	Tag       string `json:"tag"`
+	NodeID    string `json:"nodeId"`
+	OwnerID   string `json:"ownerId,omitempty"`
 }
 
 func androidLogicalSourceStatusLocked(id string) (bool, androidSourceResponse) {

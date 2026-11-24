@@ -146,8 +146,8 @@ void main() {
     );
     expect(
       await atlasPlanetMascotAssetCountForTesting(),
-      3,
-      reason: 'All three DrOppo poses must be available offline',
+      6,
+      reason: 'The three poses and their transition frames must decode offline',
     );
   });
   setUp(() {
@@ -202,7 +202,18 @@ void main() {
       final before = await surface();
       await tester.pump(const Duration(seconds: 2));
       final after = await surface();
-      expect(before.cityLights + after.cityLights, greaterThan(20));
+      if (!connected && !busy && !error) {
+        expect(before.cityLights + after.cityLights, 0);
+        expect(
+          before.pixels.every((pixel) {
+            final red = pixel >> 16;
+            return red == ((pixel >> 8) & 255) && red == (pixel & 255);
+          }),
+          isTrue,
+        );
+      } else {
+        expect(before.cityLights + after.cityLights, greaterThan(20));
+      }
       final changed = before.pixels.indexed
           .where((entry) => entry.$2 != after.pixels[entry.$1])
           .length;
@@ -255,6 +266,41 @@ void main() {
     flags.dispose();
   });
 
+  testWidgets('launch, interrupted flight and recovery use the drawn frames', (
+    tester,
+  ) async {
+    final flags = _PlanetFlags();
+    await _pumpPlanet(tester, flags, desktopComposition: true);
+    Map<String, double> poses() =>
+        atlasPlanetPaintedPosesForTesting(_painter(tester));
+    expect(poses(), {'waiting': 1.0});
+    flags.update(() => flags.connecting = true);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 215));
+    expect(poses()['rising'], greaterThan(.95));
+    await tester.pump(const Duration(milliseconds: 215));
+    expect(poses()['pushOff'], greaterThan(.95));
+    final atInterruption = poses();
+    flags.update(() {
+      flags.connecting = false;
+      flags.error = true;
+    });
+    await tester.pump();
+    expect(poses(), atInterruption);
+    await tester.pump(const Duration(milliseconds: 275));
+    expect(poses()['recovering'], greaterThan(.95));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(poses(), {'puzzled': 1.0});
+    flags.update(() {
+      flags.error = false;
+      flags.reducedMotion = true;
+    });
+    await tester.pump();
+    expect(poses(), {'waiting': 1.0});
+    await tester.pumpWidget(const SizedBox.shrink());
+    flags.dispose();
+  });
+
   testWidgets('an immediate connection still launches the mascot', (
     tester,
   ) async {
@@ -271,7 +317,7 @@ void main() {
   });
 
   for (final (state, color) in const [
-    ('disconnected', Color(0xFFAAB4B2)),
+    ('disconnected', Color(0xFFADADAD)),
     ('connected', Color(0xFF5CF0B0)),
     ('error', Color(0xFFFF6969)),
     ('connecting', Color(0xFFFFCF78)),
@@ -301,7 +347,7 @@ void main() {
           _painter(tester),
           const Size(320, 320),
         );
-        expect(_phase(tester) - initialPhase, closeTo(3 / 70, 0.002));
+        expect(_phase(tester) - initialPhase, closeTo(3 / 127.273, 0.002));
         expect((first.center.dy - moved.center.dy).abs(), greaterThan(0.1));
         expect(
           (firstTilt - atlasPlanetTiltForTesting(_painter(tester))).abs(),
@@ -335,7 +381,7 @@ void main() {
       await tester.pump();
       expect(_phase(tester), closeTo(hidden, 0.001));
       await tester.pump(const Duration(seconds: 2));
-      expect(_phase(tester) - hidden, closeTo(2 / 70, 0.002));
+      expect(_phase(tester) - hidden, closeTo(2 / 127.273, 0.002));
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpWidget(const SizedBox.shrink());
       flags.dispose();
@@ -415,7 +461,7 @@ void main() {
       expect(notifications, inInclusiveRange(29, 31));
       final start = _phase(tester);
       for (var quarter = 1; quarter <= 4; quarter++) {
-        await tester.pump(const Duration(milliseconds: 17500));
+        await tester.pump(const Duration(microseconds: 31818250));
         final painter = _painter(tester);
         final globe = atlasPlanetGlobeBoundsForTesting(
           painter,
@@ -438,7 +484,7 @@ void main() {
         await _capture(tester, 'orbit-quarter-$quarter');
         expect(tester.takeException(), isNull);
       }
-      expect(_phase(tester), closeTo(start, 1 / 2100));
+      expect(_phase(tester), closeTo(start, 1 / 3818));
       await tester.pumpWidget(const SizedBox.shrink());
       flags.dispose();
     },

@@ -119,7 +119,7 @@ func androidServiceCatalog() []androidService {
 			Tag:  "telegram",
 			Name: "Telegram",
 			PackageNames: []string{
-				"org.telegram.messenger", "org.telegram.messenger.web",
+				"org.telegram.messenger", "org.telegram.messenger.web", "org.thunderdog.challegram",
 			},
 			DomainSuffixes: []string{
 				"telegram.org", "telegram.me", "t.me", "telegra.ph", "telesco.pe", "tdesktop.com",

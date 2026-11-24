@@ -46,6 +46,16 @@ class _PrimaryVault extends NativeAccountSessionStore {
 class _Bridge extends MockCoreBridge {
   bool connected = false;
   final busyState = <String, dynamic>{};
+  final moves = <(String, int)>[];
+  @override
+  Future<VpnSourcesSnapshot> vpnSourcesSnapshot() async =>
+      VpnSourcesSnapshot.fromJson(await callMap('GetVPNSources'));
+  @override
+  Future<Map<String, dynamic>> moveVpnSource(String id, int index) async {
+    moves.add((id, index));
+    return {'success': true};
+  }
+
   bool failStatus = false;
   List<Map<String, dynamic>>? references;
   final added = <String>[];
@@ -328,6 +338,7 @@ void main() {
       );
       expect(result['success'], true);
       expect(bridge.added, ['dropo-individual-free', 'dropo-individual-boost']);
+      expect(bridge.moves, [('boost', 0)]);
       expect(vault.record['boostKey'], contains('#boost'));
       expect(vault.record['boostUntil'], api.until);
       expect(api.calls.where((x) => x == 'POST /v1/vpn/profile'), hasLength(1));

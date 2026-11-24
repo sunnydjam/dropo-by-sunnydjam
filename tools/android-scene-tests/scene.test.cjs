@@ -237,9 +237,9 @@ test('motion preference changes never replay a stale flight or error transition'
 
 test('mascot resources remain the exact approved original green poses', async t => {
   const page=await pageFor(t);
-  const data=await page.evaluate(()=>Object.fromEntries(['waiting','flying','puzzled'].map(k=>[k,window.DropoArt[k]])));
+  const data=await page.evaluate(()=>Object.fromEntries(['waiting','flying','puzzled','rising','pushOff','recovering'].map(k=>[k,window.DropoArt[k]])));
   for (const [kind,url] of Object.entries(data)) {
-    assert.deepEqual(Buffer.from(url.split(',')[1],'base64'),fs.readFileSync(path.join(assets,'mascot',`droppo_${kind}.png`)));
+    assert.deepEqual(Buffer.from(url.split(',')[1],'base64'),fs.readFileSync(path.join(assets,'mascot',`droppo_${kind === 'pushOff' ? 'push_off' : kind}.png`)));
   }
 });
 

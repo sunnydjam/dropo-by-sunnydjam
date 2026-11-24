@@ -3,6 +3,7 @@ package ownedprofile
 import (
 	"crypto/sha256"
 	"dropocore/dnspolicy"
+	"dropocore/residential"
 	"encoding/base64"
 	"encoding/hex"
 	"net"
@@ -19,6 +20,8 @@ const latviaRealityName = "api.droponevedimka.in"
 const latviaPublicKey = "J26jwaXFR_4DrAswgMXV0Z-ME_c6HJc543f06CridSM"
 const latviaShortID = "3613ced3f53e2f97"
 const finlandTLSName = "fi1.dropo.fun"
+const moscowPublicKey = "hOW3VMYbr95p3qB8j508XbSQT3LCCj2zG83MW_3D-hE"
+const moscowShortID = "0ad55d50aab7547f"
 
 const (
 	Hysteria    = "hysteria2"
@@ -47,6 +50,10 @@ func regionalEndpointFor(provider string) regionalEndpoint {
 func IsManagedReality(server string, port int, network, security, sni, key, shortID, fingerprint string) bool {
 	if network != "tcp" || security != "reality" || fingerprint != "chrome" {
 		return false
+	}
+	if server == PrimaryIPv4 && (port == 2453 || port == 2454) && sni == primaryHostname &&
+		key == moscowPublicKey && shortID == moscowShortID {
+		return true
 	}
 	for _, tier := range []string{Free, Boost} {
 		e := regionalEndpointFor(tier)
@@ -109,6 +116,14 @@ func ExtraIngress(id string) string {
 }
 
 func CandidateIngress(provider, candidate string) string {
+	if IsPrimary(provider) && candidate == provider+ResidentialSuffix {
+		return "residential-xhttp"
+	}
+	for _, method := range []string{Hysteria, Reality, XHTTP} {
+		if candidate == MoscowCandidateID(provider, method) {
+			return "moscow-" + method
+		}
+	}
 	switch candidate {
 	case provider + "-lv-quic":
 		if provider == Free {
@@ -124,6 +139,71 @@ func CandidateIngress(provider, candidate string) string {
 		return ExtraIngress(provider)
 	}
 	return ""
+}
+
+const ResidentialSuffix = "-residential"
+
+func IsResidential(id string) bool {
+	return id == Free+ResidentialSuffix || id == Boost+ResidentialSuffix
+}
+
+func ResidentialReserve(id, raw string, now time.Time) (DirectReserve, bool) {
+	routes := DirectReserves(id, raw, now)
+	for _, r := range routes {
+		if r.Ingress != XHTTP {
+			continue
+		}
+		primary, _ := url.Parse(raw)
+		pool := "free"
+		if id == Boost {
+			pool = "boost"
+		}
+		entry, _ := url.Parse(r.URI)
+		entry.Host = net.JoinHostPort(residential.Host(primary.User.Username(), pool), "443")
+		entry.Fragment = "Резервный шлюз · " + RegionName(id)
+		return DirectReserve{ID: id + ResidentialSuffix, Name: entry.Fragment, URI: entry.String(), Ingress: XHTTP}, true
+	}
+	return DirectReserve{}, false
+}
+
+func MoscowCandidateID(provider, method string) string {
+	return provider + "-moscow-" + method
+}
+
+func IsMoscowCandidate(id string) bool {
+	for _, provider := range []string{Free, Boost} {
+		for _, method := range []string{Hysteria, Reality, XHTTP} {
+			if id == MoscowCandidateID(provider, method) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func MoscowReserves(id, raw string, now time.Time) []DirectReserve {
+	if !IsPrimary(id) || Expired(id, raw, now) {
+		return nil
+	}
+	primary, _ := url.Parse(raw)
+	key := strings.ToLower(primary.User.Username())
+	port := "2453"
+	if id == Boost {
+		port = "2454"
+	}
+	dial := net.JoinHostPort(PrimaryIPv4, port)
+	hash := sha256.Sum256([]byte("dropo-moscow-v1\x00hysteria2\x00" + key))
+	quic := url.URL{Scheme: "hysteria2", User: url.User(base64.RawURLEncoding.EncodeToString(hash[:])), Host: dial,
+		Fragment: "Москва · Hysteria 2", RawQuery: url.Values{"sni": {primaryHostname}, "alpn": {"h3"}}.Encode()}
+	tcp := url.URL{Scheme: "vless", User: url.User(key), Host: dial, Fragment: "Москва · TCP/REALITY",
+		RawQuery: url.Values{"security": {"reality"}, "sni": {primaryHostname}, "type": {"tcp"}, "encryption": {"none"},
+			"fp": {"chrome"}, "pbk": {moscowPublicKey}, "sid": {moscowShortID}}.Encode()}
+	primary.Host, primary.Fragment = PrimaryIPv4+":443", "Москва · XHTTP"
+	return []DirectReserve{
+		{ID: MoscowCandidateID(id, XHTTP), Name: primary.Fragment, URI: primary.String(), Ingress: XHTTP},
+		{ID: MoscowCandidateID(id, Reality), Name: tcp.Fragment, URI: tcp.String(), Ingress: Reality},
+		{ID: MoscowCandidateID(id, Hysteria), Name: quic.Fragment, URI: quic.String(), Ingress: Hysteria},
+	}
 }
 
 func DirectReserves(id, raw string, now time.Time) []DirectReserve {

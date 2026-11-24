@@ -56,6 +56,14 @@ func allowDefaultDNSFallback() bool { return false }
 
 // Windows network GUIDs distinguish physical networks with identical LAN prefixes.
 func vpnSourceNetworkKey() string {
+	id, _ := residentialPhysicalNetwork()
+	if id == (windows.GUID{}) {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(id.String())))
+}
+
+func residentialPhysicalNetwork() (windows.GUID, uint32) {
 	size := uint32(15 * 1024)
 	for attempt := 0; attempt < 3; attempt++ {
 		buf := make([]byte, size)
@@ -65,10 +73,11 @@ func vpnSourceNetworkKey() string {
 			continue
 		}
 		if err != nil {
-			return ""
+			return windows.GUID{}, 0
 		}
 		best := uint32(^uint32(0))
 		var id windows.GUID
+		var index uint32
 		for a := first; a != nil; a = a.Next {
 			if a.OperStatus != windows.IfOperStatusUp || a.FirstGatewayAddress == nil || a.NetworkGuid == (windows.GUID{}) || (a.IfType != 6 && a.IfType != 71 && a.IfType != 243 && a.IfType != 244) {
 				continue
@@ -76,12 +85,10 @@ func vpnSourceNetworkKey() string {
 			if a.Ipv4Metric < best {
 				best = a.Ipv4Metric
 				id = a.NetworkGuid
+				index = a.IfIndex
 			}
 		}
-		if id == (windows.GUID{}) {
-			return ""
-		}
-		return fmt.Sprintf("%x", sha256.Sum256([]byte(id.String())))
+		return id, index
 	}
-	return ""
+	return windows.GUID{}, 0
 }

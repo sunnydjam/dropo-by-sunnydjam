@@ -38,9 +38,9 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 	if !decodeSuccess(BuildSingBoxConfig()) {
 		t.Fatal("cannot prepare managed failover")
 	}
-	wantIDs := []string{ownedprofile.Free + "-lv-quic", ownedprofile.Free + ownedprofile.MainSuffix, ownedprofile.Free + ownedprofile.ExtraSuffix}
+	wantIDs := []string{ownedprofile.MoscowCandidateID(ownedprofile.Free, ownedprofile.XHTTP), ownedprofile.MoscowCandidateID(ownedprofile.Free, ownedprofile.Reality), ownedprofile.MoscowCandidateID(ownedprofile.Free, ownedprofile.Hysteria), ownedprofile.Free + "-lv-quic", ownedprofile.Free + ownedprofile.MainSuffix, ownedprofile.Free + ownedprofile.ExtraSuffix, ownedprofile.Free + ownedprofile.ResidentialSuffix}
 	if len(current.preparedSources) != len(wantIDs) {
-		t.Fatalf("expected two independent sources, got %d", len(current.preparedSources))
+		t.Fatalf("expected seven independent routes, got %d", len(current.preparedSources))
 	}
 	for i, candidate := range current.preparedSources {
 		if candidate.ID != wantIDs[i] || candidate.Tag != "vpn-"+candidate.ID {
@@ -57,7 +57,7 @@ func TestAndroidOwnedPairMigrationKeepsChoicesAndIndependentCandidates(t *testin
 		Generation int64 `json:"generation"`
 	}
 	json.Unmarshal([]byte(BeginAndroidSourceSession()), &plan)
-	reserve := current.preparedSources[0]
+	reserve := current.preparedSources[3]
 	selector := &testSourceSelector{}
 	if !CommitAndroidSourceProbeBatch(plan.Generation, sourceObservationJSON(reserve.ID, reserve.NodeID, plan.Generation, "ok", 40), reserve.ID, selector) {
 		t.Fatal("healthy reserve did not commit")
@@ -316,11 +316,11 @@ func TestAndroidManagedIngressChoiceSurvivesRestoreAndPreservesEntitlement(t *te
 	sourceSuccess(t, "SetManagedIngress", ownedprofile.Free, ownedprofile.XHTTP)
 	current = stateWithoutOwnedSecrets(current)
 	sourceSuccess(t, "RestoreManagedVPNSource", ownedprofile.Free, ownedReserveFixture, ownedprofile.Free, "")
-	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 2 || current.preparedSources[0].ID != ownedprofile.Free+ownedprofile.MainSuffix || current.preparedSources[1].OwnerID == ownedprofile.Free {
-		t.Fatal("restored manual choice did not pin regional XHTTP before the personal subscription")
+	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 8 || current.preparedSources[0].ID != ownedprofile.MoscowCandidateID(ownedprofile.Free, ownedprofile.XHTTP) || !current.preparedSources[0].Preferred || current.preparedSources[7].OwnerID == ownedprofile.Free {
+		t.Fatal("restored manual choice lost Moscow XHTTP priority or fallbacks")
 	}
 	sourceSuccess(t, "SetManagedIngress", ownedprofile.Free, "")
-	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 4 || current.preparedSources[0].ID != ownedprofile.Free+"-lv-quic" || current.preparedSources[1].ID != ownedprofile.Free+ownedprofile.MainSuffix || current.preparedSources[2].ID != ownedprofile.Free+ownedprofile.ExtraSuffix {
+	if !decodeSuccess(BuildSingBoxConfig()) || len(current.preparedSources) != 8 || current.preparedSources[0].Preferred || current.preparedSources[3].ID != ownedprofile.Free+"-lv-quic" || current.preparedSources[4].ID != ownedprofile.Free+ownedprofile.MainSuffix || current.preparedSources[5].ID != ownedprofile.Free+ownedprofile.ExtraSuffix {
 		t.Fatal("returning to automatic did not restore the Free transport order")
 	}
 }

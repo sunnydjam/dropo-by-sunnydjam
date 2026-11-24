@@ -160,6 +160,8 @@ func defaultState() coreState {
 // EnsureStarted initializes the Android core state. It is intentionally small:
 // Android owns the VpnService lifecycle, while this package owns persisted
 // state, events, and the JSON API consumed by Flutter.
+func ResidentialCacheDirectory() string { mu.Lock(); defer mu.Unlock(); return current.BasePath }
+
 func EnsureStarted(basePath, appVersion string) string {
 	mu.Lock()
 	defer mu.Unlock()

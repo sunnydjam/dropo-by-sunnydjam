@@ -1,6 +1,9 @@
 package ownedprofile
 
-import "strings"
+import (
+	"dropocore/residential"
+	"strings"
+)
 
 // ApplyXHTTPBudget bounds the managed ingress's H2 carriers per pool. Bursts
 // of independent carriers caused stalls in repeated native-client acceptance.
@@ -13,7 +16,7 @@ func ApplyXHTTPBudget(server string, port int, security, sni, host string, setti
 	regional := false
 	for tier, pool := range map[string]string{Free: "free", Boost: "boost"} {
 		endpoint := regionalEndpointFor(tier)
-		if port == 2446 && server == endpoint.ip && sni == endpoint.tlsName && host == endpoint.tlsName && path == "/managed/v1/"+pool {
+		if (port == 2446 && server == endpoint.ip || port == 443 && residential.Reserved(server)) && sni == endpoint.tlsName && host == endpoint.tlsName && path == "/managed/v1/"+pool {
 			regional = true
 			break
 		}

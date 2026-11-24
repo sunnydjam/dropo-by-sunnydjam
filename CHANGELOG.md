@@ -2,6 +2,13 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 4.0.0
+
+- Managed Free and Turbo now try three Moscow methods, three direct regional methods and a residential XHTTP gateway. The app obtains the gateway address through a signed, encrypted assignment scoped to the installation and plan. See the [reserve design and acceptance results](docs/architecture/RESIDENTIAL_RESERVE.md).
+- Windows selective routing handles Telegram Desktop connections to its data centers on their assigned TCP ports. Android applies the Telegram policy to Telegram X as well as the Play and telegram.org clients.
+- Preserve confirmed account access during a transient or incomplete refresh and defer changes to the active managed profile while connected.
+- Updated the home screen, globe and Droppo transition animations on Android and Windows.
+
 ## 3.1.27
 
 - Windows diagnostics now validate the public identity services of EA, Epic Games, Battle.net and Riot alongside the Steam Store check.

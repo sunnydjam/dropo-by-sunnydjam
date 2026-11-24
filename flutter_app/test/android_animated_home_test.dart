@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'guest_identity_test.dart' show GuestApi, MemoryVault;
+
 void main() {
   test(
     'scene bridge rejects arbitrary calls, malformed input and unknown modes',
@@ -49,7 +51,9 @@ void main() {
   ) async {
     debugMobileShellOverride = true;
     debugAndroidPlatformOverride = true;
+    debugAccountTransport = GuestApi(MemoryVault());
     addTearDown(() {
+      debugAccountTransport = null;
       debugMobileShellOverride = null;
       debugAndroidPlatformOverride = null;
     });
@@ -157,9 +161,11 @@ void main() {
   testWidgets(
     'Android footer opens login with Boost destination and hides version',
     (tester) async {
+      debugAccountTransport = GuestApi(MemoryVault());
       debugMobileShellOverride = true;
       debugAndroidPlatformOverride = true;
       addTearDown(() {
+        debugAccountTransport = null;
         debugMobileShellOverride = null;
         debugAndroidPlatformOverride = null;
       });

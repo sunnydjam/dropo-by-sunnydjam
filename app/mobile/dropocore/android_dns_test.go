@@ -9,6 +9,23 @@ import (
 
 const androidDNSFixture = "vless://00000000-0000-0000-0000-000000000000@203.0.113.10:443?security=tls&type=ws&sni=endpoint.example#fixture"
 
+func TestTelegramAndroidClientsFollowServicePolicy(t *testing.T) {
+	for policy, outbound := range map[string]string{"auto": "proxy", "vpn": "proxy", "direct": "direct"} {
+		t.Run(policy, func(t *testing.T) {
+			text, _, err := buildAndroidSingBoxConfig(androidDNSFixture, "error", "blocked_only", false, "", map[string]string{"telegram": policy})
+			config := decodeAndroidDNSFixture(t, text, err)
+			for _, pkg := range []string{"org.telegram.messenger", "org.telegram.messenger.web", "org.thunderdog.challegram"} {
+				if !androidContainsPackageRoute(config, pkg, outbound) {
+					t.Errorf("%s lacks package route through %s", pkg, outbound)
+				}
+			}
+			if androidContainsPackageRoute(config, "com.example.chat", "proxy") {
+				t.Fatal("unrelated app acquired Telegram's VPN route")
+			}
+		})
+	}
+}
+
 func decodeAndroidDNSFixture(t *testing.T, text string, err error) map[string]interface{} {
 	t.Helper()
 	if err != nil {

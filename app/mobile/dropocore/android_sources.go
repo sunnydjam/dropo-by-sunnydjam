@@ -34,7 +34,7 @@ const maxAndroidVPNSources = 16
 // The existing HTTPS relays have dedicated persistent slots. Direct FI/LV
 // sources are generated in memory and do not evict existing subscriptions.
 const maxAndroidSourceCandidates = maxAndroidVPNSources + 2
-const maxAndroidRuntimeSourceCandidates = maxAndroidSourceCandidates + 6
+const maxAndroidRuntimeSourceCandidates = maxAndroidSourceCandidates + 12
 
 func androidLogicalSourceCount(sources []androidVPNSource) int {
 	count := 0
@@ -164,11 +164,18 @@ func androidSourcesViewLocked() map[string]interface{} {
 		name := source.Name
 		activeIngress := ""
 		managedIngress := ""
+		var ingresses map[string]androidSourceResponse
 		if ownedprofile.IsPrimary(publicID) {
 			name = ownedprofile.DisplayName(publicID, ownedprofile.Name(publicID))
 			managedIngress = ownedprofile.NormalizeIngress(publicID, source.ManagedIngress)
-			if active {
+			if active && response.State == "ok" {
 				activeIngress = ownedprofile.CandidateIngress(publicID, current.activeSourceID)
+			}
+			ingresses = make(map[string]androidSourceResponse)
+			for _, candidate := range current.preparedSources {
+				if ingress := ownedprofile.CandidateIngress(publicID, candidate.ID); ingress != "" && candidate.OwnerID == source.ID {
+					ingresses[ingress] = androidSourceResponseLocked(candidate.ID)
+				}
 			}
 		}
 		views = append(views, map[string]interface{}{
@@ -178,7 +185,7 @@ func androidSourcesViewLocked() map[string]interface{} {
 			"node_names": names, "last_updated": source.UpdatedAt, "last_error": problem,
 			"node_ids": ids, "favorite_node_ids": append([]string{}, source.FavoriteNodeIDs...),
 			"active":   active,
-			"response": response,
+			"response": response, "ingress_responses": ingresses,
 		})
 	}
 	return map[string]interface{}{"success": true, "sources": views, "running": current.Connected,

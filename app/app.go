@@ -101,6 +101,7 @@ type App struct {
 	vpnSourceMonitorMu          sync.Mutex
 	vpnSourceSelectionMu        sync.Mutex
 	vpnSourceRankedTags         []string
+	vpnSourceDirectRanked       bool
 	vpnSourceMonitorCancel      context.CancelFunc
 	vpnSourceMonitorGeneration  uint64
 	vpnSourceActive             string

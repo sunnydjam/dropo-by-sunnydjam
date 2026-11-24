@@ -401,7 +401,7 @@ void main() {
           'name': 'Dropo Free',
           'public_catalog_id': 'dropo-individual-free',
           'active': true,
-          'active_ingress': 'hysteria2',
+          'active_ingress': 'moscow-hysteria2',
           'node_count': 1,
           'selected_node': 0,
         }),
@@ -413,8 +413,10 @@ void main() {
       tester,
       find.byKey(const PageStorageKey('source-details-free-id')),
     );
-    expect(find.text('Hysteria 2 / QUIC'), findsOneWidget);
-    expect(find.text('Активен сейчас'), findsOneWidget);
+    expect(find.text('Hysteria 2 / QUIC'), findsNWidgets(2));
+    expect(find.text('Туннель МСК'), findsOneWidget);
+    expect(find.text('Напрямую · Латвия'), findsOneWidget);
+    expect(find.text('Активен сейчас · Ожидает замера'), findsOneWidget);
     expect(find.textContaining('Финляндия'), findsNothing);
     await _tapVisible(
       tester,
@@ -436,6 +438,54 @@ void main() {
           .selected,
       isTrue,
     );
+  });
+
+  testWidgets('Turbo shows when a direct fallback takes over', (tester) async {
+    VpnSourceInfo turbo(String activeIngress, {bool fallback = false}) =>
+        VpnSourceInfo.fromJson({
+          'id': 'turbo-id',
+          'name': 'Dropo Turbo',
+          'public_catalog_id': 'dropo-individual-boost',
+          'active': true,
+          'active_ingress': activeIngress,
+          'node_count': 1,
+          'selected_node': 0,
+          'ingress_responses': {
+            'moscow-tcp': {
+              'state': fallback ? 'failed' : 'ok',
+              'latencyMs': 42,
+              'checkedAt': DateTime.now().toUtc().toIso8601String(),
+            },
+            if (fallback)
+              'hysteria2': {
+                'state': 'ok',
+                'latencyMs': 18,
+                'checkedAt': DateTime.now().toUtc().toIso8601String(),
+              },
+          },
+        });
+    final bridge = _SourceBridge()..sources = [turbo('moscow-tcp')];
+    await _pumpEditor(tester, bridge, size: const Size(390, 800));
+    await _tapVisible(
+      tester,
+      find.byKey(const PageStorageKey('source-details-turbo-id')),
+    );
+    final moscow = find.text('Туннель МСК');
+    final direct = find.text('Напрямую · Финляндия');
+    expect(
+      tester.getTopLeft(moscow).dy,
+      lessThan(tester.getTopLeft(direct).dy),
+    );
+    expect(find.text('Активен сейчас · 42 мс'), findsOneWidget);
+    expect(find.text('Резервный шлюз · Финляндия'), findsOneWidget);
+    expect(find.text('Ещё не проверялся'), findsNWidgets(4));
+
+    bridge.sources = [turbo('hysteria2', fallback: true)];
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+    expect(find.text('Нет ответа'), findsOneWidget);
+    expect(find.text('Активен сейчас · 18 мс'), findsOneWidget);
+    expect(find.text('Активен сейчас · 42 мс'), findsNothing);
   });
 
   testWidgets(
@@ -722,6 +772,32 @@ void main() {
     },
   );
 
+  testWidgets('Turbo card remains above Free when Free is manually selected', (
+    tester,
+  ) async {
+    final bridge = _SourceBridge()
+      ..autoSelect = false
+      ..running = false
+      ..sources = [
+        for (final tier in ['free', 'boost'])
+          VpnSourceInfo.fromJson({
+            'id': tier,
+            'public_catalog_id': 'dropo-individual-$tier',
+            'name': tier == 'boost' ? 'Dropo Turbo' : 'Dropo Free',
+            'node_count': 1,
+            'selected_node': 0,
+          }),
+      ];
+    await _pumpEditor(tester, bridge, size: const Size(700, 1100));
+    final turbo = find.byKey(const ValueKey('vpn-source-boost'));
+    final free = find.byKey(const ValueKey('vpn-source-free'));
+    expect(tester.getTopLeft(turbo).dy, lessThan(tester.getTopLeft(free).dy));
+    expect(
+      find.descendant(of: free, matching: find.text('Выбран для подключения')),
+      findsOneWidget,
+    );
+    expect(bridge.moves, isEmpty);
+  });
   testWidgets('active fallback and next manual primary are distinct', (
     tester,
   ) async {
@@ -1479,6 +1555,46 @@ void main() {
         image.dispose();
       });
     }
+
+    final sample = _SourceBridge()
+      ..autoSelect = true
+      ..sources = [
+        VpnSourceInfo.fromJson({
+          'id': 'managed-preview',
+          'name': 'Dropo Free',
+          'public_catalog_id': 'dropo-individual-free',
+          'active': true,
+          'active_ingress': 'moscow-xhttp',
+          'node_count': 1,
+          'selected_node': 0,
+          'ingress_responses': {
+            for (final (method, delay) in [
+              ('xhttp', 32),
+              ('tcp', 44),
+              ('hysteria2', 52),
+            ])
+              'moscow-$method': {
+                'state': 'ok',
+                'latencyMs': delay,
+                'checkedAt': DateTime.now().toUtc().toIso8601String(),
+              },
+          },
+        }),
+      ];
+    final managedKey = GlobalKey();
+    await _pumpEditor(
+      tester,
+      sample,
+      size: const Size(940, 1060),
+      captureKey: managedKey,
+    );
+    await _tapVisible(
+      tester,
+      find.byKey(const PageStorageKey('source-details-managed-preview')),
+    );
+    await capture(managedKey, 'managed-routes');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
 
     for (final size in [const Size(1120, 800), const Size(390, 844)]) {
       debugMobileShellOverride = size.width < 600;
