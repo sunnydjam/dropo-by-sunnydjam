@@ -202,7 +202,7 @@ jobs:
           go-version: "1.27.4"
           cache-dependency-path: app/go.sum
       - name: Install Linux tray build dependencies
-        timeout-minutes: 5
+        timeout-minutes: 20
         run: |
           # Keep Ubuntu's archive keys and signature checks. Only switch the
           # download mirror when the hosted runner cannot resolve Azure's mirror.
@@ -211,7 +211,7 @@ jobs:
             printf '%s\n' 'https://ubuntu.osuosl.org/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt
           fi
           sudo apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=2 update
-          sudo apt-get install -y libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libayatana-appindicator3-dev
       - name: Go race detector
         working-directory: app
         run: go test -race ./...
