@@ -141,7 +141,8 @@ func sanitizeAndroidAdaptiveCacheLocked() {
 }
 
 func AndroidAdaptiveServiceDomains(tag string) string {
-	for _, s := range androidAdaptiveServices(nil) {
+	// Look up the domain scope of this capability independently of install defaults.
+	for _, s := range androidAdaptiveServices(map[string]string{tag: androidRoutePolicyAuto}) {
 		if s.Tag == tag {
 			service, _ := androidServiceByTag(tag)
 			return encode(service.DomainSuffixes)

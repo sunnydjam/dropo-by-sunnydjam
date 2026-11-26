@@ -75,6 +75,9 @@ func TestAdaptiveBuiltGraphPassesPinnedEngineConfigCheck(t *testing.T) {
 	if json.Unmarshal([]byte(core.Call("SetRoutingMode", `["blocked_only"]`)), &response) != nil || response["success"] != true {
 		t.Fatal("selective mode fixture failed")
 	}
+	if json.Unmarshal([]byte(core.Call("SetAndroidRoutePolicy", `["youtube","auto"]`)), &response) != nil || response["success"] != true {
+		t.Fatal("explicit adaptive method fixture failed")
+	}
 	if json.Unmarshal([]byte(BuildSingBoxConfig()), &response) != nil || response["success"] != true {
 		t.Fatal("adaptive graph rejected")
 	}
