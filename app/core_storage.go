@@ -327,6 +327,7 @@ func (s *Storage) normalizeAppSettings() {
 	if app.ZapretStrategies == nil {
 		app.ZapretStrategies = map[string]string{}
 	}
+	serviceRoutesChanged := false
 	for _, svc := range DefaultFreeAccessServices {
 		raw, exists := app.FreeAccessMethods[svc.Tag]
 		normalized := NormalizeFreeAccessServiceMethod(raw)
@@ -351,6 +352,9 @@ func (s *Storage) normalizeAppSettings() {
 			delete(app.ZapretStrategies, svc.Tag)
 			delete(app.ZapretStrategyModes, svc.Tag)
 		}
+		if s.data.Version < 8 && normalized != NormalizeFreeAccessServiceMethod(raw) {
+			serviceRoutesChanged = true
+		}
 		app.FreeAccessMethods[svc.Tag] = normalized
 		app.FreeAccessServices[svc.Tag] = true
 		mode := NormalizeZapretStrategyMode(app.ZapretStrategyModes[svc.Tag])
@@ -362,6 +366,13 @@ func (s *Storage) normalizeAppSettings() {
 			}
 		}
 		app.ZapretStrategyModes[svc.Tag] = mode
+	}
+	// Start may reuse a generated sing-box configuration across upgrades.
+	// Discard stale selectors while retaining all subscription and node data.
+	if serviceRoutesChanged && app.RoutingMode == RoutingModeBlockedOnly {
+		for i := range s.data.Profiles {
+			s.data.Profiles[i].SingboxConfig = nil
+		}
 	}
 	for i := range s.data.Profiles {
 		if s.data.Profiles[i].ID != DefaultProfileID {

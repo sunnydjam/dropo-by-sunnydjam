@@ -94,12 +94,17 @@ func TestLegacyServiceDefaultsMigrateOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.data.Version = 7
+	s.data.App.RoutingMode = RoutingModeBlockedOnly
+	s.data.Profiles[0].SingboxConfig = map[string]interface{}{"outbounds": []interface{}{"legacy"}}
 	s.data.App.FreeAccessMethods = map[string]string{"youtube": "auto", "meta": "vpn", "telegram": "auto", "twitch": "direct"}
 	s.normalizeAppSettings()
 	for tag, want := range map[string]string{"youtube": "vpn", "discord": "vpn", "telegram": "direct", "meta": "vpn", "twitch": "direct", "claude": "vpn"} {
 		if got := s.data.App.FreeAccessMethods[tag]; got != want {
 			t.Fatalf("migrated %s = %q, want %q", tag, got, want)
 		}
+	}
+	if s.data.Profiles[0].SingboxConfig != nil {
+		t.Fatal("the cached configuration still contains the old service selectors")
 	}
 	s.data.App.FreeAccessMethods["discord"] = "auto"
 	s.normalizeAppSettings()
