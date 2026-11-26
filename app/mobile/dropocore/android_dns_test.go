@@ -209,3 +209,41 @@ func TestAIAndroidSelectiveRoutesAndDNS(t *testing.T) {
 		}
 	}
 }
+
+func TestBothAndroidModesUseCatalogWithDirectBoundary(t *testing.T) {
+	for _, mode := range []string{"all_traffic", "blocked_only"} {
+		text, _, err := buildAndroidSingBoxConfig(androidDNSFixture, "error", mode, false, "", map[string]string{"youtube": "direct", "openai": "direct"})
+		config := decodeAndroidDNSFixture(t, text, err)
+		route := config["route"].(map[string]any)
+		if route["final"] != "direct" || len(route["rule_set"].([]any)) != 2 {
+			t.Fatal("incomplete catalog routes", mode)
+		}
+		stage := 0
+		for _, raw := range route["rules"].([]any) {
+			rule := raw.(map[string]any)
+			switch {
+			case rule["rule_set"] != nil:
+				name := rule["rule_set"].([]any)[0]
+				if rule["outbound"] != "proxy" || !(name == "refilter-domains" && stage == 0 || name == "refilter-ips" && stage == 2) {
+					t.Fatalf("%s unordered catalog rule %v", mode, rule)
+				}
+				stage++
+			case rule["domain_regex"] != nil:
+				if rule["outbound"] != "direct" || stage != 1 {
+					t.Fatalf("%s incorrect shared-IP boundary", mode)
+				}
+				stage++
+			}
+		}
+		if stage != 3 || !androidContainsDomainRoute(config, "chatgpt.com", "proxy") || !androidContainsDNSServer(config, "chatgpt.com", "dns-remote") {
+			t.Fatal("missing protected service routing", mode)
+		}
+		want := "direct"
+		if mode == "all_traffic" {
+			want = "proxy"
+		}
+		if !androidContainsDomainRoute(config, "youtube.com", want) {
+			t.Fatalf("%s lost named service policy", mode)
+		}
+	}
+}

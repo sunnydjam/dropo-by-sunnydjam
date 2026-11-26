@@ -103,6 +103,15 @@ jobs:
         shell: powershell
         working-directory: app
         run: go test ./trafficorchestrator -run '^TestWinDivertCaptureFilterCompilesWithBundledRuntime$' -count=1
+      - name: Exercise both service routing modes using the packaged runtime
+        shell: pwsh
+        working-directory: app
+        run: |
+          $binaries = @(Get-ChildItem '../release/dropo-*/dropo/resources/bin/sing-box.exe')
+          if ($binaries.Count -ne 1) { throw 'Expected one packaged sing-box executable' }
+          $env:DROPO_TEST_SINGBOX = $binaries[0].FullName
+          go test -count=1 -v -run '^(TestWindowsServiceRoutingDataplane|TestSelectiveBundledPACAndScopedIPRoutes)$' .
+          if ($LASTEXITCODE -ne 0) { throw 'Windows catalog routing regression' }
       - name: Verify reproducible Windows rebuild
         shell: powershell
         env:

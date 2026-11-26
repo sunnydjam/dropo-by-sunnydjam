@@ -23,9 +23,13 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows runtime")
 	}
-	binaries, _ := filepath.Glob(filepath.Join("..", "dependencies", "sing-box-v"+SingBoxVersion, "windows-amd64", "sing-box-*", "sing-box.exe"))
-	if len(binaries) == 0 {
-		t.Skip("bundled executable absent")
+	binary := os.Getenv("DROPO_TEST_SINGBOX")
+	if binary == "" {
+		binaries, _ := filepath.Glob(filepath.Join("..", "dependencies", "sing-box-v"+SingBoxVersion, "windows-amd64", "sing-box-*", "sing-box.exe"))
+		if len(binaries) == 0 {
+			t.Skip("bundled executable absent")
+		}
+		binary = binaries[0]
 	}
 	for _, mode := range []RoutingMode{RoutingModeBlockedOnly, RoutingModeAllTraffic} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -66,7 +70,7 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 			if err = writeJSONConfig(path, config); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command(binaries[0], "run", "-c", path)
+			cmd := exec.Command(binary, "run", "-c", path)
 			var logs bytes.Buffer
 			cmd.Stdout = &logs
 			cmd.Stderr = &logs
