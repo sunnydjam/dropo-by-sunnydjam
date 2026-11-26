@@ -45,6 +45,8 @@ class GuestIdentityCoordinator extends ChangeNotifier {
   int? _guestDeletionRequestEpoch;
   int? _guestDeletionRefreshEpoch;
   Timer? _renewal;
+  Timer? _profileTimer;
+  int _profileDelaySeconds = 30;
   DateTime? _lastAttempt;
   int _epoch = 0;
   bool _disposed = false, _foreground = true;
@@ -237,6 +239,7 @@ class GuestIdentityCoordinator extends ChangeNotifier {
   }
 
   void _publish() {
+    if (accountKind != 'registered') _profileTimer?.cancel();
     if (!_disposed) notifyListeners();
   }
 
@@ -261,19 +264,24 @@ class GuestIdentityCoordinator extends ChangeNotifier {
     _record = next;
   }
 
-  Future<void> restore() {
+  Future<void> restore() => _readIdentity();
+
+  Future<void> _readIdentity({bool profileOnly = false}) {
     if (_disposed || !available || _changingIdentity) {
       return Future<void>.value();
     }
     if (_restoring != null) return _restoring!;
-    final pending = _restore().catchError((Object _) {
+    final pending = _restore(profileOnly: profileOnly).catchError((Object _) {
       if (_disposed) return;
       state = 'storage_error';
       _publish();
     });
     _restoring = pending;
     return pending.whenComplete(() {
-      if (identical(_restoring, pending)) _restoring = null;
+      if (identical(_restoring, pending)) {
+        _restoring = null;
+        _scheduleProfileCheck();
+      }
     });
   }
 
@@ -296,20 +304,37 @@ class GuestIdentityCoordinator extends ChangeNotifier {
   }
 
   void setForeground(bool foreground) {
+    final returning = !_foreground && foreground;
     _foreground = foreground;
     if (!foreground) {
       _renewal?.cancel();
+      _profileTimer?.cancel();
       return;
     }
-    unawaited(resume());
+    if (returning && accountKind == 'registered') {
+      unawaited(_readIdentity(profileOnly: _account != null));
+    } else {
+      unawaited(resume());
+    }
     _scheduleRenewal();
   }
 
-  Future<void> _restore() async {
+  void _scheduleProfileCheck() {
+    _profileTimer?.cancel();
+    if (_disposed || !_foreground || accountKind != 'registered') return;
+    _profileDelaySeconds = state == 'offline'
+        ? math.min(240, _profileDelaySeconds * 2)
+        : 30;
+    _profileTimer = Timer(Duration(seconds: _profileDelaySeconds), () {
+      unawaited(_readIdentity(profileOnly: true));
+    });
+  }
+
+  Future<void> _restore({required bool profileOnly}) async {
     final epoch = _epoch;
     _lastAttempt = _now();
     try {
-      if (persistSession) {
+      if (persistSession && !profileOnly) {
         final record = await store.read();
         if (_disposed || epoch != _epoch) return;
         _record = record;
@@ -320,20 +345,22 @@ class GuestIdentityCoordinator extends ChangeNotifier {
       return; // Missing and unreadable credentials are deliberately different.
     }
     if (_disposed || epoch != _epoch) return;
-    try {
-      final capabilities = await _api.request('GET', '/v1/capabilities');
-      if (_disposed || epoch != _epoch) return;
-      guestAvailable =
-          capabilities['guestAvailable'] == true &&
-          persistSession &&
-          (_platform == 'android' || _platform == 'windows');
-      incidentsAvailable = capabilities['incidentsAvailable'] == true;
-      guestWebDeletionAvailable =
-          guestAvailable && capabilities['guestWebDeletionAvailable'] == true;
-    } catch (_) {
-      guestAvailable = false;
-      incidentsAvailable = false;
-      guestWebDeletionAvailable = false;
+    if (!profileOnly) {
+      try {
+        final capabilities = await _api.request('GET', '/v1/capabilities');
+        if (_disposed || epoch != _epoch) return;
+        guestAvailable =
+            capabilities['guestAvailable'] == true &&
+            persistSession &&
+            (_platform == 'android' || _platform == 'windows');
+        incidentsAvailable = capabilities['incidentsAvailable'] == true;
+        guestWebDeletionAvailable =
+            guestAvailable && capabilities['guestWebDeletionAvailable'] == true;
+      } catch (_) {
+        guestAvailable = false;
+        incidentsAvailable = false;
+        guestWebDeletionAvailable = false;
+      }
     }
     if (_disposed || epoch != _epoch) return;
     if (suppressed) {
@@ -353,8 +380,13 @@ class GuestIdentityCoordinator extends ChangeNotifier {
         try {
           final response = await _api.request('GET', '/v1/me', token: existing);
           if (_disposed || epoch != _epoch) return;
-          _account = _asMap(response['account']);
-          if (accountKind == 'registered') {
+          final account = _asMap(response['account']);
+          if (profileOnly &&
+              !AccountDisplaySnapshot.fromJson(account).hasConfirmedPlan) {
+            throw const FormatException('Incomplete account profile');
+          }
+          _account = account;
+          if (!profileOnly && accountKind == 'registered') {
             await _bindRegisteredInstallation(epoch);
           }
           if (_disposed || epoch != _epoch) return;
@@ -666,6 +698,7 @@ class GuestIdentityCoordinator extends ChangeNotifier {
     } finally {
       _changingIdentity = false;
       _publish();
+      _scheduleProfileCheck();
     }
   }
 
@@ -834,6 +867,7 @@ class GuestIdentityCoordinator extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     ++_epoch;
+    _profileTimer?.cancel();
     _renewal?.cancel();
     if (_ownsApi) _api.close();
     super.dispose();

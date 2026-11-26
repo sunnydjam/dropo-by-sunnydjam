@@ -1,6 +1,8 @@
 package main
 
 import (
+	"dropocore/aicatalog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,14 +13,15 @@ func TestTelegramAssignedTCPPortsInSelectiveVPN(t *testing.T) {
 	settings := GlobalAppSettings{FreeAccessMethods: DefaultFreeAccessServiceMethodState()}
 	settings.FreeAccessMethods["telegram"] = FreeAccessMethodVPN
 	services := nativeSelectiveCaptureCatalogForSettings(settings)
-	if len(services) != 1 || services[0].ID != "telegram" {
+	index := slices.IndexFunc(services, func(r traffic.ServiceRule) bool { return r.ID == "telegram" })
+	if index < 0 {
 		t.Fatalf("selective catalog = %+v", services)
 	}
 	filter, err := traffic.BuildSelectiveWinDivertFilterForMode(services, 32000, false)
 	if err != nil || !strings.Contains(filter, "149.154.160.0") {
 		t.Fatalf("capture filter lacks Telegram's network: %s, %v", filter, err)
 	}
-	if len(services[0].TCPPorts) != 0 {
+	if len(services[index].TCPPorts) != 0 {
 		t.Errorf("DC capture excludes assigned MTProto ports: %v", services[0].TCPPorts)
 	}
 	plan := traffic.TrafficPlan{Revision: 1, CatalogRevision: traffic.BuiltinCatalogRevision,
@@ -90,16 +93,17 @@ func TestNativeVPNOnlyCaptureLeavesUnrelatedHandshakesInKernel(t *testing.T) {
 
 func TestNativeSelectiveCaptureCatalogUsesOnlyNonDirectPolicies(t *testing.T) {
 	settings := GlobalAppSettings{FreeAccessMethods: DefaultFreeAccessServiceMethodState()}
-	if catalog := nativeSelectiveCaptureCatalogForSettings(settings); len(catalog) != 0 {
+	if catalog := nativeSelectiveCaptureCatalogForSettings(settings); slices.ContainsFunc(catalog, func(r traffic.ServiceRule) bool { return !aicatalog.VPNOnly(r.ID) }) {
 		t.Fatalf("all-direct settings produced capture services: %+v", catalog)
 	}
 
 	settings.FreeAccessMethods["youtube"] = FreeAccessMethodZapret
 	catalog := nativeSelectiveCaptureCatalogForSettings(settings)
-	if len(catalog) != 1 || catalog[0].ID != "youtube" {
+	index := slices.IndexFunc(catalog, func(r traffic.ServiceRule) bool { return r.ID == "youtube" })
+	if index < 0 || slices.ContainsFunc(catalog, func(r traffic.ServiceRule) bool { return r.ID != "youtube" && !aicatalog.VPNOnly(r.ID) }) {
 		t.Fatalf("YouTube-only Zapret catalog = %+v", catalog)
 	}
-	if len(catalog[0].ProcessDiscoveryUDPPortRanges) != 0 {
+	if len(catalog[index].ProcessDiscoveryUDPPortRanges) != 0 {
 		t.Fatalf("YouTube unexpectedly enabled UDP process discovery: %+v", catalog[0])
 	}
 
@@ -187,5 +191,25 @@ func TestSelectivePlanScopeAllowsStrategyOnlyRevision(t *testing.T) {
 	previous.Selections = []traffic.ServiceSelection{{ServiceID: "discord", StrategyID: "one"}}
 	if !sameSelectiveRoutingOverlay(previous, next) {
 		t.Fatal("strategy-only revision unnecessarily changed the DNS/PAC overlay")
+	}
+}
+
+func TestChatGPTVoiceRequiresProcessIdentity(t *testing.T) {
+	settings := GlobalAppSettings{FreeAccessMethods: DefaultFreeAccessServiceMethodState()}
+	settings.FreeAccessMethods["openai"] = FreeAccessMethodVPN
+	rules := nativeSelectiveCaptureCatalogForSettings(settings)
+	plan := traffic.TrafficPlan{Revision: 1, CatalogRevision: traffic.BuiltinCatalogRevision,
+		Services: rules, Routes: []traffic.ServiceRoute{{ServiceID: "openai", Kind: traffic.ServiceRouteVPN}}}
+	classifier, err := traffic.NewClassifier(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow := traffic.FlowEvidence{Network: traffic.NetworkUDP, Port: 3478, Destination: "203.0.113.20", ProcessName: "ChatGPT.exe"}
+	if got := classifier.Classify(flow); got.ServiceID != "openai" {
+		t.Errorf("chat voice: %+v", got)
+	}
+	flow.ProcessName = "unrelated.exe"
+	if got := classifier.Classify(flow); got.Matched {
+		t.Errorf("unrelated STUN: %+v", got)
 	}
 }

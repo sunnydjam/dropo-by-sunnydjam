@@ -810,17 +810,17 @@ func TestAndroidRuntimeSettingsValidateAndInvalidateCache(t *testing.T) {
 	mu.Unlock()
 	config := buildConfigForTest(t)
 	route := config["route"].(map[string]interface{})
-	if route["final"] != "proxy" {
-		t.Fatalf("all_traffic final = %v, want proxy", route["final"])
+	if route["final"] != "direct" {
+		t.Fatalf("all_traffic final = %v, want direct", route["final"])
 	}
 	dns := config["dns"].(map[string]interface{})
-	if dns["final"] != "dns-remote" {
-		t.Fatalf("all_traffic dns final = %v, want dns-remote", dns["final"])
+	if dns["final"] != "dns-direct" {
+		t.Fatalf("all_traffic dns final = %v, want dns-direct", dns["final"])
 	}
-	if androidContainsDomainRoute(config, "steam.com", "direct") ||
-		androidContainsPackageRoute(config, "com.valvesoftware.android.steam.community", "direct") ||
-		androidContainsDNSServer(config, "steam.com", "dns-direct") {
-		t.Fatal("all_traffic must not carve Steam out of the explicit full-VPN policy")
+	if !androidContainsDomainRoute(config, "steam.com", "direct") ||
+		!androidContainsPackageRoute(config, "com.valvesoftware.android.steam.community", "direct") ||
+		!androidContainsDNSServer(config, "steam.com", "dns-direct") {
+		t.Fatal("all_traffic must preserve Steam direct")
 	}
 	if androidContainsDomainRoute(config, "instagram.com", "direct") ||
 		androidContainsDNSServer(config, "instagram.com", "dns-direct") {
@@ -890,6 +890,13 @@ func TestAndroidGeneratedConfigAcceptedBySingBox(t *testing.T) {
 	current.Subscription = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com&sni=example.com&fp=chrome#demo"
 	mu.Unlock()
 
+	dir, err := filepath.Abs("../../../dependencies/filters")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev, _ := androidRuleDirectory.Load().(string)
+	androidRuleDirectory.Store(dir)
+	t.Cleanup(func() { androidRuleDirectory.Store(prev) })
 	config := buildConfigForTest(t)
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -1072,11 +1079,12 @@ func TestAndroidRoutesExposeAutoDirectAndVPNMethods(t *testing.T) {
 	}
 	for _, raw := range services {
 		service := raw.(map[string]interface{})
-		if service["selectedMethod"] != androidRoutePolicyAuto {
-			t.Fatalf("default selected method for %v = %v, want auto", service["tag"], service["selectedMethod"])
+		selected, effective := androidRoutePolicyAuto, androidRoutePolicyDirect
+		if service["vpnOnly"] == true {
+			selected, effective = androidRoutePolicyVPN, androidRoutePolicyVPN
 		}
-		if service["effectiveMethodLabel"] != androidRoutePolicyLabel(androidRoutePolicyDirect) {
-			t.Fatalf("default method label without subscription for %v = %v, want direct", service["tag"], service["effectiveMethodLabel"])
+		if service["selectedMethod"] != selected || service["effectiveMethodLabel"] != androidRoutePolicyLabel(effective) {
+			t.Fatalf("default policy for %v = %v/%v, want %s/%s", service["tag"], service["selectedMethod"], service["effectiveMethodLabel"], selected, effective)
 		}
 		if service["zapretSupported"] != false {
 			t.Fatalf("Android service %v unexpectedly advertises Zapret support", service["tag"])

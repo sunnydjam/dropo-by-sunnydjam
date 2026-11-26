@@ -24,6 +24,7 @@ type compiledServiceRule struct {
 type Classifier struct {
 	revision     uint64
 	rules        []compiledServiceRule
+	protected    []compiledServiceRule
 	workNetworks []compiledWorkNetwork
 	directRules  []compiledWorkNetwork
 }
@@ -59,6 +60,9 @@ func NewClassifier(plan TrafficPlan) (*Classifier, error) {
 				return nil, fmt.Errorf("compile service %s CIDR %s: %w", service.ID, cidr, err)
 			}
 			compiled.prefixes[prefix.Masked()] = struct{}{}
+		}
+		if service.VPNOnly {
+			classifier.protected = append(classifier.protected, compiled)
 		}
 		classifier.rules = append(classifier.rules, compiled)
 	}
@@ -118,6 +122,9 @@ func (c *Classifier) Classify(flow FlowEvidence) Classification {
 			return Classification{WorkNetwork: true, WorkNetworkID: network.id, Evidence: []string{"work-cidr"}}
 		}
 	}
+	if matched := c.protectedIdentity(host, processName); matched.Matched {
+		return matched
+	}
 	for _, rule := range c.directRules {
 		if _, matched := rule.processNames[processName]; matched && processName != "" {
 			return Classification{Direct: true, DirectRuleID: rule.id, Evidence: []string{"direct-process"}}
@@ -155,6 +162,20 @@ func (c *Classifier) Classify(flow FlowEvidence) Classification {
 		return Classification{}
 	}
 	return best.result
+}
+
+func (c *Classifier) protectedIdentity(host, process string) Classification {
+	for _, rule := range c.protected {
+		if host != "" {
+			if _, ok := longestDomainSuffix(host, rule.suffixes); ok {
+				return Classification{Matched: true, ServiceID: rule.rule.ID, Evidence: []string{"protected-domain"}}
+			}
+		}
+		if _, ok := rule.processNames[process]; ok && process != "" {
+			return Classification{Matched: true, ServiceID: rule.rule.ID, Evidence: []string{"protected-process"}}
+		}
+	}
+	return Classification{}
 }
 
 func (r compiledServiceRule) portAllows(network Network, port int) bool {

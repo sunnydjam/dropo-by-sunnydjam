@@ -1,6 +1,8 @@
 package main
 
 import (
+	"dropocore/aicatalog"
+
 	"fmt"
 	"net"
 	"os/exec"
@@ -23,7 +25,7 @@ type FreeAccessService struct {
 	RequiresVPN    bool     `json:"requires_vpn,omitempty"`
 }
 
-var DefaultFreeAccessServices = []FreeAccessService{
+var DefaultFreeAccessServices = append([]FreeAccessService{
 	{
 		Tag:         "discord",
 		DisplayName: "Discord",
@@ -381,52 +383,34 @@ var DefaultFreeAccessServices = []FreeAccessService{
 		ProbeURLs:    []string{"https://id.atlassian.com", "https://bitbucket.org"},
 		RequiresVPN:  true,
 	},
-	{
-		Tag:         "openai",
-		DisplayName: "ChatGPT",
-		ExactHosts: []string{
-			"chatgpt.com", "ab.chatgpt.com", "ws.chatgpt.com", "api.openai.com", "auth.openai.com",
-			"persistent.oaistatic.com", "oaisidekickupdates.blob.core.windows.net",
-		},
-		DomainSuffixes: []string{
-			"openai.com", "chatgpt.com", "ws.chatgpt.com", "oaistatic.com", "oaiusercontent.com", "oaistatsig.com",
-			"openaimerge.com", "auth0.openai.com", "workos.com", "workoscdn.com",
-		},
-		ProcessNames: []string{"ChatGPT.exe"},
-		HealthURL:    "https://chatgpt.com",
-		ProbeURLs:    []string{"https://api.openai.com"},
-		RequiresVPN:  true,
-	},
-	{
-		Tag:         "ai-other",
-		DisplayName: "Другие AI-сервисы",
-		DomainSuffixes: []string{
-			"githubcopilot.com", "copilot-proxy.githubusercontent.com", "origin-tracker.githubusercontent.com",
-			"copilot-telemetry.githubusercontent.com", "default.exp-tas.com", "api.github.com", "github.com",
-			"cursor.com", "cursor.sh", "api2.cursor.sh", "api3.cursor.sh", "repo42.cursor.sh",
-			"cursorapi.com", "cursor-cdn.com", "download.todesktop.com",
-			"copilot.microsoft.com", "perplexity.ai", "api.perplexity.ai", "poe.com",
-			"gemini.google.com", "aistudio.google.com", "ai.google.dev", "generativelanguage.googleapis.com",
-			"notebooklm.google.com", "grok.com", "x.ai", "api.x.ai", "console.x.ai",
-			"meta.ai", "ai.meta.com", "llama.com",
-		},
-		ProcessNames: []string{
-			"Code.exe", "Cursor.exe", "GitHubCopilot.exe",
-		},
-		HealthURL:   "https://perplexity.ai",
-		ProbeURLs:   []string{"https://perplexity.ai", "https://gemini.google.com"},
-		RequiresVPN: true,
-	},
+}, aiFreeAccessServices()...)
+
+func aiFreeAccessServices() []FreeAccessService {
+	var services []FreeAccessService
+	for _, ai := range aicatalog.Services {
+		service := FreeAccessService{Tag: ai.Tag, DisplayName: ai.Name, DomainSuffixes: ai.Domains, ProcessNames: ai.Processes,
+			HealthURL: ai.HealthURL, ProbeURLs: ai.ProbeURLs, RequiresVPN: true}
+		switch ai.Tag {
+		case "openai":
+			service.ExactHosts = []string{"chatgpt.com", "ab.chatgpt.com", "ws.chatgpt.com", "api.openai.com", "auth.openai.com", "persistent.oaistatic.com", "oaisidekickupdates.blob.core.windows.net"}
+		case "claude":
+			service.ExactHosts = []string{"claude.ai", "api.anthropic.com", "platform.claude.com", "sso.claude.com", "downloads.claude.ai", "bridge.claudeusercontent.com"}
+		}
+		services = append(services, service)
+	}
+	return services
 }
 
 var primaryHomeRouteServiceTags = map[string]bool{
 	"youtube": true,
 	"discord": true,
 	"meta":    true,
-	"openai":  true,
 }
 
 func HomeRouteServiceVisible(settings GlobalAppSettings, serviceTag string) bool {
+	if aicatalog.VPNOnly(serviceTag) {
+		return false
+	}
 	if primaryHomeRouteServiceTags[serviceTag] {
 		return true
 	}
@@ -566,6 +550,9 @@ func FreshInstallFreeAccessServiceMethodState() map[string]string {
 	state := make(map[string]string, len(DefaultFreeAccessServices))
 	for _, service := range DefaultFreeAccessServices {
 		state[service.Tag] = FreeAccessMethodAuto
+		if aicatalog.VPNOnly(service.Tag) {
+			state[service.Tag] = FreeAccessMethodVPN
+		}
 	}
 	return state
 }
@@ -640,8 +627,8 @@ func NormalizeFreeAccessServiceMethod(method string) string {
 }
 
 func FreeAccessServiceMethod(settings GlobalAppSettings, serviceTag string) string {
-	if settings.FreeAccessMethods == nil {
-		return FreeAccessMethodDirect
+	if aicatalog.VPNOnly(serviceTag) {
+		return FreeAccessMethodVPN
 	}
 	raw, exists := settings.FreeAccessMethods[serviceTag]
 	if !exists || strings.TrimSpace(raw) == "" {
@@ -869,10 +856,7 @@ func FreeAccessServiceRouteOutboundForSettings(service FreeAccessService, settin
 		if hasVPNProxy {
 			return ServiceBypassGroupTag(service.Tag)
 		}
-		if service.RequiresVPN {
-			return "direct"
-		}
-		return ""
+		return NoRouteOutboundTag
 	}
 
 	enabled := FreeAccessServiceEnabled(settings, service.Tag)
@@ -904,7 +888,7 @@ func FreeAccessOutboundLabel(outboundTag string) string {
 	case "direct":
 		return "Напрямую"
 	case NoRouteOutboundTag:
-		return "No route"
+		return "Нет рабочего маршрута"
 	default:
 		return outboundTag
 	}

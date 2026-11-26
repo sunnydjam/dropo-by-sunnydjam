@@ -150,7 +150,7 @@ Future<void> _capture(
 
 void main() {
   testWidgets(
-    'phone Home disclosure shows four quick services on one star field',
+    'phone Home disclosure shows configurable quick services on one star field',
     (tester) async {
       debugMobileShellOverride = true;
       addTearDown(() => debugMobileShellOverride = null);
@@ -175,10 +175,10 @@ void main() {
       expect(find.byKey(const ValueKey('nav-services')), findsNothing);
       await _capture(tester, 'android-home-services-collapsed-390');
       await openSection(tester, 'services');
-      final lastQuick = find.byKey(const ValueKey('home-service-row-openai'));
+      final lastQuick = find.byKey(const ValueKey('home-service-row-meta'));
       await Scrollable.ensureVisible(tester.element(lastQuick), alignment: 1);
       await tester.pump(const Duration(milliseconds: 400));
-      for (final tag in ['youtube', 'discord', 'meta', 'openai']) {
+      for (final tag in ['youtube', 'discord', 'meta']) {
         expect(
           find.byKey(ValueKey('home-service-row-$tag')).hitTestable(),
           findsOneWidget,

@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	traffic "dropo/trafficorchestrator"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -299,6 +301,9 @@ func (a *App) startDiscordRealtimeMonitorForSession(session uint64) {
 	}
 	controller := a.discordRealtime
 	settings := a.storage.GetAppSettings()
+	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
+		return
+	}
 	method := FreeAccessServiceMethod(settings, "discord")
 	controller.mu.Lock()
 	automatic := controller.automatic
@@ -1460,6 +1465,9 @@ func (a *App) activateDiscordRealtimeFallback(session uint64, reason string) {
 			controller.resetRouteObservationLocked()
 			initialBusy = controller.initialBusy
 			controller.mu.Unlock()
+			if err := a.setDiscordTerminalRoute(traffic.ServiceRouteVPN); err != nil {
+				return err
+			}
 			serviceSwitched = a.switchServiceRoute("discord", "auto-select")
 			realtimeSwitched = a.switchOutboundSelector(discordRealtimeGroupTag, discordVPNGroupTag)
 			if serviceSwitched && realtimeSwitched {
@@ -1490,8 +1498,11 @@ func (a *App) activateDiscordRealtimeFallback(session uint64, reason string) {
 		if !controller.ownsSession(session) {
 			return errRouteStrategySessionExpired
 		}
-		a.switchServiceRoute("discord", "direct")
-		a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
+		if err := a.setDiscordTerminalRoute(traffic.ServiceRouteUnavailable); err != nil {
+			return err
+		}
+		a.switchServiceRoute("discord", NoRouteOutboundTag)
+		a.switchOutboundSelector(discordRealtimeGroupTag, NoRouteOutboundTag)
 		controller.mu.Lock()
 		controller.fallbackVPN = false
 		controller.initialBusy = false
@@ -1499,14 +1510,32 @@ func (a *App) activateDiscordRealtimeFallback(session uint64, reason string) {
 		controller.initialIdle = time.Time{}
 		controller.automatic = false
 		controller.mu.Unlock()
-		a.cacheServiceMethodWithNextStrategy("discord", FreeAccessMethodDirect, "discord-live-media-fallback", nextStrategyIndex)
+		a.cacheServiceMethodWithNextStrategy("discord", NoRouteOutboundTag, "discord-live-media-fallback", nextStrategyIndex)
 		return nil
 	}); err != nil {
 		return
 	}
 	a.commitDiscordRealtimeSessionAction(session, func() { a.endBusy(discordRealtimeBusyID) })
 	a.emitDiscordRealtimeService(session, false, true, false, "В этой сессии проверены 4 стратегии Discord voice; следующий запуск продолжит со следующего набора")
-	a.writeLog(fmt.Sprintf("[DiscordRealtime] all %d local attempts failed; direct fallback selected for this session and the next strategy cursor was saved", discordLocalStrategyCount()))
+	a.writeLog(fmt.Sprintf("[DiscordRealtime] all %d local attempts failed; route blocked for this session and the next strategy cursor was saved", discordLocalStrategyCount()))
+}
+
+// Called under the session commit lock, in the same order as native trials.
+func (a *App) setDiscordTerminalRoute(kind traffic.ServiceRouteKind) error {
+	a.serviceEngineComposeMu.Lock()
+	defer a.serviceEngineComposeMu.Unlock()
+	if a.trafficEngine == nil || a.trafficEngine.ActiveTag() != composedStrategyTag {
+		return nil
+	}
+	plan := cloneTrafficPlan(a.trafficEngine.CurrentPlan())
+	if !slices.ContainsFunc(plan.Services, func(s traffic.ServiceRule) bool { return s.ID == "discord" }) {
+		return nil
+	}
+	plan.Selections = slices.DeleteFunc(plan.Selections, func(s traffic.ServiceSelection) bool { return s.ServiceID == "discord" })
+	plan.Routes = slices.DeleteFunc(plan.Routes, func(r traffic.ServiceRoute) bool { return r.ServiceID == "discord" })
+	plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: "discord", Kind: kind})
+	plan.Revision++
+	return a.trafficEngine.StartPlan(plan)
 }
 
 func (a *App) nextDiscordStrategyIndex() int {
@@ -1711,8 +1740,8 @@ func (a *App) rotateDiscordVPNSource(session uint64, reason string) {
 			if !controller.ownsSession(session) {
 				return errRouteStrategySessionExpired
 			}
-			a.switchServiceRoute("discord", "direct")
-			a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
+			a.switchServiceRoute("discord", "auto-select")
+			a.switchOutboundSelector(discordRealtimeGroupTag, discordVPNGroupTag)
 			controller.mu.Lock()
 			controller.initialBusy = false
 			controller.initialReady = true
@@ -1725,7 +1754,7 @@ func (a *App) rotateDiscordVPNSource(session uint64, reason string) {
 			return
 		}
 		a.commitDiscordRealtimeSessionAction(session, func() { a.endBusy(discordRealtimeBusyID) })
-		a.writeLog("[DiscordRealtime] VPN UDP failed and no alternative VPN source exists; switched to direct")
+		a.writeLog("[DiscordRealtime] VPN UDP failed and no alternative VPN source exists; retained VPN")
 		a.closeDiscordRealtimeConnections(session)
 		return
 	}
@@ -1771,10 +1800,10 @@ func (a *App) rotateDiscordVPNSource(session uint64, reason string) {
 			if !controller.ownsSession(session) {
 				return errRouteStrategySessionExpired
 			}
-			a.switchServiceRoute("discord", "direct")
-			a.switchOutboundSelector(discordRealtimeGroupTag, "direct")
+			a.switchServiceRoute("discord", "auto-select")
+			a.switchOutboundSelector(discordRealtimeGroupTag, discordVPNGroupTag)
 			controller.mu.Lock()
-			controller.fallbackVPN = false
+			controller.fallbackVPN = true
 			controller.vpnTried = make(map[string]bool)
 			controller.resetRouteObservationLocked()
 			controller.mu.Unlock()
@@ -1782,7 +1811,7 @@ func (a *App) rotateDiscordVPNSource(session uint64, reason string) {
 		}); err != nil {
 			return
 		}
-		a.writeLog(fmt.Sprintf("[DiscordRealtime] every independent VPN source failed the current realtime health window (%s); switched to direct but kept automatic recovery enabled", reason))
+		a.writeLog(fmt.Sprintf("[DiscordRealtime] every independent VPN source failed the current realtime health window (%s); retained VPN but kept automatic recovery enabled", reason))
 		a.closeDiscordRealtimeConnections(session)
 		return
 	}

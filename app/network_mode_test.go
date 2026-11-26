@@ -361,7 +361,7 @@ func TestDeepWindowsProxyFallbackPrunesDeadVPNCandidatesFromRouteProbe(t *testin
 		t.Fatalf("auto-select after pruning = %#v, want selector pinned to live candidate", auto)
 	}
 	proxy := getOutbound(config, "proxy")
-	if got := interfaceStringSlice(proxy["outbounds"]); !sameStringSet(got, []string{"auto-select", "vless-live", "direct"}) {
+	if got := interfaceStringSlice(proxy["outbounds"]); !sameStringSet(got, []string{"auto-select", "vless-live"}) {
 		t.Fatalf("proxy selector candidates = %v, want dead candidate removed", got)
 	}
 }

@@ -287,6 +287,7 @@ class OwnedVPNClient {
     Future<Map<String, dynamic>> Function(String, int) verify, {
     String? registeredToken,
     CoreBridge? bridge,
+    bool Function()? isCurrent,
   }) async {
     await _ownedStep('protected_storage_read', _load);
     if (_record?['deletionPending'] == true) {
@@ -475,7 +476,8 @@ class OwnedVPNClient {
     }
     if (registeredToken != null) {
       final identity = await _identityStore.read();
-      if (identity['suppressed'] == true ||
+      if (isCurrent?.call() == false ||
+          identity['suppressed'] == true ||
           identity['pendingDeletion'] != null ||
           identity['token'] != registeredToken ||
           identity['accountKind'] != 'registered' ||
@@ -491,8 +493,16 @@ class OwnedVPNClient {
     _record!['freeKey'] = free;
     _record!['boostKey'] = boost;
     _record!['boostUntil'] = until;
+    if (registeredToken != null && boost != null) {
+      _record!['boostApplyPending'] = true;
+    }
     await _persist();
-    return _apply(save, bridge);
+    final result = await _apply(save, bridge);
+    if (result['success'] == true &&
+        _record!.remove('boostApplyPending') != null) {
+      await _persist();
+    }
+    return result;
   }
 
   Future<String> _downloadKey(Object? value, int until) async {
@@ -725,21 +735,26 @@ class OwnedVPNClient {
   );
 
   /// Account entitlements can change on the web while this local profile stays
-  /// cached. Refresh only changed entitlements, before starting a VPN session.
+  /// cached. Reconcile changed entitlements while the native session is idle.
   Future<Map<String, dynamic>> synchronizeEntitlement(
     CoreBridge bridge,
     String token,
     DateTime? turboUntil, {
     AccountTransport? transport,
+    bool Function()? isCurrent,
   }) => _serialize(() async {
     await _load();
-    if (_record?['deletionPending'] == true || _record?['freeKey'] is! String) {
+    if (isCurrent?.call() == false) return {'success': false};
+    if (_record?['deletionPending'] == true) {
       return {'success': true, 'unchanged': true};
     }
     final active = turboUntil?.isAfter(DateTime.now()) ?? false;
     final until = active ? turboUntil!.millisecondsSinceEpoch ~/ 1000 : 0;
     final cachedUntil = (_record?['boostUntil'] as num?)?.toInt() ?? 0;
-    if (active && _record?['boostKey'] is String && cachedUntil == until) {
+    if (active &&
+        _record?['boostKey'] is String &&
+        cachedUntil == until &&
+        _record?['boostApplyPending'] != true) {
       return {'success': true, 'unchanged': true};
     }
     if (!active && _record?['boostKey'] == null && cachedUntil == 0) {
@@ -750,21 +765,30 @@ class OwnedVPNClient {
     )) {
       return {'success': true, 'deferred': true};
     }
+    if (isCurrent?.call() == false) return {'success': false};
     if (active) {
       // An authenticated account is already bound by the identity coordinator.
       // Never silently consent to merging another guest installation here.
-      return _linkAccount(bridge, token, false, transport: transport);
+      return _linkAccount(
+        bridge,
+        token,
+        false,
+        transport: transport,
+        isCurrent: isCurrent,
+      );
     }
     final view = await bridge.callMap('GetVPNSources');
     for (final source in _ownedFamilyRepresentatives(
       view['sources'] as List? ?? const [],
       family: 'dropo-individual-boost',
     )) {
+      if (isCurrent?.call() == false) return {'success': false};
       final result = await bridge.removeVpnSource(source['id'].toString());
       if (result['success'] != true) return result;
     }
     _turboSelectionHandled = false;
     _record!.remove('boostKey');
+    _record!.remove('boostApplyPending');
     _record!['boostUntil'] = 0;
     await _persist();
     return {'success': true, 'turboRemoved': true};
@@ -775,12 +799,14 @@ class OwnedVPNClient {
     String token,
     bool consent, {
     AccountTransport? transport,
+    bool Function()? isCurrent,
   }) async {
     final api = transport ?? _AccountApi(endpoint);
     try {
       await _load();
       final identity = await _identityStore.read();
-      if (identity['suppressed'] == true ||
+      if (isCurrent?.call() == false ||
+          identity['suppressed'] == true ||
           identity['pendingDeletion'] != null ||
           identity['token'] != token ||
           identity['accountKind'] != 'registered') {
@@ -862,12 +888,18 @@ class OwnedVPNClient {
       }
       final result = await _enroll(
         api,
-        (id, name, key, ok) =>
-            bridge.callMap('AddManagedVPNSource', args: [id, name, key, ok]),
+        (id, name, key, ok) async {
+          if (isCurrent?.call() == false) throw const AccountIdentityChanged();
+          return bridge.callMap(
+            'AddManagedVPNSource',
+            args: [id, name, key, ok],
+          );
+        },
         (raw, min) =>
             bridge.callMap('ValidateManagedCatalog', args: [raw, min]),
         registeredToken: token,
         bridge: bridge,
+        isCurrent: isCurrent,
       );
       if (result['success'] == true && _record?['boostKey'] == null) {
         final view = await bridge.callMap('GetVPNSources');

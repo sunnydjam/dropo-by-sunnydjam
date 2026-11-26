@@ -167,7 +167,7 @@ func (routing *fakeIPRouting) forHost(host string) (FakeIPTarget, bool) {
 		Network: NetworkTCP, Port: 443, Host: host,
 	})
 	route := routing.routes[classification.ServiceID]
-	if !classification.Matched || (route != ServiceRouteVPN && route != ServiceRouteZapret) {
+	if !classification.Matched || (route != ServiceRouteVPN && route != ServiceRouteZapret && route != ServiceRouteUnavailable) {
 		return FakeIPTarget{}, false
 	}
 	if route == ServiceRouteZapret && routing.zapretExactHosts[host] != classification.ServiceID {
@@ -236,7 +236,7 @@ func validateFakeIPTarget(target FakeIPTarget) error {
 	if normalizeHost(target.Host) == "" || target.ServiceID == "" {
 		return errors.New("fake-IP target host and service are required")
 	}
-	if target.Route != ServiceRouteVPN && target.Route != ServiceRouteZapret {
+	if target.Route != ServiceRouteVPN && target.Route != ServiceRouteZapret && target.Route != ServiceRouteUnavailable {
 		return errors.New("fake-IP target route must be VPN or Zapret")
 	}
 	return nil

@@ -1,6 +1,7 @@
 package dropocore
 
 import (
+	"dropocore/aicatalog"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -28,11 +29,14 @@ func prepareAndroidRoutingChangeLocked(method string, args []interface{}) (andro
 	if !ok {
 		return change, errors.New("Unknown Android route service: " + change.tag)
 	}
+	if aicatalog.VPNOnly(change.tag) && change.method != androidRoutePolicyVPN {
+		return change, errors.New("Для сервиса обязателен VPN")
+	}
 	if change.method == "" {
 		return change, errors.New("Unknown Android route policy")
 	}
 	change.unchanged = androidServicePolicy(service, change.policies) == change.method
-	if change.method == androidRoutePolicyAuto {
+	if change.method == androidServicePolicy(service, nil) {
 		delete(change.policies, change.tag)
 	} else {
 		if change.policies == nil {
@@ -173,7 +177,8 @@ func replaceAndroidRoutingPolicy(activeConfig string, change androidRoutingChang
 	policies := androidEffectiveRoutePoliciesForMode(change.policies, hasProxy, change.mode)
 	config["outbounds"] = kept
 	config["dns"] = buildAndroidDNSPolicy(hasProxy, change.mode, hideRU, policies)
-	route["rules"], route["final"] = buildAndroidRouteRules(change.mode, hideRU, ruOutbound, policies), androidFinalOutbound(change.mode)
+	route["rules"], route["final"] = buildAndroidRouteRules(change.mode, hideRU, ruOutbound, policies), "direct"
+	configureAndroidCatalog(route, change.mode)
 	if change.mode == "blocked_only" {
 		addAndroidAdaptiveGraph(config, change.policies)
 	}

@@ -26,7 +26,10 @@ void main() {
       '../app/core_freeaccess.go',
       before: 'var primaryHomeRouteServiceTags',
     );
-    expect(androidTags, hasLength(29));
+    final ai = _catalogTags('../app/mobile/dropocore/aicatalog/catalog.go');
+    androidTags.addAll(ai);
+    windowsTags.addAll(ai);
+    expect(androidTags, hasLength(30));
     expect(windowsTags, equals(androidTags));
     expect(serviceIconCatalogTags, equals(androidTags));
   });

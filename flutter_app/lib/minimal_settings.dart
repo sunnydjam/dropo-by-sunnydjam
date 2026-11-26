@@ -135,6 +135,12 @@ class _MinimalSettingsPage extends StatelessWidget {
               : 'Обход, профили и рабочие сети',
           Icons.shield_outlined,
         ),
+        (
+          'vpn-only-services',
+          'Сервисы с обязательным VPN',
+          'ИИ и сервисы с региональными ограничениями',
+          Icons.public_outlined,
+        ),
         ('help', 'Помощь', 'Решение проблем и диагностика', Icons.help_outline),
       ],
     };
@@ -165,4 +171,67 @@ class _MinimalSettingsPage extends StatelessWidget {
       ),
     );
   }
+}
+
+class _VPNOnlyServicesPage extends StatefulWidget {
+  const _VPNOnlyServicesPage({required this.bridge});
+  final CoreBridge bridge;
+
+  @override
+  State<_VPNOnlyServicesPage> createState() => _VPNOnlyServicesPageState();
+}
+
+class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
+  late Future<List<RouteService>> catalog = widget.bridge.routes();
+  @override
+  Widget build(BuildContext context) => _FeaturePage(
+    title: 'Сервисы с обязательным VPN',
+    icon: Icons.public_outlined,
+    slivers: [
+      SliverPadding(
+        padding: const EdgeInsets.all(16),
+        sliver: SliverToBoxAdapter(
+          child: FutureBuilder<List<RouteService>>(
+            future: catalog,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snapshot.hasError) {
+                return TextButton(
+                  onPressed: () =>
+                      setState(() => catalog = widget.bridge.routes()),
+                  child: Text(_uiText(context, 'Повторить загрузку')),
+                );
+              }
+              final services =
+                  (snapshot.data ?? []).where((s) => s.vpnOnly).toList()..sort(
+                    (a, b) => _homeRouteName(a).compareTo(_homeRouteName(b)),
+                  );
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _uiText(
+                      context,
+                      'В обоих режимах эти сервисы используют только VPN. Если VPN недоступен, соединение останавливается.',
+                    ),
+                  ),
+                  for (final service in services)
+                    ListTile(
+                      key: ValueKey('vpn-only-${service.tag}'),
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(_homeRouteName(service)),
+                      subtitle: SelectableText(
+                        service.domainSuffixes.join(', '),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    ],
+  );
 }

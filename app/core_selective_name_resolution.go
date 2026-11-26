@@ -36,7 +36,7 @@ func selectedFakeHostMappings(plan traffic.TrafficPlan, directory *traffic.FakeI
 	}
 	selected := make(map[string]bool, len(plan.Routes))
 	for _, route := range plan.Routes {
-		selected[route.ServiceID] = route.Kind == traffic.ServiceRouteVPN || route.Kind == traffic.ServiceRouteZapret
+		selected[route.ServiceID] = route.Kind == traffic.ServiceRouteVPN || route.Kind == traffic.ServiceRouteZapret || route.Kind == traffic.ServiceRouteUnavailable
 	}
 	hosts := make([]string, 0)
 	for _, service := range plan.Services {
@@ -72,11 +72,14 @@ func (d selectiveDomains) matches(host string) bool {
 }
 
 type selectiveDomainPlan struct {
-	direct, vpn, zapret selectiveDomains
+	catalog                             []string
+	catalogRoute                        traffic.ServiceRouteKind
+	direct, vpn, zapret, unavailable    selectiveDomains
+	work, mandatoryVPN, mandatoryDenied selectiveDomains
 }
 
 func selectiveDomainsForPlan(plan traffic.TrafficPlan) selectiveDomainPlan {
-	result := selectiveDomainPlan{newSelectiveDomains(), newSelectiveDomains(), newSelectiveDomains()}
+	result := selectiveDomainPlan{direct: newSelectiveDomains(), vpn: newSelectiveDomains(), zapret: newSelectiveDomains(), unavailable: newSelectiveDomains(), work: newSelectiveDomains(), mandatoryVPN: newSelectiveDomains(), mandatoryDenied: newSelectiveDomains()}
 	add := func(set map[string]struct{}, hosts []string) {
 		for _, h := range hosts {
 			if host := normalizeProxyHost(h); host != "" {
@@ -85,6 +88,7 @@ func selectiveDomainsForPlan(plan traffic.TrafficPlan) selectiveDomainPlan {
 		}
 	}
 	for _, work := range plan.WorkNetworks {
+		add(result.work.suffix, work.DomainSuffixes)
 		add(result.direct.suffix, work.DomainSuffixes)
 	}
 	for _, rule := range plan.DirectRules {
@@ -95,12 +99,29 @@ func selectiveDomainsForPlan(plan traffic.TrafficPlan) selectiveDomainPlan {
 		routes[route.ServiceID] = route.Kind
 	}
 	for _, svc := range plan.Services {
+		kind := routes[svc.ID]
+		if svc.ID == commonBlockedServiceTag && (kind == traffic.ServiceRouteVPN || kind == traffic.ServiceRouteUnavailable) {
+			result.catalog = svc.DomainSuffixes
+			result.catalogRoute = kind
+			continue
+		}
+		if svc.VPNOnly {
+			scope := result.mandatoryVPN
+			if kind != traffic.ServiceRouteVPN {
+				scope = result.mandatoryDenied
+				kind = traffic.ServiceRouteUnavailable
+			}
+			add(scope.exact, svc.ExactHosts)
+			add(scope.suffix, svc.DomainSuffixes)
+		}
 		var d selectiveDomains
-		switch routes[svc.ID] {
+		switch kind {
 		case traffic.ServiceRouteVPN:
 			d = result.vpn
 		case traffic.ServiceRouteZapret:
 			d = result.zapret
+		case traffic.ServiceRouteUnavailable:
+			d = result.unavailable
 		case traffic.ServiceRouteDirect:
 			d = result.direct
 		default:
@@ -113,11 +134,17 @@ func selectiveDomainsForPlan(plan traffic.TrafficPlan) selectiveDomainPlan {
 }
 
 func (p selectiveDomainPlan) needsFake(host string) bool {
+	if p.work.matches(host) {
+		return false
+	}
+	if p.mandatoryVPN.matches(host) || p.mandatoryDenied.matches(host) {
+		return true
+	}
 	if p.direct.matches(host) {
 		return false
 	}
 	_, exactZapret := p.zapret.exact[normalizeProxyHost(host)]
-	return p.vpn.matches(host) || exactZapret
+	return p.vpn.matches(host) || p.unavailable.matches(host) || exactZapret
 }
 
 // installSelectiveFakeHosts appends only exact, positively classified service

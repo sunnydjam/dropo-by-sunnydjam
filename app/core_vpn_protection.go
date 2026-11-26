@@ -35,17 +35,9 @@ func vpnProtectionStatusForPlatform(mode RoutingMode, platform string) VPNProtec
 			Reason: "В этом desktop runtime нет подтверждённой системной защиты трафика",
 		}
 	}
-	if NormalizeRoutingMode(mode) != RoutingModeAllTraffic {
-		return VPNProtectionStatus{
-			TargetScope: VPNProtectionScopeVPNServices,
-			State:       "selective_guard_not_integrated",
-			Reason:      "Для выбранных сервисов нужна отдельная защита только VPN-маршрутов; общий сетевой блок нарушил бы прямые маршруты",
-		}
-	}
 	return VPNProtectionStatus{
-		EligibleMode: true,
-		TargetScope:  VPNProtectionScopeDevice,
-		State:        "guard_not_integrated",
-		Reason:       "Автоматическое переподключение доступно, но защита всего компьютера через Windows WFP ещё не установлена",
+		TargetScope: VPNProtectionScopeVPNServices,
+		State:       "selective_guard_not_integrated",
+		Reason:      "Для выбранных сервисов нужна отдельная защита только VPN-маршрутов; общий сетевой блок нарушил бы прямые маршруты",
 	}
 }

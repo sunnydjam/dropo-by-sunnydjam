@@ -53,7 +53,7 @@ class _AboutContent extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         const Text(
-          'Ваши VPN-источники — в одном приложении. Подключайте весь трафик '
+          'Ваши VPN-источники — в одном приложении. Подключайте заблокированные сервисы через VPN '
           'или выбирайте маршрут отдельно для сервисов.',
           textAlign: TextAlign.center,
           style: TextStyle(color: Color(0xFFADC1BB), height: 1.4),

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dropocore/aicatalog"
 	"dropocore/dnspolicy"
 	"path/filepath"
 	"reflect"
@@ -57,11 +58,14 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	if !settings.FreeAccessEnabled {
 		t.Fatal("free access state should remain enabled for legacy UI/API compatibility")
 	}
-	wantMethod := FreeAccessMethodDirect
-	if runtime.GOOS == "windows" || runtime.GOOS == "android" {
-		wantMethod = FreeAccessMethodAuto
-	}
 	for _, svc := range DefaultFreeAccessServices {
+		wantMethod := FreeAccessMethodDirect
+		if runtime.GOOS == "windows" || runtime.GOOS == "android" {
+			wantMethod = FreeAccessMethodAuto
+			if aicatalog.VPNOnly(svc.Tag) {
+				wantMethod = FreeAccessMethodVPN
+			}
+		}
 		if got := settings.FreeAccessMethods[svc.Tag]; got != wantMethod {
 			t.Fatalf("fresh route for %s = %q, want %q", svc.Tag, got, wantMethod)
 		}
@@ -189,8 +193,8 @@ func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
 		t.Fatalf("full VPN selector choices = %v, want VPN sources without direct", choices)
 	}
 	dns, _ := config["dns"].(map[string]interface{})
-	if dns["final"] != "dns-remote" {
-		t.Fatalf("full VPN DNS final = %v, want dns-remote", dns["final"])
+	if dns["final"] != "dns-direct" {
+		t.Fatalf("full VPN DNS final = %v, want dns-direct", dns["final"])
 	}
 	remoteDNSFound := false
 	for _, raw := range dns["servers"].([]interface{}) {
@@ -205,11 +209,8 @@ func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
 	if !remoteDNSFound {
 		t.Fatal("full VPN remote DNS server is missing")
 	}
-	for _, raw := range dns["rules"].([]interface{}) {
-		rule, _ := raw.(map[string]interface{})
-		if rule["server"] == "dns-direct" {
-			t.Fatalf("full VPN DNS has a direct domain rule: %#v", rule)
-		}
+	if !containsDNSDomainSuffixServer(config, "vk.com", "dns-direct") || !containsDNSDomainSuffixServer(config, "claude.ai", "dns-remote") {
+		t.Fatal("catalog and ordinary DNS must follow different paths")
 	}
 	route, _ := config["route"].(map[string]interface{})
 	bootstrap, _ := route["default_domain_resolver"].(map[string]interface{})
@@ -218,7 +219,7 @@ func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
 	}
 	experimental, _ := config["experimental"].(map[string]interface{})
 	cacheFile, _ := experimental["cache_file"].(map[string]interface{})
-	if cacheFile["path"] != "cache-all-traffic.db" {
+	if cacheFile["path"] != "cache-catalog-vpn-v2.db" {
 		t.Fatalf("full VPN cache path = %v, want isolated selector cache", cacheFile["path"])
 	}
 	if configNeedsAllTrafficTunnelMigration(config, RoutingModeAllTraffic) {
@@ -337,12 +338,12 @@ func TestAllTrafficDNSPreservesWorkNetworkResolver(t *testing.T) {
 	builder.applyDNSRouting(template, GlobalAppSettings{}, true)
 	dns := template["dns"].(map[string]interface{})
 	rules := dns["rules"].([]interface{})
-	if len(rules) != 9 || rules[0].(map[string]interface{})["server"] != "wg-dns" || rules[1].(map[string]interface{})["server"] != "dns-local" {
-		t.Fatalf("full VPN DNS work/local exceptions = %#v", rules)
+	if len(rules) < 3 || rules[0].(map[string]interface{})["server"] != "wg-dns" || rules[1].(map[string]interface{})["server"] != "dns-local" || dns["final"] != "dns-direct" {
+		t.Fatal("catalog VPN lost local/work DNS priority")
 	}
-	for i, tag := range map[int]string{2: "dns-remote-fi", 5: "dns-remote", 8: "dns-remote-lv"} {
-		if rules[i].(map[string]interface{})["server"] != tag {
-			t.Fatalf("full VPN DNS resolver order at %d does not match %s", i, tag)
+	for _, tag := range []string{"dns-remote-fi", "dns-remote", "dns-remote-lv"} {
+		if !containsDNSDomainSuffixServer(template, "claude.ai", tag) {
+			t.Fatalf("missing protected Claude DNS %s", tag)
 		}
 	}
 }
@@ -405,8 +406,8 @@ func TestGeneratedRoutingPreservesWireGuardOverlayAcrossModes(t *testing.T) {
 			if privateRuleIndex < 0 || workRuleIndex >= privateRuleIndex {
 				t.Fatalf("%s WireGuard rule index = %d, generic private rule index = %d; work overlay must win", mode, workRuleIndex, privateRuleIndex)
 			}
-			if mode == RoutingModeAllTraffic && route["final"] != "proxy" {
-				t.Fatalf("all-traffic final = %v, want proxy after the work-network exception", route["final"])
+			if mode == RoutingModeAllTraffic && route["final"] != "direct" {
+				t.Fatalf("all-traffic final = %v, want direct after the work-network exception", route["final"])
 			}
 
 			dns, _ := config["dns"].(map[string]interface{})

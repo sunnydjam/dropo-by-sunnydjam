@@ -156,82 +156,86 @@ void main() {
     },
   );
 
-  testWidgets('home routes keep four primary services and can pin another', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(960, 900);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets(
+    'home routes keep configurable primary services and can pin another',
+    (tester) async {
+      tester.view.physicalSize = const Size(960, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-    final bridge = MockCoreBridge();
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: ThemeData.dark(),
-        home: DropoHomePage(bridge: bridge),
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 2));
+      final bridge = MockCoreBridge();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: DropoHomePage(bridge: bridge),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
 
-    expect(
-      find.byKey(const ValueKey<String>('home-route-controls')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey<String>('home-routing-selected')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey<String>('home-routing-all-vpn')),
-      findsOneWidget,
-    );
-    await openSection(tester, 'service-settings');
-    for (final tag in const ['youtube', 'discord', 'meta', 'openai']) {
-      expect(find.byKey(ValueKey('home-service-row-$tag')), findsOneWidget);
-    }
-    final allServices = find.byKey(const ValueKey('services-all'));
-    await tester.ensureVisible(allServices);
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(allServices);
-    await tester.pump(const Duration(milliseconds: 300));
-    await openHomeService(tester, 'google');
-    final pinGoogle = find.byKey(const ValueKey('pin-service-google'));
-    await tester.ensureVisible(pinGoogle);
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(pinGoogle);
-    await tester.pump(const Duration(milliseconds: 800));
-    expect(
-      (await bridge.routes())
-          .firstWhere((route) => route.tag == 'google')
-          .homeVisible,
-      isTrue,
-    );
-    await tester.enterText(find.byKey(const ValueKey('service-search')), '');
-    final pinned = find.byKey(const ValueKey('services-pinned'));
-    await tester.ensureVisible(pinned);
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(pinned);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(
-      find.byKey(const ValueKey('home-service-row-google')),
-      findsOneWidget,
-    );
-    await tester.ensureVisible(pinGoogle);
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(pinGoogle);
-    await tester.pump(const Duration(milliseconds: 800));
-    expect(find.byKey(const ValueKey('home-service-row-google')), findsNothing);
-    final disclosure = find.byKey(
-      const ValueKey<String>('toggle-home-route-services'),
-    );
-    await tester.ensureVisible(disclosure);
-    await tester.pump(const Duration(milliseconds: 200));
-    await tester.tap(disclosure);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.byKey(const ValueKey('service-search')), findsNothing);
-    expect(tester.takeException(), isNull);
-  });
+      expect(
+        find.byKey(const ValueKey<String>('home-route-controls')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('home-routing-selected')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('home-routing-all-vpn')),
+        findsOneWidget,
+      );
+      await openSection(tester, 'service-settings');
+      for (final tag in const ['youtube', 'discord', 'meta']) {
+        expect(find.byKey(ValueKey('home-service-row-$tag')), findsOneWidget);
+      }
+      final allServices = find.byKey(const ValueKey('services-all'));
+      await tester.ensureVisible(allServices);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(allServices);
+      await tester.pump(const Duration(milliseconds: 300));
+      await openHomeService(tester, 'google');
+      final pinGoogle = find.byKey(const ValueKey('pin-service-google'));
+      await tester.ensureVisible(pinGoogle);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(pinGoogle);
+      await tester.pump(const Duration(milliseconds: 800));
+      expect(
+        (await bridge.routes())
+            .firstWhere((route) => route.tag == 'google')
+            .homeVisible,
+        isTrue,
+      );
+      await tester.enterText(find.byKey(const ValueKey('service-search')), '');
+      final pinned = find.byKey(const ValueKey('services-pinned'));
+      await tester.ensureVisible(pinned);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(pinned);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.byKey(const ValueKey('home-service-row-google')),
+        findsOneWidget,
+      );
+      await tester.ensureVisible(pinGoogle);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(pinGoogle);
+      await tester.pump(const Duration(milliseconds: 800));
+      expect(
+        find.byKey(const ValueKey('home-service-row-google')),
+        findsNothing,
+      );
+      final disclosure = find.byKey(
+        const ValueKey<String>('toggle-home-route-services'),
+      );
+      await tester.ensureVisible(disclosure);
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.tap(disclosure);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('service-search')), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('home can switch all traffic through VPN immediately', (
     tester,

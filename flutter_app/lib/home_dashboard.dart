@@ -452,7 +452,7 @@ class _HomeRouteControls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ordered = List<RouteService>.from(services);
-    const primaryOrder = <String>['youtube', 'discord', 'meta', 'openai'];
+    final primaryOrder = primaryHomeRouteServiceTags.toList();
     ordered.sort((left, right) {
       final leftIndex = primaryOrder.indexOf(left.tag);
       final rightIndex = primaryOrder.indexOf(right.tag);
@@ -508,7 +508,7 @@ class _HomeRouteControls extends StatelessWidget {
                 fit: FlexFit.loose,
                 child: _AccessibleDescription(
                   message: hasSubscription
-                      ? 'Направить весь трафик через VPN'
+                      ? 'Направить сервисы из списка блокировок и ИИ-сервисы через VPN'
                       : _isMobileShell
                       ? 'Сначала добавьте VPN-подписку'
                       : 'Бесплатный публичный источник или своя подписка',
@@ -527,7 +527,7 @@ class _HomeRouteControls extends StatelessWidget {
           const SizedBox(height: 12),
           Text(
             routingMode == 'all_traffic'
-                ? 'Общий трафик — через VPN. Локальные и рабочие сети сохраняют исключения.'
+                ? 'Заблокированные и ИИ-сервисы идут через VPN. Остальные сайты открываются напрямую.'
                 : 'Маршруты сервисов и каталоги блокировок. Остальное — напрямую.',
             style: const TextStyle(
               color: _homeMuted,
@@ -742,9 +742,11 @@ class _HomeRouteServiceRow extends StatelessWidget {
             LayoutBuilder(
               builder: (context, bounds) {
                 final options = [
-                  _homeRouteButton(service, 'auto', 'Авто', selected),
+                  if (!service.vpnOnly)
+                    _homeRouteButton(service, 'auto', 'Авто', selected),
                   _homeRouteButton(service, 'vpn', 'VPN', selected),
-                  _homeRouteButton(service, 'direct', 'Напрямую', selected),
+                  if (!service.vpnOnly)
+                    _homeRouteButton(service, 'direct', 'Напрямую', selected),
                 ];
                 final stacked =
                     bounds.maxWidth < 250 ||
@@ -769,7 +771,7 @@ class _HomeRouteServiceRow extends StatelessWidget {
                 );
               },
             ),
-            if (!_isMobileShell)
+            if (!_isMobileShell && !service.vpnOnly)
               _AccessibleDescription(
                 message: service.zapretSupported
                     ? service.tag == 'discord'

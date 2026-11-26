@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"dropocore/aicatalog"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -382,6 +383,9 @@ func (a *App) probeServiceCandidates(service FreeAccessService, candidates []rou
 	proxyCandidates := make([]routeProbeCandidate, 0, len(candidates))
 	transparentCandidates := make([]routeProbeCandidate, 0)
 	for _, candidate := range candidates {
+		if aicatalog.VPNOnly(service.Tag) && candidate.Kind != "vpn" {
+			continue
+		}
 		if candidate.Kind == "transparent" {
 			transparentCandidates = append(transparentCandidates, candidate)
 			continue
@@ -757,7 +761,7 @@ func applyRouteProbeSelectionsToConfig(config map[string]interface{}, results []
 	tagStats := map[string][]int64{}
 	tagKinds := map[string]string{}
 	for _, result := range results {
-		if !result.Success || result.MethodTag == "" {
+		if !result.Success || result.MethodTag == "" || (aicatalog.VPNOnly(result.Tag) && result.MethodKind != "vpn") {
 			continue
 		}
 		selections[result.Tag] = result.MethodTag
@@ -774,6 +778,11 @@ func applyRouteProbeSelectionsToConfig(config map[string]interface{}, results []
 		tag, _ := outboundMap["tag"].(string)
 		if strings.HasPrefix(tag, "bypass-") {
 			serviceTag := strings.TrimPrefix(tag, "bypass-")
+			if aicatalog.VPNOnly(serviceTag) && selections[serviceTag] != "" {
+				applyRouteProbeSelectionToGroup(outboundMap, "auto-select", "vpn")
+				changed = true
+				continue
+			}
 			if selected := selections[serviceTag]; selected != "" {
 				applyRouteProbeSelectionToGroup(outboundMap, routeProbeConfigOutbound(selected, tagKinds[selected]), tagKinds[selected])
 				changed = true
@@ -974,8 +983,27 @@ func newHTTPProxyClient(proxyAddress string) *http.Client {
 	}
 }
 
+func protectedServiceHost(host string) bool {
+	for _, svc := range DefaultFreeAccessServices {
+		if aicatalog.VPNOnly(svc.Tag) {
+			for _, suffix := range svc.DomainSuffixes {
+				if proxyHostMatches(host, suffix) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+func checkDirectProbeRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 || protectedServiceHost(req.URL.Hostname()) {
+		return http.ErrUseLastResponse
+	}
+	return nil
+}
+
 func newDirectHTTPClient() *http.Client {
-	return &http.Client{
+	return &http.Client{CheckRedirect: checkDirectProbeRedirect,
 		Timeout: routeProbeHTTPTimeout,
 		Transport: &http.Transport{
 			ForceAttemptHTTP2:     true,

@@ -2,6 +2,7 @@ package dropocore
 
 import (
 	"crypto/sha256"
+	"dropocore/aicatalog"
 	"dropocore/catalog"
 	"dropocore/sourcehistory"
 	"encoding/json"
@@ -117,6 +118,7 @@ type routeInfo struct {
 	Method               string   `json:"method"`
 	EffectiveMethodLabel string   `json:"effectiveMethodLabel"`
 	SelectedMethod       string   `json:"selectedMethod"`
+	VPNOnly              bool     `json:"vpnOnly"`
 	RequiresVPN          bool     `json:"requiresVpn"`
 	ZapretSupported      bool     `json:"zapretSupported"`
 	HomeVisible          bool     `json:"homeVisible"`
@@ -169,6 +171,7 @@ func EnsureStarted(basePath, appVersion string) string {
 
 	if strings.TrimSpace(basePath) != "" {
 		current.BasePath = basePath
+		androidRuleDirectory.Store(basePath)
 		_ = os.MkdirAll(basePath, 0o755)
 	}
 	if !alreadyInitialized {
@@ -1270,6 +1273,11 @@ func loadLocked() error {
 	}
 	if current.RoutePolicies == nil {
 		current.RoutePolicies = map[string]string{}
+	}
+	for tag := range current.RoutePolicies {
+		if aicatalog.VPNOnly(tag) {
+			delete(current.RoutePolicies, tag)
+		}
 	}
 	normalizeLoadedAppConfigLocked()
 	normalizeLoadedAndroidSubscriptionCountLocked()

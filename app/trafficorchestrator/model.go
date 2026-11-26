@@ -174,6 +174,7 @@ type PortRange struct {
 
 // ServiceRule identifies one service across web, desktop and mobile traffic.
 type ServiceRule struct {
+	VPNOnly                       bool               `json:"vpnOnly,omitempty"`
 	ID                            string             `json:"id"`
 	DisplayName                   string             `json:"displayName"`
 	ExactHosts                    []string           `json:"exactHosts,omitempty"`
@@ -207,9 +208,10 @@ type ServiceSelection struct {
 type ServiceRouteKind string
 
 const (
-	ServiceRouteDirect ServiceRouteKind = "direct"
-	ServiceRouteVPN    ServiceRouteKind = "vpn"
-	ServiceRouteZapret ServiceRouteKind = "zapret"
+	ServiceRouteUnavailable ServiceRouteKind = "unavailable"
+	ServiceRouteDirect      ServiceRouteKind = "direct"
+	ServiceRouteVPN         ServiceRouteKind = "vpn"
+	ServiceRouteZapret      ServiceRouteKind = "zapret"
 )
 
 type ServiceRoute struct {

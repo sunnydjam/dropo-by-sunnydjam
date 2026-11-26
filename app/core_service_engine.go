@@ -21,7 +21,7 @@ import (
 // isFreeAccessFallbackTag reports whether a cached selection is a VPN/direct
 // fallback decision rather than a transparent desync method.
 func isFreeAccessFallbackTag(tag string) bool {
-	return tag == FreeAccessMethodVPN || tag == FreeAccessMethodDirect
+	return tag == FreeAccessMethodVPN || tag == FreeAccessMethodDirect || tag == NoRouteOutboundTag
 }
 
 const (
@@ -213,6 +213,9 @@ func (a *App) loadServiceStrategyCache() map[string]serviceStrategyCacheEntry {
 		// A fallback is safe for bootstrap, but every new connected session removes
 		// it from the validation view and tries the next strategy batch. Keep the
 		// entry so its persistent cursor is not lost between starts.
+		if entry.MethodTag == FreeAccessMethodDirect {
+			entry.MethodTag = NoRouteOutboundTag
+		}
 		if isFreeAccessFallbackTag(entry.MethodTag) {
 			out[tag] = entry
 			continue
@@ -552,7 +555,7 @@ func (a *App) nativeVPNServiceRequested() bool {
 	hasVPN, _ := configHasVPNProbeCandidates(a.storage.ActiveConfigFilePath())
 	for _, service := range DefaultFreeAccessServices {
 		method := FreeAccessServiceMethod(settings, service.Tag)
-		if method == FreeAccessMethodVPN {
+		if method == FreeAccessMethodVPN || method != FreeAccessMethodDirect && cache[service.Tag].MethodTag == NoRouteOutboundTag {
 			return true
 		}
 		if method != FreeAccessMethodAuto {
@@ -561,7 +564,7 @@ func (a *App) nativeVPNServiceRequested() bool {
 		if entry, ok := cache[service.Tag]; ok && entry.MethodTag == FreeAccessMethodVPN {
 			return true
 		}
-		if hasVPN && (service.RequiresVPN || !serviceHasFreeBypass(service.Tag) || !FreeMethodsAllowed(settings)) {
+		if !serviceHasFreeBypass(service.Tag) || !FreeMethodsAllowed(settings) || hasVPN && service.RequiresVPN {
 			return true
 		}
 	}
@@ -743,13 +746,16 @@ func (a *App) validateWindowsUnifiedServiceStrategies(
 // Discord automatic realtime monitoring starts after the full web/API ladder.
 func (a *App) startWindowsUnifiedServiceValidationAsync(startDiscordMonitorAfter bool) {
 	session := a.currentRouteStrategySession()
+	serviceTags := a.backgroundServiceStrategyTags()
+	if len(serviceTags) == 0 {
+		return
+	}
 	go func() {
 		startedAt := time.Now()
 		hasVPN := false
 		if a.storage != nil {
 			hasVPN, _ = configHasVPNProbeCandidates(a.storage.ActiveConfigFilePath())
 		}
-		serviceTags := a.backgroundServiceStrategyTags()
 		extendedSearch := !hasVPN
 		if a.storage != nil {
 			settings := a.storage.GetAppSettings()
@@ -966,6 +972,12 @@ func (a *App) applyWindowsUnifiedBootstrapRoutesToConfig(configPath string) (boo
 
 func windowsUnifiedBootstrapServiceRoute(settings GlobalAppSettings, service FreeAccessService, cached serviceStrategyCacheEntry, hasVPN bool) string {
 	method := FreeAccessServiceMethod(settings, service.Tag)
+	if cached.MethodTag == NoRouteOutboundTag && method != FreeAccessMethodDirect {
+		if hasVPN && method != FreeAccessMethodZapret {
+			return "auto-select"
+		}
+		return NoRouteOutboundTag
+	}
 	switch method {
 	case FreeAccessMethodDirect:
 		return "direct"
@@ -1004,6 +1016,12 @@ func windowsUnifiedBootstrapServiceRoute(settings GlobalAppSettings, service Fre
 
 func windowsUnifiedBootstrapDiscordRealtimeRoute(settings GlobalAppSettings, cached serviceStrategyCacheEntry, hasVPN bool) string {
 	method := FreeAccessServiceMethod(settings, "discord")
+	if method != FreeAccessMethodDirect && (cached.MethodTag == NoRouteOutboundTag || method == FreeAccessMethodVPN && !hasVPN) {
+		if hasVPN && method != FreeAccessMethodZapret {
+			return discordVPNGroupTag
+		}
+		return NoRouteOutboundTag
+	}
 	if method == FreeAccessMethodDirect || method == FreeAccessMethodZapret || !hasVPN {
 		return "direct"
 	}
@@ -1047,14 +1065,14 @@ func (a *App) preferredCommonBlockedFallback() string {
 			return FreeAccessMethodVPN
 		}
 	}
-	return FreeAccessMethodDirect
+	return NoRouteOutboundTag
 }
 
 func (a *App) applyCommonBlockedFallback(method string) {
 	if method == "" {
 		method = a.preferredCommonBlockedFallback()
 	}
-	outbound := "direct"
+	outbound := NoRouteOutboundTag
 	if method == FreeAccessMethodVPN {
 		outbound = "auto-select"
 	}
@@ -1895,12 +1913,13 @@ func (a *App) applyServiceFreeFallback(serviceTag string, nextStrategyIndex ...i
 		}
 		return
 	}
-	a.cacheServiceMethodWithNextStrategy(serviceTag, FreeAccessMethodDirect, "fallback-direct", nextIndex)
-	if allowVPNFallback {
-		a.writeLog(fmt.Sprintf("[FreeAccess] %s (%s-blocked) left direct: no working desync and no VPN subscription", serviceTag, blockType))
-	} else {
-		a.writeLog(fmt.Sprintf("[FreeAccess] %s (%s-blocked) left direct after the Zapret-only batch; VPN fallback is disabled by explicit policy", serviceTag, blockType))
+	a.cacheServiceMethodWithNextStrategy(serviceTag, NoRouteOutboundTag, "no-working-route", nextIndex)
+	a.applyServiceFallbackSelectionToConfig(configPath, routeProbeServiceResult{Tag: serviceTag, MethodTag: NoRouteOutboundTag, Success: true})
+	a.switchServiceRoute(serviceTag, NoRouteOutboundTag)
+	if serviceTag == "discord" {
+		a.switchOutboundSelector(discordRealtimeGroupTag, NoRouteOutboundTag)
 	}
+	a.writeLog(fmt.Sprintf("[FreeAccess] %s: no permitted strategy succeeded; service unavailable", serviceTag))
 }
 
 func (a *App) applyServiceFallbackSelectionToConfig(configPath string, result routeProbeServiceResult) bool {

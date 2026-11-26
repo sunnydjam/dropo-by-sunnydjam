@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"dropocore/aicatalog"
 	"dropocore/dnspolicy"
 	"dropocore/residential"
 	"dropocore/sourcehistory"
@@ -121,7 +122,7 @@ type Storage struct {
 }
 
 const (
-	SettingsVersion  = 6
+	SettingsVersion  = 7
 	ResourcesFolder  = "resources"
 	SettingsFileName = "settings.json"
 )
@@ -288,7 +289,7 @@ func (s *Storage) createDefaultSettings() *SettingsFile {
 
 func (s *Storage) normalizeAppSettings() {
 	app := &s.data.App
-	applyCurrentDefaults := s.data.Version < SettingsVersion
+	applyCurrentDefaults := s.data.Version < 6
 
 	if !validLogLevel(app.LogLevel) {
 		app.LogLevel = LogLevelInfo
@@ -317,8 +318,9 @@ func (s *Storage) normalizeAppSettings() {
 	if app.FreeAccessServices == nil {
 		app.FreeAccessServices = DefaultFreeAccessServiceState()
 	}
-	if app.FreeAccessMethods == nil {
-		app.FreeAccessMethods = DefaultFreeAccessServiceMethodState()
+	legacyWithoutMethods := app.FreeAccessMethods == nil
+	if legacyWithoutMethods {
+		app.FreeAccessMethods = make(map[string]string)
 	}
 	if app.ZapretStrategyModes == nil {
 		app.ZapretStrategyModes = DefaultZapretStrategyModeState()
@@ -327,7 +329,11 @@ func (s *Storage) normalizeAppSettings() {
 		app.ZapretStrategies = map[string]string{}
 	}
 	for _, svc := range DefaultFreeAccessServices {
-		normalized := NormalizeFreeAccessServiceMethod(app.FreeAccessMethods[svc.Tag])
+		raw, exists := app.FreeAccessMethods[svc.Tag]
+		normalized := NormalizeFreeAccessServiceMethod(raw)
+		if legacyWithoutMethods {
+			normalized = FreeAccessMethodDirect
+		}
 		if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(normalized) || IsFreeAccessTransparentMethod(normalized)) {
 			if serviceHasFreeBypass(svc.Tag) {
 				normalized = FreeAccessMethodZapret
@@ -337,8 +343,14 @@ func (s *Storage) normalizeAppSettings() {
 		}
 		// Preserve the intent of the removed per-service checkbox: a legacy
 		// disabled Auto service becomes the visible Direct policy once.
-		if enabled, exists := app.FreeAccessServices[svc.Tag]; exists && !enabled && normalized == FreeAccessMethodAuto {
+		enabled, hadCheckbox := app.FreeAccessServices[svc.Tag]
+		if hadCheckbox && !enabled && (!exists || normalized == FreeAccessMethodAuto) {
 			normalized = FreeAccessMethodDirect
+		}
+		if aicatalog.VPNOnly(svc.Tag) {
+			normalized = FreeAccessMethodVPN
+			delete(app.ZapretStrategies, svc.Tag)
+			delete(app.ZapretStrategyModes, svc.Tag)
 		}
 		app.FreeAccessMethods[svc.Tag] = normalized
 		app.FreeAccessServices[svc.Tag] = true
@@ -1753,7 +1765,7 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 		// the full-tunnel session even when sing-box restores its cache file.
 		if experimental, ok := template["experimental"].(map[string]interface{}); ok {
 			if cacheFile, ok := experimental["cache_file"].(map[string]interface{}); ok {
-				cacheFile["path"] = "cache-all-traffic.db"
+				cacheFile["path"] = "cache-catalog-vpn-v2.db"
 			}
 		}
 	}
@@ -1872,13 +1884,6 @@ func (b *ConfigBuilderForStorage) generateOutbounds(template map[string]interfac
 		outbounds = append(outbounds, buildVPNSourceFallbackOutbound(proxyTags))
 
 		selectorOutbounds := append([]string{"auto-select"}, proxyTags...)
-		// A cached manual selector choice survives sing-box restarts. Do not
-		// offer direct in full-tunnel mode: an old direct choice must not
-		// silently bypass the user's explicit all-VPN policy.
-		if NormalizeRoutingMode(b.routingMode) != RoutingModeAllTraffic {
-			selectorOutbounds = append(selectorOutbounds, "direct")
-		}
-
 		if selector, ok := outboundsTemplate["selector"].(map[string]interface{}); ok {
 			selector = copyMap(selector)
 			selector["outbounds"] = selectorOutbounds
@@ -1895,9 +1900,10 @@ func (b *ConfigBuilderForStorage) generateOutbounds(template map[string]interfac
 		outbounds = append(outbounds, map[string]interface{}{
 			"type":      "selector",
 			"tag":       "proxy",
-			"outbounds": []string{"direct"},
-			"default":   "direct",
+			"outbounds": []string{NoRouteOutboundTag},
+			"default":   NoRouteOutboundTag,
 		})
+		outbounds = append(outbounds, map[string]any{"type": "block", "tag": NoRouteOutboundTag})
 	}
 
 	if direct, ok := outboundsTemplate["direct"].(map[string]interface{}); ok {
@@ -2233,7 +2239,7 @@ func (b *ConfigBuilderForStorage) addFreeAccessOutbounds(template map[string]int
 
 	vpnOrDirect := []string{"direct"}
 	if hasVPNProxy {
-		vpnOrDirect = []string{"auto-select", "direct"}
+		vpnOrDirect = []string{"auto-select"}
 	}
 
 	if FreeMethodsAllowed(settings) || serviceStrategiesAllowed || hasVPNProxy {
@@ -2246,7 +2252,7 @@ func (b *ConfigBuilderForStorage) addFreeAccessOutbounds(template map[string]int
 			if hasVPNProxy {
 				commonCandidates = append(commonCandidates, "auto-select")
 			}
-			outbounds = append(outbounds, BuildServiceRouteGroup(SmartBypassGroupTag, commonCandidates))
+			outbounds = append(outbounds, BuildServiceRouteGroup(SmartBypassGroupTag, append(commonCandidates, NoRouteOutboundTag)))
 		} else if runtime.GOOS != "windows" {
 			// Compatibility platforms still use the local SOCKS methods and must
 			// not let an unrelated neutral direct check win a blocked-site group.
@@ -2273,9 +2279,13 @@ func (b *ConfigBuilderForStorage) addFreeAccessOutbounds(template map[string]int
 					}
 					continue
 				}
+				if runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag) && stringSliceContains(serviceCandidates, "direct") {
+					serviceCandidates = append(serviceCandidates, NoRouteOutboundTag)
+					needsNoRouteOutbound = true
+				}
 				outbounds = append(outbounds, BuildServiceRouteGroup(ServiceBypassGroupTag(svc.Tag), serviceCandidates))
 			}
-			if needsNoRouteOutbound {
+			if needsNoRouteOutbound && !outboundTagExists(outbounds, NoRouteOutboundTag) {
 				outbounds = append(outbounds, map[string]interface{}{
 					"type": "block",
 					"tag":  NoRouteOutboundTag,
@@ -2302,7 +2312,7 @@ func (b *ConfigBuilderForStorage) addFreeAccessOutbounds(template map[string]int
 			"default":   vpnCandidates[0],
 		})
 	}
-	realtimeCandidates := []string{"direct"}
+	realtimeCandidates := []string{"direct", NoRouteOutboundTag}
 	if hasVPNProxy {
 		realtimeCandidates = append(realtimeCandidates, discordVPNGroupTag)
 	}
@@ -2331,7 +2341,7 @@ func (b *ConfigBuilderForStorage) addFreeAccessOutbounds(template map[string]int
 		outbounds = append(outbounds, BuildResilientGroup(RuRouteGroupTag, ruCandidates))
 	}
 
-	if freeAccessSettingsNeedNoRouteOutbound(settings, hasVPNProxy) && !outboundTagExists(outbounds, NoRouteOutboundTag) {
+	if !outboundTagExists(outbounds, NoRouteOutboundTag) {
 		outbounds = append(outbounds, map[string]interface{}{
 			"type": "block",
 			"tag":  NoRouteOutboundTag,
@@ -2499,6 +2509,9 @@ func (b *ConfigBuilderForStorage) buildFreeAccessRules(settings GlobalAppSetting
 	rules = append(rules, buildDiscordRealtimeRules(settings, hasVPNProxy)...)
 
 	for _, svc := range DefaultFreeAccessServices {
+		if aicatalog.VPNOnly(svc.Tag) {
+			continue
+		}
 		outbound := FreeAccessServiceRouteOutboundForSettings(svc, settings, hasVPNProxy)
 		if outbound == "" {
 			continue
@@ -2567,13 +2580,12 @@ func buildDiscordRealtimeRules(settings GlobalAppSettings, hasVPNProxy bool) []i
 	}
 }
 
-// blockedCatchAllOutbound keeps the broad Re:filter/community catalog direct.
-// Only a named service with an explicit policy may use VPN or Zapret.
-func (b *ConfigBuilderForStorage) blockedCatchAllOutbound(_ GlobalAppSettings, _ bool) string {
-	// The broad RKN catalog is classification data, not an implicit route
-	// policy. Only named services selected by the user may leave the direct
-	// path in blocked_only mode.
-	return "direct"
+// Named policies take precedence. The remaining signed catalog uses VPN.
+func (b *ConfigBuilderForStorage) blockedCatchAllOutbound(_ GlobalAppSettings, hasVPN bool) string {
+	if hasVPN {
+		return "proxy"
+	}
+	return NoRouteOutboundTag
 }
 
 // ruRuleOutbound returns which outbound RU-classified domains should use:
@@ -2602,7 +2614,7 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 	if servers, ok := dns["servers"].([]interface{}); ok {
 		for i, value := range servers {
 			server, ok := value.(map[string]interface{})
-			if ok && b.routingMode != RoutingModeAllTraffic && dnspolicy.IsDropoDirectResolver(server) {
+			if ok && dnspolicy.IsDropoDirectResolver(server) {
 				servers[i] = map[string]any{"type": "local", "tag": "dns-direct"}
 				continue
 			}
@@ -2625,38 +2637,23 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 		"action":        "route",
 		"server":        "dns-local",
 	})
+	if servers, ok := dns["servers"].([]interface{}); ok {
+		for _, server := range servers {
+			remote, ok := server.(map[string]interface{})
+			if !ok || remote["tag"] != "dns-remote" {
+				continue
+			}
+			remote["type"] = "https"
+			remote["server"] = dnspolicy.BootstrapIPv4
+			remote["server_port"] = 443
+			remote["path"] = "/dns-query"
+			remote["tls"] = map[string]interface{}{"enabled": true, "server_name": dnspolicy.Hostname}
+			remote["detour"] = "proxy"
+		}
+	}
 	if b.routingMode == RoutingModeAllTraffic {
-		// Use DNS-over-HTTPS through the VPN. The new sing-box UDP DNS server
-		// dials directly unless given a detour, and UDP is not supported by
-		// every subscription transport. Only VPN-endpoint bootstrap (below)
-		// and preserved work-network DNS rules may use a direct resolver.
-		if servers, ok := dns["servers"].([]interface{}); ok {
-			for _, server := range servers {
-				remote, ok := server.(map[string]interface{})
-				if !ok || remote["tag"] != "dns-remote" {
-					continue
-				}
-				remote["type"] = "https"
-				remote["server"] = dnspolicy.BootstrapIPv4
-				remote["server_port"] = 443
-				remote["path"] = "/dns-query"
-				remote["tls"] = map[string]interface{}{"enabled": true, "server_name": dnspolicy.Hostname}
-				remote["detour"] = "proxy"
-			}
-		}
-		dns["rules"] = rules
-		dns["final"] = "dns-remote"
-		dns["strategy"] = "ipv4_only"
-		dns["reverse_mapping"] = true
-		dns["independent_cache"] = true
-		if route, ok := template["route"].(map[string]interface{}); ok {
-			// Resolving a VPN server through a resolver inside that VPN would
-			// deadlock the tunnel before it connects.
-			route["default_domain_resolver"] = map[string]interface{}{
-				"server": "dns-direct", "strategy": "ipv4_only",
-			}
-		}
-		return
+		settings.HideRuTraffic = false
+
 	}
 	// PAC and the native VPN relay share this loopback inbound. Unlike the
 	// system's ordinary DNS queries, a name arriving here already has a VPN
@@ -2675,7 +2672,7 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 			}
 		}
 	}
-	if b.routingMode != RoutingModeAllTraffic && len(DirectDomainSuffixes) > 0 {
+	if len(DirectDomainSuffixes) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": DirectDomainSuffixes,
 			"action":        "route",
@@ -2692,7 +2689,7 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 			continue
 		}
 		server := "dns-remote"
-		if outbound == "direct" {
+		if outbound == "direct" && b.routingMode != RoutingModeAllTraffic {
 			server = "dns-direct"
 		}
 		if len(svc.ExactHosts) > 0 {
@@ -2703,6 +2700,9 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 		}
 	}
 
+	if tags := availableRuleSetTags(catalogVPNFilters(b.filterManager), "refilter-domains"); len(tags) > 0 {
+		rules = append(rules, map[string]any{"rule_set": tags, "action": "route", "server": "dns-remote"})
+	}
 	ruDNSServer := b.ruDNSServer(settings)
 	if len(RuDomainSuffixes) > 0 {
 		rules = append(rules, map[string]interface{}{
@@ -2826,7 +2826,7 @@ func (b *ConfigBuilderForStorage) ruDNSServer(settings GlobalAppSettings) string
 }
 
 func (b *ConfigBuilderForStorage) finalDNSServer(settings GlobalAppSettings) string {
-	if settings.HideRuTraffic || b.routingMode == RoutingModeAllTraffic || b.routingMode == RoutingModeExceptRussia {
+	if settings.HideRuTraffic || b.routingMode == RoutingModeExceptRussia {
 		return "dns-remote"
 	}
 	return "dns-direct"
@@ -2930,8 +2930,34 @@ func (b *ConfigBuilderForStorage) applyBlockedOnlyMode(route map[string]interfac
 	// Internal networks go through WireGuard tunnel directly
 
 	// 6. RU traffic: direct by default, "ru-route" if the hide toggle is on.
+	newRules = append(newRules, protectedServiceRules(settings, hasVPNProxy, false)...)
 	newRules = append(newRules, buildDirectServiceRules()...)
 
+	newRules = append(newRules, buildBlockedServiceProtocolFallbackRules(settings)...)
+
+	// 7. Named services: each explicit Direct/VPN/Zapret policy is authoritative.
+	newRules = append(newRules, b.buildFreeAccessRules(settings, hasVPNProxy)...)
+
+	// 8. Everything else positively classified by the RKN catalogs. Domain
+	// evidence is evaluated before a known-domain direct boundary; the IP list
+	// is only a fallback for IP-only traffic. Community and service-specific IP
+	// sources are deliberately excluded from this global catch-all.
+	catalogRules := buildBlockedCatalogRouteRules(
+		filterRuleSets,
+		b.blockedCatchAllOutbound(settings, hasVPNProxy),
+		[]string{"refilter-domains"},
+		[]string{"refilter-ips"},
+	)
+
+	// A positive catalog domain rule precedes broad regional suffixes. Known
+	// names still take precedence over hostless IP entries.
+	if len(catalogRules) > 0 {
+		first := catalogRules[0].(map[string]any)
+		if stringSliceContains(interfaceStringSlice(first["rule_set"]), "refilter-domains") {
+			newRules = append(newRules, first)
+			catalogRules = catalogRules[1:]
+		}
+	}
 	newRules = append(newRules,
 		map[string]interface{}{
 			"domain_suffix": RuDomainSuffixes,
@@ -2945,22 +2971,7 @@ func (b *ConfigBuilderForStorage) applyBlockedOnlyMode(route map[string]interfac
 		},
 	)
 
-	newRules = append(newRules, buildBlockedServiceProtocolFallbackRules(settings)...)
-
-	// 7. Named services: each explicit Direct/VPN/Zapret policy is authoritative.
-	newRules = append(newRules, b.buildFreeAccessRules(settings, hasVPNProxy)...)
-
-	// 8. Everything else positively classified by the RKN catalogs. Domain
-	// evidence is evaluated before a known-domain direct boundary; the IP list
-	// is only a fallback for IP-only traffic. Community and service-specific IP
-	// sources are deliberately excluded from this global catch-all.
-	newRules = append(newRules, buildBlockedCatalogRouteRules(
-		filterRuleSets,
-		b.blockedCatchAllOutbound(settings, hasVPNProxy),
-		[]string{"refilter-domains"},
-		[]string{"refilter-ips"},
-	)...)
-
+	newRules = append(newRules, catalogRules...)
 	route["rules"] = newRules
 	route["final"] = "direct"
 
@@ -2968,53 +2979,9 @@ func (b *ConfigBuilderForStorage) applyBlockedOnlyMode(route map[string]interfac
 		len(newRuleSets), len(newRules))
 }
 
-// applyAllTrafficMode configures routing for all traffic through VPN.
-//
-// RU traffic is intentionally NOT carved out here even when "Скрывать
-// RU-трафик" is on: this mode's entire point is "everything through VPN",
-// which already includes RU domains via final=proxy — the hide-toggle has
-// no additional effect in this mode.
+// all_traffic is the persisted name of the preset that forces VPN for the blocked catalog.
 func (b *ConfigBuilderForStorage) applyAllTrafficMode(route map[string]interface{}) {
-	fmt.Printf("[applyRoutingMode] Using all_traffic mode\n")
-
-	// Remove rule_sets (not needed for all traffic mode)
-	route["rule_set"] = []interface{}{}
-
-	// Minimal rules
-	newRules := []interface{}{
-		map[string]interface{}{
-			"action": "sniff",
-		},
-		map[string]interface{}{
-			"domain_suffix": LocalDomainSuffixes,
-			"action":        "route",
-			"outbound":      "direct",
-		},
-		map[string]interface{}{
-			"protocol": "dns",
-			"action":   "hijack-dns",
-		},
-		map[string]interface{}{
-			"ip_is_private": true,
-			"action":        "route",
-			"outbound":      "direct",
-		},
-	}
-	// The proxy helper itself must bypass the redirector to avoid a loop. No
-	// user-facing service or Zapret exception is allowed in explicit all-VPN
-	// mode; saved per-service policies become active again in blocked_only.
-	newRules = insertAfterFirstRouteRule(newRules, []interface{}{
-		map[string]interface{}{
-			"process_name": []string{XrayExeName},
-			"action":       "route",
-			"outbound":     "direct",
-		},
-	})
-
-	route["rules"] = newRules
-	route["final"] = "proxy"
-
-	fmt.Printf("[applyRoutingMode] Applied all_traffic: %d rules, final=proxy\n", len(newRules))
+	applyCatalogVPNRoutes(route, b.filterManager)
 }
 
 // applyExceptRussiaMode configures routing for all traffic except Russia through VPN.

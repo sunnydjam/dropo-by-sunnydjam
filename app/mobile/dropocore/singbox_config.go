@@ -8,15 +8,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v24-split-dns"
+	androidConfigSchema     = "android-package-routing-v28-shared-catalog"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -210,7 +212,7 @@ func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, 
 }
 
 func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string, adaptivePolicies ...map[string]string) (string, error) {
-	finalOutbound := androidFinalOutbound(routingMode)
+	finalOutbound := "direct"
 	dns := buildAndroidDNSPolicy(len(proxyTags) > 0, routingMode, hideRuTraffic, effectiveRoutePolicies)
 	config := map[string]interface{}{
 		"log": map[string]interface{}{
@@ -244,6 +246,7 @@ func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, lo
 		},
 	}
 
+	configureAndroidCatalog(config["route"].(map[string]any), routingMode)
 	// Full VPN must never acquire an automatic direct route. Adaptive service
 	// strategies are available only in selective mode; new sessions still
 	// bootstrap their selectors on VPN until all targets pass fresh probes.
@@ -574,9 +577,9 @@ func addTransport(out map[string]interface{}, proxy proxyConfig) {
 }
 
 func buildAndroidDNSPolicy(throughVPN bool, routingMode string, hideRuTraffic bool, effectiveRoutePolicies map[string]string) map[string]interface{} {
-	dnsServers := buildAndroidDNSServers(throughVPN, routingMode == "all_traffic")
+	dnsServers := buildAndroidDNSServers(throughVPN)
 	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies)
-	finalDNSServer := androidFinalDNSServer(routingMode)
+	finalDNSServer := "dns-direct"
 	dns := map[string]interface{}{
 		"servers": dnsServers, "rules": dnsRules, "final": finalDNSServer,
 		"strategy": "ipv4_only", "reverse_mapping": true, "independent_cache": true,
@@ -585,11 +588,8 @@ func buildAndroidDNSPolicy(throughVPN bool, routingMode string, hideRuTraffic bo
 	return dns
 }
 
-func buildAndroidDNSServers(throughVPN bool, fullTunnel bool) []interface{} {
+func buildAndroidDNSServers(throughVPN bool) []interface{} {
 	direct := map[string]any{"type": "local", "tag": "dns-direct"}
-	if fullTunnel {
-		direct = dnspolicy.Server("dns-direct", throughVPN)
-	}
 	return []interface{}{
 		map[string]interface{}{"type": "local", "tag": "dns-local"},
 		dnspolicy.Server("dns-bootstrap", false),
@@ -606,13 +606,13 @@ func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies 
 			"server":        "dns-local",
 		},
 	}
-	if routingMode != "all_traffic" {
-		rules = append(rules, map[string]interface{}{
-			"domain_suffix": androidLatencySensitiveDirectDomainSuffixes(),
-			"action":        "route",
-			"server":        "dns-direct",
-		})
-	}
+	domains, _ := androidProtectedIdentities()
+	rules = append(rules, map[string]any{"domain_suffix": domains, "action": "route", "server": "dns-remote"})
+	rules = append(rules, map[string]interface{}{
+		"domain_suffix": androidLatencySensitiveDirectDomainSuffixes(),
+		"action":        "route",
+		"server":        "dns-direct",
+	})
 	if directDomains := androidServiceDomainSuffixesByPolicy(routePolicies, androidRoutePolicyDirect); len(directDomains) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": directDomains,
@@ -627,16 +627,18 @@ func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies 
 			"server":        "dns-remote",
 		})
 	}
-	if routingMode != "all_traffic" {
-		ruServer := "dns-direct"
-		if hideRuTraffic {
-			ruServer = "dns-remote"
-		}
-		rules = append(rules,
-			map[string]interface{}{"domain_suffix": androidDirectDomainSuffixes(), "action": "route", "server": ruServer},
-			map[string]interface{}{"domain_keyword": androidDirectDomainKeywords(), "action": "route", "server": ruServer},
-		)
+	rules = append(rules, map[string]any{"rule_set": []string{"refilter-domains"}, "action": "route", "server": "dns-remote"})
+	if routingMode == "all_traffic" {
+		hideRuTraffic = false
 	}
+	ruServer := "dns-direct"
+	if hideRuTraffic {
+		ruServer = "dns-remote"
+	}
+	rules = append(rules,
+		map[string]interface{}{"domain_suffix": androidDirectDomainSuffixes(), "action": "route", "server": ruServer},
+		map[string]interface{}{"domain_keyword": androidDirectDomainKeywords(), "action": "route", "server": ruServer},
+	)
 	return rules
 }
 
@@ -651,20 +653,20 @@ func buildAndroidRouteRules(routingMode string, hideRuTraffic bool, ruOutbound s
 			"outbound":      "direct",
 		},
 	}
-	if routingMode != "all_traffic" {
-		rules = append(rules,
-			map[string]interface{}{
-				"domain_suffix": androidLatencySensitiveDirectDomainSuffixes(),
-				"action":        "route",
-				"outbound":      "direct",
-			},
-			map[string]interface{}{
-				"package_name": androidLatencySensitiveDirectPackageNames(),
-				"action":       "route",
-				"outbound":     "direct",
-			},
-		)
-	}
+	domains, packages := androidProtectedIdentities()
+	rules = append(rules, map[string]any{"domain_suffix": domains, "action": "route", "outbound": "proxy"}, map[string]any{"package_name": packages, "action": "route", "outbound": "proxy"})
+	rules = append(rules,
+		map[string]interface{}{
+			"domain_suffix": androidLatencySensitiveDirectDomainSuffixes(),
+			"action":        "route",
+			"outbound":      "direct",
+		},
+		map[string]interface{}{
+			"package_name": androidLatencySensitiveDirectPackageNames(),
+			"action":       "route",
+			"outbound":     "direct",
+		},
+	)
 	if directDomains := androidServiceDomainSuffixesByPolicy(routePolicies, androidRoutePolicyDirect); len(directDomains) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": directDomains,
@@ -696,37 +698,38 @@ func buildAndroidRouteRules(routingMode string, hideRuTraffic bool, ruOutbound s
 			"outbound":     "proxy",
 		})
 	}
-	if routingMode != "all_traffic" {
-		ruRouteOutbound := "direct"
-		if hideRuTraffic {
-			ruRouteOutbound = ruOutbound
-		}
-		rules = append(rules,
-			map[string]interface{}{"domain_suffix": androidDirectDomainSuffixes(), "action": "route", "outbound": ruRouteOutbound},
-			map[string]interface{}{"domain_keyword": androidDirectDomainKeywords(), "action": "route", "outbound": ruRouteOutbound},
-			// Terminal boundary for every hostname not positively identified by a
-			// blocked-service domain or package rule above. Service IP ranges are
-			// metadata/diagnostics only and must never capture another application.
-			map[string]interface{}{"domain_regex": []string{androidKnownDomainRegex}, "action": "route", "outbound": "direct"},
-		)
+	rules = append(rules, map[string]any{"rule_set": []string{"refilter-domains"}, "action": "route", "outbound": "proxy"})
+	if routingMode == "all_traffic" {
+		hideRuTraffic = false
 	}
+	ruRouteOutbound := "direct"
+	if hideRuTraffic {
+		ruRouteOutbound = ruOutbound
+	}
+	rules = append(rules,
+		map[string]interface{}{"domain_suffix": androidDirectDomainSuffixes(), "action": "route", "outbound": ruRouteOutbound},
+		map[string]interface{}{"domain_keyword": androidDirectDomainKeywords(), "action": "route", "outbound": ruRouteOutbound},
+		// Terminal boundary for every hostname not positively identified by a
+		// blocked-service domain or package rule above. Service IP ranges are
+		// metadata/diagnostics only and must never capture another application.
+		map[string]interface{}{"domain_regex": []string{androidKnownDomainRegex}, "action": "route", "outbound": "direct"},
+	)
+	rules = append(rules, map[string]any{"rule_set": []string{"refilter-ips"}, "action": "route", "outbound": "proxy"})
 	return rules
 }
 
-func androidFinalOutbound(routingMode string) string {
-	switch routingMode {
-	case "all_traffic":
-		return "proxy"
-	default:
-		return "direct"
-	}
-}
+// The APK ships the same two generic rule sets as the Windows installer.
+var androidRuleDirectory atomic.Value
 
-func androidFinalDNSServer(routingMode string) string {
-	if androidFinalOutbound(routingMode) == "proxy" {
-		return "dns-remote"
+func configureAndroidCatalog(route map[string]any, mode string) {
+
+	dir, _ := androidRuleDirectory.Load().(string)
+	sets := make([]any, 0, 2)
+	for _, tag := range []string{"refilter-domains", "refilter-ips"} {
+		name := strings.ReplaceAll(tag, "-", "_") + ".srs"
+		sets = append(sets, map[string]any{"type": "local", "format": "binary", "tag": tag, "path": filepath.Join(dir, name)})
 	}
-	return "dns-direct"
+	route["rule_set"] = sets
 }
 
 func androidDirectDomainSuffixes() []string {

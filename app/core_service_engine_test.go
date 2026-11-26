@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -56,6 +57,47 @@ func TestAllTrafficDoesNotRequireNativeServiceEngine(t *testing.T) {
 	if err := app.startComposedTransparentEngine(""); err == nil {
 		t.Fatal("selected-services Zapret unexpectedly started without WinDivert")
 	}
+}
+
+func TestAllTrafficSkipsServiceStrategyWork(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows session lifecycle")
+	}
+	app := newServiceEngineTestApp(t)
+	settings := app.storage.GetAppSettings()
+	settings.RoutingMode = RoutingModeAllTraffic
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(config, []byte(`{"outbounds":[{"tag":"vpn","type":"direct"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app.events = NewEventHub(32)
+	if err := app.prepareRoutingConfigForStart(config, "vpn-connect"); err != nil {
+		t.Fatal(err)
+	}
+	if events := app.eventSnapshot(0); len(events) != 0 {
+		t.Fatalf("full tunnel announced service setup: %v", events)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		app.discordRealtime = newDiscordRealtimeController()
+		app.routeStrategyJobs = make(chan routeStrategyMaintenanceJob, 1)
+		app.isRunning = true
+		app.resetRouteStrategySession()
+		app.startWindowsUnifiedServiceValidationAsync(true)
+		app.startDiscordRealtimeMonitor()
+		app.requestRouteStrategyMaintenance("service:discord quick-check")
+		synctest.Wait()
+		if app.discordRealtime.running || len(app.routeStrategyJobs) != 0 {
+			t.Fatal("full tunnel started service monitoring or queued a retune")
+		}
+		for _, event := range app.eventSnapshot(0) {
+			if strings.HasPrefix(event.Name, "route-probe-") {
+				t.Fatalf("full tunnel emitted %s", event.Name)
+			}
+		}
+	})
 }
 
 func TestAllTrafficKeepsWireGuardCamouflageSeparateFromServiceStrategies(t *testing.T) {
@@ -124,7 +166,7 @@ func TestServiceFallbackCacheKeepsCursorForNextSession(t *testing.T) {
 	})
 
 	cache := app.loadServiceStrategyCache()
-	if cache["youtube"].MethodTag != FreeAccessMethodDirect || cache["youtube"].NextStrategyIndex != 3 {
+	if cache["youtube"].MethodTag != NoRouteOutboundTag || cache["youtube"].NextStrategyIndex != 3 {
 		t.Fatalf("fallback cursor was not retained: %+v", cache["youtube"])
 	}
 	if indexes := serviceStrategyBatchStartIndexes(cache, []string{"youtube"}); indexes["youtube"] != 3 {

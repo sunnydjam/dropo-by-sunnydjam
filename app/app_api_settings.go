@@ -4,6 +4,7 @@ package main
 // This file contains app configuration API methods
 
 import (
+	"dropocore/aicatalog"
 	"fmt"
 	"os"
 	"runtime"
@@ -317,7 +318,7 @@ func (a *App) GetRoutingMode() map[string]interface{} {
 	// Get mode descriptions for UI
 	modeDescriptions := map[string]string{
 		string(RoutingModeBlockedOnly): "Только заблокированные",
-		string(RoutingModeAllTraffic):  "Весь трафик",
+		string(RoutingModeAllTraffic):  "Всё через VPN",
 	}
 
 	return map[string]interface{}{
@@ -326,7 +327,7 @@ func (a *App) GetRoutingMode() map[string]interface{} {
 		"description": modeDescriptions[string(mode)],
 		"modes": []map[string]string{
 			{"value": string(RoutingModeBlockedOnly), "label": "Выбранные сервисы", "description": "VPN и Zapret работают только для сервисов с явной политикой; остальной трафик идёт напрямую."},
-			{"value": string(RoutingModeAllTraffic), "label": "Весь трафик", "description": "Весь трафик через VPN. Максимальная приватность, высокая нагрузка."},
+			{"value": string(RoutingModeAllTraffic), "label": "Всё через VPN", "description": "Заблокированные и ИИ-сервисы идут через VPN. Остальной трафик идёт напрямую."},
 		},
 	}
 }
@@ -594,6 +595,7 @@ func (a *App) GetFreeAccessConfig() map[string]interface{} {
 			"ipCidrs":              append([]string(nil), svc.IPCIDRs...),
 			"enabled":              enabled,
 			"requiresVpn":          svc.RequiresVPN,
+			"vpnOnly":              aicatalog.VPNOnly(svc.Tag),
 			"zapretSupported":      runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
 			"homeVisible":          HomeRouteServiceVisible(settings, svc.Tag),
 			"selectedMethod":       selectedMethod,
@@ -630,7 +632,7 @@ func (a *App) GetFreeAccessConfig() map[string]interface{} {
 }
 
 // SetHomeRouteServiceVisible pins or removes an optional service on the home
-// dashboard. The four primary services are always visible and cannot be removed.
+// dashboard. The primary services are always visible and cannot be removed.
 // This is a UI preference only, so changing it never restarts the traffic stack.
 func (a *App) SetHomeRouteServiceVisible(tag string, visible bool) map[string]interface{} {
 	a.waitForInit()
@@ -777,6 +779,9 @@ func (a *App) ToggleFreeAccessService(tag string, enabled bool) map[string]inter
 		}
 	}
 
+	if aicatalog.VPNOnly(tag) {
+		return map[string]any{"success": enabled, "method": FreeAccessMethodVPN, "message": "Для сервиса обязателен VPN"}
+	}
 	a.mu.Lock()
 	isRunning := a.isRunning
 	isStarting := a.isStarting
@@ -864,6 +869,9 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 			"success": false,
 			"error":   fmt.Sprintf("Неизвестный метод маршрута: %s", strings.TrimSpace(method)),
 		}
+	}
+	if aicatalog.VPNOnly(tag) && normalized != FreeAccessMethodVPN {
+		return map[string]any{"success": false, "error": "Для сервиса обязателен VPN"}
 	}
 	requestedMethod := strings.TrimSpace(strings.ToLower(method))
 	if normalized == FreeAccessMethodZapret && !serviceHasFreeBypass(service.Tag) && isKnownLegacyFreeAccessMethod(requestedMethod) {
@@ -1049,7 +1057,7 @@ func (a *App) SetZapretServiceStrategy(tag string, mode string, strategyTag stri
 	if a.storage == nil {
 		return map[string]interface{}{"success": false, "error": "Хранилище не инициализировано"}
 	}
-	if !found || runtime.GOOS != "windows" || !serviceHasFreeBypass(tag) {
+	if !found || aicatalog.VPNOnly(tag) || runtime.GOOS != "windows" || !serviceHasFreeBypass(tag) {
 		return map[string]interface{}{"success": false, "error": fmt.Sprintf("Настройка Zapret недоступна для сервиса %s", tag)}
 	}
 	var selected ServiceBypassMethod

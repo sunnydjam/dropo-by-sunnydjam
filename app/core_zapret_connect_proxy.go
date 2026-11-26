@@ -37,8 +37,10 @@ type zapretConnectServiceScope struct {
 }
 
 type zapretConnectScope struct {
-	direct   selectiveDomains
-	services []zapretConnectServiceScope
+	direct       selectiveDomains
+	unavailable  selectiveDomains
+	mandatoryVPN selectiveDomains
+	services     []zapretConnectServiceScope
 }
 
 type zapretSourcePortPool struct {
@@ -404,7 +406,9 @@ func compileZapretConnectScope(plan traffic.TrafficPlan) (*zapretConnectScope, e
 	}
 	scope := &zapretConnectScope{}
 	domains := selectiveDomainsForPlan(plan)
+	scope.mandatoryVPN = domains.mandatoryVPN
 	scope.direct = domains.direct
+	scope.unavailable = domains.unavailable
 	for _, service := range plan.Services {
 		if routes[service.ID] != traffic.ServiceRouteZapret {
 			continue
@@ -444,7 +448,7 @@ func (scope *zapretConnectScope) allows(host string, port int) bool {
 	if host == "" || port < 1 || port > 65535 {
 		return false
 	}
-	if scope.direct.matches(host) {
+	if scope.mandatoryVPN.matches(host) || scope.direct.matches(host) || scope.unavailable.matches(host) {
 		return false
 	}
 	for _, service := range scope.services {

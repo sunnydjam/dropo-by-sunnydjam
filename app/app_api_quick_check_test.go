@@ -54,12 +54,8 @@ func TestLauncherDiscoveryRequiresExpectedIssuerOnChosenRoute(t *testing.T) {
 			for _, mode := range []RoutingMode{RoutingModeBlockedOnly, RoutingModeAllTraffic} {
 				svc := clientQuickCheckService{URL: server.URL, Category: "Direct-Game", DiscoveryIssuer: "expected", EndpointOnly: true}
 				svc.ExpectedRoute = (&App{}).clientQuickCheckExpectedRoute(GlobalAppSettings{RoutingMode: mode}, nil, svc)
-				var direct, proxy *http.Client
-				if mode == RoutingModeAllTraffic {
-					proxy = server.Client()
-				} else {
-					direct = server.Client()
-				}
+				direct := server.Client()
+				var proxy *http.Client
 				got := runSingleClientQuickCheck(context.Background(), svc, direct, proxy, nil)
 				if got.Success != tc.ok || got.RouteVerified || got.CheckScope != "endpoint_reachability" ||
 					got.ProxyChecked != (proxy != nil) || got.NormalChecked != (direct != nil) {
@@ -424,7 +420,7 @@ func TestClientQuickCheckKeepsDirectGuardsAndSelectedServicesOnly(t *testing.T) 
 	}
 }
 
-func TestClientQuickCheckAllTrafficUsesVPNForEveryEndpoint(t *testing.T) {
+func TestClientQuickCheckCatalogVPNKeepsOrdinaryEndpointsDirect(t *testing.T) {
 	app := &App{}
 	settings := GlobalAppSettings{RoutingMode: RoutingModeAllTraffic, HideRuTraffic: true}
 	for _, service := range []clientQuickCheckService{
@@ -432,8 +428,12 @@ func TestClientQuickCheckAllTrafficUsesVPNForEveryEndpoint(t *testing.T) {
 		{Name: "Steam Store", Category: "Direct-Game"},
 		{Name: "Discord", Category: "Blocked", ServiceTag: "discord"},
 	} {
-		if got := app.clientQuickCheckExpectedRoute(settings, nil, service); got != clientQuickCheckRouteVPN {
-			t.Fatalf("all-traffic route for %s = %q, want VPN", service.Name, got)
+		want := clientQuickCheckRouteDirect
+		if service.ServiceTag == "discord" {
+			want = clientQuickCheckRouteVPN
+		}
+		if got := app.clientQuickCheckExpectedRoute(settings, nil, service); got != want {
+			t.Fatalf("catalog route for %s = %q, want %q", service.Name, got, want)
 		}
 	}
 }

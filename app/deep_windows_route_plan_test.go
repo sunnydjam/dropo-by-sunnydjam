@@ -81,8 +81,8 @@ func TestDeepWindowsRoutePlanAllTrafficKeepsLocalDirectExclusions(t *testing.T) 
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
 
-	if plan.RUTraffic != DeepWindowsTrafficProxy || plan.ForeignTraffic != DeepWindowsTrafficProxy || plan.DefaultTraffic != DeepWindowsTrafficProxy {
-		t.Fatalf("ru/foreign/default = %s/%s/%s, want proxy/proxy/proxy", plan.RUTraffic, plan.ForeignTraffic, plan.DefaultTraffic)
+	if plan.RUTraffic != DeepWindowsTrafficDirect || plan.ForeignTraffic != DeepWindowsTrafficDirect || plan.DefaultTraffic != DeepWindowsTrafficDirect {
+		t.Fatalf("ru/foreign/default = %s/%s/%s, want direct/direct/direct", plan.RUTraffic, plan.ForeignTraffic, plan.DefaultTraffic)
 	}
 	if !plan.RequiresSingBoxProxy || !plan.RequiresRedirector {
 		t.Fatalf("all-traffic must require local proxy endpoint and redirector under Deep Windows: %+v", plan)
@@ -90,7 +90,7 @@ func TestDeepWindowsRoutePlanAllTrafficKeepsLocalDirectExclusions(t *testing.T) 
 	if len(plan.DirectServices) != 0 || len(plan.TransparentServices) != 0 {
 		t.Fatalf("all-traffic must override saved service exceptions: %+v", plan)
 	}
-	for _, serviceTag := range []string{"youtube", "discord", "meta", "openai"} {
+	for _, serviceTag := range []string{"youtube", "discord", "meta", "openai", "claude", "ai-other"} {
 		if !planContainsString(plan.ProxyServices, serviceTag) {
 			t.Fatalf("all-traffic proxy services = %v, want %s", plan.ProxyServices, serviceTag)
 		}
@@ -155,8 +155,8 @@ func TestDeepWindowsRoutePlanDisableFreeMethodsDoesNotOverrideExplicitDirect(t *
 	if len(plan.TransparentServices) != 0 {
 		t.Fatalf("transparent services = %v, want none while free methods are disabled", plan.TransparentServices)
 	}
-	if plan.RequiresSingBoxProxy || plan.RequiresRedirector {
-		t.Fatalf("explicit direct routes must not require a local proxy endpoint: %+v", plan)
+	if !plan.RequiresSingBoxProxy || !plan.RequiresRedirector {
+		t.Fatalf("mandatory VPN services require the local proxy endpoint: %+v", plan)
 	}
 }
 

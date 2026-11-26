@@ -750,9 +750,7 @@ class _AtlasRouteControls extends StatelessWidget {
               ),
               _AccessibleDescription(
                 message: c.hasSubscription
-                    ? _isMobileShell
-                          ? 'Направить интернет-трафик через VPN; локальные адреса идут напрямую'
-                          : 'Направить общий трафик через VPN; исключения рабочих сетей сохраняются'
+                    ? 'Заблокированные и ИИ-сервисы через VPN, обычные сайты напрямую'
                     : 'Можно использовать бесплатный публичный источник или свою подписку',
                 child: _mode(
                   'all-vpn',
@@ -969,12 +967,14 @@ class _AtlasServiceRow extends StatelessWidget {
         service.tag == 'discord' ? 'Zapret (эксп.)' : 'Обход · Zapret',
       _ => 'Авто',
     };
-    final options = [
-      'auto',
-      'direct',
-      'vpn',
-      if (!_isMobileShell && service.zapretSupported) 'zapret',
-    ];
+    final options = service.vpnOnly
+        ? const ['vpn']
+        : [
+            'auto',
+            'direct',
+            'vpn',
+            if (!_isMobileShell && service.zapretSupported) 'zapret',
+          ];
     final dropdown = Semantics(
       label: 'Способ подключения: ${_homeRouteName(service)}',
       child: Container(
@@ -1013,7 +1013,7 @@ class _AtlasServiceRow extends StatelessWidget {
                   ),
                 ),
             ],
-            onChanged: controls.enabled && !allTraffic
+            onChanged: controls.enabled && !allTraffic && !service.vpnOnly
                 ? (value) {
                     if (value != null && value != policy) {
                       controls.onPolicyChanged(service, value);
@@ -1109,6 +1109,7 @@ class _AtlasServiceIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (tag == 'claude') return _ServiceBrandIcon(tag: tag, size: 28);
     final asset = switch (tag) {
       'youtube' => 'youtube',
       'discord' => 'discord',

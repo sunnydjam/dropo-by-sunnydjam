@@ -115,6 +115,7 @@ func (s *CommandServer) launchSourceSelection(activeID string, checked chan bool
 		return errors.New("VPN source selector is not ready")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	core.RegisterAndroidVPNCheckClient(plan.Generation, ctx, &http.Client{Transport: sourceHTTPTransport(selector), Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
 	s.sourceCancel = cancel
 	s.sourceCoreGeneration = plan.Generation
 	s.sourceWake = make(chan struct{}, 1)
@@ -658,12 +659,16 @@ func firstVerifiedEndpoint(ctx context.Context, targets []string, probe func(con
 	return 0, false
 }
 
-func probeSourceHTTP(ctx context.Context, target string, outbound N.Dialer) error {
-	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true,
+func sourceHTTPTransport(outbound N.Dialer) *http.Transport {
+	return &http.Transport{Proxy: nil, DisableKeepAlives: true,
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			return outbound.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(address))
 		}}
+}
+
+func probeSourceHTTP(ctx context.Context, target string, outbound N.Dialer) error {
+	transport := sourceHTTPTransport(outbound)
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request, err := http.NewRequestWithContext(ctx, http.MethodHead, target, nil)

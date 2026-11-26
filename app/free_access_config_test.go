@@ -72,8 +72,8 @@ func TestPrimaryHomeServicesDoNotCaptureSiblingGroups(t *testing.T) {
 	if containsStringValue(services["openai"].DomainSuffixes, "github.com") {
 		t.Fatal("ChatGPT route must not capture GitHub or other AI services")
 	}
-	if !containsStringValue(services["ai-other"].DomainSuffixes, "github.com") {
-		t.Fatal("other AI services must remain available as an optional route")
+	if containsStringValue(services["ai-other"].DomainSuffixes, "github.com") || !containsStringValue(services["ai-other"].DomainSuffixes, "githubcopilot.com") {
+		t.Fatal("Copilot routing must be scoped to its service")
 	}
 }
 
@@ -92,13 +92,13 @@ func TestYouTubeQUICFallbackIsEnabledOnlyForExplicitZapret(t *testing.T) {
 	}
 }
 
-func TestBlockedCatalogCannotOverrideExplicitServiceOnlyRouting(t *testing.T) {
+func TestBlockedCatalogRequiresVPNInServiceMode(t *testing.T) {
 	builder := &ConfigBuilderForStorage{}
-	if got := builder.blockedCatchAllOutbound(GlobalAppSettings{}, true); got != "direct" {
-		t.Fatalf("blocked catalog outbound with VPN available = %q, want direct", got)
+	if got := builder.blockedCatchAllOutbound(GlobalAppSettings{}, true); got != "proxy" {
+		t.Fatalf("blocked catalog outbound with VPN available = %q, want proxy", got)
 	}
-	if got := builder.blockedCatchAllOutbound(GlobalAppSettings{}, false); got != "direct" {
-		t.Fatalf("blocked catalog outbound without VPN = %q, want direct", got)
+	if got := builder.blockedCatchAllOutbound(GlobalAppSettings{}, false); got != NoRouteOutboundTag {
+		t.Fatalf("blocked catalog outbound without VPN = %q, want unavailable", got)
 	}
 }
 
@@ -178,7 +178,7 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 
 	candidates := getOutboundCandidates(config, SmartBypassGroupTag)
 	if runtime.GOOS == "windows" {
-		if len(candidates) != 1 || candidates[0] != "direct" {
+		if !sameStringSet(candidates, []string{"direct", NoRouteOutboundTag}) {
 			t.Fatalf("%s candidates without subscription = %v, want native carrier [direct]", SmartBypassGroupTag, candidates)
 		}
 	} else if methodTags := FreeAccessMethodTags(); !sameStringSet(candidates, methodTags) || containsString(candidates, "direct") {
@@ -256,8 +256,8 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 			t.Fatalf("generated config does not resolve %s through dns-direct by default", domain)
 		}
 	}
-	if !routeRuleBeforeRuleSet(config, "domain_suffix", "yandex.ru", "refilter-domains") {
-		t.Fatal("RU direct domain rules must be before RKN catch-all")
+	if routeRuleBeforeRuleSet(config, "domain_suffix", "yandex.ru", "refilter-domains") {
+		t.Fatal("an explicitly blocked domain must precede the regional suffix fallback")
 	}
 	if containsRouteRuleSet(config, "community-domains") || containsRouteRuleSet(config, "community-ips") {
 		t.Fatal("blocked_only catch-all must not route broad community rule-sets through smart-bypass")
@@ -306,10 +306,10 @@ func TestAllTrafficModeDoesNotKeepPerServiceBypassRules(t *testing.T) {
 	builder.applyAllTrafficMode(route)
 	config := map[string]interface{}{"route": route}
 
-	if final, _ := route["final"].(string); final != "proxy" {
-		t.Fatalf("all-traffic final = %q, want proxy", final)
+	if final, _ := route["final"].(string); final != "direct" {
+		t.Fatalf("all-traffic final = %q, want direct", final)
 	}
-	if containsDomainSuffixRouteRule(config, "youtube.com", "direct") ||
+	if !containsDomainSuffixRouteRule(config, "claude.ai", "proxy") || !containsDomainSuffixRouteRule(config, "youtube.com", "proxy") || containsDomainSuffixRouteRule(config, "youtube.com", "direct") ||
 		containsDomainSuffixRouteRule(config, "youtube.com", ServiceBypassGroupTag("youtube")) {
 		t.Fatalf("all-traffic rules retained a YouTube service exception: %#v", route["rules"])
 	}
@@ -401,11 +401,11 @@ func TestSelectedBlockedOnlyWithSubscriptionRoutesOnlyBlockedTraffic(t *testing.
 	if final := getDNSFinal(config); final != "dns-direct" {
 		t.Fatalf("blocked_only DNS final = %q, want dns-direct", final)
 	}
-	if outbound := routeRuleSetOutbound(config, "refilter-domains"); outbound != "direct" {
-		t.Fatalf("unselected blocked catalog outbound = %q, want direct", outbound)
+	if outbound := routeRuleSetOutbound(config, "refilter-domains"); outbound != "proxy" {
+		t.Fatalf("unselected blocked catalog outbound = %q, want proxy", outbound)
 	}
-	if outbound := routeRuleSetOutbound(config, "refilter-ips"); outbound != "direct" {
-		t.Fatalf("unselected blocked IP catalog outbound = %q, want direct", outbound)
+	if outbound := routeRuleSetOutbound(config, "refilter-ips"); outbound != "proxy" {
+		t.Fatalf("unselected blocked IP catalog outbound = %q, want proxy", outbound)
 	}
 	if containsRouteRuleSet(config, "discord-ips") {
 		t.Fatal("service-specific Discord IP data must not participate in the global blocked catch-all")
@@ -420,7 +420,7 @@ func TestSelectedBlockedOnlyWithSubscriptionRoutesOnlyBlockedTraffic(t *testing.
 	smartCandidates := getOutboundCandidates(config, SmartBypassGroupTag)
 	youtubeCandidates := getOutboundCandidates(config, ServiceBypassGroupTag("youtube"))
 	if runtime.GOOS == "windows" {
-		if len(youtubeCandidates) != 1 || youtubeCandidates[0] != "direct" {
+		if !sameStringSet(youtubeCandidates, []string{"direct", NoRouteOutboundTag}) {
 			t.Fatalf("YouTube candidates = %v, want strict Zapret direct carrier", youtubeCandidates)
 		}
 	} else if len(smartCandidates) == 0 || smartCandidates[len(smartCandidates)-1] != "auto-select" {
@@ -593,11 +593,11 @@ func TestFilterActiveFreeAccessOutboundsRemovesInactiveStrategies(t *testing.T) 
 		t.Fatalf("%s candidates = %v, want active byedpi plus auto-select", SmartBypassGroupTag, smartCandidates)
 	}
 	telegramCandidates := getOutboundCandidates(filtered, ServiceBypassGroupTag("telegram"))
-	if len(telegramCandidates) != 1 || telegramCandidates[0] != "direct" {
-		t.Fatalf("%s candidates = %v, want Windows Unified direct fallback when legacy strategies are inactive", ServiceBypassGroupTag("telegram"), telegramCandidates)
+	if len(telegramCandidates) != 1 || telegramCandidates[0] != NoRouteOutboundTag {
+		t.Fatalf("%s candidates = %v, want blocked route when legacy strategies are inactive", ServiceBypassGroupTag("telegram"), telegramCandidates)
 	}
-	if containsOutbound(filtered, NoRouteOutboundTag) {
-		t.Fatalf("Windows Unified direct fallback must not add obsolete %q outbound", NoRouteOutboundTag)
+	if !containsOutbound(filtered, NoRouteOutboundTag) {
+		t.Fatalf("Missing terminal %q outbound", NoRouteOutboundTag)
 	}
 	if got := interfaceStringSlice([]string{"byedpi", "auto-select"}); !sameStringSet(got, []string{"byedpi", "auto-select"}) {
 		t.Fatalf("interfaceStringSlice([]string) = %v", got)
@@ -719,11 +719,11 @@ func TestFilterActiveFreeAccessOutboundsUsesDirectWhenDeepWindowsAvailable(t *te
 	}
 
 	telegramCandidates := getOutboundCandidates(filtered, ServiceBypassGroupTag("telegram"))
-	if len(telegramCandidates) != 1 || telegramCandidates[0] != "direct" {
-		t.Fatalf("%s candidates = %v, want direct via Deep Windows transparent engine", ServiceBypassGroupTag("telegram"), telegramCandidates)
+	if len(telegramCandidates) != 1 || telegramCandidates[0] != NoRouteOutboundTag {
+		t.Fatalf("%s candidates = %v, want blocked route", ServiceBypassGroupTag("telegram"), telegramCandidates)
 	}
-	if containsOutbound(filtered, NoRouteOutboundTag) {
-		t.Fatalf("filtered config must not contain %q when Deep Windows is available", NoRouteOutboundTag)
+	if !containsOutbound(filtered, NoRouteOutboundTag) {
+		t.Fatalf("filtered config must contain %q when Deep Windows is available", NoRouteOutboundTag)
 	}
 }
 
@@ -1516,11 +1516,11 @@ func TestApplyServiceFreeFallbackKeepsExplicitZapretOffVPN(t *testing.T) {
 		t.Fatal(err)
 	}
 	youtubeGroup := getOutbound(updated, ServiceBypassGroupTag("youtube"))
-	if youtubeGroup["default"] != "direct" {
-		t.Fatalf("strict Zapret fallback default = %v, want direct", youtubeGroup["default"])
+	if youtubeGroup["default"] != NoRouteOutboundTag {
+		t.Fatalf("strict Zapret exhausted route = %v, want block", youtubeGroup["default"])
 	}
 	cache := app.loadServiceStrategyCache()["youtube"]
-	if cache.MethodTag != FreeAccessMethodDirect || cache.NextStrategyIndex != 3 {
+	if cache.MethodTag != NoRouteOutboundTag || cache.NextStrategyIndex != 3 {
 		t.Fatalf("strict Zapret fallback cache = %+v, want direct with next cursor 3", cache)
 	}
 }
@@ -2214,7 +2214,7 @@ func TestSmartBypassPrefersFreeAccessWhenSubscriptionExists(t *testing.T) {
 	config := map[string]interface{}{"outbounds": template["outbounds"]}
 	candidates := getOutboundCandidates(config, SmartBypassGroupTag)
 	if runtime.GOOS == "windows" {
-		if len(candidates) != 2 || candidates[0] != "direct" || candidates[1] != "auto-select" {
+		if len(candidates) != 3 || candidates[0] != "direct" || candidates[1] != "auto-select" || candidates[2] != NoRouteOutboundTag {
 			t.Fatalf("%s candidates with subscription = %v, want native direct then ordered VPN fallback", SmartBypassGroupTag, candidates)
 		}
 	} else {
@@ -2283,7 +2283,7 @@ func TestDisableFreeAccessDoesNotOverrideExplicitVPNServiceGroups(t *testing.T) 
 
 	routeConfig := map[string]interface{}{
 		"route": map[string]interface{}{
-			"rules": builder.buildFreeAccessRules(settings, true),
+			"rules": append(protectedServiceRules(settings, true, false), builder.buildFreeAccessRules(settings, true)...),
 		},
 	}
 	if !containsDomainSuffixRouteRule(routeConfig, "telegram.org", ServiceBypassGroupTag("telegram")) {

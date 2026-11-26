@@ -80,6 +80,23 @@ class _DisplayTransport implements AccountTransport {
   void close() {}
 }
 
+class _LiveProfileClient extends OwnedVPNClient {
+  _LiveProfileClient() : super(endpoint: 'https://api.droponevedimka.ru');
+  final applied = <DateTime?>[];
+  @override
+  Future<Map<String, dynamic>> synchronizeEntitlement(
+    CoreBridge bridge,
+    String token,
+    DateTime? turboUntil, {
+    AccountTransport? transport,
+    bool Function()? isCurrent,
+  }) async {
+    expect(isCurrent!(), true);
+    applied.add(turboUntil);
+    return {'success': true};
+  }
+}
+
 Future<void> _pump(
   WidgetTester tester, {
   required Size size,
@@ -88,6 +105,7 @@ Future<void> _pump(
   bool connected = false,
   String mode = 'blocked_only',
   _VariantBridge? providedBridge,
+  OwnedVPNClient? ownedVPN,
 }) async {
   debugMobileShellOverride = mobile;
   tester.view.physicalSize = size;
@@ -110,7 +128,7 @@ Future<void> _pump(
           ),
           child: child!,
         ),
-        home: DropoHomePage(bridge: bridge),
+        home: DropoHomePage(bridge: bridge, ownedVPN: ownedVPN),
       ),
     ),
   );
@@ -229,6 +247,81 @@ void main() {
     await tester.pumpAndSettle();
     expect(purchase, findsNothing);
     expect(find.text(api.name), findsOneWidget);
+  });
+
+  testWidgets('an external Turbo grant and revocation update the open home', (
+    tester,
+  ) async {
+    final api = _DisplayTransport();
+    debugAccountTransport = api;
+    debugAccountSessionToken = 'fixture-restored-session';
+    await _pump(tester, size: const Size(1200, 820));
+    final offer = find.byKey(const ValueKey('free-plan-banner'));
+    expect(offer, findsOneWidget);
+    api.turboUntil = DateTime.now().add(const Duration(days: 1));
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pumpAndSettle();
+    expect(offer, findsNothing);
+    api.turboUntil = null;
+    api.failProfile = true;
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pumpAndSettle();
+    expect(offer, findsNothing);
+    api.failProfile = false;
+    await tester.pump(const Duration(seconds: 60));
+    await tester.pumpAndSettle();
+    expect(offer, findsOneWidget);
+    expect(api.paths.where((p) => p == '/v1/capabilities'), hasLength(1));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'a live grant updates the UI during VPN and applies once after stop',
+    (tester) async {
+      final api = _DisplayTransport();
+      final profiles = _LiveProfileClient();
+      final bridge = _VariantBridge(connected: true);
+      debugAccountTransport = api;
+      debugAccountSessionToken = 'fixture-restored-session';
+      await _pump(
+        tester,
+        size: const Size(1200, 820),
+        providedBridge: bridge,
+        ownedVPN: profiles,
+      );
+      final until = DateTime.now().toUtc().add(const Duration(days: 2));
+      api.turboUntil = until;
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('free-plan-banner')), findsNothing);
+      expect(profiles.applied, isNot(contains(until)));
+      bridge.connected = false;
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+      expect(profiles.applied.where((expiry) => expiry == until), hasLength(1));
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('returning from a gift link checks Turbo before the next timer', (
+    tester,
+  ) async {
+    final api = _DisplayTransport();
+    debugAccountTransport = api;
+    debugAccountSessionToken = 'fixture-restored-session';
+    await _pump(tester, size: const Size(390, 844), mobile: true);
+    expect(find.byKey(const ValueKey('free-plan-banner')), findsOneWidget);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    api.turboUntil = DateTime.now().add(const Duration(days: 1));
+    await tester.pump(const Duration(minutes: 2));
+    expect(api.profileReads, 1);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(api.profileReads, 2);
+    expect(find.byKey(const ValueKey('free-plan-banner')), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   for (final (name, size, mobile, scale) in [

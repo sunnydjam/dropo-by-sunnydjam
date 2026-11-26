@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -172,7 +173,7 @@ func TestNativePlanIncludesManualVPNServiceWithoutZapretStrategy(t *testing.T) {
 	if !foundRule {
 		t.Fatal("Discord VPN service rule is missing")
 	}
-	if len(plan.Routes) != 1 || plan.Routes[0].ServiceID != "discord" || plan.Routes[0].Kind != traffic.ServiceRouteVPN {
+	if !slices.Contains(plan.Routes, traffic.ServiceRoute{ServiceID: "discord", Kind: traffic.ServiceRouteVPN}) {
 		t.Fatalf("VPN routes = %+v", plan.Routes)
 	}
 }

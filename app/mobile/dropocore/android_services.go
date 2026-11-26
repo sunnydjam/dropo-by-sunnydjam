@@ -1,6 +1,8 @@
 package dropocore
 
 import (
+	"dropocore/aicatalog"
+
 	"context"
 	"fmt"
 	"io"
@@ -20,7 +22,6 @@ var androidPrimaryHomeRouteTags = map[string]bool{
 	"youtube": true,
 	"discord": true,
 	"meta":    true,
-	"openai":  true,
 }
 
 type androidService struct {
@@ -34,7 +35,7 @@ type androidService struct {
 }
 
 func androidServiceCatalog() []androidService {
-	return []androidService{
+	services := []androidService{
 		{
 			Tag:  "discord",
 			Name: "Discord",
@@ -310,33 +311,11 @@ func androidServiceCatalog() []androidService {
 			HealthURL: "https://trello.com",
 			ProbeURLs: []string{"https://id.atlassian.com", "https://bitbucket.org"},
 		},
-		{
-			Tag:  "openai",
-			Name: "ChatGPT",
-			DomainSuffixes: []string{
-				"openai.com", "chatgpt.com", "ws.chatgpt.com", "oaistatic.com", "oaiusercontent.com", "oaistatsig.com",
-				"openaimerge.com", "auth0.openai.com", "workos.com", "workoscdn.com",
-			},
-			HealthURL: "https://chatgpt.com",
-			ProbeURLs: []string{"https://api.openai.com"},
-		},
-		{
-			Tag:  "ai-other",
-			Name: "Другие AI-сервисы",
-			DomainSuffixes: []string{
-				"githubcopilot.com", "copilot-proxy.githubusercontent.com", "origin-tracker.githubusercontent.com",
-				"copilot-telemetry.githubusercontent.com", "default.exp-tas.com", "api.github.com", "github.com",
-				"cursor.com", "cursor.sh", "api2.cursor.sh", "api3.cursor.sh", "repo42.cursor.sh",
-				"cursorapi.com", "cursor-cdn.com", "download.todesktop.com",
-				"copilot.microsoft.com", "perplexity.ai", "api.perplexity.ai", "poe.com",
-				"gemini.google.com", "aistudio.google.com", "ai.google.dev", "generativelanguage.googleapis.com",
-				"notebooklm.google.com", "grok.com", "x.ai", "api.x.ai", "console.x.ai",
-				"meta.ai", "ai.meta.com", "llama.com",
-			},
-			HealthURL: "https://perplexity.ai",
-			ProbeURLs: []string{"https://gemini.google.com"},
-		},
 	}
+	for _, ai := range aicatalog.Services {
+		services = append(services, androidService{Tag: ai.Tag, Name: ai.Name, DomainSuffixes: ai.Domains, PackageNames: ai.Packages, HealthURL: ai.HealthURL, ProbeURLs: ai.ProbeURLs})
+	}
+	return services
 }
 
 func androidServiceByTag(tag string) (androidService, bool) {
@@ -350,6 +329,9 @@ func androidServiceByTag(tag string) (androidService, bool) {
 }
 
 func androidServicePolicy(service androidService, policies map[string]string) string {
+	if aicatalog.VPNOnly(service.Tag) {
+		return androidRoutePolicyVPN
+	}
 	if policies != nil {
 		if policy := normalizeAndroidRoutePolicy(policies[service.Tag]); policy != "" {
 			return policy
@@ -407,9 +389,7 @@ func androidEffectiveRoutePoliciesForMode(policies map[string]string, hasVPN boo
 	if normalizeAndroidRoutingMode(routingMode) != "all_traffic" {
 		return result
 	}
-	// Full VPN is a mode-level contract. Keep the saved per-service choices so
-	// they can be restored in selective mode, but never emit a Direct carve-out
-	// while all public traffic is expected to use the VPN.
+	// The preset covers every named catalog entry. Unlisted traffic stays direct.
 	for tag := range result {
 		result[tag] = androidRoutePolicyVPN
 	}
@@ -449,6 +429,7 @@ func androidServiceRoutesLocked(live bool) []routeInfo {
 			Method:               methodLabel,
 			EffectiveMethodLabel: methodLabel,
 			SelectedMethod:       selectedPolicy,
+			VPNOnly:              aicatalog.VPNOnly(service.Tag),
 			RequiresVPN:          effectivePolicy == androidRoutePolicyVPN,
 			HomeVisible:          androidHomeRouteServiceVisibleLocked(service.Tag),
 			// Unknown until an explicit health check runs. Never manufacture
@@ -462,6 +443,9 @@ func androidServiceRoutesLocked(live bool) []routeInfo {
 }
 
 func androidHomeRouteServiceVisibleLocked(tag string) bool {
+	if aicatalog.VPNOnly(tag) {
+		return false
+	}
 	if androidPrimaryHomeRouteTags[tag] {
 		return true
 	}
@@ -513,6 +497,16 @@ func androidRouteMethodCache(services []routeInfo) map[string]string {
 		result[service.Tag] = service.SelectedMethod
 	}
 	return result
+}
+
+func androidProtectedIdentities() (domains, packages []string) {
+	for _, svc := range androidServiceCatalog() {
+		if aicatalog.VPNOnly(svc.Tag) {
+			domains = append(domains, svc.DomainSuffixes...)
+			packages = append(packages, svc.PackageNames...)
+		}
+	}
+	return domains, packages
 }
 
 func androidServiceDomainSuffixesByPolicy(policies map[string]string, policy string) []string {
@@ -598,6 +592,22 @@ func runAndroidClientQuickCheck() string {
 
 // Help checks observe endpoints only. They must not persist logs, mutate route
 // policy or publish events that can be interpreted as a connection operation.
+// Owned by the currently running libbox instance. A check queued during a
+// disconnect must fail before opening a socket on a later session.
+var androidVPNCheck struct {
+	generation int64
+	session    context.Context
+	client     *http.Client
+}
+
+func RegisterAndroidVPNCheckClient(generation int64, session context.Context, client *http.Client) {
+	mu.Lock()
+	defer mu.Unlock()
+	if current.sourceSession == generation && generation != 0 {
+		androidVPNCheck.generation, androidVPNCheck.session, androidVPNCheck.client = generation, session, client
+	}
+}
+
 func runAndroidClientQuickCheckMode(readOnly bool) string {
 	return runAndroidClientQuickCheckWithProbe(readOnly, probeAndroidService)
 }
@@ -606,6 +616,10 @@ func runAndroidClientQuickCheckWithProbe(readOnly bool, probe func(context.Conte
 	startedAt := time.Now()
 	mu.Lock()
 	services := androidServiceRoutesLocked(true)
+	vpnCheck := androidVPNCheck
+	if vpnCheck.generation != current.sourceSession || current.sourceSession == 0 {
+		vpnCheck.client = nil
+	}
 	sessionStartedAt := current.StartedAt
 	sessionNumber := current.TotalSessions
 	sessionWasConnected := current.Connected
@@ -626,7 +640,16 @@ func runAndroidClientQuickCheckWithProbe(readOnly bool, probe func(context.Conte
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	client := &http.Client{Timeout: 8 * time.Second}
+	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	vpnCtx, cancelVPN := context.WithCancel(ctx)
+	defer cancelVPN()
+	if vpnCheck.session != nil {
+		stop := context.AfterFunc(vpnCheck.session, cancelVPN)
+		defer stop()
+		if vpnCheck.session.Err() != nil {
+			cancelVPN()
+		}
+	}
 	results := make([]map[string]interface{}, len(services))
 	jobs := make(chan int)
 	workers := 8
@@ -642,7 +665,11 @@ func runAndroidClientQuickCheckWithProbe(readOnly bool, probe func(context.Conte
 				service := services[index]
 				target := androidServiceHealthTarget(service.Tag)
 				probeStarted := time.Now()
-				statusCode, errText := probe(ctx, client, target)
+				checkCtx, checkClient := ctx, client
+				if service.RequiresVPN || service.VPNOnly {
+					checkCtx, checkClient = vpnCtx, vpnCheck.client
+				}
+				statusCode, errText := probe(checkCtx, checkClient, target)
 				delayMS := int(time.Since(probeStarted).Milliseconds())
 				result := androidClientQuickCheckResult(service, target, statusCode, errText, delayMS)
 				results[index] = result
@@ -753,6 +780,9 @@ func androidServiceHealthTarget(tag string) string {
 }
 
 func probeAndroidService(ctx context.Context, client *http.Client, target string) (int, string) {
+	if client == nil {
+		return 0, "VPN недоступен"
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return 0, err.Error()

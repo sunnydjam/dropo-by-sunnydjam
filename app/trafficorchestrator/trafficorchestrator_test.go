@@ -379,7 +379,7 @@ func TestSelectionMustUseServiceCandidate(t *testing.T) {
 	}
 }
 
-func TestVPNRoutePassesPacketAndPersistsTypedFlowDecision(t *testing.T) {
+func TestVPNRouteDropsPacketWithoutRelayAndPersistsTypedFlowDecision(t *testing.T) {
 	plan := testPlan()
 	plan.Selections = nil
 	plan.Routes = []ServiceRoute{{ServiceID: "discord", Kind: ServiceRouteVPN}}
@@ -400,8 +400,8 @@ func TestVPNRoutePassesPacketAndPersistsTypedFlowDecision(t *testing.T) {
 	if !ok || flow.Disposition != FlowService || flow.ServiceID != "discord" || flow.Route != ServiceRouteVPN {
 		t.Fatalf("VPN flow = %+v, found=%t", flow, ok)
 	}
-	if string(decision.Packets[0]) != string(packet) {
-		t.Fatal("VPN-marked packet changed before relay activation")
+	if len(decision.Packets) != 0 || !decision.Dropped {
+		t.Fatal("VPN packet escaped before relay activation")
 	}
 }
 
@@ -500,16 +500,11 @@ func TestProcessorDoesNotSpliceMidstreamVPNFlow(t *testing.T) {
 	}
 	packet := testIPv4TCPPacket(t, "gateway.discord.com")
 	decision := processor.Process(packet)
-	if decision.Dropped || decision.Transformed || !strings.Contains(decision.Reason, "failed safe") || len(decision.Packets) != 1 || string(decision.Packets[0]) != string(packet) {
-		t.Fatalf("midstream VPN decision = %+v", decision)
+	if !decision.Dropped || len(decision.Packets) != 0 {
+		t.Fatalf("VPN packet escaped midstream: %+v", decision)
 	}
-	second := processor.Process(packet)
-	if second.Dropped || second.Transformed || second.Reason != "preserved established direct flow" || len(second.Packets) != 1 || string(second.Packets[0]) != string(packet) {
-		t.Fatalf("preserved midstream decision = %+v", second)
-	}
-	counters := processor.Counters()["discord"]
-	if counters.Errors != 1 || counters.Passed != 1 {
-		t.Fatalf("midstream counters = %+v", counters)
+	if second := processor.Process(packet); !second.Dropped || len(second.Packets) != 0 {
+		t.Fatalf("VPN retry escaped: %+v", second)
 	}
 }
 
@@ -1705,4 +1700,36 @@ func testIPv4UDPPacket(destination string, port int, payload []byte) []byte {
 	copy(packet[28:], payload)
 	calculateChecksums(packet)
 	return packet
+}
+
+func TestVPNOnlyIdentitiesFailClosedOnSharedAddress(t *testing.T) {
+	for _, kind := range []ServiceRouteKind{ServiceRouteVPN, ServiceRouteUnavailable} {
+		plan := TrafficPlan{Revision: 1, CatalogRevision: BuiltinCatalogRevision, Services: []ServiceRule{{ID: "claude", DisplayName: "Claude", VPNOnly: true, DomainSuffixes: []string{"claude.ai"}}}, Routes: []ServiceRoute{{ServiceID: "claude", Kind: kind}}, DirectRules: []DirectRule{{ID: "ordinary", ProcessNames: []string{"browser.exe"}}}}
+		processor, err := NewProcessor(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		classifier, err := NewClassifier(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if class := classifier.Classify(FlowEvidence{Network: NetworkTCP, Port: 443, Host: "api.claude.ai", ProcessName: "browser.exe"}); class.ServiceID != "claude" {
+			t.Fatalf("direct browser overrode protected host: %+v", class)
+		}
+		for _, host := range []string{"claude.ai", "vk.com"} {
+			packet := testIPv4TCPPacketTo(t, "66.22.200.1", host)
+			d := processor.Process(packet)
+			if host == "vk.com" {
+				if len(d.Packets) != 1 || string(d.Packets[0]) != string(packet) {
+					t.Fatalf("ordinary host affected: %+v", d)
+				}
+			} else if !d.Dropped || len(d.Packets) != 0 {
+				t.Fatalf("protected packet escaped: %+v", d)
+			}
+		}
+		plan.Routes[0].Kind = ServiceRouteDirect
+		if ValidatePlan(plan) == nil {
+			t.Fatal("protected direct route accepted")
+		}
+	}
 }

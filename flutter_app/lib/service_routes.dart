@@ -182,7 +182,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
           .routes(live: widget.connected)
           .timeout(const Duration(seconds: 10));
       if (mounted && generation == loadGeneration) {
-        setState(() => services = result);
+        setState(() => services = result.where((s) => !s.vpnOnly).toList());
       }
     } catch (error) {
       if (mounted && generation == loadGeneration) {

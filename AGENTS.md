@@ -51,13 +51,15 @@ commit workflow.
   connected.
 - At bootstrap, automatic blocked services may use a network-valid proven
   direct-strategy cache. Otherwise route them through the available VPN
-  subscription fallback, or direct only when no subscription exists. Background
+  subscription fallback. An exhausted strategy ladder leaves that service unavailable.
+  For AI and other VPN-only catalog entries, require VPN from bootstrap through
+  failover, including probes and saved profiles. Background
   selection must commit only after every required target succeeds. With a VPN
   subscription it tries one small bounded candidate ladder and falls back to the
   subscription immediately. Without a subscription it may repeat that bounded
   ladder in a cancellable campaign of at most one hour; the UI must expose the
   active service, strategy/attempt number, and the extended-search warning.
-  Retry temporary VPN/direct fallbacks on each new session.
+  Retry temporary VPN or unavailable outcomes on each new session.
 - Discord realtime/media health is background maintenance and must never set a
   connection-wide busy state or disable settings. Mark Discord working only
   after sustained bidirectional media evidence. Explicit user Direct/VPN policy

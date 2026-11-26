@@ -372,7 +372,7 @@ class _ConnectionHealthPanelState extends State<_ConnectionHealthPanel> {
                   _HealthPill(
                     icon: allTraffic ? Icons.public : Icons.grid_view_rounded,
                     label: allTraffic
-                        ? 'Весь трафик через VPN'
+                        ? 'Заблокированные сервисы через VPN'
                         : 'Только выбранные сервисы',
                     color: const Color(0xFF8BC5FF),
                   ),
@@ -405,8 +405,8 @@ class _ConnectionHealthPanelState extends State<_ConnectionHealthPanel> {
               else if (allTraffic)
                 _DiagnosticRouteRow(
                   key: const ValueKey('diagnostics-route-all'),
-                  name: 'Весь интернет',
-                  policy: 'Режим: весь трафик',
+                  name: 'Список блокировок и ИИ-сервисы',
+                  policy: 'Заблокированные и ИИ-сервисы через VPN',
                   actualRoute: 'VPN',
                   source: activeNode.isEmpty
                       ? widget.routesAreLive
@@ -1018,8 +1018,8 @@ String _healthSummary({
   }
   if (allTraffic) {
     return activeNode.isEmpty
-        ? 'Весь публичный трафик направлен через VPN. Узел выбирается ядром.'
-        : 'Весь публичный трафик направлен через VPN · $activeNode.';
+        ? 'Заблокированные и ИИ-сервисы направлены через VPN. Узел выбирается ядром.'
+        : 'Заблокированные и ИИ-сервисы направлены через VPN · $activeNode.';
   }
   return 'Выбранные сервисы используют свои маршруты, остальной трафик идёт напрямую.';
 }

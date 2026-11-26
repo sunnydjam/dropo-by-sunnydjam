@@ -71,11 +71,7 @@ func TestAndroidPublicDNSUsesVPNWithoutChangingTrafficRoutes(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			text, _, err := buildAndroidSingBoxConfig(androidDNSFixture, "error", mode, false, "", map[string]string{"meta": "direct", "telegram": "vpn"})
 			config := decodeAndroidDNSFixture(t, text, err)
-			if mode == "blocked_only" {
-				assertAndroidSystemDNS(t, config)
-			} else {
-				assertAndroidEncryptedDNSTransport(t, config, "dns-direct", true)
-			}
+			assertAndroidSystemDNS(t, config)
 			assertAndroidEncryptedDNSTransport(t, config, "dns-remote", true)
 			assertAndroidEncryptedDNSTransport(t, config, "dns-bootstrap", false)
 
@@ -111,7 +107,7 @@ func TestAndroidPublicDNSUsesVPNWithoutChangingTrafficRoutes(t *testing.T) {
 					!androidContainsPackageRoute(config, "org.telegram.messenger", "proxy") {
 					t.Fatal("tunneling DNS must not tunnel unselected traffic or override manual service routes")
 				}
-			} else if dns["final"] != "dns-remote" || route["final"] != "proxy" || androidContainsDomainRoute(config, "instagram.com", "direct") {
+			} else if dns["final"] != "dns-direct" || route["final"] != "direct" || androidContainsDomainRoute(config, "instagram.com", "direct") {
 				t.Fatal("full VPN must remain authoritative over saved selective routes")
 			}
 		})
@@ -182,4 +178,34 @@ func TestAndroidDNSPolicyInvalidatesCachedDirectResolverConfig(t *testing.T) {
 	}
 	config := decodeAndroidDNSFixture(t, response.Config, nil)
 	assertAndroidSystemDNS(t, config)
+}
+
+func TestAIAndroidSelectiveRoutesAndDNS(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		policies := map[string]string{}
+		claudeOut, claudeDNS := "proxy", "dns-remote"
+		if direct {
+			policies["claude"] = "direct"
+		}
+		text, _, err := buildAndroidSingBoxConfig(androidDNSFixture, "error", "blocked_only", false, "", policies)
+		config := decodeAndroidDNSFixture(t, text, err)
+		for _, suffix := range []string{"anthropic.com", "claude.ai", "claude.app", "claude.com", "claudeusercontent.com", "claudemcpcontent.com"} {
+			if !androidContainsDomainRoute(config, suffix, claudeOut) || !androidContainsDNSServer(config, suffix, claudeDNS) {
+				t.Errorf("missing %s route or DNS for %s", claudeOut, suffix)
+			}
+		}
+		if !androidContainsPackageRoute(config, "com.anthropic.claude", claudeOut) {
+			t.Error("missing Claude app route")
+		}
+		for _, pkg := range []string{"com.openai.chatgpt", "ai.mistral.chat", "com.deepseek.chat"} {
+			if !androidContainsPackageRoute(config, pkg, "proxy") {
+				t.Errorf("missing VPN route for %s", pkg)
+			}
+		}
+		for _, suffix := range []string{"chatgpt.com", "oaiusercontent.com", "gemini.google.com", "githubcopilot.com", "deepseek.com", "mistral.ai"} {
+			if !androidContainsDomainRoute(config, suffix, "proxy") || !androidContainsDNSServer(config, suffix, "dns-remote") {
+				t.Errorf("missing VPN route or DNS for %s", suffix)
+			}
+		}
+	}
 }

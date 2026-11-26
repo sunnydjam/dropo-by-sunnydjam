@@ -377,11 +377,13 @@ func denseClientQuickCheckServices(catalog []clientQuickCheckService) []clientQu
 }
 
 func (a *App) clientQuickCheckExpectedRoute(settings GlobalAppSettings, cache map[string]serviceStrategyCacheEntry, svc clientQuickCheckService) string {
-	// In the full-tunnel mode every public endpoint must be verified through
-	// the active VPN path. Service-level Direct/Auto preferences are retained
-	// for the selective mode, but they do not override the all-traffic
-	// contract while that mode is active.
+	if strings.Contains(svc.Category, "VPNOnly") {
+		return clientQuickCheckRouteVPN
+	}
 	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
+		if strings.HasPrefix(svc.Category, "Direct") {
+			return clientQuickCheckRouteDirect
+		}
 		return clientQuickCheckRouteVPN
 	}
 	if settings.HideRuTraffic && strings.HasPrefix(svc.Category, "Direct-RU") {
@@ -618,7 +620,7 @@ func newQuickCheckHTTPClient(proxy func(*http.Request) (*url.URL, error)) *http.
 		Timeout:   clientQuickCheckRequestTimeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
+			if len(via) >= 10 || proxy == nil && protectedServiceHost(req.URL.Hostname()) {
 				return http.ErrUseLastResponse
 			}
 			return nil

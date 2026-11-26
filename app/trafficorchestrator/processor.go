@@ -150,9 +150,11 @@ func (p *Processor) ApplyPlan(plan TrafficPlan) error {
 		routes:     make(map[string]ServiceRouteKind, len(plan.Routes)),
 	}
 	for _, service := range plan.Services {
+		if service.VPNOnly {
+			snapshot.routes[service.ID] = ServiceRouteUnavailable
+		}
 		if len(service.ProcessNames) > 0 {
 			snapshot.usesProcessIdentity = true
-			break
 		}
 	}
 	if !snapshot.usesProcessIdentity {
@@ -333,7 +335,10 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			return PacketDecision{PlanRevision: snapshot.plan.Revision, Dropped: true, Reason: "expired synthetic destination requires fresh DNS"}
 		}
 		if previous, ok := p.flows.lookup(tuple, snapshot.plan.Revision); ok && previous.Disposition == FlowDirect && !parsed.isInitialTCPSYN() {
-			return passDecision(snapshot.plan.Revision, packet, "preserved established direct flow")
+			identity := snapshot.classifier.protectedIdentity(normalizeHost(parsed.flowEvidence().Host), normalizeProcessName(resolveOwner()))
+			if !identity.Matched {
+				return passDecision(snapshot.plan.Revision, packet, "preserved established direct flow")
+			}
 		}
 	}
 	trustedRuntime := !fakeDestination && !pinned && isTrustedSelectiveRuntimeProcess(resolveOwner())
@@ -374,6 +379,9 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 	}
 	if !classification.Matched {
 		return passDecision(snapshot.plan.Revision, packet, "service not classified")
+	}
+	if route == ServiceRouteUnavailable || snapshot.routes[classification.ServiceID] == ServiceRouteUnavailable {
+		return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: ServiceRouteUnavailable, Dropped: true, Reason: "selected service has no working route"}
 	}
 	if route == ServiceRouteDirect && !fakeDestination {
 		p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
@@ -420,35 +428,14 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "unsupported selective TCP relay transport"}
 		}
 		if p.redirector == nil {
-			if fakeDestination {
-				return PacketDecision{PlanRevision: snapshot.plan.Revision, Dropped: true, Reason: "synthetic address has no TCP relay"}
-			}
-			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Passed++ })
-			reason := "service requires selective TCP relay"
-			if route == ServiceRouteVPN {
-				reason = "service requires selective VPN relay"
-			}
-			decision := passDecision(snapshot.plan.Revision, packet, reason)
-			decision.ServiceID = classification.ServiceID
-			decision.Route = route
-			return decision
+			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++ })
+			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "service requires selective VPN relay"}
 		}
 		reflected, redirectErr := p.redirector.ReflectClientPacket(parsed, TCPRedirectTarget{
 			Flow: tuple, Host: evidence.Host, ServiceID: classification.ServiceID, Route: route,
 		})
 		if redirectErr != nil {
-			if !fakeDestination && !parsed.isInitialTCPSYN() {
-				p.flows.store(tuple, FlowDecision{
-					PlanRevision: snapshot.plan.Revision, Disposition: FlowDirect,
-					ProcessName: normalizeProcessName(evidence.ProcessName),
-					Reason:      "selective TCP redirect declined for established flow",
-				})
-				p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++; value.Passed++ })
-				decision := passDecision(snapshot.plan.Revision, packet, "selective TCP redirect failed safe: "+redirectErr.Error())
-				decision.ServiceID = classification.ServiceID
-				decision.Route = route
-				return decision
-			}
+
 			p.bump(classification.ServiceID, func(value *ServiceCounters) { value.Matched++; value.Errors++ })
 			return PacketDecision{PlanRevision: snapshot.plan.Revision, ServiceID: classification.ServiceID, Route: route, Dropped: true, Reason: "selective TCP redirect failed: " + redirectErr.Error()}
 		}

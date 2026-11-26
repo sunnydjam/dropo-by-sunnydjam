@@ -1208,6 +1208,19 @@ class DropoVpnService :
                         error("Failed to create private libbox working directory")
                     }
                 }
+                for (name in listOf("refilter_domains.srs", "refilter_ips.srs")) {
+                    val file = android.util.AtomicFile(java.io.File(context.filesDir, name))
+                    context.assets.open(name).use { input ->
+                        val output = file.startWrite()
+                        try {
+                            input.copyTo(output)
+                            file.finishWrite(output)
+                        } catch (error: Throwable) {
+                            file.failWrite(output)
+                            throw error
+                        }
+                    }
+                }
                 Dropoandroid.setup(
                     BoxSetupOptions().apply {
                         basePath = context.filesDir.absolutePath

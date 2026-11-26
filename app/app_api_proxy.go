@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"dropocore/aicatalog"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -511,6 +512,7 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 				"requiresVpn":     true,
 				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
 				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"vpnOnly":         aicatalog.VPNOnly(svc.Tag),
 				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
 				"group":           "proxy",
 				"method":          method,
@@ -556,8 +558,8 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 					method = "VPN"
 					outbound = "auto-select"
 				} else {
-					method = "Direct (no VPN key)"
-					outbound = "direct"
+					method = "VPN недоступен"
+					outbound = NoRouteOutboundTag
 				}
 			}
 			services = append(services, map[string]interface{}{
@@ -568,6 +570,7 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 				"requiresVpn":     svc.RequiresVPN,
 				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
 				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"vpnOnly":         aicatalog.VPNOnly(svc.Tag),
 				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
 				"group":           groupTag,
 				"method":          method,
@@ -598,6 +601,7 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 			"requiresVpn":     svc.RequiresVPN,
 			"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
 			"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+			"vpnOnly":         aicatalog.VPNOnly(svc.Tag),
 			"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
 			"group":           groupTag,
 			"method":          method,
@@ -649,6 +653,7 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 				"requiresVpn":     true,
 				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
 				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+				"vpnOnly":         aicatalog.VPNOnly(svc.Tag),
 				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
 				"group":           "proxy",
 				"method":          "VPN",
@@ -673,8 +678,8 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 				delay = int(selected.LatencyMS)
 			}
 			if svc.RequiresVPN && selected.MethodKind != "vpn" {
-				method = "Direct (no VPN key)"
-				outbound = "direct"
+				method = "Нет рабочего маршрута"
+				outbound = NoRouteOutboundTag
 				delay = 0
 			}
 		}
@@ -686,6 +691,7 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 			"requiresVpn":     svc.RequiresVPN,
 			"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
 			"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+			"vpnOnly":         aicatalog.VPNOnly(svc.Tag),
 			"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
 			"group":           ServiceBypassGroupTag(svc.Tag),
 			"method":          method,
@@ -841,6 +847,8 @@ func (a *App) nativeTrafficRouteSummary(serviceTag string) (string, string, bool
 		}
 	}
 	switch kind {
+	case "unavailable":
+		return "Нет рабочего маршрута", NoRouteOutboundTag, true
 	case clientQuickCheckRouteVPN:
 		return "VPN", "auto-select", true
 	case clientQuickCheckRouteDirect:

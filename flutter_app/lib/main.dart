@@ -2110,6 +2110,8 @@ class MockCoreBridge implements CoreBridge {
       ],
       'methodCache': const {
         'openai': 'vpn',
+        'claude': 'vpn',
+        'ai-other': 'vpn',
         'youtube': 'vpn',
         'discord': 'vpn',
         'google': 'direct',
@@ -2187,6 +2189,7 @@ class MockCoreBridge implements CoreBridge {
             name: route.name,
             method: _connected ? route.method : 'Mock standby',
             selectedMethod: _routeMethods[route.tag] ?? route.selectedMethod,
+            vpnOnly: route.vpnOnly,
             requiresVpn: route.requiresVpn,
             delayMs: _connected ? 24 + route.tag.length : 0,
             domainSuffixes: route.domainSuffixes,
@@ -3097,7 +3100,6 @@ const Set<String> primaryHomeRouteServiceTags = <String>{
   'youtube',
   'discord',
   'meta',
-  'openai',
 };
 
 bool isPrimaryHomeRouteService(String tag) =>
@@ -3115,6 +3117,7 @@ String _homeRouteName(RouteService service) {
 }
 
 String _normalizedHomeRoutePolicy(RouteService service) {
+  if (service.vpnOnly) return 'vpn';
   switch (service.selectedMethod.trim().toLowerCase()) {
     case 'auto':
       return 'auto';
@@ -3137,6 +3140,7 @@ class RouteService {
     required this.method,
     this.actualOutbound = '',
     this.selectedMethod = 'auto',
+    this.vpnOnly = false,
     required this.requiresVpn,
     required this.delayMs,
     this.domainSuffixes = const [],
@@ -3157,6 +3161,7 @@ class RouteService {
   final String method;
   final String actualOutbound;
   final String selectedMethod;
+  final bool vpnOnly;
   final bool requiresVpn;
   final int delayMs;
   final List<String> domainSuffixes;
@@ -3182,6 +3187,7 @@ class RouteService {
           'Auto',
       actualOutbound: json['outbound']?.toString() ?? '',
       selectedMethod: _routePolicyFromJson(json),
+      vpnOnly: json["vpnOnly"] == true,
       requiresVpn: json['requiresVpn'] == true,
       domainSuffixes: _asStringList(
         json['domainSuffixes'] ?? json['domain_suffixes'],
@@ -3222,6 +3228,7 @@ class RouteService {
           'Auto',
       actualOutbound: json['outbound']?.toString() ?? '',
       selectedMethod: _routePolicyFromJson(json),
+      vpnOnly: json["vpnOnly"] == true,
       requiresVpn:
           json['requiresVpn'] == true ||
           json['method']?.toString().toLowerCase().contains('vpn') == true ||
@@ -3280,6 +3287,7 @@ class RouteService {
       method: method ?? this.method,
       actualOutbound: actualOutbound ?? this.actualOutbound,
       selectedMethod: selectedMethod ?? this.selectedMethod,
+      vpnOnly: vpnOnly,
       requiresVpn: requiresVpn ?? this.requiresVpn,
       delayMs: delayMs ?? this.delayMs,
       domainSuffixes: domainSuffixes ?? this.domainSuffixes,
@@ -3824,7 +3832,9 @@ class VpnConflictItem {
 }
 
 class DropoHomePage extends StatefulWidget {
-  const DropoHomePage({super.key, required this.bridge});
+  const DropoHomePage({super.key, required this.bridge, this.ownedVPN});
+
+  final OwnedVPNClient? ownedVPN;
 
   final CoreBridge bridge;
 
@@ -3913,6 +3923,9 @@ class _DropoHomePageState extends State<DropoHomePage>
   bool externalVpnConflictBlocked = false;
   bool connectionHintDanger = false;
   bool routeProbeActive = false;
+  String? _pendingRoutingMode;
+  bool get _usesServiceRoutes =>
+      (_pendingRoutingMode ?? appConfig.routingMode) == 'blocked_only';
   bool routeProbeExtendedSearch = false;
   bool routeProbeFailed = false;
   int routeProbeExpectedCount = 0;
@@ -3946,6 +3959,10 @@ class _DropoHomePageState extends State<DropoHomePage>
   final List<String> _sectionHistory = [];
   late final _AccountDisplayController _accountDisplay;
   late final GuestIdentityCoordinator _guestIdentity;
+  OwnedVPNClient get _profileClient => widget.ownedVPN ?? _ownedVPNClient;
+  (int, DateTime?)? _appliedEntitlement;
+  DateTime? _retryEntitlementAfter;
+  bool _applyingEntitlement = false;
   late final IncidentReporter _incidents;
   late final AndroidReviewPromptCoordinator _reviewPrompt;
 
@@ -3981,6 +3998,65 @@ class _DropoHomePageState extends State<DropoHomePage>
           ? const AccountDisplaySnapshot(displayName: 'Аккаунт')
           : null,
     );
+    unawaited(_applyLiveEntitlement());
+  }
+
+  Future<void> _applyLiveEntitlement() async {
+    if (!online ||
+        quitting ||
+        !mounted ||
+        _applyingEntitlement ||
+        _ownedProfileSessionBusy(status) ||
+        _guestIdentity.accountKind != 'registered' ||
+        !accountEndpointAvailable(_profileClient.endpoint)) {
+      return;
+    }
+    final account = _guestIdentity.account;
+    final token = _guestIdentity.token;
+    if (account == null ||
+        token == null ||
+        _guestIdentity.state != 'ready' ||
+        account['demoAccount'] == true ||
+        account['authMethod'] == 'password') {
+      return;
+    }
+    final display = AccountDisplaySnapshot.fromJson(account);
+    if (!display.hasConfirmedPlan) return;
+    final now = DateTime.now();
+    final until = display.turboUntil;
+    final epoch = _guestIdentity.identityEpoch;
+    final desired = (epoch, until?.isAfter(now) == true ? until : null);
+    if (_appliedEntitlement == desired ||
+        (_retryEntitlementAfter?.isAfter(now) ?? false)) {
+      return;
+    }
+    bool current() =>
+        mounted &&
+        !quitting &&
+        _guestIdentity.identityEpoch == epoch &&
+        _guestIdentity.token == token;
+    _applyingEntitlement = true;
+    try {
+      final result = await _profileClient.synchronizeEntitlement(
+        widget.bridge,
+        token,
+        desired.$2,
+        isCurrent: current,
+      );
+      if (!current()) return;
+      if (result['success'] == true && result['deferred'] != true) {
+        _appliedEntitlement = desired;
+        if (result['unchanged'] != true) await _refreshHomeSources(force: true);
+      } else {
+        _retryEntitlementAfter = now.add(const Duration(seconds: 30));
+      }
+    } catch (_) {
+      if (current()) {
+        _retryEntitlementAfter = now.add(const Duration(seconds: 30));
+      }
+    } finally {
+      _applyingEntitlement = false;
+    }
   }
 
   bool get _showTurboOffer {
@@ -4122,7 +4198,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     if (widget.bridge is! MockCoreBridge && _accountConfigured) {
       try {
         final epoch = _guestIdentity.identityEpoch;
-        await _ownedVPNClient.prepareAccountIdentity(
+        await _profileClient.prepareAccountIdentity(
           canWrite: () => mounted && _guestIdentity.identityEpoch == epoch,
         );
       } catch (_) {
@@ -4241,7 +4317,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     });
     try {
       await widget.bridge.ensureStarted();
-      await _ownedVPNClient.restore(widget.bridge);
+      await _profileClient.restore(widget.bridge);
       if (!mounted || quitting || request != _bootstrapRequest) return;
       setState(() {
         online = true;
@@ -4403,6 +4479,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         }
       });
       unawaited(_refreshHomeSources(force: all));
+      unawaited(_applyLiveEntitlement());
       _checkAndroidReviewPrompt();
       final metadataRequest = all ? ++_metadataRequest : null;
       await Future.wait([
@@ -4486,6 +4563,10 @@ class _DropoHomePageState extends State<DropoHomePage>
       if (!mounted || quitting || request != _metadataRequest) return;
       setState(() {
         subscription = loadedSubscription;
+        if (loadedConfig.routingMode != appConfig.routingMode &&
+            loadedConfig.routingMode == 'all_traffic') {
+          _clearRouteProbe();
+        }
         appConfig = loadedConfig;
         _dropoThemeMode.value = themeModeFromSetting(loadedConfig.theme);
         wireGuards = loadedWireGuards;
@@ -4648,6 +4729,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   void _applyEvent(BridgeEvent event) {
+    if (event.name.startsWith('route-probe-') && !_usesServiceRoutes) return;
     switch (event.name) {
       case 'update-stage':
         final stage = event.payload['stage']?.toString();
@@ -4809,8 +4891,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         statusMessage = 'Подключаем VPN';
         connectionHint = 'Android VpnService запускает sing-box...';
         connectionHintDanger = false;
-        routeProbeActive = true;
-        routeProbeFailed = false;
         break;
       case 'vpn-error':
         final message =
@@ -4902,6 +4982,7 @@ class _DropoHomePageState extends State<DropoHomePage>
           : null,
     );
     _observeAndroidSession(status);
+    unawaited(_applyLiveEntitlement());
 
     if (connecting) {
       busyTasks['vpn-connect'] = message.isEmpty
@@ -4915,8 +4996,6 @@ class _DropoHomePageState extends State<DropoHomePage>
           ? (message.isEmpty ? 'Восстанавливаем соединение…' : message)
           : 'Android VpnService запускает sing-box...';
       connectionHintDanger = false;
-      routeProbeActive = true;
-      routeProbeFailed = false;
       return;
     }
 
@@ -5082,6 +5161,15 @@ class _DropoHomePageState extends State<DropoHomePage>
         : 'Стратегии обхода подобраны.';
   }
 
+  void _clearRouteProbe() {
+    routeProbeActive = false;
+    routeProbeFailed = false;
+    routeProbeExpectedCount = 0;
+    routeProbeExtendedSearch = false;
+    routeProbeProgress = <String, RouteProbeProgress>{};
+    routeHint = '';
+  }
+
   void _setConnectionPrimed(bool target) {
     _invalidateCoreSnapshots();
     busyTasks[target ? 'vpn-connect' : 'vpn-disconnect'] = target
@@ -5092,22 +5180,10 @@ class _DropoHomePageState extends State<DropoHomePage>
         ? 'Проверяем окружение и запускаем безопасный начальный маршрут.'
         : 'Останавливаем сетевые процессы и возвращаем системные настройки.';
     connectionHintDanger = false;
+    _clearRouteProbe();
     if (target) {
       // Do not present a previous session's observation while a new one starts.
       status = status.copyWith(vpnResponse: const VpnResponseSnapshot());
-      routeProbeActive = true;
-      routeProbeFailed = false;
-      routeProbeExpectedCount = 0;
-      routeProbeExtendedSearch = false;
-      routeProbeProgress = <String, RouteProbeProgress>{};
-      routeHint = 'Ожидаем список сервисов для подбора стратегий...';
-    } else {
-      routeProbeActive = false;
-      routeProbeFailed = false;
-      routeProbeExpectedCount = 0;
-      routeProbeExtendedSearch = false;
-      routeProbeProgress = <String, RouteProbeProgress>{};
-      routeHint = '';
     }
   }
 
@@ -5143,14 +5219,14 @@ class _DropoHomePageState extends State<DropoHomePage>
           if (token != null &&
               account != null &&
               _guestIdentity.accountKind == 'registered') {
-            await _ownedVPNClient.synchronizeEntitlement(
+            await _profileClient.synchronizeEntitlement(
               widget.bridge,
               token,
               DateTime.tryParse(account['speedBoostUntil']?.toString() ?? ''),
             );
           }
         }
-        await _ownedVPNClient.restore(widget.bridge);
+        await _profileClient.restore(widget.bridge);
       } catch (_) {
         // A failed account refresh keeps the already protected VPN sources.
       } finally {
@@ -5183,7 +5259,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         if (target) connectionAttempt++;
         statusMessage = target ? 'Подключаем VPN' : 'Отключаем VPN';
         connectionHint = target
-            ? 'Проверяем конфиг и запускаем VPN; стратегии сервисов проверятся в фоне.'
+            ? 'Проверяем конфигурацию и запускаем VPN.'
             : 'Останавливаем сетевые процессы и возвращаем системные настройки.';
         connectionHintDanger = false;
       });
@@ -6363,7 +6439,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _setHomeRoutePolicy(RouteService service, String policy) async {
-    if (uiBusy || policy == service.selectedMethod) {
+    if (uiBusy || service.vpnOnly || policy == service.selectedMethod) {
       return;
     }
     setState(() {
@@ -6496,8 +6572,9 @@ class _DropoHomePageState extends State<DropoHomePage>
     _androidHaptic();
     setState(() {
       uiBusy = true;
+      _pendingRoutingMode = mode;
       statusMessage = mode == 'all_traffic'
-          ? 'Переключаем весь трафик на VPN'
+          ? 'Переключаем заблокированные и ИИ-сервисы на VPN'
           : 'Включаем выборочные маршруты';
       connectionHint = status.connected && !_isAndroidPlatform
           ? 'VPN будет автоматически переподключён.'
@@ -6516,6 +6593,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
       setState(() {
         appConfig = appConfig.copyWith(routingMode: mode);
+        if (mode == 'all_traffic') _clearRouteProbe();
         homeRoutesExpanded = mode == 'blocked_only';
         liveRoutesConfirmed = false;
         statusMessage = mode == 'all_traffic'
@@ -6536,7 +6614,10 @@ class _DropoHomePageState extends State<DropoHomePage>
       }
     } finally {
       if (mounted) {
-        setState(() => uiBusy = false);
+        setState(() {
+          _pendingRoutingMode = null;
+          uiBusy = false;
+        });
       }
     }
   }
@@ -6589,7 +6670,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         routes
             .where(
               (route) =>
-                  !route.homeVisible && !isPrimaryHomeRouteService(route.tag),
+                  !route.vpnOnly && !route.homeVisible && !isPrimaryHomeRouteService(route.tag),
             )
             .toList(growable: false)
           ..sort((left, right) => left.name.compareTo(right.name));
@@ -6657,7 +6738,9 @@ class _DropoHomePageState extends State<DropoHomePage>
             externalVpnConflictBlocked ||
             depsProgress.trim().isNotEmpty);
     final showRouteProbe =
-        (routeProbeActive || routeProbeFailed) && routeProbeProgress.isNotEmpty;
+        _usesServiceRoutes &&
+        (routeProbeActive || routeProbeFailed) &&
+        routeProbeProgress.isNotEmpty;
     // Platform views are instantiated only on a real Android runtime. Desktop
     // and host widget tests retain the native Flutter layout.
     if (Platform.isAndroid) {
@@ -6768,7 +6851,7 @@ class _DropoHomePageState extends State<DropoHomePage>
       );
     }
     return _AtlasHomeLayout(
-      noticeLabel: routeProbeActive && routeProbeExtendedSearch && !hintDanger
+      noticeLabel: showRouteProbe && routeProbeExtendedSearch && !hintDanger
           ? 'Поиск до часа'
           : 'Сообщения',
       telemetry:
@@ -6943,7 +7026,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     summaryOnly: summaryOnly,
     services: routes
         .where(
-          (route) => route.homeVisible || isPrimaryHomeRouteService(route.tag),
+          (route) => !route.vpnOnly && (route.homeVisible || isPrimaryHomeRouteService(route.tag)),
         )
         .toList(growable: false),
     enabled: !controlsDisabled && !connectionBusy,
@@ -6983,6 +7066,8 @@ class _DropoHomePageState extends State<DropoHomePage>
               ? null
               : _openWireGuard,
         );
+      case 'vpn-only-services':
+        return _VPNOnlyServicesPage(bridge: widget.bridge);
       case 'guided-help':
         return _GuidedHelpPage(
           key: const ValueKey('guided-help-section'),
@@ -7021,10 +7106,10 @@ class _DropoHomePageState extends State<DropoHomePage>
           onDisplayChanged: _accountDisplay.publish,
           identity: _guestIdentity,
           onVPNProfile: (token, consent) =>
-              _ownedVPNClient.linkAccount(widget.bridge, token, consent),
-          onDeleteGuestVPN: () => _ownedVPNClient.deleteGuest(widget.bridge),
+              _profileClient.linkAccount(widget.bridge, token, consent),
+          onDeleteGuestVPN: () => _profileClient.deleteGuest(widget.bridge),
           onForgetVPNProfile: (preserveStandaloneGuest) =>
-              _ownedVPNClient.forgetLocalProfile(
+              _profileClient.forgetLocalProfile(
                 widget.bridge,
                 preserveStandaloneGuest: preserveStandaloneGuest,
               ),
@@ -12442,7 +12527,35 @@ String _routePolicyFromJson(Map<String, dynamic> json) {
 
 const List<RouteService> fallbackRoutes = [
   RouteService(
+    tag: 'claude',
+    vpnOnly: true,
+    name: 'Claude',
+    method: 'Через VPN',
+    selectedMethod: 'vpn',
+    requiresVpn: true,
+    delayMs: 0,
+    domainSuffixes: [
+      'claude.ai',
+      'claude.com',
+      'anthropic.com',
+      'claude.app',
+      'claudeusercontent.com',
+      'claudemcpcontent.com',
+    ],
+  ),
+  RouteService(
+    tag: 'ai-other',
+    vpnOnly: true,
+    name: 'Другие AI-сервисы',
+    method: 'Через VPN',
+    selectedMethod: 'vpn',
+    requiresVpn: true,
+    delayMs: 0,
+    domainSuffixes: ['gemini.google.com', 'perplexity.ai', 'githubcopilot.com'],
+  ),
+  RouteService(
     tag: 'openai',
+    vpnOnly: true,
     name: 'ChatGPT',
     method: 'Через VPN',
     selectedMethod: 'vpn',

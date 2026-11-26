@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"sync/atomic"
 	"testing"
 )
 
@@ -64,5 +65,31 @@ func TestAndroidReadOnlyCheckDoesNotAcceptReconnect(t *testing.T) {
 	}
 	if report["sessionValid"] != false {
 		t.Fatal("read-only result survived a session change")
+	}
+}
+
+func TestAndroidProtectedDiagnosticNeverUsesPhysicalClient(t *testing.T) {
+	mu.Lock()
+	original := current
+	current = defaultState()
+	current.Config.RoutingMode = "blocked_only"
+	current.RoutePolicies = map[string]string{"claude": "direct", "openai": "auto", "canva": "direct"}
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); current = original; mu.Unlock() })
+	var protected atomic.Int32
+	runAndroidClientQuickCheckWithProbe(true, func(ctx context.Context, c *http.Client, url string) (int, string) {
+		for _, tag := range []string{"claude", "openai", "canva"} {
+			if url == androidServiceHealthTarget(tag) {
+				protected.Add(1)
+				if c != nil {
+					t.Errorf("direct HTTP client offered to %s", tag)
+				}
+				return probeAndroidService(ctx, c, url)
+			}
+		}
+		return http.StatusNoContent, ""
+	})
+	if protected.Load() != 3 {
+		t.Fatalf("protected checks=%d", protected.Load())
 	}
 }

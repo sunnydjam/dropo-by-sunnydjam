@@ -103,7 +103,7 @@ func (a *App) requestRouteStrategyMaintenance(reason string) {
 }
 
 func (a *App) requestRouteStrategyMaintenanceForSession(session uint64, reason string) {
-	if a.routeStrategyJobs == nil || a.isShuttingDown() {
+	if a.routeStrategyJobs == nil || a.isShuttingDown() || a.windowsFullTunnel() {
 		return
 	}
 	if reason == "" {

@@ -57,6 +57,7 @@ class _Bridge extends MockCoreBridge {
   }
 
   bool failStatus = false;
+  bool failBoost = false;
   List<Map<String, dynamic>>? references;
   final added = <String>[];
   final removed = <String>[];
@@ -77,7 +78,7 @@ class _Bridge extends MockCoreBridge {
     }
     if (method == 'AddManagedVPNSource') {
       added.add(args[0] as String);
-      return {'success': true};
+      return {'success': !(failBoost && args[0] == 'dropo-individual-boost')};
     }
     if (method == 'GetVPNSources') {
       return {
@@ -345,6 +346,29 @@ void main() {
       expect(api.calls.any((x) => x.contains('/v1/guest/link')), false);
     },
   );
+  test(
+    'first Turbo grant provisions a new device and retries partial delivery',
+    () async {
+      vault.value = null;
+      bridge.failBoost = true;
+      Future<Map<String, dynamic>> sync() => HttpOverrides.runWithHttpOverrides(
+        () => client.synchronizeEntitlement(
+          bridge,
+          'registered-fixture',
+          until,
+          transport: api,
+        ),
+        _HTTP(),
+      );
+      expect((await sync())['success'], false);
+      expect(vault.record['boostApplyPending'], true);
+      bridge.failBoost = false;
+      expect((await sync())['turboReady'], true);
+      expect(vault.record.containsKey('boostApplyPending'), false);
+      expect(bridge.moves, [('boost', 0)]);
+    },
+  );
+
   test('unchanged entitlement does not query or reissue profiles', () async {
     vault.value = base64UrlEncode(
       utf8.encode(

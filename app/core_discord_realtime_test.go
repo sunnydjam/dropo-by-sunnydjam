@@ -657,7 +657,7 @@ func TestDiscordRealtimeOutboundsPreferNativeDirectBeforeVPNSources(t *testing.T
 		t.Fatalf("Discord VPN selector = %#v", vpn)
 	}
 	realtime := findOutboundMap(outbounds, discordRealtimeGroupTag)
-	if realtime == nil || realtime["default"] != "direct" || !sameStringSet(interfaceStringSlice(realtime["outbounds"]), []string{"direct", discordVPNGroupTag}) {
+	if realtime == nil || realtime["default"] != "direct" || !sameStringSet(interfaceStringSlice(realtime["outbounds"]), []string{"direct", NoRouteOutboundTag, discordVPNGroupTag}) {
 		t.Fatalf("Discord realtime selector = %#v", realtime)
 	}
 

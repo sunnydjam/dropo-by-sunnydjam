@@ -1371,33 +1371,39 @@ void main() {
     expect(find.text('Отключить'), findsOneWidget);
   });
 
-  testWidgets('compact service row has a touch target and persists a route', (
-    tester,
-  ) async {
-    final bridge = _HomeBridge();
-    await bridge.saveSubscription('https://example.test/subscription');
-    await _pumpHome(tester, bridge, size: const Size(700, 500));
-    await openHomeService(tester, 'openai');
-    final row = find.byKey(const ValueKey('home-service-row-openai'));
-    expect(tester.getSize(row).height, greaterThanOrEqualTo(56));
-    await _tap(tester, 'service-route-openai-direct');
-    expect(bridge.policyWrites, 1);
-    expect(
-      find.byKey(const ValueKey('service-route-openai-direct')),
-      findsOneWidget,
-    );
-    await _tap(tester, 'toggle-home-route-services');
-    expect(find.byKey(const ValueKey('service-search')), findsNothing);
-    await _tap(tester, 'toggle-home-route-services');
-    await tester.enterText(
-      find.byKey(const ValueKey('service-search')),
-      'google',
-    );
-    await tester.pump();
-    await _tap(tester, 'home-service-row-google');
-    expect(find.byKey(const ValueKey('pin-service-google')), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
+  testWidgets(
+    'compact service row has a touch target and locks ChatGPT to VPN',
+    (tester) async {
+      final bridge = _HomeBridge();
+      await bridge.saveSubscription('https://example.test/subscription');
+      await _pumpHome(tester, bridge, size: const Size(700, 500));
+      await openSection(tester, 'services');
+      final row = find.byKey(const ValueKey('home-service-row-youtube'));
+      expect(tester.getSize(row).height, greaterThanOrEqualTo(48));
+      await _tap(tester, 'services-all');
+      for (final tag in ['openai', 'claude', 'ai-other']) {
+        expect(find.byKey(ValueKey('home-service-row-$tag')), findsNothing);
+      }
+      expect(bridge.policyWrites, 0);
+      await _tap(tester, 'toggle-home-route-services');
+      expect(find.byKey(const ValueKey('service-search')), findsNothing);
+      await _tap(tester, 'toggle-home-route-services');
+      await tester.enterText(
+        find.byKey(const ValueKey('service-search')),
+        'google',
+      );
+      await tester.pump();
+      await _tap(tester, 'home-service-row-google');
+      expect(find.byKey(const ValueKey('pin-service-google')), findsOneWidget);
+      await openSection(tester, 'settings');
+      await _tap(tester, 'link-vpn-only-services');
+      for (final tag in ['openai', 'claude', 'ai-other']) {
+        expect(find.byKey(ValueKey('vpn-only-$tag')), findsOneWidget);
+      }
+      expect(find.byKey(const ValueKey('vpn-only-youtube')), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   for (final mobile in [false, true]) {
     testWidgets(

@@ -131,8 +131,8 @@ func TestWindowsProtectionCapabilityPreservesDirectFirstMode(t *testing.T) {
 	}
 
 	full := vpnProtectionStatusForPlatform(RoutingModeAllTraffic, "windows")
-	if full.Available || full.Active || !full.EligibleMode || full.TargetScope != "device" || full.State != "guard_not_integrated" {
-		t.Fatalf("full-tunnel mode must identify device scope without claiming active protection: %+v", full)
+	if full != selective {
+		t.Fatalf("catalog VPN must identify service scope without claiming active protection: %+v", full)
 	}
 
 	other := vpnProtectionStatusForPlatform(RoutingModeAllTraffic, "linux")

@@ -105,7 +105,15 @@ val targetAbis = flutterTargetPlatforms.mapNotNull {
     }
 }.distinct()
 
+val catalogAssets = tasks.register<Sync>("stageBlockedCatalog") {
+    from(rootProject.file("../../dependencies/filters")) {
+        include("refilter_domains.srs", "refilter_ips.srs")
+    }
+    into(layout.buildDirectory.dir("generated/blockedCatalog"))
+}
+
 android {
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/blockedCatalog").get().asFile)
     namespace = "in.droponevedimka.dropo"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
@@ -189,3 +197,5 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+tasks.named("preBuild") { dependsOn(catalogAssets) }

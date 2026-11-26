@@ -25,22 +25,24 @@ class _ProgressBridge extends MockCoreBridge {
     'autoStartPrompted': true,
     'checkUpdates': false,
     'reduceMotion': true,
-    'routingMode': 'blocked_only',
   };
 }
 
 Future<_ProgressBridge> _pump(
   WidgetTester tester,
   Size size,
-  double scale,
-) async {
+  double scale, {
+  String mode = 'blocked_only',
+  bool connected = true,
+}) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   debugMobileShellOverride = size.width < 500;
   final bridge = _ProgressBridge();
   addTearDown(bridge.controller.close);
+  await bridge.setRoutingMode(mode);
   await bridge.saveSubscription('https://example.test/fixture');
-  await bridge.setConnected(true);
+  if (connected) await bridge.setConnected(true);
   await tester.pumpWidget(
     MaterialApp(
       theme: ThemeData.dark().copyWith(
@@ -118,6 +120,53 @@ void main() {
     view.resetPhysicalSize();
     view.resetDevicePixelRatio();
   });
+
+  testWidgets(
+    'full tunnel ignores strategy progress on connect and mode switch',
+    (tester) async {
+      final bridge = await _pump(
+        tester,
+        const Size(1024, 768),
+        1,
+        mode: 'all_traffic',
+        connected: false,
+      );
+      void emitProgress() {
+        bridge.emit('route-probe-start', const {
+          'extendedSearch': true,
+          'serviceCount': 1,
+          'services': [
+            {'tag': 'discord', 'name': 'Discord'},
+          ],
+        });
+        bridge.emit('route-probe-candidate', const {
+          'serviceTag': 'discord',
+          'serviceName': 'Discord',
+          'status': 'voice-check',
+        });
+      }
+
+      await tester.tap(_key('home-connect'));
+      await tester.pumpAndSettle();
+      expect((await bridge.status()).connected, isTrue);
+      emitProgress();
+      await tester.pumpAndSettle();
+      expect(_key('notice-overlay'), findsNothing);
+      await tester.tap(_key('home-routing-selected'));
+      await tester.pumpAndSettle();
+      expect(_key('notice-overlay'), findsNothing);
+      emitProgress();
+      await tester.pumpAndSettle();
+      expect(_key('route-probe-details'), findsOneWidget);
+      await tester.tap(_key('home-routing-all-vpn'));
+      await tester.pumpAndSettle();
+      expect(_key('notice-overlay'), findsNothing);
+      emitProgress();
+      await tester.pumpAndSettle();
+      expect(_key('notice-overlay'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   for (final (size, scale) in [
     (const Size(684, 461), 1.0),

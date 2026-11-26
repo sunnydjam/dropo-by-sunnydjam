@@ -125,6 +125,9 @@ func EndAndroidSourceSession(generation int64) {
 	if current.sourceSession != generation {
 		return
 	}
+	androidVPNCheck.client = nil
+	androidVPNCheck.session = nil
+	androidVPNCheck.generation = 0
 	current.sourceSession = 0
 	current.adaptiveActive = nil
 	current.activeSourceID = ""

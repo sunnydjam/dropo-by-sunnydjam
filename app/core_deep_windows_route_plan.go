@@ -72,16 +72,9 @@ func buildDeepWindowsRoutePlanForSettings(settings GlobalAppSettings, hasVPNCand
 		plan.requireProxy("RU traffic hiding is enabled")
 	}
 
-	switch mode {
-	case RoutingModeAllTraffic:
-		plan.RUTraffic = DeepWindowsTrafficProxy
-		plan.ForeignTraffic = DeepWindowsTrafficProxy
-		plan.DefaultTraffic = DeepWindowsTrafficProxy
-		plan.requireProxy("all-traffic routing is enabled")
-	default:
-		plan.DefaultTraffic = DeepWindowsTrafficDirect
-	}
 	if mode == RoutingModeAllTraffic {
+		plan.RUTraffic = DeepWindowsTrafficDirect
+		plan.requireProxy("blocked catalog uses VPN")
 		for _, svc := range DefaultFreeAccessServices {
 			if hasVPNCandidates {
 				plan.ProxyServices = append(plan.ProxyServices, svc.Tag)
@@ -152,25 +145,25 @@ func deepWindowsServiceAction(settings GlobalAppSettings, svc FreeAccessService,
 		if hasVPNCandidates {
 			return DeepWindowsTrafficProxy, fmt.Sprintf("%s requires VPN/subscription", svc.DisplayName)
 		}
-		return DeepWindowsTrafficDirect, ""
+		return DeepWindowsTrafficBlock, ""
 	}
 	if !serviceHasFreeBypass(svc.Tag) {
 		if hasVPNCandidates {
 			return DeepWindowsTrafficProxy, fmt.Sprintf("%s has no working free bypass and uses VPN/subscription", svc.DisplayName)
 		}
-		return DeepWindowsTrafficDirect, ""
+		return DeepWindowsTrafficBlock, ""
 	}
 	if !FreeAccessServiceEnabled(settings, svc.Tag) {
 		if hasVPNCandidates {
 			return DeepWindowsTrafficProxy, fmt.Sprintf("%s free access is disabled and VPN fallback is available", svc.DisplayName)
 		}
-		return DeepWindowsTrafficDirect, ""
+		return DeepWindowsTrafficBlock, ""
 	}
 	if !FreeMethodsAllowed(settings) {
 		if hasVPNCandidates {
 			return DeepWindowsTrafficProxy, fmt.Sprintf("%s free methods are disabled and VPN fallback is available", svc.DisplayName)
 		}
-		return DeepWindowsTrafficDirect, ""
+		return DeepWindowsTrafficBlock, ""
 	}
 	if hasTransparent {
 		return DeepWindowsTrafficTransparent, ""
@@ -181,7 +174,7 @@ func deepWindowsServiceAction(settings GlobalAppSettings, svc FreeAccessService,
 	if hasVPNCandidates {
 		return DeepWindowsTrafficProxy, fmt.Sprintf("%s falls back to VPN because free methods are unavailable", svc.DisplayName)
 	}
-	return DeepWindowsTrafficDirect, ""
+	return DeepWindowsTrafficBlock, ""
 }
 
 func (p *DeepWindowsRoutePlan) requireProxy(reason string) {

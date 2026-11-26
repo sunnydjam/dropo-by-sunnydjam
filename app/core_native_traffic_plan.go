@@ -1,9 +1,11 @@
 package main
 
 import (
+	"dropocore/aicatalog"
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -32,7 +34,7 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 	}
 	for _, service := range DefaultFreeAccessServices {
 		selection, selected := selections[service.Tag]
-		if !selected {
+		if !selected || aicatalog.VPNOnly(service.Tag) {
 			continue
 		}
 		candidateIDs := nativeStrategyIDsForService(service.Tag)
@@ -102,12 +104,32 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 			IPMatchPolicy: traffic.IPMatchHostless,
 			TCPPorts:      []int{80, 443}, UDPPorts: []int{443},
 			CandidateStrategyIDs: commonCandidateIDs,
-			AllowVPNFallback:     true, AllowDirectFallback: true,
+			AllowVPNFallback:     true, AllowDirectFallback: false,
 		})
 		plan.Selections = append(plan.Selections, traffic.ServiceSelection{
 			ServiceID: commonBlockedServiceTag, StrategyID: strategyID,
 		})
 		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: commonBlockedServiceTag, Kind: traffic.ServiceRouteZapret})
+	}
+	if _, selecting := selections[commonBlockedServiceTag]; !selecting && a != nil && a.storage != nil && shouldUseSelectiveWindowsSession(a.storage.GetAppSettings()) {
+		// The two catalog formats ship together in the verified runtime. Unit
+		// fixtures without bundled filters may contain only named services.
+		base := a.runtimeBasePath()
+		if base != "" && fileExists(filepath.Join(base, "bin", FiltersFolder, blockedDomainsFileName)) {
+			catalog, err := a.loadBlockedCatalogCached()
+			if err != nil {
+				return traffic.TrafficPlan{}, err
+			}
+			hasVPN, _ := configHasVPNProbeCandidates(a.storage.ActiveConfigFilePath())
+			kind := traffic.ServiceRouteUnavailable
+			if hasVPN {
+				kind = traffic.ServiceRouteVPN
+			}
+			// The narrow sing-box TUN handles IP-only entries. Domain rules here
+			// drive synthetic DNS and PAC without expanding WinDivert to all HTTPS.
+			plan.Services = append(plan.Services, traffic.ServiceRule{ID: commonBlockedServiceTag, DisplayName: "Blocked domains", DomainSuffixes: catalog.Domains})
+			plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: commonBlockedServiceTag, Kind: kind})
+		}
 	}
 	a.addNativeVPNServiceRoutes(&plan)
 	a.addNativeWireGuardRules(&plan)
@@ -138,11 +160,16 @@ func (a *App) addNativeVPNServiceRoutes(plan *traffic.TrafficPlan) {
 				vpnRoute = true
 			}
 		}
-		if known[service.Tag] || !vpnRoute {
+		unavailable := method != FreeAccessMethodDirect && (cache[service.Tag].MethodTag == NoRouteOutboundTag || !hasVPN && method == FreeAccessMethodAuto && (!serviceHasFreeBypass(service.Tag) || !FreeMethodsAllowed(settings)))
+		if known[service.Tag] || (!vpnRoute && !unavailable) {
 			continue
 		}
 		plan.Services = append(plan.Services, nativeServiceRule(service, nil))
-		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: service.Tag, Kind: traffic.ServiceRouteVPN})
+		kind := traffic.ServiceRouteVPN
+		if unavailable && method != FreeAccessMethodVPN && !(hasVPN && method == FreeAccessMethodAuto) {
+			kind = traffic.ServiceRouteUnavailable
+		}
+		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: service.Tag, Kind: kind})
 		known[service.Tag] = true
 	}
 }
@@ -166,7 +193,7 @@ func rotateStringValues(values []string, first string) []string {
 
 func nativeServiceRule(service FreeAccessService, strategyIDs []string) traffic.ServiceRule {
 	rule := traffic.ServiceRule{
-		ID: service.Tag, DisplayName: service.DisplayName,
+		ID: service.Tag, DisplayName: service.DisplayName, VPNOnly: aicatalog.VPNOnly(service.Tag),
 		ExactHosts:           append([]string(nil), service.ExactHosts...),
 		DomainSuffixes:       append([]string(nil), service.DomainSuffixes...),
 		IPCIDRs:              append([]string(nil), service.IPCIDRs...),
@@ -175,13 +202,16 @@ func nativeServiceRule(service FreeAccessService, strategyIDs []string) traffic.
 		UDPPorts:             []int{443},
 		CandidateStrategyIDs: append([]string(nil), strategyIDs...),
 		AllowVPNFallback:     true,
-		AllowDirectFallback:  true,
+		AllowDirectFallback:  false,
 	}
 	if len(rule.ProcessNames) > 0 {
 		rule.ProcessMatchPolicy = traffic.ProcessMatchIdentity
 	}
 	if len(rule.IPCIDRs) > 0 {
 		rule.IPMatchPolicy = traffic.IPMatchRequireContext
+	}
+	if service.Tag == "openai" {
+		rule.ProcessDiscoveryUDPPortRanges = []traffic.PortRange{{First: 3478, Last: 3478}}
 	}
 	if service.Tag == "telegram" {
 		// MTProto DCs may assign any TCP port. Native capture remains scoped
@@ -315,7 +345,7 @@ func (a *App) addNativeWireGuardRules(plan *traffic.TrafficPlan) {
 			IPMatchPolicy:        traffic.IPMatchRequireContext,
 			Fingerprints:         []string{"wireguard-initiation", "wireguard-cookie"},
 			CandidateStrategyIDs: []string{"native-decoy-split"},
-			AllowDirectFallback:  true,
+			AllowDirectFallback:  false,
 		})
 		plan.Selections = append(plan.Selections, traffic.ServiceSelection{ServiceID: id, StrategyID: "native-decoy-split"})
 		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: id, Kind: traffic.ServiceRouteZapret})

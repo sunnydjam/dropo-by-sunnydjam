@@ -2,6 +2,12 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 4.0.2
+
+- В Windows оба режима направляют в VPN сайты из каталога блокировок. Обычные сайты и их DNS используют прямой маршрут. В режиме «По сервисам» сохраняется выбранный метод для конкретного сервиса.
+- ChatGPT, Claude и остальные сервисы с обязательным VPN перечислены в настройках. Редактировать их маршрут или переключать их на Direct при сбое нельзя.
+- Исправлено применение старых настроек и отчёт о проверке подключения при недоступности VPN.
+
 ## 4.0.1
 
 - Android now shows a full-height green space background with passing meteor showers on tall phones.

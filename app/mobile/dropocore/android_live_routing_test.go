@@ -71,14 +71,12 @@ func assertAndroidLiveMetaRoute(t *testing.T, config, outbound, dns string) {
 		}
 		return
 	}
-	rules := policy["rules"].([]interface{})
-	if len(rules) < 7 {
-		t.Fatal("live mode change discarded encrypted DNS failover")
+	if policy["final"] != "dns-direct" {
+		t.Fatal("ordinary DNS lost its direct route")
 	}
-	last := rules[len(rules)-7:]
-	for i, want := range map[int]string{0: dns + "-fi", 3: dns, 6: dns + "-lv"} {
-		if last[i].(map[string]interface{})["server"] != want {
-			t.Fatalf("live mode change lost the public DNS chain at %d", i)
+	for _, tag := range []string{dns + "-fi", dns, dns + "-lv"} {
+		if !androidContainsDNSServer(parsed, "instagram.com", tag) {
+			t.Fatalf("missing named DNS transport %s", tag)
 		}
 	}
 }

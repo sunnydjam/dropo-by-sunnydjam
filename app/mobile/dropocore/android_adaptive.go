@@ -21,7 +21,7 @@ type androidAdaptiveService struct {
 // This candidate covers HTTPS/TCP only. QUIC, calls, unknown protocols and
 // ports keep the VPN route. There is no Android WinDivert/zapret executable.
 func androidAdaptiveServices(policies map[string]string) []androidAdaptiveService {
-	allowed := map[string]bool{"youtube": true, "meta": true, "facebook": true, "twitter": true, "linkedin": true, "twitch": true, "spotify": true, "canva": true, "notion": true, "openai": true}
+	allowed := map[string]bool{"youtube": true, "meta": true, "facebook": true, "twitter": true, "linkedin": true, "twitch": true, "spotify": true}
 	out := []androidAdaptiveService{}
 	for _, service := range androidServiceCatalog() {
 		if !allowed[service.Tag] || androidServicePolicy(service, policies) != androidRoutePolicyAuto {
@@ -56,10 +56,11 @@ func addAndroidAdaptiveGraph(config map[string]interface{}, policies map[string]
 		adaptive = append(adaptive, map[string]interface{}{"network": "tcp", "protocol": "tls", "port": 443, "domain_suffix": append([]string(nil), service.DomainSuffixes...), "action": "route", "outbound": tag, "tls_record_fragment": true})
 	}
 	// The first four rules preserve sniff/DNS and private/work boundaries.
-	if len(rules) >= 4 {
-		next := append([]interface{}{}, rules[:4]...)
+	const baseRules = 6 // sniff, DNS, private IP/domain, then mandatory VPN domains/packages
+	if len(rules) >= baseRules {
+		next := append([]interface{}{}, rules[:baseRules]...)
 		next = append(next, adaptive...)
-		rules = append(next, rules[4:]...)
+		rules = append(next, rules[baseRules:]...)
 	}
 	config["outbounds"], route["rules"] = outbounds, rules
 }

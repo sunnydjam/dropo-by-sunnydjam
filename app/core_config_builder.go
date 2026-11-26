@@ -1,6 +1,7 @@
 package main
 
 import (
+	"dropocore/aicatalog"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -360,8 +361,6 @@ func (b *ConfigBuilder) generateOutbounds(template map[string]interface{}, proxi
 
 		// Selector для ручного выбора
 		selectorOutbounds := append([]string{"auto-select"}, proxyTags...)
-		selectorOutbounds = append(selectorOutbounds, "direct")
-
 		if selector, ok := outboundsTemplate["selector"].(map[string]interface{}); ok {
 			selector = copyMap(selector)
 			selector["outbounds"] = selectorOutbounds
@@ -379,9 +378,10 @@ func (b *ConfigBuilder) generateOutbounds(template map[string]interface{}, proxi
 		outbounds = append(outbounds, map[string]interface{}{
 			"type":      "selector",
 			"tag":       "proxy",
-			"outbounds": []string{"direct"},
-			"default":   "direct",
+			"outbounds": []string{NoRouteOutboundTag},
+			"default":   NoRouteOutboundTag,
 		})
+		outbounds = append(outbounds, map[string]any{"type": "block", "tag": NoRouteOutboundTag})
 	}
 
 	// Добавляем direct
@@ -878,43 +878,72 @@ func buildBlockedCatalogRouteRules(configs []map[string]interface{}, outbound st
 	return rules
 }
 
-// applyAllTrafficMode configures routing for all traffic through VPN.
-// Removes all direct rules for Russia, everything goes through proxy.
-func (b *ConfigBuilder) applyAllTrafficMode(route map[string]interface{}, existingRules, existingRuleSets []interface{}) {
-	fmt.Printf("[applyRoutingMode] Using all_traffic mode\n")
+func (b *ConfigBuilder) applyAllTrafficMode(route map[string]interface{}, _, _ []interface{}) {
+	applyCatalogVPNRoutes(route, b.filterManager)
+}
 
-	// Remove geosite/geoip rule_sets (not needed for all traffic mode)
-	route["rule_set"] = []interface{}{}
-
-	// Minimal rules: sniff, private, everything else proxy
-	newRules := []interface{}{
-		// 1. Sniff
-		map[string]interface{}{
-			"action": "sniff",
-		},
-		// 2. Local domains direct
-		map[string]interface{}{
-			"domain_suffix": LocalDomainSuffixes,
-			"action":        "route",
-			"outbound":      "direct",
-		},
-		// 3. Hijack DNS
-		map[string]interface{}{
-			"protocol": "dns",
-			"action":   "hijack-dns",
-		},
-		// 4. Private IPs direct
-		map[string]interface{}{
-			"ip_is_private": true,
-			"action":        "route",
-			"outbound":      "direct",
-		},
+func catalogVPNFilters(manager *FilterManager) []map[string]any {
+	if manager == nil {
+		return nil
 	}
+	var rules []map[string]any
+	for _, entry := range manager.GetRuleSetConfigs() {
+		if entry["tag"] == "refilter-domains" || entry["tag"] == "refilter-ips" {
+			rules = append(rules, entry)
+		}
+	}
+	return rules
+}
 
-	route["rules"] = newRules
-	route["final"] = "proxy"
+func protectedServiceRules(settings GlobalAppSettings, hasVPN, catalog bool) []any {
+	var rules []any
+	for _, service := range DefaultFreeAccessServices {
+		if !aicatalog.VPNOnly(service.Tag) {
+			continue
+		}
+		outbound := FreeAccessServiceRouteOutboundForSettings(service, settings, hasVPN)
+		if catalog {
+			outbound = "proxy"
+		}
+		if len(service.DomainSuffixes) > 0 {
+			rules = append(rules, map[string]any{"domain_suffix": service.DomainSuffixes, "action": "route", "outbound": outbound})
+		}
+		if len(service.ProcessNames) > 0 {
+			rules = append(rules, map[string]any{"process_name": service.ProcessNames, "action": "route", "outbound": outbound})
+		}
+	}
+	return rules
+}
 
-	fmt.Printf("[applyRoutingMode] Applied all_traffic: minimal rules, final=proxy\n")
+func applyCatalogVPNRoutes(route map[string]any, manager *FilterManager) {
+	filters := catalogVPNFilters(manager)
+	sets := make([]any, 0, len(filters))
+	for _, f := range filters {
+		sets = append(sets, f)
+	}
+	route["rule_set"] = sets
+	rules := []any{
+		map[string]any{"action": "sniff"},
+		map[string]any{"protocol": "dns", "action": "hijack-dns"},
+		map[string]any{"ip_is_private": true, "action": "route", "outbound": "direct"},
+		map[string]any{"domain_suffix": LocalDomainSuffixes, "action": "route", "outbound": "direct"},
+		map[string]any{"process_name": []string{XrayExeName}, "action": "route", "outbound": "direct"},
+	}
+	rules = append(rules, protectedServiceRules(GlobalAppSettings{}, true, true)...)
+	rules = append(rules, buildDirectServiceRules()...)
+	for _, svc := range DefaultFreeAccessServices {
+		if aicatalog.VPNOnly(svc.Tag) {
+			continue
+		}
+		if len(svc.DomainSuffixes) > 0 {
+			rules = append(rules, map[string]any{"domain_suffix": svc.DomainSuffixes, "action": "route", "outbound": "proxy"})
+		}
+		if len(svc.ProcessNames) > 0 {
+			rules = append(rules, map[string]any{"process_name": svc.ProcessNames, "action": "route", "outbound": "proxy"})
+		}
+	}
+	rules = append(rules, buildBlockedCatalogRouteRules(filters, "proxy", []string{"refilter-domains"}, []string{"refilter-ips"})...)
+	route["rules"], route["final"] = rules, "direct"
 }
 
 // applyExceptRussiaMode configures routing for all traffic except Russia through VPN.

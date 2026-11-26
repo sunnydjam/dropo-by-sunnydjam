@@ -95,7 +95,7 @@ func ValidatePlan(plan TrafficPlan) error {
 			return fmt.Errorf("route references unknown service %q", route.ServiceID)
 		}
 		switch route.Kind {
-		case ServiceRouteDirect, ServiceRouteVPN, ServiceRouteZapret:
+		case ServiceRouteDirect, ServiceRouteVPN, ServiceRouteZapret, ServiceRouteUnavailable:
 		default:
 			return fmt.Errorf("route for %q uses unsupported kind %q", route.ServiceID, route.Kind)
 		}
@@ -103,6 +103,15 @@ func ValidatePlan(plan TrafficPlan) error {
 			return fmt.Errorf("duplicate route for service %q", route.ServiceID)
 		}
 		routes[route.ServiceID] = route.Kind
+	}
+	for _, service := range plan.Services {
+		if !service.VPNOnly {
+			continue
+		}
+		kind := routes[service.ID]
+		if len(service.CandidateStrategyIDs) > 0 || service.AllowDirectFallback || (kind != "" && kind != ServiceRouteVPN && kind != ServiceRouteUnavailable) {
+			return fmt.Errorf("service %q requires exclusive VPN routing", service.ID)
+		}
 	}
 	for serviceID := range selections {
 		if kind, exists := routes[serviceID]; exists && kind != ServiceRouteZapret {

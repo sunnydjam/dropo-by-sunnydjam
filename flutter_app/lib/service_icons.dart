@@ -37,6 +37,7 @@ const Map<String, IconData> _servicePictograms = {
   'notion': Icons.menu_book_rounded,
   'manychat': Icons.mark_unread_chat_alt_rounded,
   'ai-other': Icons.hub_rounded,
+  'claude': Icons.auto_awesome_rounded,
 };
 
 @visibleForTesting

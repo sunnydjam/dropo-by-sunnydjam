@@ -47,7 +47,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
   void initState() {
     super.initState();
     if (widget.routeSnapshot != null) {
-      services = widget.routeSnapshot!;
+      services = widget.routeSnapshot!.where((s) => !s.vpnOnly).toList();
     } else {
       unawaited(_load());
     }
@@ -67,7 +67,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
         widget.routeSnapshot != null &&
         !identical(oldWidget.routeSnapshot, widget.routeSnapshot)) {
       ++loadGeneration;
-      services = widget.routeSnapshot!;
+      services = widget.routeSnapshot!.where((s) => !s.vpnOnly).toList();
       loading = false;
       loadError = '';
     } else if (!busy &&
@@ -89,7 +89,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
           .routes(live: connected)
           .timeout(const Duration(seconds: 10));
       if (mounted && generation == loadGeneration) {
-        setState(() => services = result);
+        setState(() => services = result.where((s) => !s.vpnOnly).toList());
       }
     } catch (error) {
       if (mounted && generation == loadGeneration) {

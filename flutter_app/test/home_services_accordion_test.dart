@@ -31,6 +31,7 @@ class _ServicesBridge extends MockCoreBridge {
       for (final tag in ['youtube', 'discord', 'meta', 'openai', 'telegram'])
         RouteService(
           tag: tag,
+          vpnOnly: tag == 'openai',
           name: switch (tag) {
             'youtube' => 'YouTube',
             'discord' => 'Discord',
@@ -201,8 +202,8 @@ void main() {
     expect(find.byKey(const ValueKey('service-search')), findsNothing);
     expect(find.byKey(const ValueKey('nav-services')), findsNothing);
     await _open(tester);
-    expect(find.text('Закреплённые 4'), findsOneWidget);
-    expect(find.text('Все 5'), findsOneWidget);
+    expect(find.text('Закреплённые 3'), findsOneWidget);
+    expect(find.text('Все 4'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('home-service-row-youtube')),
       findsOneWidget,
@@ -227,7 +228,7 @@ void main() {
     expect(bridge.pins['telegram'], true);
     expect(bridge.routeWrites, 0);
     await _search(tester, '');
-    expect(find.text('Закреплённые 5'), findsOneWidget);
+    expect(find.text('Закреплённые 4'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('home-service-row-telegram')),
       findsOneWidget,

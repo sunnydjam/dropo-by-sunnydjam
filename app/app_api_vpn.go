@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"dropocore/aicatalog"
 	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
@@ -425,89 +426,11 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	a.writeLog(fmt.Sprintf("Network config: %s", configPath))
 	a.writeLog(fmt.Sprintf("Log level: %s", logLevel))
 
-	// Start local helpers before sing-box so local outbounds are already
-	// reachable when sing-box performs its first group health checks.
-	a.updateBusy(busyID, "Запускаем бесплатные методы обхода...")
-	activeFreeAccessTags := a.startFreeAccessForConfig(configPath)
-	a.updateBusy(busyID, "Оставляем в конфиге только активные методы...")
-	if err := a.filterActiveFreeAccessOutbounds(configPath, activeFreeAccessTags); err != nil {
-		a.writeLog(fmt.Sprintf("[FreeAccess] failed to filter active free-access outbounds: %v", err))
-	}
-	a.updateBusy(busyID, "Применяем сохранённые стратегии бесплатного доступа...")
-	if runtime.GOOS == "windows" {
-		a.writeLog("[FreeAccess] legacy global strategy store skipped: Windows Unified uses service_strategy_cache.json")
-	} else {
-		if changed, err := a.applyStoredFreeAccessStrategiesToConfig(configPath, activeFreeAccessTags); err != nil {
-			a.writeLog(fmt.Sprintf("[FreeAccess] failed to apply stored strategies: %v", err))
-		} else if changed {
-			a.writeLog("[FreeAccess] stored/default strategies applied before start")
-		} else {
-			a.writeLog("[FreeAccess] stored/default strategies did not require config changes")
-		}
-	}
-	a.updateBusy(busyID, "Сравниваем бесплатные методы с VPN/VLESS подпиской...")
-	cacheApplied, cacheFresh := false, false
-	if hasVPNCandidates, err := configHasVPNProbeCandidates(configPath); err != nil {
-		a.writeLog(fmt.Sprintf("[RouteProbe] failed to inspect VPN candidates before start: %v", err))
-	} else if !hasVPNCandidates {
-		a.writeLog("[RouteProbe] startup VPN comparison skipped: no VPN/VLESS subscription candidates")
-	} else if startupVPNRouteComparisonEnabled {
-		a.writeLog("[RouteProbe] VPN/VLESS candidates found; comparing them with free strategies before start")
-		report, err := a.runRouteProbeAndApply(configPath, activeFreeAccessTags, "startup vpn comparison")
-		if err != nil {
-			a.writeLog(fmt.Sprintf("[RouteProbe] startup VPN comparison failed: %v", err))
-		} else {
-			cacheApplied = true
-			cacheFresh = true
-			if err := a.saveRouteProbeCache(report); err != nil {
-				a.writeLog(fmt.Sprintf("[RouteProbe] failed to save startup comparison cache: %v", err))
-			}
-			a.writeLog(fmt.Sprintf("[RouteProbe] startup VPN comparison applied: %d/%d service(s) have a route",
-				routeProbeSuccessCount(report.Services), len(report.Services)))
-		}
-	} else {
-		a.writeLog("[RouteProbe] VPN/VLESS candidates found; full comparison is disabled, per-service startup validation will be used")
-	}
-	if startupRouteProbeCacheApplyEnabled && !cacheApplied {
-		a.updateBusy(busyID, "Применяем сохраненный подбор маршрутов...")
-		var cacheErr error
-		cacheApplied, cacheFresh, cacheErr = a.applyCachedRouteProbeToConfig(configPath, true, activeFreeAccessTags)
-		if cacheErr != nil {
-			a.writeLog(fmt.Sprintf("[RouteProbe] failed to apply discovery cache: %v", cacheErr))
-		} else if cacheApplied {
-			if cacheFresh {
-				a.writeLog("[RouteProbe] fresh discovery cache applied before start")
-			} else {
-				a.writeLog("[RouteProbe] stale discovery cache applied before start")
-			}
-		} else {
-			a.writeLog("[RouteProbe] no discovery cache available; starting with resilient outbound groups")
-		}
-	}
-	a.updateBusy(busyID, "Проверяем, что выбранные бесплатные методы всё ещё активны...")
-	if runtime.GOOS == "windows" {
-		if changed, bootstrapErr := a.applyWindowsUnifiedBootstrapRoutesToConfig(configPath); bootstrapErr != nil {
-			a.writeLog(fmt.Sprintf("[FreeAccess] failed to prepare safe Windows Unified bootstrap routes: %v", bootstrapErr))
-		} else if changed {
-			a.writeLog("[FreeAccess] safe bootstrap routes applied: proven cache -> direct, unproven automatic services -> VPN/direct fallback")
-		}
-	}
-	liveFreeAccessTags := liveFreeAccessProxyTags(activeFreeAccessTags)
-	if err := a.filterActiveFreeAccessOutbounds(configPath, liveFreeAccessTags); err != nil {
-		a.writeLog(fmt.Sprintf("[FreeAccess] failed to re-check live free-access outbounds: %v", err))
-	}
-	if cacheApplied {
-		if err := a.requireWorkingRouteAfterProbe(configPath); err != nil {
-			a.hasError.Store(true)
-			UpdateTrayIcon("error")
-			a.writeLog(fmt.Sprintf("[RouteProbe] startup blocked: %v", err))
-			return map[string]interface{}{
-				"success": false,
-				"error":   err.Error(),
-			}
-		}
-	} else {
-		a.writeLog("[RouteProbe] startup route gate skipped because discovery cache is not available yet")
+	if err := a.prepareRoutingConfigForStart(configPath, busyID); err != nil {
+		a.hasError.Store(true)
+		UpdateTrayIcon("error")
+		a.writeLog(fmt.Sprintf("[RouteProbe] startup blocked: %v", err))
+		return map[string]interface{}{"success": false, "error": err.Error()}
 	}
 	if depsStatus.Degraded {
 		changed, fallbackErr := a.forceSubscriptionFallbackForTransparentRuntime(configPath)
@@ -676,7 +599,7 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	// initiation packet. It remains a sidecar; WireGuard owns the tunnel.
 	a.resetWireGuardCamouflageSession()
 	a.prepareDiscordRealtimeSession()
-	a.updateBusy(busyID, "Запускаем быстрые маршруты для заблокированных сервисов...")
+	a.updateBusy(busyID, "Применяем сетевые маршруты...")
 	if err := a.startComposedTransparentEngine(busyID); err != nil {
 		a.writeLog(fmt.Sprintf("[NetworkMode] native traffic engine failed to start: %v", err))
 		// A proxy-only selective session has no TUN fallback. Leaving sing-box
@@ -750,8 +673,8 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	// overwrites it with the final disconnected/error state.
 	UpdateTrayIcon("connected")
 	a.setRestoreVPNOnStartup(true)
-	a.writeLog("VPN started successfully; service strategies are validating in the background")
-	a.AddToLogBuffer("VPN запущен; стратегии сервисов проверяются в фоне")
+	a.writeLog("VPN started successfully")
+	a.AddToLogBuffer("VPN запущен")
 	startupSucceeded = true
 	deferDiscordMonitor := false
 	if runtime.GOOS == "windows" && a.storage != nil {
@@ -866,13 +789,104 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	}
 }
 
+func (a *App) windowsFullTunnel() bool {
+	return runtime.GOOS == "windows" && a.storage != nil &&
+		NormalizeRoutingMode(a.storage.GetAppSettings().RoutingMode) == RoutingModeAllTraffic
+}
+
+func (a *App) prepareRoutingConfigForStart(configPath, busyID string) error {
+	if a.windowsFullTunnel() {
+		// Older profiles can still contain inactive local proxy outbounds.
+		return a.filterActiveFreeAccessOutbounds(configPath, nil)
+	}
+	// Start local helpers before sing-box so local outbounds are already
+	// reachable when sing-box performs its first group health checks.
+	a.updateBusy(busyID, "Запускаем бесплатные методы обхода...")
+	activeFreeAccessTags := a.startFreeAccessForConfig(configPath)
+	a.updateBusy(busyID, "Оставляем в конфиге только активные методы...")
+	if err := a.filterActiveFreeAccessOutbounds(configPath, activeFreeAccessTags); err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] failed to filter active free-access outbounds: %v", err))
+	}
+	a.updateBusy(busyID, "Применяем сохранённые стратегии бесплатного доступа...")
+	if runtime.GOOS == "windows" {
+		a.writeLog("[FreeAccess] legacy global strategy store skipped: Windows Unified uses service_strategy_cache.json")
+	} else {
+		if changed, err := a.applyStoredFreeAccessStrategiesToConfig(configPath, activeFreeAccessTags); err != nil {
+			a.writeLog(fmt.Sprintf("[FreeAccess] failed to apply stored strategies: %v", err))
+		} else if changed {
+			a.writeLog("[FreeAccess] stored/default strategies applied before start")
+		} else {
+			a.writeLog("[FreeAccess] stored/default strategies did not require config changes")
+		}
+	}
+	a.updateBusy(busyID, "Сравниваем бесплатные методы с VPN/VLESS подпиской...")
+	cacheApplied, cacheFresh := false, false
+	if hasVPNCandidates, err := configHasVPNProbeCandidates(configPath); err != nil {
+		a.writeLog(fmt.Sprintf("[RouteProbe] failed to inspect VPN candidates before start: %v", err))
+	} else if !hasVPNCandidates {
+		a.writeLog("[RouteProbe] startup VPN comparison skipped: no VPN/VLESS subscription candidates")
+	} else if startupVPNRouteComparisonEnabled {
+		a.writeLog("[RouteProbe] VPN/VLESS candidates found; comparing them with free strategies before start")
+		report, err := a.runRouteProbeAndApply(configPath, activeFreeAccessTags, "startup vpn comparison")
+		if err != nil {
+			a.writeLog(fmt.Sprintf("[RouteProbe] startup VPN comparison failed: %v", err))
+		} else {
+			cacheApplied = true
+			cacheFresh = true
+			if err := a.saveRouteProbeCache(report); err != nil {
+				a.writeLog(fmt.Sprintf("[RouteProbe] failed to save startup comparison cache: %v", err))
+			}
+			a.writeLog(fmt.Sprintf("[RouteProbe] startup VPN comparison applied: %d/%d service(s) have a route",
+				routeProbeSuccessCount(report.Services), len(report.Services)))
+		}
+	} else {
+		a.writeLog("[RouteProbe] VPN/VLESS candidates found; full comparison is disabled, per-service startup validation will be used")
+	}
+	if startupRouteProbeCacheApplyEnabled && !cacheApplied {
+		a.updateBusy(busyID, "Применяем сохраненный подбор маршрутов...")
+		var cacheErr error
+		cacheApplied, cacheFresh, cacheErr = a.applyCachedRouteProbeToConfig(configPath, true, activeFreeAccessTags)
+		if cacheErr != nil {
+			a.writeLog(fmt.Sprintf("[RouteProbe] failed to apply discovery cache: %v", cacheErr))
+		} else if cacheApplied {
+			if cacheFresh {
+				a.writeLog("[RouteProbe] fresh discovery cache applied before start")
+			} else {
+				a.writeLog("[RouteProbe] stale discovery cache applied before start")
+			}
+		} else {
+			a.writeLog("[RouteProbe] no discovery cache available; starting with resilient outbound groups")
+		}
+	}
+	a.updateBusy(busyID, "Проверяем, что выбранные бесплатные методы всё ещё активны...")
+	if runtime.GOOS == "windows" {
+		if changed, bootstrapErr := a.applyWindowsUnifiedBootstrapRoutesToConfig(configPath); bootstrapErr != nil {
+			a.writeLog(fmt.Sprintf("[FreeAccess] failed to prepare safe Windows Unified bootstrap routes: %v", bootstrapErr))
+		} else if changed {
+			a.writeLog("[FreeAccess] safe bootstrap routes applied: proven cache -> direct, unproven automatic services -> VPN/direct fallback")
+		}
+	}
+	liveFreeAccessTags := liveFreeAccessProxyTags(activeFreeAccessTags)
+	if err := a.filterActiveFreeAccessOutbounds(configPath, liveFreeAccessTags); err != nil {
+		a.writeLog(fmt.Sprintf("[FreeAccess] failed to re-check live free-access outbounds: %v", err))
+	}
+	if cacheApplied {
+		if err := a.requireWorkingRouteAfterProbe(configPath); err != nil {
+			return err
+		}
+	} else {
+		a.writeLog("[RouteProbe] startup route gate skipped because discovery cache is not available yet")
+	}
+	return nil
+}
+
 func (a *App) writeDeepWindowsProxyFallbackConfig(activeConfigPath string) (string, error) {
 	config, err := readJSONConfig(activeConfigPath)
 	if err != nil {
 		return "", err
 	}
 
-	removedTun := removeTunInbounds(config)
+	removedTun := scopeSelectiveTunToCatalog(config)
 	if removedTun == 0 {
 		a.writeLog("[NetworkMode] proxy-only fallback config had no TUN inbound to remove")
 	} else {
@@ -910,7 +924,21 @@ func (a *App) writeDeepWindowsProxyFallbackConfig(activeConfigPath string) (stri
 	return path, nil
 }
 
-func removeTunInbounds(config map[string]interface{}) int {
+// Keep a TUN route only for the bundled generic blocked-IP prefixes. The
+// physical interface retains the default route and DNS. Mixed/PAC traffic and
+// the native WinDivert owner keep their existing per-service paths.
+func scopeSelectiveTunToCatalog(config map[string]interface{}) int {
+	route, _ := config["route"].(map[string]any)
+	sets, _ := route["rule_set"].([]any)
+	hasCatalog := false
+	for _, raw := range sets {
+		rs, _ := raw.(map[string]any)
+		if rs["tag"] == "refilter-ips" && rs["type"] == "local" {
+			hasCatalog = true
+			break
+		}
+	}
+
 	inbounds, ok := config["inbounds"].([]interface{})
 	if !ok {
 		return 0
@@ -920,6 +948,15 @@ func removeTunInbounds(config map[string]interface{}) int {
 	for _, inbound := range inbounds {
 		inboundMap, ok := inbound.(map[string]interface{})
 		if ok && inboundMap["type"] == "tun" {
+			if hasCatalog {
+				inboundMap["route_address_set"] = []string{"refilter-ips"}
+				// Keep even an empty future rule set from producing a default route.
+				inboundMap["route_address"] = []string{"172.19.0.2/32"}
+				inboundMap["dns_mode"] = "disabled"
+				inboundMap["strict_route"] = false
+				filtered = append(filtered, inbound)
+				continue
+			}
 			removed++
 			continue
 		}
@@ -976,9 +1013,12 @@ func pinSelectiveVPNInbound(config map[string]interface{}) error {
 		return fmt.Errorf("selective mixed inbound tag is unavailable")
 	}
 	outbounds, _ := config["outbounds"].([]interface{})
-	terminal := "direct"
+	terminal := NoRouteOutboundTag
 	if outboundTagExists(outbounds, "auto-select") {
 		terminal = "auto-select"
+	}
+	if terminal == NoRouteOutboundTag && !outboundTagExists(outbounds, terminal) {
+		config["outbounds"] = append(outbounds, map[string]any{"type": "block", "tag": terminal})
 	}
 	route, ok := config["route"].(map[string]interface{})
 	if !ok {
@@ -1003,7 +1043,7 @@ func pinSelectiveVPNInbound(config map[string]interface{}) error {
 	servers, _ := dns["servers"].([]any)
 	for _, raw := range servers {
 		server, _ := raw.(map[string]any)
-		if terminal != "direct" && server["tag"] == "dns-remote" {
+		if terminal == "auto-select" && server["tag"] == "dns-remote" {
 			head = []any{map[string]any{"inbound": []any{inboundTag}, "action": "resolve"}, pinned}
 			break
 		}
@@ -1088,7 +1128,6 @@ func (a *App) pruneProxyFallbackVPNCandidates(config map[string]interface{}) boo
 			}
 		case "proxy":
 			selectorCandidates := append([]string{"auto-select"}, keep...)
-			selectorCandidates = append(selectorCandidates, "direct")
 			if !stringSetEqual(interfaceStringSlice(outboundMap["outbounds"]), selectorCandidates) {
 				outboundMap["outbounds"] = selectorCandidates
 				changed = true
@@ -1366,7 +1405,11 @@ func (a *App) ensureActiveConfigForStart() error {
 				}
 			}
 		}
-		if !needsRebuild && !configSupportsDiscordRealtimeRouting(config) {
+		if !needsRebuild && NormalizeRoutingMode(appSettings.RoutingMode) == RoutingModeBlockedOnly && !configHasProtectedServiceRoutes(config) {
+			a.writeLog("Rebuilding cached service routes for the AI catalog")
+			needsRebuild = true
+		}
+		if !needsRebuild && appSettings.RoutingMode != RoutingModeAllTraffic && !configSupportsDiscordRealtimeRouting(config) {
 			a.writeLog("Active config predates Discord realtime routing; rebuilding before start")
 			needsRebuild = true
 		}
@@ -1507,38 +1550,10 @@ func configNeedsAllTrafficTunnelMigration(config map[string]interface{}, mode Ro
 		return true
 	}
 	dns, _ := config["dns"].(map[string]interface{})
-	if dns == nil || dns["final"] != "dns-remote" {
-		return true
-	}
-	remoteDNS := false
-	if servers, ok := dns["servers"].([]interface{}); ok {
-		for _, raw := range servers {
-			server, _ := raw.(map[string]interface{})
-			if server["tag"] == "dns-remote" {
-				remoteDNS = server["type"] == "https" && server["detour"] == "proxy"
-				break
-			}
-		}
-	}
-	if !remoteDNS {
-		return true
-	}
-	if rules, ok := dns["rules"].([]interface{}); ok {
-		for _, raw := range rules {
-			rule, _ := raw.(map[string]interface{})
-			if rule["server"] == "dns-direct" {
-				return true
-			}
-		}
-	}
-	route, _ := config["route"].(map[string]interface{})
-	resolver, _ := route["default_domain_resolver"].(map[string]interface{})
-	if resolver["server"] != "dns-direct" {
-		return true
-	}
-	experimental, _ := config["experimental"].(map[string]interface{})
-	cacheFile, _ := experimental["cache_file"].(map[string]interface{})
-	return cacheFile["path"] != "cache-all-traffic.db"
+	route, _ := config["route"].(map[string]any)
+	experimental, _ := config["experimental"].(map[string]any)
+	cache, _ := experimental["cache_file"].(map[string]any)
+	return dns["final"] != "dns-direct" || route["final"] != "direct" || !configHasClaudeRoutes(config) || cache["path"] != "cache-catalog-vpn-v2.db"
 }
 
 // configSupportsDiscordRealtimeRouting is the structural migration gate for
@@ -1588,6 +1603,53 @@ func configSupportsDiscordRealtimeRouting(config map[string]interface{}) bool {
 	return hasUDPProcessRule && hasVoiceGatewayRule
 }
 
+func configHasProtectedServiceRoutes(config map[string]any) bool {
+	outbounds, _ := config["outbounds"].([]any)
+	if stringSliceContains(outboundGroupCandidates(outbounds, "proxy"), "direct") {
+		return false
+	}
+	route, _ := config["route"].(map[string]any)
+	rules, _ := route["rules"].([]any)
+	for _, svc := range DefaultFreeAccessServices {
+		if !aicatalog.VPNOnly(svc.Tag) {
+			continue
+		}
+		found := false
+		for _, raw := range rules {
+			rule, _ := raw.(map[string]any)
+			if !stringSliceContains(interfaceStringSlice(rule["domain_suffix"]), svc.DomainSuffixes[0]) {
+				continue
+			}
+			if rule["outbound"] == NoRouteOutboundTag {
+				found = true
+				break
+			}
+			if rule["outbound"] != ServiceBypassGroupTag(svc.Tag) {
+				return false
+			}
+			candidates := outboundGroupCandidates(outbounds, ServiceBypassGroupTag(svc.Tag))
+			found = len(candidates) == 1 && candidates[0] == "auto-select"
+			break
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func configHasClaudeRoutes(config map[string]interface{}) bool {
+	route, _ := config["route"].(map[string]interface{})
+	rules, _ := route["rules"].([]interface{})
+	for _, raw := range rules {
+		rule, _ := raw.(map[string]interface{})
+		if stringSliceContains(interfaceStringSlice(rule["domain_suffix"]), "claudemcpcontent.com") {
+			return true
+		}
+	}
+	return false
+}
+
 func configNeedsBlockedOnlyContractMigration(config map[string]interface{}, routingMode RoutingMode) bool {
 	if NormalizeRoutingMode(routingMode) == RoutingModeAllTraffic {
 		return false
@@ -1626,6 +1688,9 @@ func configNeedsScopedBlockedCatalogMigration(config map[string]interface{}, rou
 		}
 		hasDomainCatalog := stringSliceContains(ruleSets, "refilter-domains")
 		hasIPCatalog := stringSliceContains(ruleSets, "refilter-ips")
+		if (hasDomainCatalog || hasIPCatalog) && rule["outbound"] == "direct" {
+			return true
+		}
 		if hasDomainCatalog && hasIPCatalog {
 			return true
 		}
@@ -2210,13 +2275,6 @@ func (a *App) filterActiveFreeAccessOutbounds(configPath string, activeFreeAcces
 }
 
 func (a *App) emptyBypassGroupFallbackOutbound() string {
-	if a != nil {
-		status := a.currentNetworkModeStatus()
-		if status.Active == NetworkModeWindowsUnified {
-			a.writeLog("[FreeAccess] empty bypass group fallback: direct via the native Windows traffic engine")
-			return "direct"
-		}
-	}
 	return NoRouteOutboundTag
 }
 
