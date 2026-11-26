@@ -7,7 +7,6 @@
   const disconnect = $('.dp-disconnect');
   const cancel = $('.dp-cancel'), details = $('.dp-details'), status = $('.dp-status-text');
   const service = $('.dp-mode-service'), all = $('.dp-mode-all'), timer = $('.dp-session-time');
-  const spaceCanvas = $('.dp-space'), space = spaceCanvas.getContext('2d');
   const haloCanvas = $('.dp-globe'), halo = haloCanvas.getContext('2d'), canvas = $('.dp-front');
   const mq = matchMedia('(prefers-reduced-motion: reduce)');
   const settings = { motion: !mq.matches };
@@ -30,9 +29,9 @@
   let duration = 1, transitionFrom = null, connectedAt = 0, lastTimer = '';
   let raf = 0, stillTimer = 0, lastPaint = -Infinity, lastTick = null, sceneClock = 0;
   let visible = document.visibilityState !== 'hidden', intersecting = true, pausedAt = null;
-  let w = 390, h = 610, dpr = 1, spaceW = 390, spaceH = 760, nebula = null;
+  let w = 390, h = 610, dpr = 1;
   let renderer, world, camera, earth, earthUniforms, sprites, flight;
-  let lastView = null, lastSpacePaint = -Infinity, haloKey = null;
+  let lastView = null, haloKey = null;
   let retryArrow;
 
   // Chromium can finish a failed stylesheet preload before bootstrap receives
@@ -228,14 +227,6 @@
       transition('return', .5);
     }
   }
-  const stars=Array.from({length:156},(_,i)=>{const rand=n=>{const x=Math.sin(i*127.1+n*311.7+71.4)*43758.5453;return x-Math.floor(x);};return{x:rand(1),y:rand(2),layer:rand(3),r:.35+rand(4)*.8,phase:rand(5)*Math.PI*2};});
-  function prepareNebula(){nebula=document.createElement('canvas');nebula.width=Math.ceil(spaceW+120);nebula.height=Math.ceil(spaceH+120);const n=nebula.getContext('2d');n.fillStyle='#030908';n.fillRect(0,0,nebula.width,nebula.height);const clouds=[[.15,.26,.85,'#10362f30'],[.91,.54,.78,'#16392a24'],[.2,.93,.64,'#15223b26']];for(const[x,y,r,color]of clouds){const radius=spaceW*r,g=n.createRadialGradient(nebula.width*x,nebula.height*y,0,nebula.width*x,nebula.height*y,radius);g.addColorStop(0,color);g.addColorStop(1,'#00000000');n.fillStyle=g;n.fillRect(0,0,nebula.width,nebula.height);}}
-  function drawSpace(t){
-    space.clearRect(0,0,spaceW,spaceH);if(nebula)space.drawImage(nebula,-60+Math.sin(t/44)*24,-60+Math.cos(t/57)*20);
-    for(let i=0;i<stars.length;i++){const star=stars[i],speed=.35+star.layer*1.5,x=(star.x*spaceW+t*speed*.70+spaceW*3)%spaceW,y=(star.y*spaceH+t*speed*.27+spaceH*3)%spaceH,alpha=(.22+star.layer*.36)*(.72+.28*Math.sin(t*(.65+star.layer*.6)+star.phase));space.fillStyle=`rgba(${i%5===0?'157,206,226':'209,234,222'},${alpha})`;space.beginPath();space.arc(x,y,star.r,0,Math.PI*2);space.fill();if(i%37===0){space.strokeStyle=`rgba(217,238,241,${alpha*.4})`;space.lineWidth=.6;space.beginPath();space.moveTo(x-2.5,y);space.lineTo(x+2.5,y);space.moveTo(x,y-2.5);space.lineTo(x,y+2.5);space.stroke();}}
-    const streak=(t+9)%23;if(streak<1.0){const p=streak,x=spaceW*.74-p*spaceW*.26,y=spaceH*.15+p*spaceH*.09,g=space.createLinearGradient(x,y,x+34,y-13);g.addColorStop(0,`rgba(199,228,225,${Math.sin(p*Math.PI)*.3})`);g.addColorStop(1,'#d1eeea00');space.strokeStyle=g;space.lineWidth=.8;space.beginPath();space.moveTo(x,y);space.lineTo(x+34,y-13);space.stroke();}
-  }
-
   function createSprite(T, image, kind) {
     const info = artInfo[kind], texture = new T.Texture(image);
     texture.colorSpace = T.SRGBColorSpace;
@@ -344,7 +335,7 @@
     halo.fillStyle=g;halo.beginPath();halo.arc(b.cx,b.cy,r*1.12,0,Math.PI*2);halo.fill();
   }
   function drawArrow(retry){
-    const c=hint.querySelector('canvas');c.width=360;c.height=400;const ctx=c.getContext('2d');ctx.scale(2,2);
+    const c=hint.querySelector('canvas');const scale=Math.min(devicePixelRatio || 1, 4);c.width=Math.round(180*scale);c.height=Math.round(200*scale);const ctx=c.getContext('2d');ctx.scale(c.width/180,c.height/200);
     const angle=Math.PI/6,tx=90+39*Math.sin(angle),ty=39*Math.cos(angle);
     const startY = retry ? 116 : 187, curveY = retry ? 101 : 157;
     ctx.strokeStyle='#fff';ctx.lineCap='round';ctx.lineJoin='round';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(124,startY);ctx.bezierCurveTo(173,curveY,tx+29,ty+51,tx,ty);ctx.stroke();
@@ -395,9 +386,6 @@
     lastView = view;
     const inFlight = settings.motion && ['launch', 'orbit', 'arrive', 'return'].includes(phase);
     const b = layout(view.zoom);
-    if (now - lastSpacePaint >= 100 || !settings.motion) {
-      drawSpace(t); lastSpacePaint = now;
-    }
     const haloState = [b.d, b.cy, view.glow, view.error].join('/');
     if (haloState !== haloKey) { drawHalo(b, view); haloKey = haloState; }
     if (renderer) {
@@ -567,13 +555,11 @@
     if (!presented) main.dataset.startup = 'loading';
     if (!valid) return false;
 
-    w = rect.width; h = rect.height; dpr = Math.min(ratio, 2, Math.sqrt(1750000 / (w * h)));
-    haloKey = null; lastSpacePaint = -Infinity;
-    spaceW = bounds.width; spaceH = bounds.height;
+    w = rect.width; h = rect.height; dpr = Math.min(ratio, Math.sqrt(4200000 / (w * h)), 4096 / Math.max(w, h));
+    haloKey = null;
+    if (retryArrow !== undefined) drawArrow(retryArrow);
     haloCanvas.width = Math.round(w * dpr); haloCanvas.height = Math.round(h * dpr);
     halo.setTransform(dpr, 0, 0, dpr, 0, 0);
-    spaceCanvas.width = Math.round(spaceW * dpr); spaceCanvas.height = Math.round(spaceH * dpr);
-    space.setTransform(dpr, 0, 0, dpr, 0, 0); prepareNebula();
     if (renderer) {
       renderer.setPixelRatio(dpr);
       renderer.setSize(w, h, false);

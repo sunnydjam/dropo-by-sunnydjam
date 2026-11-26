@@ -118,7 +118,11 @@ void main() {
     expect(drawer, findsNothing);
     expect(feedback, hasLength(1));
 
-    await tester.dragFrom(const Offset(5, 220), const Offset(140, 0));
+    await tester.dragFrom(const Offset(65, 220), const Offset(4, 100));
+    await tester.dragFrom(const Offset(250, 220), const Offset(100, 0));
+    await tester.pump();
+    expect(drawer, findsNothing);
+    await tester.dragFrom(const Offset(65, 220), const Offset(140, 0));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
     expect(drawer, findsOneWidget);

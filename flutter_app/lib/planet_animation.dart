@@ -316,7 +316,6 @@ class _DrOppoSprite {
       final bytes = await rootBundle.load(pose.asset);
       final codec = await ui.instantiateImageCodec(
         bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
-        targetWidth: 512,
       );
       try {
         image = (await codec.getNextFrame()).image;

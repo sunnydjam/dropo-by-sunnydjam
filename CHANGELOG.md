@@ -2,6 +2,12 @@
 
 Significant changes in the `Dropo by sunnydjam` fork are documented here.
 
+## 4.0.1
+
+- Android now shows a full-height green space background with passing meteor showers on tall phones.
+- A rightward swipe starting in the left half of the page opens the menu, including on the interactive globe.
+- The globe, mascot and connection hint render at higher resolution on dense Android displays.
+
 ## 4.0.0
 
 - Managed Free and Turbo now try three Moscow methods, three direct regional methods and a residential XHTTP gateway. The app obtains the gateway address through a signed, encrypted assignment scoped to the installation and plan. See the [reserve design and acceptance results](docs/architecture/RESIDENTIAL_RESERVE.md).

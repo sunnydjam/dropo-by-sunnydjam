@@ -1,7 +1,6 @@
 
 #dropo-motion-preview { display:grid; justify-items:center; gap:12px; width:100%; padding:16px 0; }
-#dropo-motion-preview .dp-phone { --dp-mint:#7de9b8; --dp-muted:#91a49c; position:relative; isolation:isolate; width:min(100%,390px); height:760px; overflow:hidden; border-radius:32px; background:#050b08; color:#edf5f0; font:400 14px/1.45 Inter,system-ui,-apple-system,"Segoe UI",sans-serif; box-shadow:0 0 0 1px #314039,0 22px 65px #00000028; }
-#dropo-motion-preview .dp-phone::before { content:""; position:absolute; top:0; right:0; bottom:0; left:0; inset:0; z-index:-1; opacity:.6; background-image:radial-gradient(circle at 22px 33px,#a8d6c266 0 .7px,transparent 1px),radial-gradient(circle at 71px 94px,#96bca344 0 .6px,transparent 1px),radial-gradient(circle at 48px 52px,#73988355 0 .6px,transparent 1px); background-size:113px 137px,171px 193px,227px 211px; }
+#dropo-motion-preview .dp-phone { --dp-mint:#7de9b8; --dp-muted:#91a49c; position:relative; isolation:isolate; width:min(100%,390px); height:760px; overflow:hidden; border-radius:32px; background:transparent; color:#edf5f0; font:400 14px/1.45 Inter,system-ui,-apple-system,"Segoe UI",sans-serif; box-shadow:0 0 0 1px #314039,0 22px 65px #00000028; }
 #dropo-motion-preview .dp-phone *,#dropo-motion-preview .dp-phone *::before,#dropo-motion-preview .dp-phone *::after { box-sizing:border-box; }
 #dropo-motion-preview .dp-phone button { font:inherit; color:inherit; cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
 #dropo-motion-preview .dp-phone button:focus-visible { outline:2px solid #aaf6d3; outline-offset:5px; }
@@ -58,8 +57,6 @@
 #dropo-motion-preview .dp-main .dp-cancel { top:536px; }
 
 
-#dropo-motion-preview .dp-phone::before { display:none; }
-#dropo-motion-preview .dp-space { position:absolute; top:0; right:0; bottom:0; left:0; inset:0; z-index:-1; width:100%; height:100%; pointer-events:none; }
 #dropo-motion-preview .dp-hint { height:240px; }
 #dropo-motion-preview .dp-hint canvas { height:200px; }
 #dropo-motion-preview .dp-hint span { top:192px; }
@@ -69,7 +66,7 @@
 #dropo-motion-preview .dp-main .dp-cancel { top:498px; }
 @font-face { font-family:Inter; src:url('../fonts/InterVariable.ttf'); font-weight:100 900; }
 @font-face { font-family:Caveat; src:url('vendor/Caveat.ttf'); font-weight:400 700; }
-html,body { margin:0; width:100%; height:100%; background:#030908; overscroll-behavior:none; }
+html,body { margin:0; width:100%; height:100%; background:transparent; overscroll-behavior:none; }
 #dropo-motion-preview { display:block; padding:0; height:100%; }
 #dropo-motion-preview .dp-phone { width:100%; height:100%; min-height:600px; border-radius:0; box-shadow:none; }
 #dropo-motion-preview .dp-main { height:100%; }

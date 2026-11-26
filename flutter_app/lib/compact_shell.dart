@@ -2,6 +2,14 @@ part of 'main.dart';
 
 // Navigation is presentation-only. The session-aware callbacks still own all
 // route/source changes, including mobile restrictions while connected.
+// Let child controls and vertical scrolling compete normally for the touch.
+class _MenuSwipeRecognizer extends HorizontalDragGestureRecognizer {
+  double startLimit = 0;
+  @override
+  bool isPointerAllowed(PointerEvent event) =>
+      event.localPosition.dx <= startLimit && super.isPointerAllowed(event);
+}
+
 class _AtlasDesktopShell extends StatefulWidget {
   const _AtlasDesktopShell({
     required this.activeSection,
@@ -452,9 +460,33 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
     return Stack(
       fit: StackFit.expand,
       children: [
-        ExcludeFocus(
-          excluding: _open,
-          child: ExcludeSemantics(excluding: _open, child: page),
+        RawGestureDetector(
+          behavior: HitTestBehavior.translucent,
+          gestures: {
+            if (!_open && _canShowDrawer)
+              _MenuSwipeRecognizer:
+                  GestureRecognizerFactoryWithHandlers<_MenuSwipeRecognizer>(
+                    _MenuSwipeRecognizer.new,
+                    (recognizer) {
+                      recognizer.startLimit = math.min(width / 2, 200.0);
+                      recognizer.dragStartBehavior = DragStartBehavior.down;
+                      recognizer.onStart = (_) => _edgeDistance = 0;
+                      recognizer.onUpdate = (event) =>
+                          _edgeDistance += event.primaryDelta ?? 0;
+                      recognizer.onEnd = (event) {
+                        if (_edgeDistance >= 48 ||
+                            (_edgeDistance > 16 &&
+                                (event.primaryVelocity ?? 0) > 320)) {
+                          _show();
+                        }
+                      };
+                    },
+                  ),
+          },
+          child: ExcludeFocus(
+            excluding: _open,
+            child: ExcludeSemantics(excluding: _open, child: page),
+          ),
         ),
         AnimatedBuilder(
           animation: _drawerAnimation,
@@ -493,27 +525,6 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
             );
           },
         ),
-        if (!_open && _canShowDrawer)
-          Positioned(
-            left: 0,
-            top: 48,
-            bottom: 0,
-            width: 20,
-            child: GestureDetector(
-              key: const ValueKey('navigation-edge-swipe'),
-              behavior: HitTestBehavior.translucent,
-              excludeFromSemantics: true,
-              onHorizontalDragStart: (_) => _edgeDistance = 0,
-              onHorizontalDragUpdate: (event) =>
-                  _edgeDistance += event.primaryDelta ?? 0,
-              onHorizontalDragEnd: (event) {
-                if (_edgeDistance >= 42 ||
-                    (_edgeDistance > 8 && (event.primaryVelocity ?? 0) > 320)) {
-                  _show();
-                }
-              },
-            ),
-          ),
       ],
     );
   }
@@ -726,173 +737,191 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
         },
         child: Scaffold(
           backgroundColor: _atlasBackground,
-          body: SafeArea(
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: _AtlasSpaceBackground(
-                    desktop: !_isMobileShell,
-                    motionEnabled:
-                        widget.motionEnabled &&
-                        widget.visible &&
-                        (android || !_open) &&
-                        widget.homeSceneReady &&
-                        widget.overlay == null,
-                  ),
+          body: Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned.fill(
+                child: _AtlasSpaceBackground(
+                  desktop: !_isMobileShell,
+                  motionEnabled:
+                      widget.motionEnabled &&
+                      widget.visible &&
+                      (android || !_open) &&
+                      widget.homeSceneReady &&
+                      widget.overlay == null,
                 ),
-                Opacity(
-                  opacity: !android && _open ? 0 : 1,
-                  child: ExcludeFocus(
-                    excluding:
-                        (!android && _open) ||
-                        !widget.homeSceneReady ||
-                        widget.overlay != null,
-                    child: ExcludeSemantics(
-                      excluding:
-                          (!android && _open) ||
-                          !widget.homeSceneReady ||
-                          widget.overlay != null,
-                      child: TickerMode(
-                        enabled:
-                            widget.visible &&
-                            (android || !_open) &&
-                            widget.overlay == null,
-                        child: Padding(
-                          padding: EdgeInsets.only(left: railWidth),
-                          child: Column(
-                            children: [
-                              Expanded(
-                                child: android
-                                    ? _androidPageWithDrawer(page, screen.width)
-                                    : page,
-                              ),
-                              if (reserveFooter && !keyboardVisible) footer,
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                if (showRail && !_open)
-                  Positioned(
-                    left: 0,
-                    top: 0,
-                    bottom: 0,
-                    width: railWidth,
-                    child: MouseRegion(
-                      key: const ValueKey('navigation-rail'),
-                      child: DecoratedBox(
-                        decoration: const BoxDecoration(
-                          border: Border(
-                            right: BorderSide(color: _atlasBorder),
-                          ),
-                        ),
-                        child: Column(
-                          children: [
-                            if (expandedRail)
-                              SizedBox(
-                                height: 48,
-                                child: Padding(
-                                  padding: const EdgeInsets.only(left: 18),
-                                  child: _brandWithVersion(
-                                    const Text(
-                                      'Dropo',
-                                      key: ValueKey('navigation-brand'),
-                                      style: TextStyle(
-                                        fontSize: 24,
-                                        fontWeight: FontWeight.w800,
-                                        letterSpacing: -0.8,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              )
-                            else
-                              _toggle(),
-                            Expanded(
-                              child: ListView(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 4,
-                                  vertical: 8,
-                                ),
+              ),
+              SafeArea(
+                child: Stack(
+                  children: [
+                    Opacity(
+                      opacity: !android && _open ? 0 : 1,
+                      child: ExcludeFocus(
+                        excluding:
+                            (!android && _open) ||
+                            !widget.homeSceneReady ||
+                            widget.overlay != null,
+                        child: ExcludeSemantics(
+                          excluding:
+                              (!android && _open) ||
+                              !widget.homeSceneReady ||
+                              widget.overlay != null,
+                          child: TickerMode(
+                            enabled:
+                                widget.visible &&
+                                (android || !_open) &&
+                                widget.overlay == null,
+                            child: Padding(
+                              padding: EdgeInsets.only(left: railWidth),
+                              child: Column(
                                 children: [
-                                  for (final item in _items)
-                                    if (_primarySections.contains(item.$1) &&
-                                        item.$1 != 'account')
-                                      _item(item, compact: !expandedRail),
+                                  Expanded(
+                                    child: android
+                                        ? _androidPageWithDrawer(
+                                            page,
+                                            screen.width,
+                                          )
+                                        : page,
+                                  ),
+                                  if (reserveFooter && !keyboardVisible) footer,
                                 ],
                               ),
                             ),
-                            const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 8),
-                              child: Divider(height: 1),
-                            ),
-                            Padding(
-                              key: const ValueKey('account-rail-footer'),
-                              padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
-                              child: _account(compact: !expandedRail),
-                            ),
-                          ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                if ((widget.notice != null || widget.updateNotice != null) &&
-                    !_open)
-                  Positioned(
-                    top: 4,
-                    left: railWidth + 8,
-                    right: 8,
-                    child: _AtlasNoticeOverlay(
-                      identity: ValueKey((
-                        widget.notice?.key,
-                        widget.updateNotice?.key,
-                      )),
-                      maxHeight: 96,
-                      pinnedChild: widget.updateNotice,
-                      hasDetails: widget.notice != null,
-                      collapsedLabel:
-                          widget.updateNotice != null && widget.notice == null
-                          ? 'Новое обновление'
-                          : 'Сообщения',
-                      child: widget.notice ?? const SizedBox.shrink(),
-                    ),
-                  ),
-                if (!widget.homeSceneReady)
-                  Positioned.fill(
-                    child: AbsorbPointer(
-                      child: ColoredBox(
-                        key: const ValueKey('android-home-loading-space'),
-                        color: _atlasBackground,
-                        child: _AtlasSpaceBackground(
-                          motionEnabled: widget.motionEnabled && widget.visible,
+                    if (showRail && !_open)
+                      Positioned(
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        width: railWidth,
+                        child: MouseRegion(
+                          key: const ValueKey('navigation-rail'),
+                          child: DecoratedBox(
+                            decoration: const BoxDecoration(
+                              border: Border(
+                                right: BorderSide(color: _atlasBorder),
+                              ),
+                            ),
+                            child: Column(
+                              children: [
+                                if (expandedRail)
+                                  SizedBox(
+                                    height: 48,
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(left: 18),
+                                      child: _brandWithVersion(
+                                        const Text(
+                                          'Dropo',
+                                          key: ValueKey('navigation-brand'),
+                                          style: TextStyle(
+                                            fontSize: 24,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: -0.8,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                else
+                                  _toggle(),
+                                Expanded(
+                                  child: ListView(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                      vertical: 8,
+                                    ),
+                                    children: [
+                                      for (final item in _items)
+                                        if (_primarySections.contains(
+                                              item.$1,
+                                            ) &&
+                                            item.$1 != 'account')
+                                          _item(item, compact: !expandedRail),
+                                    ],
+                                  ),
+                                ),
+                                const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 8),
+                                  child: Divider(height: 1),
+                                ),
+                                Padding(
+                                  key: const ValueKey('account-rail-footer'),
+                                  padding: const EdgeInsets.fromLTRB(
+                                    4,
+                                    8,
+                                    4,
+                                    8,
+                                  ),
+                                  child: _account(compact: !expandedRail),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                if (!android && _open) ...[
-                  Positioned.fill(
-                    child: ModalBarrier(
-                      key: const ValueKey('navigation-scrim'),
-                      dismissible: true,
-                      onDismiss: () => _close(restoreFocus: true),
-                      color: Colors.black.withValues(alpha: 0.35),
-                      semanticsLabel: 'Закрыть меню',
-                    ),
-                  ),
-                  Positioned(
-                    left: 0,
-                    top: 0,
-                    bottom: 0,
-                    width: math.min(280, screen.width - 48),
-                    child: _drawerPanel(android: false),
-                  ),
-                ],
-                if (widget.overlay != null)
-                  Positioned.fill(child: widget.overlay!),
-              ],
-            ),
+                    if ((widget.notice != null ||
+                            widget.updateNotice != null) &&
+                        !_open)
+                      Positioned(
+                        top: 4,
+                        left: railWidth + 8,
+                        right: 8,
+                        child: _AtlasNoticeOverlay(
+                          identity: ValueKey((
+                            widget.notice?.key,
+                            widget.updateNotice?.key,
+                          )),
+                          maxHeight: 96,
+                          pinnedChild: widget.updateNotice,
+                          hasDetails: widget.notice != null,
+                          collapsedLabel:
+                              widget.updateNotice != null &&
+                                  widget.notice == null
+                              ? 'Новое обновление'
+                              : 'Сообщения',
+                          child: widget.notice ?? const SizedBox.shrink(),
+                        ),
+                      ),
+                    if (!widget.homeSceneReady)
+                      Positioned.fill(
+                        child: AbsorbPointer(
+                          child: ColoredBox(
+                            key: const ValueKey('android-home-loading-space'),
+                            color: _atlasBackground,
+                            child: _AtlasSpaceBackground(
+                              motionEnabled:
+                                  widget.motionEnabled && widget.visible,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (!android && _open) ...[
+                      Positioned.fill(
+                        child: ModalBarrier(
+                          key: const ValueKey('navigation-scrim'),
+                          dismissible: true,
+                          onDismiss: () => _close(restoreFocus: true),
+                          color: Colors.black.withValues(alpha: 0.35),
+                          semanticsLabel: 'Закрыть меню',
+                        ),
+                      ),
+                      Positioned(
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        width: math.min(280, screen.width - 48),
+                        child: _drawerPanel(android: false),
+                      ),
+                    ],
+                    if (widget.overlay != null)
+                      Positioned.fill(child: widget.overlay!),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
       ),

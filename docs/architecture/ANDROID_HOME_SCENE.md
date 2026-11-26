@@ -31,6 +31,14 @@ Background/lifecycle pauses and reduced motion are supported; changing motion
 preferences never replays a stale transition. A native connection panel remains
 available if WebGL fails.
 
+The Android shell paints one green space background across the viewport, including
+the footer. The transparent WebView draws the planet and mascot at device pixel
+density with a 4.2-megapixel ceiling. The Earth uses the 1774 × 887 local atlas.
+Meteor showers of one to three cross the native star field; motion pauses in
+the background and follows reduced-motion preferences. A rightward swipe from
+the left half of a page (up to 200 dp in) opens the drawer. Vertical scrolling,
+buttons and the system's reserved back gesture retain their normal behavior.
+
 Flutter covers the WebView with its moving star field while the bundled assets
 and local fonts load. The scene needs native state and two rendered frames at
 the same measured viewport before posting readiness. Android then confirms the

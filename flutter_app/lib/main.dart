@@ -7,6 +7,7 @@ import 'dart:ui' as ui;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/rendering.dart';

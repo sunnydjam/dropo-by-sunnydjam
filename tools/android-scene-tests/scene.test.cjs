@@ -34,8 +34,8 @@ after(async () => {
   if (server) await new Promise(resolve => server.close(resolve));
 });
 
-async function pageFor(t, {viewport={width:390,height:760}, fault=null, manualStartup=false}={}) {
-  const context = await browser.newContext({viewport, deviceScaleFactor:1});
+async function pageFor(t, {viewport={width:390,height:760}, deviceScaleFactor=1, fault=null, manualStartup=false}={}) {
+  const context = await browser.newContext({viewport, deviceScaleFactor});
   t.after(() => context.close());
   await context.addInitScript(() => {
     window.sceneMessages=[];window.paintCount=0;
@@ -268,7 +268,7 @@ for (const viewport of [{width:360,height:600},{width:320,height:600},{width:760
       const power=document.querySelector('.dp-start').getBoundingClientRect();
       const arrow=canvas.getBoundingClientRect();
       const tipX=90+39*Math.sin(Math.PI/6), tipY=39*Math.cos(Math.PI/6);
-      const tip=canvas.getContext('2d').getImageData(Math.round(tipX*2),Math.round(tipY*2),1,1);
+      const tip=canvas.getContext('2d').getImageData(Math.round(tipX*canvas.width/180),Math.round(tipY*canvas.height/200),1,1);
       return {
         overlaps:a.x<b.right&&a.right>b.x&&a.y<b.bottom&&a.bottom>b.y,
         tipVisible:tip.data[3]>0&&arrow.width>0&&arrow.height>0,
@@ -319,4 +319,17 @@ test('embedded home announces landing once after the orbit on a fast connection'
 
   await update(page, embedded);
   assert.equal((await state(page)).hidden, true);
+});
+
+test('dense Android scene uses the original atlas resolution and a transparent full-height surface', async t => {
+  const page = await pageFor(t, {viewport:{width:360,height:800}, deviceScaleFactor:3});
+  const result = await page.evaluate(async () => {
+    const texture = new Image();
+    texture.src = window.DropoArt.earth;
+    await texture.decode();
+    const front = document.querySelector('.dp-front');
+    return [texture.naturalWidth, texture.naturalHeight, front.width, front.height,
+      ...['html','body','.dp-phone'].map(sel => getComputedStyle(document.querySelector(sel)).backgroundColor)];
+  });
+  assert.deepEqual(result, [1774, 887, 1080, 2400, ...Array(3).fill('rgba(0, 0, 0, 0)')]);
 });

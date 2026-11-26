@@ -173,7 +173,7 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
     try {
       final controller = WebViewController();
       _controller = controller;
-      await controller.setBackgroundColor(const Color(0xff030908));
+      await controller.setBackgroundColor(Colors.transparent);
       await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
       await controller.enableZoom(false);
       await controller.addJavaScriptChannel(
@@ -452,12 +452,9 @@ class _AndroidHomeSections extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        IgnorePointer(
-          ignoring: !showHome,
-          child: ExcludeFocus(
-            excluding: !showHome,
-            child: ExcludeSemantics(excluding: !showHome, child: home),
-          ),
+        Offstage(
+          offstage: !showHome,
+          child: ExcludeFocus(excluding: !showHome, child: home),
         ),
         AnimatedSwitcher(
           duration: animate ? const Duration(milliseconds: 190) : Duration.zero,
@@ -475,16 +472,10 @@ class _AndroidHomeSections extends StatelessWidget {
           ),
           child: showHome
               ? null
-              : ColoredBox(
+              : Padding(
                   key: ValueKey(section),
-                  color: _atlasBackground,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      _AtlasSpaceBackground(motionEnabled: motionEnabled),
-                      Padding(padding: const EdgeInsets.all(12), child: page),
-                    ],
-                  ),
+                  padding: const EdgeInsets.all(12),
+                  child: page,
                 ),
         ),
       ],

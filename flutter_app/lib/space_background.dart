@@ -22,6 +22,7 @@ class _AtlasSpaceBackgroundState extends State<_AtlasSpaceBackground>
   static const _durationSeconds = 180.0;
   late final AnimationController _controller;
   late final ValueNotifier<double> _seconds;
+  late final _meteors = _AtlasMeteor.shower(math.Random());
   bool _visible = true;
   int _lastFrame = -1;
 
@@ -108,6 +109,12 @@ class _AtlasSpaceBackgroundState extends State<_AtlasSpaceBackground>
               seconds: _seconds,
               active: widget.active,
               desktop: widget.desktop,
+              mobileSky: _isAndroidPlatform,
+              meteors:
+                  widget.motionEnabled &&
+                      !MediaQuery.disableAnimationsOf(context)
+                  ? _meteors
+                  : const [],
             ),
             child: const SizedBox.expand(),
           ),
@@ -131,19 +138,35 @@ class _AtlasStar {
   final double x, y, radius, opacity, offset, period, driftPeriod;
   final bool twinkles;
 
-  Offset position(Size size, double seconds, {required bool desktop}) {
+  Offset position(
+    Size size,
+    double seconds, {
+    required bool desktop,
+    bool mobileSky = false,
+  }) {
     // Both animations close at 180 seconds. Larger, nearer stars move along a
     // wider, faster path so their drift reads against the faint background.
     final depth = (radius - 0.45) / 0.7;
     final phase =
-        seconds * math.pi * 2 / (desktop ? driftPeriod : 180) + offset;
+        seconds * math.pi * 2 / (desktop || mobileSky ? driftPeriod : 180) +
+        offset;
     return Offset(
       5 +
           x * math.max(0, size.width - 10) +
-          math.sin(phase) * (desktop ? 18 + depth * 36 : 1.1),
+          math.sin(phase) *
+              (desktop
+                  ? 18 + depth * 36
+                  : mobileSky
+                  ? 6 + 16 * depth
+                  : 1.1),
       5 +
           y * math.max(0, size.height - 10) +
-          math.cos(phase) * (desktop ? 12 + depth * 18 : 0.65),
+          math.cos(phase) *
+              (desktop
+                  ? 12 + depth * 18
+                  : mobileSky
+                  ? 4 + 8 * depth
+                  : .65),
     );
   }
 
@@ -153,15 +176,77 @@ class _AtlasStar {
       : opacity;
 }
 
+class _AtlasMeteor {
+  const _AtlasMeteor(
+    this.start,
+    this.duration,
+    this.x,
+    this.y,
+    this.travel,
+    this.slope,
+  );
+  final double start, duration, x, y, travel, slope;
+
+  // A bounded schedule per mounted sky. Leave both ends of the 180s clock
+  // clear so wrapping, backgrounding and resuming never produces a burst.
+  static List<_AtlasMeteor> shower(math.Random random) {
+    final meteors = <_AtlasMeteor>[];
+    for (
+      var start = .6 + random.nextDouble();
+      start < 176;
+      start += 2.8 + random.nextDouble() * 4.2
+    ) {
+      final count = 1 + random.nextInt(3);
+      for (var i = 0; i < count; i++) {
+        meteors.add(
+          _AtlasMeteor(
+            start + i * .23,
+            .85 + random.nextDouble() * .65,
+            .2 + random.nextDouble() * .85,
+            random.nextDouble() * .88,
+            85 + random.nextDouble() * 100,
+            .28 + random.nextDouble() * .43,
+          ),
+        );
+      }
+    }
+    return meteors;
+  }
+
+  void paint(Canvas canvas, Size size, double time) {
+    final p = (time - start) / duration;
+    if (p <= 0 || p >= 1) return;
+    final head = Offset(
+      size.width * x - travel * p,
+      size.height * y + travel * slope * p,
+    );
+    final tail = head + Offset(travel * .30, -travel * slope * .30);
+    final opacity = math.sin(p * math.pi);
+    final light = const Color(0xFFDBFFF2).withValues(alpha: opacity * .82);
+    final brush = Paint()
+      ..strokeWidth = 1.35
+      ..strokeCap = StrokeCap.round
+      ..shader = ui.Gradient.linear(head, tail, [
+        light,
+        const Color(0x0064CAA9),
+      ]);
+    canvas.drawLine(head, tail, brush);
+    canvas.drawCircle(head, 1.35, Paint()..color = light);
+  }
+}
+
 class _AtlasSpacePainter extends CustomPainter {
   _AtlasSpacePainter({
     required this.seconds,
     required this.active,
     required this.desktop,
+    required this.mobileSky,
+    required this.meteors,
   }) : super(repaint: seconds);
 
   final ValueNotifier<double> seconds;
-  final bool active, desktop;
+  final bool active, desktop, mobileSky;
+  final List<_AtlasMeteor> meteors;
   static final _stars = _createStars();
   static const _periods = [12.0, 15.0, 18.0, 20.0, 22.5];
 
@@ -197,7 +282,17 @@ class _AtlasSpacePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(Offset.zero & size, Paint()..color = _atlasBackground);
+    final rect = Offset.zero & size;
+    if (mobileSky && !size.isEmpty) {
+      const gradient = LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xFF071713), Color(0xFF030B09), Color(0xFF08130F)],
+      );
+      canvas.drawRect(rect, Paint()..shader = gradient.createShader(rect));
+    } else {
+      canvas.drawRect(rect, Paint()..color = _atlasBackground);
+    }
     if (!active || size.isEmpty) return;
     final time = seconds.value;
     final starPaint = Paint();
@@ -207,12 +302,20 @@ class _AtlasSpacePainter extends CustomPainter {
         0xFFD5DEEC,
       ).withValues(alpha: star.alpha(time) * (desktop ? 1.3 : 1));
       canvas.drawCircle(
-        star.position(size, time, desktop: desktop),
+        star.position(size, time, desktop: desktop, mobileSky: mobileSky),
         star.radius * (desktop ? 1.18 : 1),
         starPaint,
       );
     }
 
+    if (mobileSky) {
+      for (final meteor in meteors) {
+        if (meteor.start > time) break;
+        if (time < meteor.start + meteor.duration) {
+          meteor.paint(canvas, size, time);
+        }
+      }
+    }
     final visibility = sunVisibility(time);
     if (visibility <= 0) return;
     final radius = math.min(72.0, size.width * 0.14);
@@ -261,6 +364,8 @@ class _AtlasSpacePainter extends CustomPainter {
   bool shouldRepaint(covariant _AtlasSpacePainter oldDelegate) =>
       oldDelegate.active != active ||
       oldDelegate.desktop != desktop ||
+      oldDelegate.mobileSky != mobileSky ||
+      oldDelegate.meteors != meteors ||
       oldDelegate.seconds != seconds;
 }
 
