@@ -42,6 +42,7 @@ param(
     [switch]$AllowUnsignedWindows,
     # Fail closed for publishers that configure a production signing gate.
     [switch]$RequireWindowsSigning,
+    [switch]$ProjectSigned,
     # Inert packaging-only opt-in. The guard is never installed as a service or
     # activated by this build; its signed bytes must be pinned independently.
     [string]$WfpGuardBinaryPath,
@@ -1094,7 +1095,7 @@ function Build-Application {
         Write-Host "[OK] Created $assetName ($assetSize MB, SHA-256 $assetSHA)" -ForegroundColor Green
     }
     if ($env:DROPO_SKIP_WINDOWS_RELEASE_GATE -ne "1") {
-        & (Join-Path $ScriptRoot "tools\windows-release-gate.ps1") -InstallerPath $installerPath -PortablePath $portablePath
+        & (Join-Path $ScriptRoot "tools\windows-release-gate.ps1") -InstallerPath $installerPath -PortablePath $portablePath -ProjectSigned:$ProjectSigned
         if ($LASTEXITCODE -ne 0) {
             throw "Windows MOTW/Defender release gate failed with exit code $LASTEXITCODE"
         }

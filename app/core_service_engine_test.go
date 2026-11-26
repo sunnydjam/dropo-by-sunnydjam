@@ -383,8 +383,8 @@ func TestWindowsUnifiedServiceGroupIsDeterministicSelector(t *testing.T) {
 		settings := GlobalAppSettings{FreeAccessEnabled: true}
 		service, _ := findFreeAccessService("youtube")
 		got := FreeAccessServiceCandidateTagsForSettings(service, settings, true)
-		if len(got) != 1 || got[0] != "direct" {
-			t.Fatalf("Windows Unified default candidates = %v, want explicit direct", got)
+		if len(got) != 1 || got[0] != "auto-select" {
+			t.Fatalf("Windows Unified default YouTube candidates = %v, want VPN", got)
 		}
 	}
 }

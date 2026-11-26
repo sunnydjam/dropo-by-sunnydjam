@@ -101,8 +101,8 @@ func TestFreshWindowsSettingsUseReleaseRecommendedRoutes(t *testing.T) {
 	}
 	methods := storage.GetAppSettings().FreeAccessMethods
 	for _, service := range DefaultFreeAccessServices {
-		want := FreeAccessMethodAuto
-		if aicatalog.VPNOnly(service.Tag) {
+		want := FreeAccessMethodDirect
+		if aicatalog.VPNOnly(service.Tag) || service.Tag == "youtube" || service.Tag == "discord" {
 			want = FreeAccessMethodVPN
 		}
 		if got := methods[service.Tag]; got != want {

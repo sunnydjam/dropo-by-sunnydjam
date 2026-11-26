@@ -9,6 +9,7 @@ param(
     [switch]$SkipFlutterChecks,
     [switch]$SkipLifecycleSmoke,
     [switch]$RequireWindowsSigning,
+    [switch]$ProjectSigned,
     [string]$SubscriptionUrl = $env:DROPO_TEST_SUBSCRIPTION_URL,
     [string]$WireGuardConfigPath,
     [string]$ReleaseFolder
@@ -141,6 +142,11 @@ function Assert-AuthenticodeSigned {
         [switch]$AllowUnsigned
     )
 
+    if ($ProjectSigned -and -not $AllowUnsigned) {
+        if ($RequireWindowsSigning) { throw "Project signing and public trust are separate release policies." }
+        & "$PSScriptRoot/verify-project-windows-signature.ps1" -Path $ExePath
+        return
+    }
     $signature = Get-AuthenticodeSignature -FilePath $ExePath
     if ($signature.SignerCertificate -and $signature.SignerCertificate.Subject -eq $signature.SignerCertificate.Issuer) {
         throw "Self-signed public release binary is forbidden: $ExePath"

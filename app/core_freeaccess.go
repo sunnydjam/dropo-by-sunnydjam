@@ -538,23 +538,16 @@ func DefaultFreeAccessServiceState() map[string]bool {
 func DefaultFreeAccessServiceMethodState() map[string]string {
 	state := make(map[string]string, len(DefaultFreeAccessServices))
 	for _, s := range DefaultFreeAccessServices {
-		state[s.Tag] = FreeAccessMethodDirect
+		state[s.Tag] = defaultServiceMethod(s.Tag)
 	}
 	return state
 }
 
-func FreshInstallFreeAccessServiceMethodState() map[string]string {
-	if runtime.GOOS != "windows" && runtime.GOOS != "android" {
-		return DefaultFreeAccessServiceMethodState()
+func defaultServiceMethod(tag string) string {
+	if aicatalog.VPNOnly(tag) || tag == "youtube" || tag == "discord" {
+		return FreeAccessMethodVPN
 	}
-	state := make(map[string]string, len(DefaultFreeAccessServices))
-	for _, service := range DefaultFreeAccessServices {
-		state[service.Tag] = FreeAccessMethodAuto
-		if aicatalog.VPNOnly(service.Tag) {
-			state[service.Tag] = FreeAccessMethodVPN
-		}
-	}
-	return state
+	return FreeAccessMethodDirect
 }
 
 func FreeAccessMethodTags() []string {
@@ -632,7 +625,7 @@ func FreeAccessServiceMethod(settings GlobalAppSettings, serviceTag string) stri
 	}
 	raw, exists := settings.FreeAccessMethods[serviceTag]
 	if !exists || strings.TrimSpace(raw) == "" {
-		return FreeAccessMethodDirect
+		return defaultServiceMethod(serviceTag)
 	}
 	method := NormalizeFreeAccessServiceMethod(raw)
 	if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(method) || IsFreeAccessTransparentMethod(method)) {
@@ -689,13 +682,18 @@ func IsFreeAccessTransparentMethod(tag string) bool {
 }
 
 func FreeAccessServiceMethodOptions() []map[string]string {
+	if runtime.GOOS == "windows" {
+		return []map[string]string{
+			{"tag": FreeAccessMethodVPN, "value": FreeAccessMethodVPN, "label": "Через VPN"},
+			{"tag": FreeAccessMethodZapret, "value": FreeAccessMethodZapret, "label": "Обход (Zapret)"},
+			{"tag": FreeAccessMethodDirect, "value": FreeAccessMethodDirect, "label": "Напрямую"},
+			{"tag": FreeAccessMethodAuto, "value": FreeAccessMethodAuto, "label": "Авто"},
+		}
+	}
 	options := []map[string]string{
 		{"tag": FreeAccessMethodAuto, "value": FreeAccessMethodAuto, "label": "Авто"},
 		{"tag": FreeAccessMethodDirect, "value": FreeAccessMethodDirect, "label": "Напрямую"},
 		{"tag": FreeAccessMethodVPN, "value": FreeAccessMethodVPN, "label": "Через VPN"},
-	}
-	if runtime.GOOS == "windows" {
-		return append(options, map[string]string{"tag": FreeAccessMethodZapret, "value": FreeAccessMethodZapret, "label": "Обход (Zapret)"})
 	}
 	for _, strategy := range DefaultByeDPIStrategies {
 		options = append(options, map[string]string{"value": strategy.Tag, "label": strategy.Label})

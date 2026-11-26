@@ -638,7 +638,7 @@ func TestDiscordRealtimeDetectsVoiceGatewayTCPFailure(t *testing.T) {
 	}
 }
 
-func TestDiscordRealtimeOutboundsPreferNativeDirectBeforeVPNSources(t *testing.T) {
+func TestDiscordRealtimeDefaultsToVPNAndHonorsManualDirect(t *testing.T) {
 	template := map[string]interface{}{
 		"outbounds": []interface{}{
 			map[string]interface{}{"type": "direct", "tag": "direct"},
@@ -657,7 +657,7 @@ func TestDiscordRealtimeOutboundsPreferNativeDirectBeforeVPNSources(t *testing.T
 		t.Fatalf("Discord VPN selector = %#v", vpn)
 	}
 	realtime := findOutboundMap(outbounds, discordRealtimeGroupTag)
-	if realtime == nil || realtime["default"] != "direct" || !sameStringSet(interfaceStringSlice(realtime["outbounds"]), []string{"direct", NoRouteOutboundTag, discordVPNGroupTag}) {
+	if realtime == nil || realtime["default"] != discordVPNGroupTag || !sameStringSet(interfaceStringSlice(realtime["outbounds"]), []string{"direct", NoRouteOutboundTag, discordVPNGroupTag}) {
 		t.Fatalf("Discord realtime selector = %#v", realtime)
 	}
 

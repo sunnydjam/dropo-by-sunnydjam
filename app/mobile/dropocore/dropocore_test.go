@@ -1079,8 +1079,8 @@ func TestAndroidRoutesExposeAutoDirectAndVPNMethods(t *testing.T) {
 	}
 	for _, raw := range services {
 		service := raw.(map[string]interface{})
-		selected, effective := androidRoutePolicyAuto, androidRoutePolicyDirect
-		if service["vpnOnly"] == true {
+		selected, effective := androidRoutePolicyDirect, androidRoutePolicyDirect
+		if service["vpnOnly"] == true || service["tag"] == "youtube" || service["tag"] == "discord" {
 			selected, effective = androidRoutePolicyVPN, androidRoutePolicyVPN
 		}
 		if service["selectedMethod"] != selected || service["effectiveMethodLabel"] != androidRoutePolicyLabel(effective) {

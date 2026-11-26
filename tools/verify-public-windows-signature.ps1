@@ -9,6 +9,7 @@ if(-not $file.PSIsContainer -and ($file.Attributes -band [IO.FileAttributes]::Re
  $signature=Get-AuthenticodeSignature -LiteralPath $file.FullName
 }else{throw 'A normal installer file is required.'}
 if($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate){throw 'Stable publication requires a publicly trusted Authenticode signature.'}
+if($signature.SignerCertificate.Subject -eq $signature.SignerCertificate.Issuer){throw "Stable public trust requires an independently issued signer."}
 $actual=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($signature.SignerCertificate.RawData))
 if($actual -ine $ExpectedCertificateSHA256){throw 'Installer publisher certificate does not match the reviewed signer.'}
 if(-not $signature.TimeStamperCertificate){throw 'Stable publication requires a trusted timestamp.'}

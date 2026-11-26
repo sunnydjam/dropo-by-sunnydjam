@@ -142,6 +142,7 @@ func TestDeepWindowsRoutePlanForcedVPNWithSubscriptionUsesProxyEndpoint(t *testi
 
 func TestDeepWindowsRoutePlanDisableFreeMethodsDoesNotOverrideExplicitDirect(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodDirect
 	settings.DisableFreeAccess = true
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
@@ -162,6 +163,7 @@ func TestDeepWindowsRoutePlanDisableFreeMethodsDoesNotOverrideExplicitDirect(t *
 
 func TestDeepWindowsRoutePlanDisableFreeMethodsWithoutSubscriptionGoesDirectForNonVPNServices(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodDirect
 	settings.DisableFreeAccess = true
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, false, true, true)

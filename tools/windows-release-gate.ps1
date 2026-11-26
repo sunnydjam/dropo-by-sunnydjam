@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$PortablePath,
     [switch]$RequireDefender,
     [switch]$RequireSignature,
+    [switch]$ProjectSigned,
     [switch]$InstallSmoke
 )
 
@@ -20,6 +21,11 @@ function Resolve-MpCmdRun {
 
 function Assert-PublicationSignaturePolicy {
     param([string]$Path)
+    if ($ProjectSigned) {
+        if ($RequireSignature) { throw "Project signing and public trust are separate release policies." }
+        & "$PSScriptRoot/verify-project-windows-signature.ps1" -Path $Path
+        return
+    }
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
     if ($signature.SignerCertificate -and $signature.SignerCertificate.Subject -eq $signature.SignerCertificate.Issuer) {
         throw "Self-signed release artifact is forbidden: $Path"
@@ -302,6 +308,11 @@ try {
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $extract $required) -PathType Leaf)) {
             throw "Portable archive is missing $required"
+        }
+    }
+    if ($ProjectSigned) {
+        foreach ($exe in @("dropo.exe", "resources/dropo-ui.exe", "resources/dropo-core.exe")) {
+            & "$PSScriptRoot/verify-project-windows-signature.ps1" -Path (Join-Path $extract $exe)
         }
     }
     Write-Host "[GATE] Scanning extracted portable payload..." -ForegroundColor Cyan

@@ -17,6 +17,9 @@ func TestWindowsServicePolicyAPIPersistsTheDisplayedChoices(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
 	for _, method := range []string{FreeAccessMethodDirect, FreeAccessMethodVPN, FreeAccessMethodZapret} {
 		requireAPISuccess(t, app.SetFreeAccessServiceMethod("youtube", method))
+		if err := app.storage.Load(); err != nil {
+			t.Fatal(err)
+		}
 		if got := FreeAccessServiceMethod(app.storage.GetAppSettings(), "youtube"); got != method {
 			t.Fatalf("UI choice %q persisted as %q", method, got)
 		}
@@ -60,11 +63,8 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	}
 	for _, svc := range DefaultFreeAccessServices {
 		wantMethod := FreeAccessMethodDirect
-		if runtime.GOOS == "windows" || runtime.GOOS == "android" {
-			wantMethod = FreeAccessMethodAuto
-			if aicatalog.VPNOnly(svc.Tag) {
-				wantMethod = FreeAccessMethodVPN
-			}
+		if svc.Tag == "youtube" || svc.Tag == "discord" || aicatalog.VPNOnly(svc.Tag) {
+			wantMethod = FreeAccessMethodVPN
 		}
 		if got := settings.FreeAccessMethods[svc.Tag]; got != wantMethod {
 			t.Fatalf("fresh route for %s = %q, want %q", svc.Tag, got, wantMethod)
@@ -88,7 +88,27 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 	}
 }
 
-func TestWindowsServiceRouteOptionsExposeExactThreePolicyContract(t *testing.T) {
+func TestLegacyServiceDefaultsMigrateOnce(t *testing.T) {
+	s := NewStorage(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	s.data.Version = 7
+	s.data.App.FreeAccessMethods = map[string]string{"youtube": "auto", "meta": "vpn", "telegram": "auto", "twitch": "direct"}
+	s.normalizeAppSettings()
+	for tag, want := range map[string]string{"youtube": "vpn", "discord": "vpn", "telegram": "direct", "meta": "vpn", "twitch": "direct", "claude": "vpn"} {
+		if got := s.data.App.FreeAccessMethods[tag]; got != want {
+			t.Fatalf("migrated %s = %q, want %q", tag, got, want)
+		}
+	}
+	s.data.App.FreeAccessMethods["discord"] = "auto"
+	s.normalizeAppSettings()
+	if s.data.App.FreeAccessMethods["discord"] != "auto" {
+		t.Fatal("new explicit automatic choice was overwritten")
+	}
+}
+
+func TestWindowsServiceRouteOptionsInSelectionOrder(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows route controls are platform specific")
 	}
@@ -97,13 +117,13 @@ func TestWindowsServiceRouteOptionsExposeExactThreePolicyContract(t *testing.T) 
 		tag   string
 		label string
 	}{
-		{FreeAccessMethodAuto, "Авто"},
-		{FreeAccessMethodDirect, "Напрямую"},
 		{FreeAccessMethodVPN, "Через VPN"},
 		{FreeAccessMethodZapret, "Обход (Zapret)"},
+		{FreeAccessMethodDirect, "Напрямую"},
+		{FreeAccessMethodAuto, "Авто"},
 	}
 	if len(options) != len(want) {
-		t.Fatalf("route options = %#v, want exactly three choices", options)
+		t.Fatalf("route options = %#v, want the supported choices", options)
 	}
 	for index, expected := range want {
 		if options[index]["tag"] != expected.tag || options[index]["value"] != expected.tag || options[index]["label"] != expected.label {
@@ -495,8 +515,8 @@ func TestSettingsAPIsPersistFreeAccessPolicy(t *testing.T) {
 			!planContainsString(plan.ProxyServices, "meta") || !planContainsString(plan.ProxyServices, "openai") {
 			t.Fatalf("disable-free plan = %+v, want explicit release routes preserved", plan)
 		}
-	} else if !planContainsString(plan.DirectServices, "youtube") || len(plan.TransparentServices) != 0 {
-		t.Fatalf("disable-free plan = %+v, want explicit default-direct service routes", plan)
+	} else if !planContainsString(plan.ProxyServices, "youtube") || len(plan.TransparentServices) != 0 {
+		t.Fatalf("disable-free plan = %+v, want default YouTube VPN route", plan)
 	}
 
 	result = app.SetDisableFreeAccess(false)

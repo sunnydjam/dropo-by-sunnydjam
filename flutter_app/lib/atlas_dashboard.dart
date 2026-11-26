@@ -970,10 +970,10 @@ class _AtlasServiceRow extends StatelessWidget {
     final options = service.vpnOnly
         ? const ['vpn']
         : [
-            'auto',
-            'direct',
             'vpn',
             if (!_isMobileShell && service.zapretSupported) 'zapret',
+            'direct',
+            'auto',
           ];
     final dropdown = Semantics(
       label: 'Способ подключения: ${_homeRouteName(service)}',

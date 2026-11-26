@@ -122,7 +122,7 @@ type Storage struct {
 }
 
 const (
-	SettingsVersion  = 7
+	SettingsVersion  = 8
 	ResourcesFolder  = "resources"
 	SettingsFileName = "settings.json"
 )
@@ -276,7 +276,7 @@ func (s *Storage) createDefaultSettings() *SettingsFile {
 			FreeAccessEnabled:   true, // enabled by default
 			FreeAccessReverse:   false,
 			FreeAccessServices:  DefaultFreeAccessServiceState(), // retained for legacy settings decoding
-			FreeAccessMethods:   FreshInstallFreeAccessServiceMethodState(),
+			FreeAccessMethods:   DefaultFreeAccessServiceMethodState(),
 			ZapretStrategyModes: DefaultZapretStrategyModeState(),
 			ZapretStrategies:    map[string]string{},
 			DisableFreeAccess:   false,
@@ -318,8 +318,7 @@ func (s *Storage) normalizeAppSettings() {
 	if app.FreeAccessServices == nil {
 		app.FreeAccessServices = DefaultFreeAccessServiceState()
 	}
-	legacyWithoutMethods := app.FreeAccessMethods == nil
-	if legacyWithoutMethods {
+	if app.FreeAccessMethods == nil {
 		app.FreeAccessMethods = make(map[string]string)
 	}
 	if app.ZapretStrategyModes == nil {
@@ -331,8 +330,8 @@ func (s *Storage) normalizeAppSettings() {
 	for _, svc := range DefaultFreeAccessServices {
 		raw, exists := app.FreeAccessMethods[svc.Tag]
 		normalized := NormalizeFreeAccessServiceMethod(raw)
-		if legacyWithoutMethods {
-			normalized = FreeAccessMethodDirect
+		if !exists || strings.TrimSpace(raw) == "" || (s.data.Version < 8 && normalized == FreeAccessMethodAuto) {
+			normalized = defaultServiceMethod(svc.Tag)
 		}
 		if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(normalized) || IsFreeAccessTransparentMethod(normalized)) {
 			if serviceHasFreeBypass(svc.Tag) {
@@ -344,7 +343,7 @@ func (s *Storage) normalizeAppSettings() {
 		// Preserve the intent of the removed per-service checkbox: a legacy
 		// disabled Auto service becomes the visible Direct policy once.
 		enabled, hadCheckbox := app.FreeAccessServices[svc.Tag]
-		if hadCheckbox && !enabled && (!exists || normalized == FreeAccessMethodAuto) {
+		if hadCheckbox && !enabled && (!exists || NormalizeFreeAccessServiceMethod(raw) == FreeAccessMethodAuto) {
 			normalized = FreeAccessMethodDirect
 		}
 		if aicatalog.VPNOnly(svc.Tag) {

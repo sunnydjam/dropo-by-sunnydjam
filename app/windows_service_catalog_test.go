@@ -100,9 +100,10 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 			transport := &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: addr}), DisableKeepAlives: true}
 			defer transport.CloseIdleConnections()
 			client := http.Client{Transport: transport, Timeout: 2 * time.Second}
-			cases := map[string]string{"vk.com": "direct", "www.ozon.ru": "direct", "online.sberbank.ru": "direct", "ordinary.example": "direct", "rutracker.org": "proxy", "api.anthropic.com": "proxy", "chatgpt.com": "proxy", "gemini.google.com": "proxy", "slack.com": "proxy", "youtube.com": "proxy"}
+			cases := map[string]string{"vk.com": "direct", "www.ozon.ru": "direct", "online.sberbank.ru": "direct", "ordinary.example": "direct", "rutracker.org": "proxy", "api.anthropic.com": "proxy", "chatgpt.com": "proxy", "gemini.google.com": "proxy", "slack.com": "proxy", "youtube.com": "proxy", "discord.com": "proxy", "twitch.tv": "proxy"}
 			if mode == RoutingModeBlockedOnly {
 				cases["youtube.com"] = "direct"
+				cases["twitch.tv"] = "direct"
 			}
 			for host, want := range cases {
 				resp, _ := client.Get(fmt.Sprintf("http://%s/", host))

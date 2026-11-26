@@ -18,16 +18,14 @@ The expected release certificate SHA-256 is stored in
 
 ## Local Windows release
 
-Windows builds are left unsigned when no publicly trusted signing identity is
-configured. To sign them, use either a certificate already installed in the
+Windows validation builds are unsigned by default. For the manual 4.0.3 release, build with -ProjectSigned and the configured project certificate. The manual verification checks a pinned certificate and a trusted timestamp. Windows may display an unknown-publisher warning on other machines. To sign them, use either a certificate already installed in the
 Windows certificate store (`DROPO_WINDOWS_CERT_SHA1`) or:
 
 - `DROPO_WINDOWS_PFX_PATH`
 - `DROPO_WINDOWS_PFX_PASSWORD`
 
 Use `-RequireWindowsSigning` (or `DROPO_REQUIRE_WINDOWS_SIGNING=1`) in a release
-environment that must fail closed. Self-signed certificates are not bundled or
-offered to public users.
+environment that must fail closed. Never bundle or distribute a root installation utility.
 
 For an OSI-licensed, fully open-source release, the preferred free option is the
 SignPath Foundation program. Until a project is accepted, unsigned artifacts

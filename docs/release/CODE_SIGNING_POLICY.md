@@ -7,8 +7,7 @@ artifacts are produced by the versioned build scripts in this repository and
 must pass the repository's manifest, SHA-256, clean-Windows and Microsoft
 Defender gates before publication.
 
-Windows releases remain unsigned unless a publicly trusted identity is
-available. The project never asks users to install a private root certificate
+For the owner-approved Windows 4.0.3 release, the local build uses the project’s self-signed Authenticode certificate with a timestamp. The release notes disclose its limited trust. The manual package gate verifies the certificate SHA-256 against the pin in tools/verify-project-windows-signature.ps1 for the installer, launcher, UI and core. The automatic stable publisher requires a publicly trusted signing identity. The project never asks users to install a private root certificate
 and never presents a self-signed executable as a trusted public release.
 
 This fork does not currently claim participation in an external signing

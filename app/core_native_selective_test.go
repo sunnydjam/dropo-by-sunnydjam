@@ -93,6 +93,8 @@ func TestNativeVPNOnlyCaptureLeavesUnrelatedHandshakesInKernel(t *testing.T) {
 
 func TestNativeSelectiveCaptureCatalogUsesOnlyNonDirectPolicies(t *testing.T) {
 	settings := GlobalAppSettings{FreeAccessMethods: DefaultFreeAccessServiceMethodState()}
+	settings.FreeAccessMethods["discord"] = FreeAccessMethodDirect
+	settings.FreeAccessMethods["youtube"] = FreeAccessMethodDirect
 	if catalog := nativeSelectiveCaptureCatalogForSettings(settings); slices.ContainsFunc(catalog, func(r traffic.ServiceRule) bool { return !aicatalog.VPNOnly(r.ID) }) {
 		t.Fatalf("all-direct settings produced capture services: %+v", catalog)
 	}
