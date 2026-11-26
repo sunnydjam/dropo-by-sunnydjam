@@ -227,10 +227,21 @@
       transition('return', .5);
     }
   }
-  function createSprite(T, image, kind) {
-    const info = artInfo[kind], texture = new T.Texture(image);
-    texture.colorSpace = T.SRGBColorSpace;
+  function textureFromImage(T, image) {
+    const texture = new T.Texture(image);
+    // WebGL1 only permits mipmaps for power-of-two textures. Three otherwise
+    // shrinks the atlas and mascot before uploading them, even on dense phones.
+    if (!renderer.capabilities.isWebGL2 &&
+        !(T.MathUtils.isPowerOfTwo(image.width) && T.MathUtils.isPowerOfTwo(image.height))) {
+      texture.minFilter = T.LinearFilter;
+      texture.generateMipmaps = false;
+    }
     texture.needsUpdate = true;
+    return texture;
+  }
+  function createSprite(T, image, kind) {
+    const info = artInfo[kind], texture = textureFromImage(T, image);
+    texture.colorSpace = T.SRGBColorSpace;
     const material = new T.MeshBasicMaterial({ map: texture, transparent: true,
       alphaTest: .008, depthWrite: false, side: T.DoubleSide, toneMapped: false });
     // Keep DrOppo's original green colors in every pose, including errors.
@@ -264,7 +275,7 @@
       if(y===0||!cells[(y-1)*nx+x])edge(b,a);if(x===nx-1||!cells[y*nx+x+1])edge(d,b);if(y===ny-1||!cells[(y+1)*nx+x])edge(c,d);if(x===0||!cells[y*nx+x-1])edge(a,c);
     }
     const geometry=new T.BufferGeometry();geometry.setAttribute('position',new T.Float32BufferAttribute(positions,3));geometry.setAttribute('uv',new T.Float32BufferAttribute(uvs,2));geometry.setAttribute('color',new T.Float32BufferAttribute(colors,3));geometry.setIndex([...front,...back,...sides]);geometry.addGroup(0,front.length,0);geometry.addGroup(front.length,back.length,1);geometry.addGroup(front.length+back.length,sides.length,2);geometry.computeVertexNormals();
-    function texture(im,bounds){const tex=new T.Texture(im);tex.colorSpace=T.SRGBColorSpace;tex.offset.set(bounds[0],1-bounds[1]-bounds[3]);tex.repeat.set(bounds[2],bounds[3]);tex.needsUpdate=true;return tex;}
+    function texture(im,bounds){const tex=textureFromImage(T, im);tex.colorSpace=T.SRGBColorSpace;tex.offset.set(bounds[0],1-bounds[1]-bounds[3]);tex.repeat.set(bounds[2],bounds[3]);return tex;}
     const frontTex=texture(frontImage,crop.map((n,i)=>n/(i%2?frontImage.height:frontImage.width)));
     const rearTex=texture(rearImage,[0,0,1,1]);
     const frontMaterial=new T.MeshBasicMaterial({map:frontTex,transparent:true,alphaTest:.012,depthWrite:true,toneMapped:false});
@@ -298,7 +309,8 @@
       premultipliedAlpha: true, powerPreference: 'low-power' });
     renderer.setClearColor(0, 0); renderer.outputColorSpace = T.SRGBColorSpace; renderer.toneMapping = T.NoToneMapping;
     world = new T.Scene(); camera = new T.OrthographicCamera(-w/2, w/2, h/2, -h/2, .1, 2500); camera.position.z = 1200;
-    const map = new T.Texture(images.earth); map.needsUpdate = true; map.wrapS = T.RepeatWrapping;
+    const map = textureFromImage(T, images.earth);
+    if (renderer.capabilities.isWebGL2) map.wrapS = T.RepeatWrapping;
     map.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
     earthUniforms = { map: { value: map }, glow: { value: 0 }, error: { value: 0 } };
     const material = new T.ShaderMaterial({ uniforms: earthUniforms, vertexShader: `

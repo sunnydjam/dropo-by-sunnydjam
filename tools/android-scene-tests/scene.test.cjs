@@ -34,7 +34,7 @@ after(async () => {
   if (server) await new Promise(resolve => server.close(resolve));
 });
 
-async function pageFor(t, {viewport={width:390,height:760}, deviceScaleFactor=1, fault=null, manualStartup=false}={}) {
+async function pageFor(t, {viewport={width:390,height:760}, deviceScaleFactor=1, webGL1=false, fault=null, manualStartup=false}={}) {
   const context = await browser.newContext({viewport, deviceScaleFactor});
   t.after(() => context.close());
   await context.addInitScript(() => {
@@ -45,6 +45,19 @@ async function pageFor(t, {viewport={width:390,height:760}, deviceScaleFactor=1,
       const original=type.prototype.drawElements;
       type.prototype.drawElements=function(...args){window.paintCount++;return original.apply(this,args);};
     }
+  });
+  if (webGL1) await context.addInitScript(() => {
+    const get = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+      return type === 'webgl2' ? null : get.call(this, type, ...args);
+    };
+    window.uploadSizes = [];
+    const upload = WebGLRenderingContext.prototype.texImage2D;
+    WebGLRenderingContext.prototype.texImage2D = function(...args) {
+      const image = args.at(-1);
+      if (image?.width) window.uploadSizes.push([image.width, image.height]);
+      return upload.apply(this, args);
+    };
   });
   const page = await context.newPage(), errors=[], external=[];
   page.on('pageerror', e => errors.push(e.message));
@@ -332,4 +345,11 @@ test('dense Android scene uses the original atlas resolution and a transparent f
       ...['html','body','.dp-phone'].map(sel => getComputedStyle(document.querySelector(sel)).backgroundColor)];
   });
   assert.deepEqual(result, [1774, 887, 1080, 2400, ...Array(3).fill('rgba(0, 0, 0, 0)')]);
+});
+
+test('WebGL1 uploads the atlas and idle mascot at their original texture sizes', async t => {
+  const page = await pageFor(t, {webGL1:true});
+  const sizes = await page.evaluate(() => window.uploadSizes.map(size => size.join('x')));
+  assert.ok(sizes.includes('1774x887'), sizes.toString());
+  assert.ok(sizes.includes('640x569'), sizes.toString());
 });

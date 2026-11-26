@@ -223,14 +223,14 @@ class _AtlasMeteor {
     final tail = head + Offset(travel * .30, -travel * slope * .30);
     final opacity = math.sin(p * math.pi);
     final light = const Color(0xFFDBFFF2).withValues(alpha: opacity * .82);
-    final brush = Paint()
-      ..strokeWidth = 1.35
-      ..strokeCap = StrokeCap.round
-      ..shader = ui.Gradient.linear(head, tail, [
-        light,
-        const Color(0x0064CAA9),
-      ]);
-    canvas.drawLine(head, tail, brush);
+    final normal = Offset(slope, 1) * .88;
+    final trail = ui.Vertices(
+      ui.VertexMode.triangles,
+      [head - normal, head + normal, tail],
+      colors: [light, light, const Color(0x0064CAA9)],
+    );
+    canvas.drawVertices(trail, BlendMode.src, Paint());
+    trail.dispose();
     canvas.drawCircle(head, 1.35, Paint()..color = light);
   }
 }
@@ -284,12 +284,20 @@ class _AtlasSpacePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
     if (mobileSky && !size.isEmpty) {
-      const gradient = LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [Color(0xFF071713), Color(0xFF030B09), Color(0xFF08130F)],
+      // Vertex colours avoid the large uniform array used by the GLES gradient
+      // shader on older drivers. The shared diagonal has one continuous colour.
+      final sky = ui.Vertices(
+        ui.VertexMode.triangleStrip,
+        [rect.topLeft, rect.topRight, rect.bottomLeft, rect.bottomRight],
+        colors: const [
+          Color(0xFF071713),
+          Color(0xFF030B09),
+          Color(0xFF030B09),
+          Color(0xFF08130F),
+        ],
       );
-      canvas.drawRect(rect, Paint()..shader = gradient.createShader(rect));
+      canvas.drawVertices(sky, BlendMode.src, Paint());
+      sky.dispose();
     } else {
       canvas.drawRect(rect, Paint()..color = _atlasBackground);
     }

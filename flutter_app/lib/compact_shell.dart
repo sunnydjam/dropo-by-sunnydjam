@@ -85,6 +85,41 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
   };
   bool _open = false;
   double _edgeDistance = 0;
+  static const _menuGesture = MethodChannel('dropo/menu-gesture');
+  Rect? _edgeArea;
+
+  void _syncEdgeArea(Size screen) {
+    if (!Platform.isAndroid) return;
+    Rect? area;
+    if (_canShowDrawer &&
+        widget.visible &&
+        !_open &&
+        (ModalRoute.isCurrentOf(context) ?? true)) {
+      final density = MediaQuery.devicePixelRatioOf(context);
+      final height = math.min(160.0, screen.height * .4);
+      area = Rect.fromLTWH(
+        0,
+        (screen.height - height) * density / 2,
+        32 * density,
+        height * density,
+      );
+    }
+    if (area == _edgeArea) return;
+    _edgeArea = area;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _edgeArea == area) {
+        unawaited(
+          _menuGesture.invokeMethod<void>(
+            'setEdgeArea',
+            area == null
+                ? null
+                : [area.width.round(), area.top.round(), area.bottom.round()],
+          ),
+        );
+      }
+    });
+  }
+
   late final AnimationController _drawerAnimation;
 
   bool get _animateDrawer =>
@@ -106,6 +141,9 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
 
   @override
   void dispose() {
+    if (Platform.isAndroid && _edgeArea != null) {
+      unawaited(_menuGesture.invokeMethod<void>('setEdgeArea'));
+    }
     _drawerAnimation.dispose();
     _toggleFocus.dispose();
     _drawerFocus.dispose();
@@ -533,6 +571,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final screen = MediaQuery.sizeOf(context);
+    _syncEdgeArea(screen);
     final android = _isAndroidPlatform;
     final showRail = !android && screen.width >= 520;
     final navigationTextScale = MediaQuery.textScalerOf(context).scale(15) / 15;

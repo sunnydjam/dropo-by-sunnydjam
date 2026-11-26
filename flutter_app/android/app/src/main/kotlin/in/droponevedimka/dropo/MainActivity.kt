@@ -14,6 +14,8 @@ import android.content.pm.LauncherApps
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
+import android.graphics.Rect
+import android.view.View
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.net.VpnService
@@ -45,6 +47,7 @@ class MainActivity : FlutterActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val playIntegrity by lazy { IntegrityManagerFactory.createStandard(applicationContext) }
     private var integrityProvider: Pair<Long, StandardIntegrityManager.StandardIntegrityTokenProvider>? = null
+    private var menuChannel: MethodChannel? = null
     private var coreChannel: MethodChannel? = null
     private var accountSessionChannel: AccountSessionChannel? = null
     private var eventChannel: EventChannel? = null
@@ -93,6 +96,22 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        menuChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dropo/menu-gesture").also {
+            it.setMethodCallHandler { call, result ->
+                if (call.method != "setEdgeArea") {
+                    result.notImplemented()
+                } else {
+                    val view = findViewById<View>(android.R.id.content)
+                    val box = call.arguments as? List<*>
+                    val rect = if (box?.size == 3) {
+                        val (width, top, bottom) = box.map { (it as? Number)?.toInt() ?: 0 }
+                        Rect(0, top, width, bottom)
+                    } else null
+                    view?.systemGestureExclusionRects = if (rect == null || rect.isEmpty) emptyList() else listOf(rect)
+                    result.success(null)
+                }
+            }
+        }
         flutterEngine.plugins.add(AndroidSceneVisualStatePlugin())
         accountSessionChannel = AccountSessionChannel(this,
             flutterEngine.dartExecutor.binaryMessenger)
@@ -135,6 +154,8 @@ class MainActivity : FlutterActivity() {
         pendingConnectResult = null
         accountSessionChannel?.close()
         accountSessionChannel = null
+        menuChannel?.setMethodCallHandler(null)
+        menuChannel = null
         coreChannel?.setMethodCallHandler(null)
         coreChannel = null
         eventChannel?.setStreamHandler(null)

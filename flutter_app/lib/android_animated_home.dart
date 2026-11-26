@@ -172,7 +172,6 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
   Future<void> _initialize() async {
     try {
       final controller = WebViewController();
-      _controller = controller;
       await controller.setBackgroundColor(Colors.transparent);
       await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
       await controller.enableZoom(false);
@@ -206,8 +205,16 @@ class _AndroidAnimatedHomeState extends State<_AndroidAnimatedHome>
         ..setMethodCallHandler((call) async {
           if (call.method == 'rendererGone') _fail();
         });
-      await _visualState.invokeMethod<void>('observeRenderer', id);
+      final supported = await _visualState.invokeMethod<bool>(
+        'observeRenderer',
+        id,
+      );
+      if (supported == false) {
+        _fail();
+        return;
+      }
       if (!mounted || _failed) return;
+      _controller = controller;
       await controller.loadFlutterAsset(_asset);
       if (mounted) setState(() {});
     } catch (_) {

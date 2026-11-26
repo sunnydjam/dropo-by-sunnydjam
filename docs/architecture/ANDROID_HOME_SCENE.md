@@ -36,8 +36,12 @@ the footer. The transparent WebView draws the planet and mascot at device pixel
 density with a 4.2-megapixel ceiling. The Earth uses the 1774 × 887 local atlas.
 Meteor showers of one to three cross the native star field; motion pauses in
 the background and follows reduced-motion preferences. A rightward swipe from
-the left half of a page (up to 200 dp in) opens the drawer. Vertical scrolling,
-buttons and the system's reserved back gesture retain their normal behavior.
+the left half of a page (up to 200 dp in) opens the drawer. With Android gesture
+navigation, the central 160 dp of the left edge also opens it. The remaining
+edges and modal dialogs retain system Back. Vertical scrolling and taps keep
+their normal behavior. WebGL1 textures retain their native dimensions.
+Android 10/11 with WebView 83 or older uses the bundled native scene before
+attaching the platform view, avoiding a graphics-thread stall on those engines.
 
 Flutter covers the WebView with its moving star field while the bundled assets
 and local fonts load. The scene needs native state and two rendered frames at

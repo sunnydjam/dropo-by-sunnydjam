@@ -1,6 +1,7 @@
 package `in`.droponevedimka.dropo
 
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
@@ -28,8 +29,13 @@ class AndroidSceneVisualStatePlugin : FlutterPlugin {
                         if (view == null || view.url != null) {
                             result.error("INVALID_SCENE_VIEW", null, null)
                         } else {
-                            observeRenderer(view, MethodChannel(binding.binaryMessenger, "$CHANNEL/$id"))
-                            result.success(null)
+                            // On Android 10/11 a Chromium 83 surface can deadlock HWUI before
+                            // the visual-state timeout can fire. Use the bundled native scene.
+                            val major = WebView.getCurrentWebViewPackage()?.versionName
+                                ?.substringBefore('.')?.toIntOrNull()
+                            val supported = Build.VERSION.SDK_INT > Build.VERSION_CODES.R || major == null || major > 83
+                            if (supported) observeRenderer(view, MethodChannel(binding.binaryMessenger, "$CHANNEL/$id"))
+                            result.success(supported)
                         }
                     }
                     "awaitFrame" -> awaitFrame(view, id, result)
