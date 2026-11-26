@@ -161,21 +161,12 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 			t.Fatalf("generated config without subscription must not route through %q", ServiceBypassGroupTag(serviceTag))
 		}
 	}
-	if runtime.GOOS == "windows" {
-		if !containsDomainSuffixRouteRule(config, "openai.com", NoRouteOutboundTag) {
-			t.Fatal("fresh explicit ChatGPT VPN route must fail closed when no subscription exists")
-		}
-	} else if !containsDomainSuffixRouteRule(config, "openai.com", "direct") {
-		t.Fatal("AI services must stay direct when no VPN subscription exists")
+	if !containsDomainSuffixRouteRule(config, "openai.com", NoRouteOutboundTag) || containsDomainSuffixRouteRule(config, "openai.com", "direct") {
+		t.Fatal("without a subscription the mandatory ChatGPT route must remain unavailable")
 	}
-	expectedOpenAIDNS := "dns-direct"
-	if runtime.GOOS == "windows" {
-		expectedOpenAIDNS = "dns-remote"
+	if !containsDNSDomainSuffixServer(config, "openai.com", "dns-remote") || containsDNSDomainSuffixServer(config, "openai.com", "dns-direct") {
+		t.Fatal("mandatory ChatGPT DNS escaped to the ordinary resolver")
 	}
-	if !containsDNSDomainSuffixServer(config, "openai.com", expectedOpenAIDNS) {
-		t.Fatalf("AI services DNS route is missing: want %s", expectedOpenAIDNS)
-	}
-
 	candidates := getOutboundCandidates(config, SmartBypassGroupTag)
 	if runtime.GOOS == "windows" {
 		if !sameStringSet(candidates, []string{"direct", NoRouteOutboundTag}) {
