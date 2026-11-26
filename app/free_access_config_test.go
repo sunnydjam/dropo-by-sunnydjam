@@ -198,17 +198,15 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 		t.Fatal("generated config without subscription must not force telegram.org through dns-remote")
 	}
 	for _, domain := range []string{"youtubei.googleapis.com", "googlevideo.com", "ytstatic.com"} {
-		expectedRoute := "direct"
-		expectedDNS := "dns-direct"
+		expectedRoute := NoRouteOutboundTag
 		if runtime.GOOS == "windows" {
-			expectedRoute = ServiceBypassGroupTag("youtube")
-			expectedDNS = "dns-remote"
+			expectedRoute = ServiceBypassGroupTag("youtube") // explicit Zapret fixture
 		}
 		if !containsDomainSuffixRouteRule(config, domain, expectedRoute) {
 			t.Fatalf("generated config route for %s = missing, want %s", domain, expectedRoute)
 		}
-		if !containsDNSDomainSuffixServer(config, domain, expectedDNS) {
-			t.Fatalf("generated config DNS for %s = missing, want %s", domain, expectedDNS)
+		if !containsDNSDomainSuffixServer(config, domain, "dns-remote") {
+			t.Fatalf("generated config DNS for %s = missing, want dns-remote", domain)
 		}
 	}
 	for _, domain := range []string{"linkedin.com", "facetime.apple.com", "viber.com", "snapchat.com", "tiktok.com"} {
@@ -223,11 +221,7 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 			t.Fatalf("generated config does not resolve %s through dns-direct", domain)
 		}
 	}
-	expectedDiscordMediaRoute := "direct"
-	if runtime.GOOS == "windows" {
-		expectedDiscordMediaRoute = NoRouteOutboundTag
-	}
-	if !containsScopedIPProcessRoute(config, "66.22.192.0/18", "Discord.exe", expectedDiscordMediaRoute) {
+	if !containsScopedIPProcessRoute(config, "66.22.192.0/18", "Discord.exe", NoRouteOutboundTag) {
 		t.Fatal("generated config must scope the Discord media range to the Discord process")
 	}
 	if !containsProcessRouteRule(config, "Discord.exe", discordRealtimeGroupTag) {
