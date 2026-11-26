@@ -3,6 +3,8 @@ package main
 import (
 	"dropocore/aicatalog"
 	"dropocore/dnspolicy"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -244,7 +246,7 @@ func TestSettingsAPIEnablesExplicitAllTrafficMode(t *testing.T) {
 	}
 	experimental, _ := config["experimental"].(map[string]interface{})
 	cacheFile, _ := experimental["cache_file"].(map[string]interface{})
-	if cacheFile["path"] != "cache-catalog-vpn-v2.db" {
+	if cacheFile["path"] != catalogVPNCacheFile {
 		t.Fatalf("full VPN cache path = %v, want isolated selector cache", cacheFile["path"])
 	}
 	if configNeedsAllTrafficTunnelMigration(config, RoutingModeAllTraffic) {
@@ -492,6 +494,21 @@ func TestFullVPNGeneratedConfigPassesBundledSingBoxCheck(t *testing.T) {
 	configPath, err := app.storage.WriteActiveConfigToFile()
 	if err != nil {
 		t.Fatal(err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	addresses := getTunAddresses(config)
+	if !containsIPv6Address(addresses) || len(addresses) < 2 {
+		t.Fatalf("catalog TUN must cover IPv4 and IPv6, got %v", addresses)
+	}
+	if getDNSStrategy(config) != "prefer_ipv4" {
+		t.Fatal("catalog DNS must allow IPv6 answers")
 	}
 	if output, err := newBackgroundCommand(matches[0], "check", "-c", configPath).CombinedOutput(); err != nil {
 		t.Fatalf("bundled sing-box rejected generated full-VPN config: %v\n%s", err, output)

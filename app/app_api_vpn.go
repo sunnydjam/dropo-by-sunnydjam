@@ -11,10 +11,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -35,13 +37,14 @@ func (a *App) GetStatus() map[string]interface{} {
 	a.waitForInit()
 
 	a.mu.Lock()
-	running := a.isRunning
 	starting := a.isStarting
+	running := a.isRunning && !starting
 	singboxPath := a.singboxPath
 	logPath := a.logPath
 	tempLogPath := a.tempLogPath
 	a.mu.Unlock()
 	reconnect := a.vpnReconnectSnapshot()
+	protectedRouterPID, protectedRouterError := a.protectedRouter.status()
 	connecting := starting || reconnect.Active
 	disconnecting := a.vpnStopping.Load()
 	vpnState := "stopped"
@@ -118,6 +121,8 @@ func (a *App) GetStatus() map[string]interface{} {
 		"reconnectReason":           reconnect.Reason,
 		"reconnectProtected":        false,
 		"vpnProtection":             currentVPNProtectionStatus(routingMode),
+		"protectedRoutingReady":     protectedRouterPID != 0,
+		"protectedRoutingError":     protectedRouterError,
 		"hasError":                  hasError,
 		"error":                     fullVPNError,
 		"routingMode":               string(routingMode),
@@ -221,7 +226,21 @@ func (a *App) Start() map[string]interface{} {
 	if !a.desiredConnected.Load() || a.isShuttingDown() {
 		return map[string]interface{}{"success": false, "cancelled": true, "error": "Подключение отменено"}
 	}
-	return a.startVPN(intentGeneration)
+	result := a.startVPN(intentGeneration)
+	if runtime.GOOS == "windows" && result["startupRetryable"] == true && a.vpnStartIntentCurrent(intentGeneration) {
+		a.writeLog("[Start] Local VPN engine failed its readiness check. Retrying once with a fresh configuration.")
+		for range 5 {
+			if !a.vpnStartIntentCurrent(intentGeneration) {
+				return cancelledVPNStartResult()
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !a.vpnStartIntentCurrent(intentGeneration) {
+			return cancelledVPNStartResult()
+		}
+		result = a.startVPN(intentGeneration)
+	}
+	return result
 }
 
 func (a *App) vpnStartIntentCurrent(expected uint64) bool {
@@ -239,10 +258,9 @@ func cancelledVPNStartResult() map[string]interface{} {
 	}
 }
 
-// cancelStartedVPNAttempt tears down a process that was created before a newer
-// user intent became visible. The process waiter has not been started yet at
-// this point, so this function owns Wait and clears the published identity.
-func (a *App) cancelStartedVPNAttempt(cmd *exec.Cmd) {
+// cancelStartedVPNAttempt tears down an uncommitted start. The process waiter
+// owns Wait. The steady-state exit handler has not been started yet.
+func (a *App) cancelStartedVPNAttempt(cmd *exec.Cmd, exited <-chan error) {
 	if a == nil || cmd == nil {
 		return
 	}
@@ -256,7 +274,7 @@ func (a *App) cancelStartedVPNAttempt(cmd *exec.Cmd) {
 		} else {
 			_ = cmd.Process.Kill()
 		}
-		_ = cmd.Wait()
+		<-exited
 	}
 	a.mu.Lock()
 	if a.cmd == cmd {
@@ -344,6 +362,7 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 			return
 		}
 		a.stopNativeWireGuardTunnels()
+		a.stopVPNSourceMonitor()
 		a.stopDiscordRealtimeMonitor()
 		a.stopFreeAccess()
 		a.stopXrayBridge()
@@ -470,6 +489,12 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	}
 	a.logActiveConfigDiagnostics(configPath)
 
+	if runtime.GOOS == "windows" && bundledRuntimeEnabled() {
+		if err := a.configureWindowsProtectedLink(configPath, selectiveWindowsSession); err != nil {
+			return map[string]interface{}{"success": false, "error": fmt.Sprintf("Не удалось подготовить локальный маршрут VPN: %v", err)}
+		}
+	}
+
 	if selectiveWindowsSession {
 		a.writeLog("[NetworkMode] Windows selective startup: proxy-only sing-box + one narrow in-process WinDivert traffic engine")
 	} else {
@@ -538,6 +563,29 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 
 	attachManagedCmdToJob(cmd, "sing-box", a.writeLog)
 
+	// The same waiter owns process completion during startup and steady state.
+	// The UI sees a connected session only after its own authenticated API
+	// responds, after sing-box has started its TUN and mixed inbounds.
+	exited := make(chan error, 1)
+	go func() {
+		exited <- cmd.Wait()
+		close(exited)
+	}()
+	go a.logOutput(stdout, "sing-box/out")
+	go a.logOutput(stderr, "sing-box/log")
+	a.updateBusy(busyID, "Проверяем готовность VPN-ядра...")
+	if err := waitForSingBoxReady(a.clashAPIAccessSnapshot(), exited, func() bool {
+		return a.vpnStartIntentCurrent(expectedIntent)
+	}, 8*time.Second); err != nil {
+		a.cancelStartedVPNAttempt(cmd, exited)
+		if !a.vpnStartIntentCurrent(expectedIntent) {
+			return cancelledVPNStartResult()
+		}
+		a.hasError.Store(true)
+		UpdateTrayIcon("error")
+		a.writeLog("[Start] sing-box readiness failed: " + err.Error())
+		return map[string]interface{}{"success": false, "error": "VPN-ядро не запустилось: " + err.Error(), "startupRetryable": true}
+	}
 	cmdDone := make(chan error, 1)
 	a.mu.Lock()
 	a.cmd = cmd
@@ -545,30 +593,16 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	a.isRunning = true
 	a.hasError.Store(false)
 	a.mu.Unlock()
-	// Drain logs immediately. The connected-session strategy validator runs in
-	// the background and must never fill child-process pipes or stall the runtime.
-	go a.logOutput(stdout, "sing-box/out")
-	go a.logOutput(stderr, "sing-box/log")
-	a.updateBusy(busyID, "Проверяем цепочку VPN-источников...")
-	a.startVPNSourceMonitor()
 	if runtime.GOOS == "windows" && a.trafficEngine != nil {
 		if selectiveWindowsSession {
-			if !waitForLoopbackPort(defaultDropoMixedProxyPort, 5*time.Second) {
-				terminateProcessTree(cmd)
-				_ = cmd.Wait()
-				a.mu.Lock()
-				if a.cmd == cmd {
-					a.cmd = nil
-					a.cmdDone = nil
-					a.isRunning = false
-				}
-				a.mu.Unlock()
-				return map[string]interface{}{"success": false, "error": "Локальный selective VPN proxy не запустился"}
+			proxyAddress, err := configuredSelectiveProxyAddress(configPath)
+			if err != nil {
+				a.cancelStartedVPNAttempt(cmd, exited)
+				return map[string]interface{}{"success": false, "error": err.Error()}
 			}
-			proxyAddress := fmt.Sprintf("127.0.0.1:%d", defaultDropoMixedProxyPort)
 			if err := a.trafficEngine.ConfigureSelectiveSession(proxyAddress, selectiveCaptureCatalog, selectiveProtocolEvidence); err != nil {
 				terminateProcessTree(cmd)
-				_ = cmd.Wait()
+				<-exited
 				a.mu.Lock()
 				if a.cmd == cmd {
 					a.cmd = nil
@@ -580,7 +614,7 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 			}
 		} else if err := a.trafficEngine.ConfigureTUNSession(); err != nil {
 			terminateProcessTree(cmd)
-			_ = cmd.Wait()
+			<-exited
 			a.mu.Lock()
 			if a.cmd == cmd {
 				a.cmd = nil
@@ -611,7 +645,7 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 			}
 			a.stopVPNSourceMonitor()
 			terminateProcessTree(cmd)
-			_ = cmd.Wait()
+			<-exited
 			a.mu.Lock()
 			if a.cmd == cmd {
 				a.cmd = nil
@@ -633,7 +667,7 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 			a.AddToLogBuffer("Локальный движок трафика недоступен. Заблокированные сервисы временно направлены через VPN-источник.")
 		} else {
 			terminateProcessTree(cmd)
-			_ = cmd.Wait()
+			<-exited
 			a.mu.Lock()
 			if a.cmd == cmd {
 				a.cmd = nil
@@ -656,8 +690,17 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 		a.startNativeWireGuardTunnels()
 	}
 	if !a.vpnStartIntentCurrent(expectedIntent) {
-		a.cancelStartedVPNAttempt(cmd)
+		a.cancelStartedVPNAttempt(cmd, exited)
 		return cancelledVPNStartResult()
+	}
+	select {
+	case err := <-exited:
+		a.cancelStartedVPNAttempt(cmd, exited)
+		a.hasError.Store(true)
+		UpdateTrayIcon("error")
+		a.writeLog(fmt.Sprintf("[Start] sing-box exited while applying the traffic plan: %v", err))
+		return map[string]interface{}{"success": false, "error": "VPN-ядро остановилось при применении маршрутов", "startupRetryable": true}
+	default:
 	}
 
 	// Start user-visible session accounting as soon as the base VPN and immutable
@@ -671,110 +714,21 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	// must never keep a usable TUN/VPN session behind the connecting spinner.
 	// Do this before the waiter starts so an immediate process exit always
 	// overwrites it with the final disconnected/error state.
+	a.mu.Lock()
+	a.isStarting = false
+	a.mu.Unlock()
 	UpdateTrayIcon("connected")
 	a.setRestoreVPNOnStartup(true)
 	a.writeLog("VPN started successfully")
 	a.AddToLogBuffer("VPN запущен")
 	startupSucceeded = true
+	a.startVPNSourceMonitor()
 	deferDiscordMonitor := false
 	if runtime.GOOS == "windows" && a.storage != nil {
 		settings := a.storage.GetAppSettings()
 		deferDiscordMonitor = FreeAccessServiceUsesZapret(settings, "discord")
 	}
-	// Monitor process in goroutine
-	go func(cmd *exec.Cmd, done chan error) {
-		err := cmd.Wait()
-		a.mu.Lock()
-		wasStoppedManually := a.stoppedManually
-		isCurrentProcess := a.cmd == cmd
-		if !isCurrentProcess || wasStoppedManually {
-			a.mu.Unlock()
-			if isCurrentProcess && a.trafficStats != nil {
-				a.trafficStats.EndSession()
-				a.trafficStats.Save()
-			}
-			done <- err
-			close(done)
-			return
-		}
-		// Signal process completion immediately so an already queued manual Stop
-		// never waits for the lifecycle lock while holding that same lock itself.
-		// Keep the process marked current until cleanup owns vpnLifecycleMu: a
-		// concurrent Start will then see an existing session instead of starting a
-		// new sing-box that this stale watcher could subsequently terminate.
-		a.mu.Unlock()
-		done <- err
-		close(done)
-
-		a.vpnLifecycleMu.Lock()
-		defer a.vpnLifecycleMu.Unlock()
-
-		// Stop may have won the lifecycle lock after Wait returned and completed
-		// all cleanup itself. Revalidate identity under the lock before touching
-		// any process-wide runtime or scheduling recovery for this generation.
-		a.mu.Lock()
-		isCurrentProcess = a.cmd == cmd
-		wasStoppedManually = a.stoppedManually
-		if !isCurrentProcess || wasStoppedManually {
-			a.mu.Unlock()
-			return
-		}
-		a.isRunning = false
-		a.stoppedManually = false
-		a.cmd = nil
-		a.cmdDone = nil
-		if a.trafficStats != nil {
-			a.trafficStats.EndSession()
-			a.trafficStats.Save()
-		}
-		shouldReconnect := a.desiredConnected.Load() && !a.isShuttingDown()
-		reason := "VPN-процесс завершился неожиданно"
-		if err != nil {
-			reason = fmt.Sprintf("VPN-процесс завершился с ошибкой: %v", err)
-		}
-
-		// ALWAYS stop WireGuard tunnels when VPN process exits
-		// This prevents orphaned tunnels that block user's native WireGuard
-		a.mu.Unlock() // Unlock before calling stopNativeWireGuardTunnels to avoid deadlock
-		if shouldReconnect {
-			// Publish the reconnecting state before potentially slow native cleanup.
-			// The worker cannot start a replacement process until this watcher
-			// releases vpnLifecycleMu, so cleanup remains strictly ordered.
-			a.hasError.Store(false)
-			a.writeLog("[Reconnect] " + reason)
-			a.AddToLogBuffer("Соединение прервано. dropo выполняет переподключение.")
-			a.scheduleVPNReconnect(reason)
-		}
-		a.invalidateRouteStrategySession()
-		a.stopNativeWireGuardTunnels()
-		a.stopVPNSourceMonitor()
-		a.stopDiscordRealtimeMonitor()
-		a.stopFreeAccess()
-		a.stopXrayBridge()
-		a.cleanupDropoRuntimeResidue("process exit")
-		if shouldReconnect {
-			a.closeLogFile()
-			return
-		}
-
-		a.mu.Lock()
-		if err != nil {
-			a.hasError.Store(true)
-			a.writeLog(fmt.Sprintf("VPN process exited with error: %v", err))
-			a.AddToLogBuffer(fmt.Sprintf("VPN завершился с ошибкой: %v", err))
-			UpdateTrayIcon("error")
-		} else {
-			a.writeLog("VPN process exited normally")
-			a.AddToLogBuffer("VPN завершил работу")
-			UpdateTrayIcon("disconnected")
-		}
-		a.closeLogFile()
-		a.mu.Unlock()
-		// Notify frontend about status change
-		if a.ctx != nil {
-			a.emitVPNLifecycleState(map[bool]string{true: "failed", false: "stopped"}[err != nil], a.reconnectGeneration.Load(), 0, "")
-		}
-	}(cmd, cmdDone)
+	go a.handleSingBoxExit(cmd, cmdDone, exited)
 	if !deferDiscordMonitor {
 		a.startDiscordRealtimeMonitor()
 	}
@@ -899,6 +853,9 @@ func (a *App) writeDeepWindowsProxyFallbackConfig(activeConfigPath string) (stri
 	if !enableMixedInboundLocalProxy(config) {
 		return "", fmt.Errorf("mixed inbound is not available for proxy fallback")
 	}
+	if a.storage != nil {
+		a.storage.ensureMixedInboundPort(config)
+	}
 	if a.pruneProxyFallbackVPNCandidates(config) {
 		a.writeLog("[NetworkMode] proxy-only fallback pruned inactive VPN candidates using route probe results")
 	}
@@ -982,7 +939,9 @@ func enableMixedInboundLocalProxy(config map[string]interface{}) bool {
 		if enabled {
 			continue
 		}
-		inboundMap["listen_port"] = float64(defaultDropoMixedProxyPort)
+		if mixedInboundPort(inboundMap["listen_port"]) <= 0 {
+			inboundMap["listen_port"] = defaultDropoMixedProxyPort
+		}
 		inboundTag, _ := inboundMap["tag"].(string)
 		if strings.TrimSpace(inboundTag) == "" {
 			inboundMap["tag"] = "dropo-selective-vpn-in"
@@ -1052,21 +1011,16 @@ func pinSelectiveVPNInbound(config map[string]interface{}) error {
 	return nil
 }
 
-func waitForLoopbackPort(port int, timeout time.Duration) bool {
-	if port < 1 || port > 65535 || timeout <= 0 {
-		return false
+func configuredSelectiveProxyAddress(path string) (string, error) {
+	config, err := readJSONConfig(path)
+	if err != nil {
+		return "", err
 	}
-	deadline := time.Now().Add(timeout)
-	for {
-		if loopbackPortReady(port, 150*time.Millisecond) {
-			return true
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		timer := time.NewTimer(50 * time.Millisecond)
-		<-timer.C
+	port := quickCheckMixedInboundPort(config)
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("не найден локальный порт VPN-прокси")
 	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), nil
 }
 
 func shouldUseSelectiveWindowsSession(settings GlobalAppSettings) bool {
@@ -1264,7 +1218,14 @@ func (a *App) startSingBoxProxyFallback(configPath, logLevel string) error {
 }
 
 func (a *App) monitorSingBoxProcess(cmd *exec.Cmd, done chan error) {
-	err := cmd.Wait()
+	exited := make(chan error, 1)
+	exited <- cmd.Wait()
+	close(exited)
+	a.handleSingBoxExit(cmd, done, exited)
+}
+
+func (a *App) handleSingBoxExit(cmd *exec.Cmd, done chan error, exited <-chan error) {
+	err := <-exited
 	a.mu.Lock()
 	wasStoppedManually := a.stoppedManually
 	isCurrentProcess := a.cmd == cmd
@@ -1540,6 +1501,8 @@ func sameRuntimeRuleSetPath(configuredPath, expectedPath string) bool {
 	return configuredAbs == expectedAbs
 }
 
+const catalogVPNCacheFile = "cache-catalog-vpn-v3.db"
+
 func configNeedsAllTrafficTunnelMigration(config map[string]interface{}, mode RoutingMode) bool {
 	if NormalizeRoutingMode(mode) != RoutingModeAllTraffic {
 		return false
@@ -1553,7 +1516,7 @@ func configNeedsAllTrafficTunnelMigration(config map[string]interface{}, mode Ro
 	route, _ := config["route"].(map[string]any)
 	experimental, _ := config["experimental"].(map[string]any)
 	cache, _ := experimental["cache_file"].(map[string]any)
-	return dns["final"] != "dns-direct" || route["final"] != "direct" || !configHasClaudeRoutes(config) || cache["path"] != "cache-catalog-vpn-v2.db"
+	return dns["final"] != "dns-direct" || route["final"] != "direct" || !configHasClaudeRoutes(config) || cache["path"] != catalogVPNCacheFile
 }
 
 // configSupportsDiscordRealtimeRouting is the structural migration gate for

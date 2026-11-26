@@ -184,7 +184,7 @@ func resetConnectionSettingsFlags() {
 	}
 }
 
-func killWindowsDropoManagedSidecarsNative(paths []string, roots []string) ([]int, error) {
+func killWindowsDropoManagedSidecarsNative(paths []string, roots []string, excludedPID int) ([]int, error) {
 	exact := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		if abs, err := filepath.Abs(path); err == nil {
@@ -220,7 +220,7 @@ func killWindowsDropoManagedSidecarsNative(paths []string, roots []string) ([]in
 	var resultErr error
 	currentPID := uint32(os.Getpid())
 	for {
-		if entry.ProcessID != 0 && entry.ProcessID != currentPID && ownedNames[strings.ToLower(windows.UTF16ToString(entry.ExeFile[:]))] {
+		if entry.ProcessID != 0 && int(entry.ProcessID) != excludedPID && entry.ProcessID != currentPID && ownedNames[strings.ToLower(windows.UTF16ToString(entry.ExeFile[:]))] {
 			process, openErr := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE, false, entry.ProcessID)
 			if openErr == nil {
 				imagePath, pathErr := processImagePath(process)

@@ -18,7 +18,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v29-service-defaults"
+	androidConfigSchema     = "android-package-routing-v30-catalog-only"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -608,11 +608,13 @@ func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies 
 	}
 	domains, _ := androidProtectedIdentities()
 	rules = append(rules, map[string]any{"domain_suffix": domains, "action": "route", "server": "dns-remote"})
-	rules = append(rules, map[string]interface{}{
-		"domain_suffix": androidLatencySensitiveDirectDomainSuffixes(),
-		"action":        "route",
-		"server":        "dns-direct",
-	})
+	if routingMode != "all_traffic" {
+		rules = append(rules, map[string]interface{}{
+			"domain_suffix": androidLatencySensitiveDirectDomainSuffixes(),
+			"action":        "route",
+			"server":        "dns-direct",
+		})
+	}
 	if directDomains := androidServiceDomainSuffixesByPolicy(routePolicies, androidRoutePolicyDirect); len(directDomains) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": directDomains,
@@ -655,18 +657,20 @@ func buildAndroidRouteRules(routingMode string, hideRuTraffic bool, ruOutbound s
 	}
 	domains, packages := androidProtectedIdentities()
 	rules = append(rules, map[string]any{"domain_suffix": domains, "action": "route", "outbound": "proxy"}, map[string]any{"package_name": packages, "action": "route", "outbound": "proxy"})
-	rules = append(rules,
-		map[string]interface{}{
-			"domain_suffix": androidLatencySensitiveDirectDomainSuffixes(),
-			"action":        "route",
-			"outbound":      "direct",
-		},
-		map[string]interface{}{
-			"package_name": androidLatencySensitiveDirectPackageNames(),
-			"action":       "route",
-			"outbound":     "direct",
-		},
-	)
+	if routingMode != "all_traffic" {
+		rules = append(rules,
+			map[string]interface{}{
+				"domain_suffix": androidLatencySensitiveDirectDomainSuffixes(),
+				"action":        "route",
+				"outbound":      "direct",
+			},
+			map[string]interface{}{
+				"package_name": androidLatencySensitiveDirectPackageNames(),
+				"action":       "route",
+				"outbound":     "direct",
+			},
+		)
+	}
 	if directDomains := androidServiceDomainSuffixesByPolicy(routePolicies, androidRoutePolicyDirect); len(directDomains) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": directDomains,

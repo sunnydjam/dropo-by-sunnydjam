@@ -3,8 +3,82 @@ package main
 import (
 	"dropocore/ownedprofile"
 	"fmt"
+	"slices"
 	"time"
 )
+
+// ApplyManagedVPNEntitlement updates the two managed families in a single
+// prepared Windows transaction. Empty keys remove the Turbo family.
+func (a *App) ApplyManagedVPNEntitlement(free, turbo string, preferTurbo bool) map[string]interface{} {
+	ops := vpnSourceReconnectOps{
+		stop: a.stopVPNForReconnect, start: a.startVPNForReconnect, restore: a.restoreVPNSourceProfile,
+	}
+	return a.applyManagedVPNEntitlement(free, turbo, preferTurbo, ops)
+}
+
+func (a *App) applyManagedVPNEntitlement(free, turbo string, preferTurbo bool, ops vpnSourceReconnectOps) map[string]interface{} {
+	revoked := turbo == "" && free == ""
+	if revoked {
+		// Recover via a regenerated Free chain if the prepared restart fails.
+		// Reapplying the old config would put the revoked credentials back.
+		restore := ops.restore
+		ops.restore = func(profile ProfileData) error {
+			dropRevokedTurbo(&profile)
+			return a.restoreVPNSourceProfileWith(profile, restore)
+		}
+		ops.enforceRevocation = true
+	}
+	alreadyRemoved := false
+	result := a.changeVPNSourcesTransaction(func(profile *ProfileData) error {
+		if revoked {
+			alreadyRemoved = !slices.ContainsFunc(profile.VPNSources, func(source VPNSource) bool {
+				return windowsOwnedFamily(source.PublicCatalogID) == ownedprofile.Boost
+			})
+			if alreadyRemoved {
+				return fmt.Errorf("Dropo Turbo уже удалён")
+			}
+			dropRevokedTurbo(profile)
+			return nil
+		}
+		if _, err := ownedprofile.Validate(ownedprofile.Boost, turbo); err != nil ||
+			ownedprofile.Expired(ownedprofile.Boost, turbo, time.Now()) {
+			return fmt.Errorf("Получен недействительный профиль Dropo Turbo")
+		}
+		if err := upsertWindowsOwnedSources(profile, ownedprofile.Free, free); err != nil {
+			return err
+		}
+		if err := upsertWindowsOwnedSources(profile, ownedprofile.Boost, turbo); err != nil {
+			return err
+		}
+		if !preferTurbo {
+			return nil
+		}
+		for _, source := range profile.VPNSources {
+			if source.PublicCatalogID == ownedprofile.Boost && !source.Disabled {
+				moveWindowsSource(profile, source.ID, 0)
+				break
+			}
+		}
+		return nil
+	}, ops)
+	if alreadyRemoved {
+		return map[string]interface{}{"success": true, "unchanged": true}
+	}
+	return result
+}
+
+func dropRevokedTurbo(profile *ProfileData) {
+	profile.VPNSources = removeOwnedVPNFamily(profile.VPNSources, ownedprofile.Boost)
+	for _, source := range profile.VPNSources {
+		if source.PublicCatalogID == ownedprofile.Free && !source.Disabled {
+			moveWindowsSource(profile, source.ID, 0)
+			break
+		}
+	}
+	profile.SubscriptionURL = ""
+	profile.SingboxConfig, profile.XrayConfig, profile.XrayConfigReady = nil, nil, false
+	normalizeProfileVPNSources(profile)
+}
 
 func (a *App) addOwnedVPNSource(provider, raw string, consent bool) map[string]interface{} {
 	if !consent {

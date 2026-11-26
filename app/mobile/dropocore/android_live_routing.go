@@ -73,8 +73,14 @@ func (change androidRoutingChange) resultLocked(applied bool) string {
 	result := map[string]interface{}{"success": true, "mode": change.mode, "applied": applied, "unchanged": change.unchanged}
 	if change.tag != "" {
 		effective := androidEffectiveRoutePoliciesForMode(change.policies, current.Subscription != "", change.mode)[change.tag]
+		if aicatalog.VPNOnly(change.tag) {
+			effective = androidRoutePolicyVPN
+		}
 		result["tag"], result["method"] = change.tag, change.method
 		result["methodLabel"], result["effectiveMethodLabel"] = androidRoutePolicyLabel(change.method), androidRoutePolicyLabel(effective)
+		if effective == "" {
+			result["effectiveMethodLabel"] = "По каталогу блокировок"
+		}
 		result["requiresVpn"] = effective == androidRoutePolicyVPN
 	}
 	return encode(result)

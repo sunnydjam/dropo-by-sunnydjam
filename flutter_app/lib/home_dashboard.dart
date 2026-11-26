@@ -527,7 +527,7 @@ class _HomeRouteControls extends StatelessWidget {
           const SizedBox(height: 12),
           Text(
             routingMode == 'all_traffic'
-                ? 'Заблокированные и ИИ-сервисы идут через VPN. Остальные сайты открываются напрямую.'
+                ? 'Заблокированные сервисы и сервисы с ограничениями для РФ идут через VPN. Остальные сайты открываются напрямую.'
                 : 'Маршруты сервисов и каталоги блокировок. Остальное — напрямую.',
             style: const TextStyle(
               color: _homeMuted,

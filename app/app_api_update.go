@@ -1,17 +1,100 @@
 package main
 
 // Update methods for dropo.
-// Background checks only report release metadata. Download/install is an
-// explicit UI action; this API must never be scheduled by an automatic check.
+// Checking, preparing a download, and starting installation are separate.
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 )
+
+func (a *App) NotifyUpdateAvailable(version string) map[string]interface{} {
+	a.waitForInit()
+	allowed := a.storage != nil && a.storage.GetAppSettings().Notifications &&
+		len(version) <= 64 && !strings.ContainsAny(version, "\x00\r\n")
+	return map[string]interface{}{"success": true, "shown": allowed && showUpdateSystemNotice(version)}
+}
+
+func (a *App) DownloadUpdateOnly(reveal bool) map[string]interface{} {
+	a.waitForInit()
+	if !a.updateInProgress.CompareAndSwap(false, true) {
+		return map[string]interface{}{"success": false, "error": "Обновление уже загружается"}
+	}
+	defer a.updateInProgress.Store(false)
+	info, err := CheckForUpdates()
+	if err != nil || !info.Available {
+		return map[string]interface{}{"success": false, "error": "Не удалось подтвердить наличие обновления"}
+	}
+	path, err := a.prepareUpdateDownload(info)
+	if err != nil {
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	if reveal {
+		openFolder(filepath.Dir(path))
+	}
+	return map[string]interface{}{"success": true, "downloaded": true, "version": info.Version}
+}
+
+func (a *App) prepareUpdateDownload(info *UpdateInfo) (string, error) {
+	if err := validateTrustedUpdateURL(info.DownloadURL); err != nil {
+		return "", err
+	}
+	if a.storage == nil {
+		return "", fmt.Errorf("хранилище настроек недоступно")
+	}
+	directory := filepath.Join(a.storage.GetResourcesPath(), "update-downloads")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return "", err
+	}
+	target := filepath.Join(directory, "dropo-update"+updateFileExtension(info.DownloadURL))
+	if verifyFileSHA256AndSize(target, info.SHA256, info.FileSize) == nil {
+		return target, nil
+	}
+	a.emitEvent("update-stage", map[string]interface{}{"stage": "downloading"})
+	var lastProgress time.Time
+	path, err := DownloadUpdate(info.DownloadURL, info.FileSize, info.SHA256, func(done, total int64) {
+		if done == total || time.Since(lastProgress) >= 200*time.Millisecond {
+			lastProgress = time.Now()
+			a.emitEvent("update-progress", map[string]interface{}{
+				"downloaded": done, "total": total, "percent": float64(done) / float64(total) * 100,
+			})
+		}
+	})
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(path)
+	input, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer input.Close()
+	output, err := os.CreateTemp(directory, ".download-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(output.Name())
+	_, copyErr := io.Copy(output, input)
+	closeErr := output.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	if err := verifyFileSHA256AndSize(output.Name(), info.SHA256, info.FileSize); err != nil {
+		return "", err
+	}
+	if err := os.Rename(output.Name(), target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
 
 // CheckForUpdates проверяет наличие обновлений (API для фронтенда)
 func (a *App) CheckForUpdates() map[string]interface{} {
@@ -69,27 +152,7 @@ func (a *App) DownloadAndInstallUpdate() map[string]interface{} {
 	if !updateInfo.Available {
 		return map[string]interface{}{"success": false, "error": "No update is available"}
 	}
-	if err := validateTrustedUpdateURL(updateInfo.DownloadURL); err != nil {
-		return map[string]interface{}{"success": false, "error": err.Error()}
-	}
-
-	a.AddToLogBuffer("Downloading update...")
-	stage("downloading")
-	var lastProgress time.Time
-
-	// Download the update
-	tempFile, err := DownloadUpdate(updateInfo.DownloadURL, updateInfo.FileSize, updateInfo.SHA256, func(downloaded, total int64) {
-		// Progress callback - can emit events if needed
-		if total > 0 && (downloaded == total || time.Since(lastProgress) >= 200*time.Millisecond) {
-			lastProgress = time.Now()
-			progress := float64(downloaded) / float64(total) * 100
-			a.emitEvent("update-progress", map[string]interface{}{
-				"downloaded": downloaded,
-				"total":      total,
-				"percent":    progress,
-			})
-		}
-	})
+	tempFile, err := a.prepareUpdateDownload(updateInfo)
 
 	if err != nil {
 		a.AddToLogBuffer("Update download failed: " + err.Error())

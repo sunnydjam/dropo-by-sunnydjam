@@ -4,6 +4,6 @@ package `in`.droponevedimka.dropo
 internal object AndroidDistributionPolicy {
     fun blocksMethod(playDistribution: Boolean, method: String): Boolean =
         playDistribution && method in setOf(
-            "androidInstallUpdate", "CheckForUpdates", "InstallUpdate", "CancelAndroidUpdate",
+            "androidInstallUpdate", "androidDownloadUpdate", "CheckForUpdates", "InstallUpdate", "CancelAndroidUpdate",
         )
 }

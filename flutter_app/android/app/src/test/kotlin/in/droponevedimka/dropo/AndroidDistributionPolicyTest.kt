@@ -6,7 +6,7 @@ import org.junit.Test
 
 class AndroidDistributionPolicyTest {
     @Test fun playBlocksEveryApkUpdateEntryPoint() {
-        for (method in listOf("androidInstallUpdate", "CheckForUpdates", "InstallUpdate", "CancelAndroidUpdate")) {
+        for (method in listOf("androidInstallUpdate", "androidDownloadUpdate", "CheckForUpdates", "InstallUpdate", "CancelAndroidUpdate")) {
             assertTrue(AndroidDistributionPolicy.blocksMethod(true, method))
             assertFalse(AndroidDistributionPolicy.blocksMethod(false, method))
         }

@@ -189,6 +189,50 @@ func TestOwnedPairWindowsLifecycleAndIndependentSelector(t *testing.T) {
 	}
 }
 
+func TestWindowsManagedEntitlementReconnectsAndNeverRestoresRevokedTurbo(t *testing.T) {
+	storage, builder := publicVPNTestBuilder(t, "vless://test@free.example.com:443?security=tls#Free")
+	app := &App{storage: storage, configBuilder: builder, initialized: true}
+	app.initializedReady.Store(true)
+	requireAPISuccess(t, app.AddManagedVPNSource(ownedprofile.Free, "", ownedReserveFixture, true))
+	turbo := strings.Replace(ownedReserveFixture, "%2Ffree", "%2Fboost", 1)
+	turbo = strings.Replace(turbo, "expiry=0", fmt.Sprintf("expiry=%d", time.Now().Add(time.Hour).Unix()), 1)
+	app.isRunning = true
+	var stopped, started int
+	rejectNextStart := false
+	ops := vpnSourceReconnectOps{
+		stop: func() map[string]interface{} {
+			stopped++
+			app.isRunning = false
+			return map[string]interface{}{"success": true}
+		},
+		start: func() map[string]interface{} {
+			started++
+			if rejectNextStart {
+				rejectNextStart = false
+				return map[string]interface{}{"success": false, "error": "fixture restart failure"}
+			}
+			app.isRunning = true
+			return map[string]interface{}{"success": true}
+		},
+	}
+	requireAPISuccess(t, app.applyManagedVPNEntitlement(ownedReserveFixture, turbo, true, ops))
+	profile, _ := storage.GetActiveProfile()
+	if groups := windowsSourceGroups(profile.VPNSources); len(groups) != 2 || groups[0][0].PublicCatalogID != ownedprofile.Boost || stopped != 1 || started != 1 {
+		t.Fatal("grant did not prioritize Turbo in one reconnect")
+	}
+	rejectNextStart = true
+	result := app.applyManagedVPNEntitlement("", "", false, ops)
+	profile, _ = storage.GetActiveProfile()
+	if groups := windowsSourceGroups(profile.VPNSources); len(groups) != 1 || groups[0][0].PublicCatalogID != ownedprofile.Free ||
+		stopped != 2 || started != 3 || !app.isRunning || result["connectionRestored"] != true {
+		t.Fatal("revoked Turbo survived the failed restart or Free did not recover")
+	}
+	requireAPISuccess(t, app.applyManagedVPNEntitlement("", "", false, ops))
+	if stopped != 2 || started != 3 {
+		t.Fatal("repeated revocation caused another reconnect")
+	}
+}
+
 func verifyWindowsResidentialBridge(t *testing.T, config []byte) {
 	t.Helper()
 	var original, prepared struct{ Outbounds []map[string]any }

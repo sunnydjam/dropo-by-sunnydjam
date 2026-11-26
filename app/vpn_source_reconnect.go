@@ -15,9 +15,10 @@ const vpnSourcePreparationBudget = 45 * time.Second
 // lifecycle coordinator's internal reconnect methods so user intent and the
 // persisted restore flag survive the temporary stop.
 type vpnSourceReconnectOps struct {
-	stop    func() map[string]interface{}
-	start   func() map[string]interface{}
-	restore func(ProfileData) error
+	stop              func() map[string]interface{}
+	start             func() map[string]interface{}
+	restore           func(ProfileData) error
+	enforceRevocation bool
 }
 
 // changeVPNSourcesTransaction applies a source-chain mutation and, when the VPN
@@ -150,10 +151,6 @@ func (a *App) changeVPNSourcesTransactionValidated(change func(*ProfileData) err
 		result["error"] = "Подготовка VPN-источников отменена или превысила время ожидания; прежние настройки сохранены"
 		return result
 	}
-	if prepareErr != nil {
-		result["error"] = "Не удалось подготовить VPN-источники: " + prepareErr.Error()
-		return result
-	}
 	current, currentErr := a.storage.GetActiveProfile()
 	a.mu.Lock()
 	wasRunning, wasStarting = a.isRunning, a.isStarting
@@ -167,6 +164,10 @@ func (a *App) changeVPNSourcesTransactionValidated(change func(*ProfileData) err
 	previous, err = cloneVPNSourceProfile(current)
 	if err != nil {
 		result["error"] = err.Error()
+		return result
+	}
+	if prepareErr != nil && !ops.enforceRevocation {
+		result["error"] = "Не удалось подготовить VPN-источники: " + prepareErr.Error()
 		return result
 	}
 	result["wasRunning"] = wasRunning
@@ -208,7 +209,15 @@ func (a *App) changeVPNSourcesTransactionValidated(change func(*ProfileData) err
 	}
 
 	a.updateBusy(busyID, "Применяем подготовленные VPN-источники...")
-	if err := a.storage.commitPreparedVPNSourceConfig(candidate.ID, prepared); err != nil {
+	commit := func() error {
+		if prepareErr != nil {
+			// Store the revocation even if the remaining sources cannot build.
+			// On the next start the core will build from the sanitized chain.
+			return a.restoreVPNSourceProfileWith(previous, ops.restore)
+		}
+		return a.storage.commitPreparedVPNSourceConfig(candidate.ID, prepared)
+	}
+	if err := commit(); err != nil {
 		rollbackErr := a.restoreVPNSourceProfileWith(previous, ops.restore)
 		result["rolledBack"] = rollbackErr == nil
 		recovery := rollbackRecoveryMessage(rollbackErr, wasRunning)

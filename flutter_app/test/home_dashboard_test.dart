@@ -88,6 +88,30 @@ class _HomeBridge extends MockCoreBridge {
   }
 }
 
+class _ProtectedSettingsBridge extends _HomeBridge {
+  bool enabled = true;
+
+  @override
+  Future<Map<String, dynamic>> appConfig() async => {
+    ...await super.appConfig(),
+    'protectedRoutingEnabled': enabled,
+    'protectedRoutingReady': enabled,
+  };
+
+  @override
+  Future<Map<String, dynamic>> callMap(
+    String method, {
+    List<Object?> args = const [],
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    if (method == 'SetProtectedRouting') {
+      enabled = args.single as bool;
+      return {'success': true};
+    }
+    return super.callMap(method, args: args, timeout: timeout);
+  }
+}
+
 class _SpaceBridge extends _HomeBridge {
   _SpaceBridge({this.canCreate = true});
 
@@ -1099,6 +1123,25 @@ void main() {
     expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('Windows VPN-only offline protection can be toggled', (
+    tester,
+  ) async {
+    final bridge = _ProtectedSettingsBridge();
+    await _pumpHome(tester, bridge, size: const Size(760, 560));
+    await openSection(tester, 'settings');
+    await _tap(tester, 'link-vpn-only-services');
+
+    const key = 'protect-vpn-only-when-off';
+    final control = find.byKey(const ValueKey(key));
+    expect(tester.widget<SwitchListTile>(control).value, isTrue);
+    await _tap(tester, key);
+    expect(bridge.enabled, isFalse);
+    expect(tester.widget<SwitchListTile>(control).value, isFalse);
+    await _tap(tester, key);
+    expect(bridge.enabled, isTrue);
+    expect(tester.widget<SwitchListTile>(control).value, isTrue);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   for (final mobile in [false, true]) {
     for (final scale in [1.0, 1.5, 2.0]) {

@@ -104,7 +104,8 @@ func candidateLooksLikeExternalVPN(candidate externalVPNCandidate) bool {
 	source := strings.ToLower(strings.TrimSpace(candidate.Source))
 	status := strings.ToLower(strings.TrimSpace(candidate.Status))
 	haystack := strings.ToLower(candidate.Name + " " + candidate.Detail)
-	if strings.TrimSpace(haystack) == "" || knownDropoOrNonVPNAdapter(haystack) {
+	if strings.TrimSpace(haystack) == "" || strings.EqualFold(candidate.Name, windowsProtectedRouterInterface) ||
+		knownDropoOrNonVPNAdapter(haystack) {
 		return false
 	}
 

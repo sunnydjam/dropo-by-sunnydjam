@@ -1,13 +1,41 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestSingBoxReadinessWaitsForAuthenticatedVersion(t *testing.T) {
+	const secret = "startup-fixture"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/version" || r.Header.Get("Authorization") != "Bearer "+secret {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte("{\"version\":\"sing-box fixture\"}"))
+	}))
+	defer server.Close()
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	exited := make(chan error, 1)
+	if err := waitForSingBoxReady(&clashAPIAccess{port: port, secret: secret}, exited, func() bool { return true }, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForSingBoxReady(&clashAPIAccess{port: port, secret: "other"}, exited, func() bool { return true }, 120*time.Millisecond); err == nil {
+		t.Fatal("an occupied loopback listener was reported ready without authentication")
+	}
+	exited <- errors.New("test process exited")
+	close(exited)
+	if err := waitForSingBoxReady(&clashAPIAccess{port: port, secret: secret}, exited, func() bool { return true }, time.Second); err == nil || !strings.Contains(err.Error(), "test process exited") {
+		t.Fatalf("early process exit: %v", err)
+	}
+}
 
 func TestClashAPIAccessAppliesRandomAuthenticatedEndpoint(t *testing.T) {
 	access := newClashAPIAccess()

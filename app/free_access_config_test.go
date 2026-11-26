@@ -130,6 +130,11 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	settings := storage.GetAppSettings()
+	settings.RoutingMode = RoutingModeBlockedOnly
+	if err := storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
 	builder := NewConfigBuilderForStorage(storage)
 	if err := builder.BuildConfig(""); err != nil {
 		t.Fatalf("BuildConfig without subscription failed: %v", err)
@@ -294,7 +299,7 @@ func TestAllTrafficModeDoesNotKeepPerServiceBypassRules(t *testing.T) {
 	if final, _ := route["final"].(string); final != "direct" {
 		t.Fatalf("all-traffic final = %q, want direct", final)
 	}
-	if !containsDomainSuffixRouteRule(config, "claude.ai", "proxy") || !containsDomainSuffixRouteRule(config, "youtube.com", "proxy") || containsDomainSuffixRouteRule(config, "youtube.com", "direct") ||
+	if !containsDomainSuffixRouteRule(config, "claude.ai", "proxy") || containsDomainSuffixRouteRule(config, "youtube.com", "proxy") || containsDomainSuffixRouteRule(config, "youtube.com", "direct") ||
 		containsDomainSuffixRouteRule(config, "youtube.com", ServiceBypassGroupTag("youtube")) {
 		t.Fatalf("all-traffic rules retained a YouTube service exception: %#v", route["rules"])
 	}

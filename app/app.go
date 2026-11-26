@@ -65,6 +65,7 @@ type App struct {
 	nativeWG               *NativeWireGuardManager // Native WireGuard tunnel manager
 	byeDPI                 *ByeDPIManager          // Free access (DPI-bypass) process manager
 	trafficEngine          *NativeTrafficManager
+	protectedRouter        windowsProtectedRouter
 	tgwsproxy              *TgWsProxyManager  // Telegram MTProto-over-WebSocket proxy sidecar
 	xrayBridge             *XrayBridgeManager // Xray bridge for VLESS xhttp profiles
 	lastRouteProbe         map[string]routeProbeServiceResult
@@ -169,7 +170,9 @@ func (a *App) startup(ctx context.Context) {
 		// Initialize unified storage (replaces appConfig, profileManager, configBuilder)
 		a.updateBusy(busyID, "Загрузка настроек...")
 		a.initStorage()
-		a.ensureAutoStartRegistration()
+		if runtime.GOOS == "windows" {
+			a.ensureAutoStartRegistration()
+		}
 		if a.isShuttingDown() {
 			return
 		}
@@ -193,6 +196,11 @@ func (a *App) startup(ctx context.Context) {
 		a.initXrayBridge()
 		if a.isShuttingDown() {
 			return
+		}
+		if runtime.GOOS == "windows" && a.storage != nil && !a.storage.GetAppSettings().DisableProtectedRouting {
+			if err := a.startWindowsProtectedRouter(); err != nil {
+				a.writeLog("[ProtectedRouting] " + err.Error())
+			}
 		}
 
 		// Initialize traffic stats
@@ -287,24 +295,14 @@ func (a *App) ensureAutoStartRegistration() {
 		return
 	}
 	settings := a.storage.GetAppSettings()
+	installerChoice, hasInstallerChoice := consumeInstallerAutoStartPreference()
 	if !settings.AutoStartPrompted {
-		if enabled, ok := consumeInstallerAutoStartPreference(); ok {
-			settings.AutoStart = enabled
-			settings.AutoStartPrompted = true
-			if err := a.storage.UpdateAppSettings(settings); err != nil {
-				a.writeLog(fmt.Sprintf("Failed to import installer autostart choice: %v", err))
-				return
-			}
-			a.writeLog(fmt.Sprintf("Imported installer autostart choice: %v", enabled))
+		settings.AutoStart = !hasInstallerChoice || installerChoice
+		settings.AutoStartPrompted = true
+		if err := a.storage.UpdateAppSettings(settings); err != nil {
+			a.writeLog(fmt.Sprintf("Failed to save autostart default: %v", err))
+			return
 		}
-	}
-	// Until the user answers the first-run autostart prompt, do not touch the
-	// system autostart entry. The UI shows the prompt and then calls
-	// ResolveAutoStartPrompt, which persists the choice and applies it. This is
-	// what makes "No" mean "not registered" rather than "registered then removed".
-	if !settings.AutoStartPrompted {
-		a.writeLog("Autostart registration deferred until the first-run prompt is answered")
-		return
 	}
 	if err := applyAutoStart(settings.AutoStart); err != nil {
 		a.writeLog(fmt.Sprintf("Failed to sync autostart setting: %v", err))
@@ -360,6 +358,7 @@ func (a *App) shutdown(ctx context.Context) {
 	a.requestShutdown()
 	// Stop sing-box
 	a.Stop()
+	a.protectedRouter.stop()
 
 	// Stop WireGuard health check and all tunnels
 	if a.nativeWG != nil {

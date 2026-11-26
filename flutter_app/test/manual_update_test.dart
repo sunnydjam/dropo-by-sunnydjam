@@ -14,6 +14,8 @@ class _ManualUpdateBridge extends MockCoreBridge {
   final _events = StreamController<BridgeEvent>.broadcast();
   int _eventId = 100;
   int checkCalls = 0;
+  int downloadCalls = 0;
+  int notifications = 0;
   int installCalls = 0;
   int cancelCalls = 0;
   int prepareQuitCalls = 0;
@@ -82,6 +84,7 @@ class _ManualUpdateBridge extends MockCoreBridge {
     'fileSize': 123456,
     'platform': android ? 'android' : 'windows',
     'selfUpdate': !android,
+    if (debugPlayDistributionOverride == true) 'distributionMode': 'play',
   });
 
   @override
@@ -116,6 +119,14 @@ class _ManualUpdateBridge extends MockCoreBridge {
     List<Object?> args = const [],
     Duration timeout = const Duration(seconds: 12),
   }) async {
+    if (method == 'DownloadUpdateOnly') {
+      downloadCalls++;
+      return {'success': true, 'downloaded': true, 'version': '3.0.34'};
+    }
+    if (method == 'NotifyUpdateAvailable') {
+      notifications++;
+      return {'success': true};
+    }
     if (method == 'CancelAndroidUpdate') {
       cancelCalls++;
       installResult?.complete({'success': false, 'cancelled': true});
@@ -245,22 +256,22 @@ void main() {
         mobile: true,
         size: const Size(390, 844),
       );
-      expect(bridge.checkCalls, 0);
+      expect(bridge.checkCalls, 1);
+      expect(bridge.downloadCalls, 0);
+      expect(bridge.notifications, 1);
       expect(
         find.byKey(const ValueKey('update-available-action')),
-        findsNothing,
+        findsOneWidget,
       );
-      await openSection(tester, 'app-settings');
-      expect(find.text('Проверять обновления автоматически'), findsNothing);
-      expect(find.text('Проверить сейчас'), findsNothing);
-      final play = find.text('Открыть Google Play');
-      await tester.ensureVisible(play);
-      await tester.tap(play);
-      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.byKey(const ValueKey('update-available-action')));
+      await tester.pump();
       expect(bridge.externalLinks, [
         'https://play.google.com/store/apps/details?id=com.dropo.myapp',
       ]);
-      expect(bridge.checkCalls, 0);
+      await openSection(tester, 'app-settings');
+      expect(find.text('Скачивать обновления автоматически'), findsNothing);
+      expect(find.text('Проверить сейчас'), findsNothing);
+      expect(bridge.checkCalls, 1);
       expect(bridge.installCalls, 0);
       expect(bridge.connectionChanges, isEmpty);
       expect(bridge.prepareQuitCalls, 0);
@@ -325,6 +336,8 @@ void main() {
     (tester) async {
       final bridge = await _pumpUpdater(tester);
       expect(bridge.checkCalls, 1);
+      expect(bridge.downloadCalls, 1);
+      expect(bridge.notifications, 1);
       expect(
         find.byKey(const ValueKey('update-available-notice')),
         findsOneWidget,
@@ -418,17 +431,18 @@ void main() {
   });
 
   testWidgets(
-    'manual settings updates remain available with startup checks off',
+    'manual settings updates remain available with automatic downloads off',
     (tester) async {
       final bridge = await _pumpUpdater(tester, checkUpdates: false);
       await openSection(tester, 'app-settings');
-      expect(bridge.checkCalls, 0);
+      expect(bridge.checkCalls, 1);
+      expect(bridge.downloadCalls, 0);
       final check = find.text('Проверить');
       await tester.ensureVisible(check);
       await tester.tap(check);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
-      expect(bridge.checkCalls, 1);
+      expect(bridge.checkCalls, 2);
       bridge.expectNoInstallOrInterruption();
 
       final update = find.descendant(
@@ -454,7 +468,7 @@ void main() {
       final bridge = await _pumpUpdater(tester);
       await openSection(tester, 'app-settings');
       final toggle = find.byKey(
-        const ValueKey('setting-switch-Проверять обновления автоматически'),
+        const ValueKey('setting-switch-Скачивать обновления автоматически'),
       );
       await tester.ensureVisible(toggle);
       await tester.tap(toggle);
@@ -473,34 +487,43 @@ void main() {
         bridge.expectNoInstallOrInterruption();
       }
       expect(bridge.checkCalls, 3);
+      expect(bridge.notifications, 1);
       expect(find.text('Обновить dropo до 3.0.34?'), findsNothing);
       await tester.pump(const Duration(seconds: 30));
       bridge.expectNoInstallOrInterruption();
     },
   );
 
-  testWidgets('disabled automatic checks do not run on startup', (
-    tester,
-  ) async {
-    final bridge = await _pumpUpdater(tester, checkUpdates: false);
-    await tester.pump(const Duration(seconds: 30));
-    expect(bridge.checkCalls, 0);
-    expect(find.byKey(const ValueKey('update-available-notice')), findsNothing);
-    bridge.expectNoInstallOrInterruption();
-  });
+  testWidgets(
+    'disabled automatic downloads still announce updates on startup',
+    (tester) async {
+      final bridge = await _pumpUpdater(tester, checkUpdates: false);
+      await tester.pump(const Duration(seconds: 30));
+      expect(bridge.checkCalls, 1);
+      expect(bridge.downloadCalls, 0);
+      expect(bridge.notifications, 1);
+      expect(
+        find.byKey(const ValueKey('update-available-notice')),
+        findsOneWidget,
+      );
+      bridge.expectNoInstallOrInterruption();
+    },
+  );
 
   testWidgets(
     'restoring default preferences still grants no install permission',
     (tester) async {
       final bridge = await _pumpUpdater(tester, checkUpdates: false);
-      expect(bridge.checkCalls, 0);
+      expect(bridge.checkCalls, 1);
       await tester.pumpWidget(const SizedBox.shrink());
       await bridge.saveAppConfig(AppConfig.defaults);
       await tester.pumpWidget(MaterialApp(home: DropoHomePage(bridge: bridge)));
       await tester.pump();
       await tester.pump(const Duration(seconds: 2));
 
-      expect(bridge.checkCalls, 1);
+      expect(bridge.checkCalls, 2);
+      expect(bridge.downloadCalls, 1);
+      expect(bridge.notifications, 2);
       expect(
         find.byKey(const ValueKey('update-available-notice')),
         findsOneWidget,
@@ -538,8 +561,9 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       final action = find.byKey(const ValueKey('update-available-action'));
       final notice = find.byKey(const ValueKey('update-available-notice'));
-      expect(tester.getRect(connection), before);
-      expect(tester.getRect(notice).overlaps(before), isFalse);
+      final after = tester.getRect(connection);
+      expect(after.top, greaterThanOrEqualTo(before.top));
+      expect(tester.getRect(notice).overlaps(after), isFalse);
       if (viewport.$2 > 1) await tester.ensureVisible(action);
       expect(action.hitTestable(), findsOneWidget);
       expect(find.byKey(const ValueKey('notice-overlay')), findsNothing);
@@ -790,7 +814,7 @@ void main() {
       mobile: true,
     );
     await openSection(tester, 'app-settings');
-    final version = find.text('Доступна версия 3.0.34');
+    final version = find.text('Вышла новая версия Dropo 3.0.34');
     await tester.ensureVisible(version);
     await tester.pump();
     expect(version, findsOneWidget);

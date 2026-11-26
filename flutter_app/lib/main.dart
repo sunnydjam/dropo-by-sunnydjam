@@ -1404,6 +1404,17 @@ class ChannelCoreBridge implements CoreBridge {
 
   @override
   Future<UpdateInfo> checkUpdates() async {
+    if (_isAndroidPlatform) {
+      try {
+        final play = await _invokeMap('androidCheckPlayUpdate');
+        if (play['managedByPlay'] == true) return UpdateInfo.fromJson(play);
+      } on MissingPluginException {
+        if (_isPlayDistribution) rethrow;
+      }
+      if (_isPlayDistribution) {
+        return UpdateInfo.fromJson(const {'success': false});
+      }
+    }
     return UpdateInfo.fromJson(
       await callMap('CheckForUpdates', timeout: const Duration(seconds: 40)),
     );
@@ -1826,6 +1837,16 @@ class ChannelCoreBridge implements CoreBridge {
     List<Object?> args = const [],
     Duration timeout = const Duration(seconds: 12),
   }) {
+    if (method == 'DownloadUpdateOnly') {
+      return _invokeMap('androidDownloadUpdate', timeout: timeout);
+    }
+    if (method == 'NotifyUpdateAvailable') {
+      return _invokeMap(
+        'androidNotifyUpdateAvailable',
+        arguments: {'version': args.single},
+        timeout: timeout,
+      );
+    }
     return _invokeMap(
       'call',
       arguments: {'method': method, 'argsJson': jsonEncode(args)},
@@ -3728,6 +3749,7 @@ class WireGuardInfo {
 
 class UpdateInfo {
   const UpdateInfo({
+    this.releaseId = '',
     required this.success,
     required this.hasUpdate,
     required this.currentVersion,
@@ -3754,6 +3776,10 @@ class UpdateInfo {
   final bool selfUpdate;
   final String distributionMode;
   final String error;
+  final String releaseId;
+  bool get usesPlay => distributionMode == 'play';
+  String get updateKey =>
+      usesPlay ? 'play:$releaseId' : 'version:$latestVersion';
 
   factory UpdateInfo.fromJson(Map<String, dynamic> json) {
     return UpdateInfo(
@@ -3769,6 +3795,7 @@ class UpdateInfo {
       selfUpdate: json['selfUpdate'] == true,
       distributionMode: json['distributionMode']?.toString() ?? '',
       error: json['error']?.toString() ?? '',
+      releaseId: json['releaseId']?.toString() ?? '',
     );
   }
 }
@@ -3896,7 +3923,6 @@ class _DropoHomePageState extends State<DropoHomePage>
   String quitProgressMessage = '';
   int lastEventId = 0;
   int refreshFailureCount = 0;
-  bool autoStartPromptShown = false;
   String activeMenuSection = 'home';
   bool _androidHomeVisible = false;
   bool _checkingWidgetSetup = false;
@@ -3955,7 +3981,12 @@ class _DropoHomePageState extends State<DropoHomePage>
   Timer? refreshTimer;
   Timer? eventsTimer;
   StreamSubscription<BridgeEvent>? pushEventsSubscription;
-  bool startupUpdateCheckScheduled = false;
+  Timer? startupUpdateCheck;
+  Timer? periodicUpdateCheck;
+  bool updateCheckRunning = false;
+  bool automaticUpdateDownloading = false;
+  String notifiedUpdate = '';
+  String preparedUpdate = '';
   double? updateProgressPercent;
   String? updateStage;
   String updateVersion = '';
@@ -3976,6 +4007,9 @@ class _DropoHomePageState extends State<DropoHomePage>
   (int, DateTime?)? _appliedEntitlement;
   DateTime? _retryEntitlementAfter;
   bool _applyingEntitlement = false;
+  String? _pendingEntitlementNotice;
+  Timer? _turboExpiryTimer;
+  bool get _windowsLiveEntitlement => Platform.isWindows && !_isMobileShell;
   late final IncidentReporter _incidents;
   late final AndroidReviewPromptCoordinator _reviewPrompt;
 
@@ -3999,6 +4033,16 @@ class _DropoHomePageState extends State<DropoHomePage>
     _incidents.synchronizeIdentity();
     final account = _guestIdentity.account;
     final token = _guestIdentity.token;
+    _turboExpiryTimer?.cancel();
+    if (_windowsLiveEntitlement && account != null && token != null) {
+      final expires = AccountDisplaySnapshot.fromJson(account).turboUntil;
+      final remaining = expires?.difference(DateTime.now());
+      if (remaining != null && remaining > Duration.zero) {
+        _turboExpiryTimer = Timer(remaining, () {
+          unawaited(_applyLiveEntitlement());
+        });
+      }
+    }
     if (token == null && _accountDisplay.value == null) {
       // A confirmed sign-out can replace startup without changing the avatar.
       _accountDisplayChanged();
@@ -4019,7 +4063,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         quitting ||
         !mounted ||
         _applyingEntitlement ||
-        _ownedProfileSessionBusy(status) ||
+        (!_windowsLiveEntitlement && _ownedProfileSessionBusy(status)) ||
         _guestIdentity.accountKind != 'registered' ||
         !accountEndpointAvailable(_profileClient.endpoint)) {
       return;
@@ -4028,7 +4072,6 @@ class _DropoHomePageState extends State<DropoHomePage>
     final token = _guestIdentity.token;
     if (account == null ||
         token == null ||
-        _guestIdentity.state != 'ready' ||
         account['demoAccount'] == true ||
         account['authMethod'] == 'password') {
       return;
@@ -4039,15 +4082,30 @@ class _DropoHomePageState extends State<DropoHomePage>
     final until = display.turboUntil;
     final epoch = _guestIdentity.identityEpoch;
     final desired = (epoch, until?.isAfter(now) == true ? until : null);
+    if (_guestIdentity.state != 'ready' &&
+        !(_windowsLiveEntitlement && until != null && !until.isAfter(now))) {
+      return;
+    }
     if (_appliedEntitlement == desired ||
         (_retryEntitlementAfter?.isAfter(now) ?? false)) {
       return;
     }
-    bool current() =>
-        mounted &&
-        !quitting &&
-        _guestIdentity.identityEpoch == epoch &&
-        _guestIdentity.token == token;
+    bool current() {
+      if (!mounted ||
+          quitting ||
+          _guestIdentity.identityEpoch != epoch ||
+          _guestIdentity.token != token) {
+        return false;
+      }
+      final latest = _guestIdentity.account;
+      if (latest == null) return false;
+      final latestPlan = AccountDisplaySnapshot.fromJson(latest);
+      final latestUntil = latestPlan.turboUntil;
+      return latestPlan.hasConfirmedPlan &&
+          (latestUntil?.isAfter(DateTime.now()) == true ? latestUntil : null) ==
+              desired.$2;
+    }
+
     _applyingEntitlement = true;
     try {
       final result = await _profileClient.synchronizeEntitlement(
@@ -4055,10 +4113,19 @@ class _DropoHomePageState extends State<DropoHomePage>
         token,
         desired.$2,
         isCurrent: current,
+        windowsLive: _windowsLiveEntitlement,
       );
       if (!current()) return;
       if (result['success'] == true && result['deferred'] != true) {
         _appliedEntitlement = desired;
+        if (_windowsLiveEntitlement && result['unchanged'] != true) {
+          if (desired.$2 != null && result['turboActivated'] == true) {
+            _pendingEntitlementNotice = 'Dropo Turbo активирован';
+          } else if (result['turboRemoved'] == true) {
+            _pendingEntitlementNotice = 'Dropo Turbo отключён';
+          }
+          _showEntitlementNotice();
+        }
         if (result['unchanged'] != true) await _refreshHomeSources(force: true);
       } else {
         _retryEntitlementAfter = now.add(const Duration(seconds: 30));
@@ -4070,6 +4137,15 @@ class _DropoHomePageState extends State<DropoHomePage>
     } finally {
       _applyingEntitlement = false;
     }
+  }
+
+  void _showEntitlementNotice() {
+    final message = _pendingEntitlementNotice;
+    if (message == null || !mounted || !windowVisible) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    _pendingEntitlementNotice = null;
+    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   bool get _showTurboOffer {
@@ -4223,6 +4299,9 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   @override
   void dispose() {
+    _turboExpiryTimer?.cancel();
+    startupUpdateCheck?.cancel();
+    periodicUpdateCheck?.cancel();
     _incidents.dispose();
     _guestIdentity.removeListener(_identityChanged);
     _guestIdentity.dispose();
@@ -4270,13 +4349,16 @@ class _DropoHomePageState extends State<DropoHomePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    _guestIdentity.setForeground(state == AppLifecycleState.resumed);
+    if (!_windowsLiveEntitlement) {
+      _guestIdentity.setForeground(state == AppLifecycleState.resumed);
+    }
     _incidents.setForeground(state == AppLifecycleState.resumed);
     switch (state) {
       case AppLifecycleState.resumed:
         if (!windowVisible && mounted) {
           setState(() => windowVisible = true);
         }
+        _showEntitlementNotice();
         if (online && !quitting && refreshTimer == null) {
           _startPolling();
           unawaited(_refresh(all: true));
@@ -4355,7 +4437,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         }
       });
       unawaited(_startVpnIfRequestedByWidget());
-      unawaited(_maybeShowAutoStartPrompt());
       _checkAndroidReviewPrompt();
     } catch (error) {
       if (!mounted || quitting || request != _bootstrapRequest) {
@@ -4368,55 +4449,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         connectionHint = error.toString();
       });
     }
-  }
-
-  // _maybeShowAutoStartPrompt shows the one-time first-run dialog that tells the
-  // user dropo will launch at system startup. "OK" keeps autostart on and
-  // registers it; "Нет, не надо" flips the default off and leaves it unregistered.
-  // The backend records the answer so this never shows again.
-  Future<void> _maybeShowAutoStartPrompt() async {
-    if (!mounted || autoStartPromptShown) {
-      return;
-    }
-    // Autostart is only wired on Windows today; skip the prompt elsewhere.
-    if (!Platform.isWindows) {
-      return;
-    }
-    if (appConfig.autoStartPrompted) {
-      return;
-    }
-    autoStartPromptShown = true;
-
-    final enable = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) => _AutoStartPromptDialog(
-        onDecision: (value) => Navigator.of(dialogContext).pop(value),
-      ),
-    );
-    if (!mounted || enable == null) {
-      // Dismissed without a choice (should not happen — barrier is disabled);
-      // leave it unanswered so we can ask again next launch.
-      autoStartPromptShown = false;
-      return;
-    }
-
-    final result = await widget.bridge.resolveAutoStartPrompt(enable);
-    if (!mounted) {
-      return;
-    }
-    final ok = result['success'] != false;
-    setState(() {
-      appConfig = appConfig.copyWith(
-        autoStart: ok ? enable : appConfig.autoStart,
-        autoStartPrompted: true,
-      );
-      statusMessage = ok
-          ? (enable
-                ? 'dropo будет запускаться при входе в систему'
-                : 'Автозапуск отключён')
-          : (result['error']?.toString() ?? 'Не удалось применить автозапуск');
-    });
   }
 
   // Native events and new user intent revoke every earlier snapshot, including
@@ -4707,38 +4739,75 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   void _scheduleStartupUpdateCheck() {
-    if (_isPlayDistribution ||
-        startupUpdateCheckScheduled ||
-        !appConfig.checkUpdates) {
-      return;
-    }
-    startupUpdateCheckScheduled = true;
-    Future<void>.delayed(const Duration(seconds: 1), () async {
-      if (!mounted || quitting || !appConfig.checkUpdates) {
+    if (periodicUpdateCheck != null) return;
+    startupUpdateCheck = Timer(const Duration(seconds: 1), () {
+      unawaited(_checkUpdatesInBackground(retry: true));
+    });
+    periodicUpdateCheck = Timer.periodic(const Duration(hours: 1), (_) {
+      unawaited(_checkUpdatesInBackground());
+    });
+  }
+
+  Future<void> _checkUpdatesInBackground({bool retry = false}) async {
+    if (!mounted || quitting || !online || updateCheckRunning) return;
+    updateCheckRunning = true;
+    try {
+      final result = await widget.bridge.checkUpdates();
+      if (!result.success) {
+        if (mounted && !quitting && result.usesPlay && updateInfo == null) {
+          setState(() => updateInfo = result);
+        }
+        if (retry) _retryStartupUpdate();
         return;
       }
-      for (var attempt = 0; attempt < 2; attempt++) {
-        UpdateInfo? result;
-        try {
-          result = await widget.bridge.checkUpdates();
-        } catch (_) {
-          result = null;
-        }
-        if (!mounted || quitting || !appConfig.checkUpdates) {
-          return;
-        }
-        final checked = result;
-        if (checked != null && checked.success) {
-          setState(() {
-            updateInfo = checked;
-          });
-          return;
-        }
-        if (attempt == 0) {
-          await Future<void>.delayed(const Duration(seconds: 15));
-        }
+      if (!mounted || quitting) return;
+      setState(() => updateInfo = result);
+      if (!result.hasUpdate) return;
+      _announceUpdate(result);
+      if (uiBusy ||
+          !appConfig.checkUpdates ||
+          result.usesPlay ||
+          _isPlayDistribution ||
+          preparedUpdate == result.updateKey) {
+        return;
       }
+      setState(() => automaticUpdateDownloading = true);
+      try {
+        final download = await widget.bridge.callMap(
+          'DownloadUpdateOnly',
+          args: [false],
+          timeout: const Duration(minutes: 16),
+        );
+        if (mounted &&
+            download['success'] == true &&
+            download['downloaded'] == true) {
+          setState(() => preparedUpdate = 'version:${download['version']}');
+        }
+      } finally {
+        if (mounted) setState(() => automaticUpdateDownloading = false);
+      }
+    } catch (_) {
+      if (retry && updateInfo?.hasUpdate != true) _retryStartupUpdate();
+    } finally {
+      updateCheckRunning = false;
+    }
+  }
+
+  void _retryStartupUpdate() {
+    if (!mounted || quitting) return;
+    startupUpdateCheck = Timer(const Duration(seconds: 15), () {
+      unawaited(_checkUpdatesInBackground());
     });
+  }
+
+  void _announceUpdate(UpdateInfo info) {
+    if (!appConfig.notifications || notifiedUpdate == info.updateKey) return;
+    notifiedUpdate = info.updateKey;
+    unawaited(
+      widget.bridge
+          .callMap('NotifyUpdateAvailable', args: [info.latestVersion])
+          .then<void>((_) {}, onError: (Object _) {}),
+    );
   }
 
   void _applyEvent(BridgeEvent event) {
@@ -4787,6 +4856,29 @@ class _DropoHomePageState extends State<DropoHomePage>
       case 'vpn-status-changed':
         _applyServiceStatePayload(event.payload);
         _incidents.observeConnection(status, appConfig.routingMode);
+        break;
+      case 'protected-route-denied':
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || quitting || status.connected) return;
+          final bridge = widget.bridge;
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(
+              content: const Text('Для этого сервиса нужен VPN'),
+              action: SnackBarAction(
+                label: 'Подробнее',
+                onPressed: () {
+                  if (bridge is HttpCoreBridge) {
+                    unawaited(
+                      bridge.openExternal(
+                        bridge.baseUri.resolve('/vpn-required').toString(),
+                      ),
+                    );
+                  }
+                },
+              ),
+            ),
+          );
+        });
         break;
       case 'client-check-done':
         if (status.connected &&
@@ -5864,6 +5956,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         // background check must not replace a VPN error or in-flight hint.
         if (result.success) updateInfo = result;
       });
+      if (result.success && result.hasUpdate) _announceUpdate(result);
       _showUpdateSnackBar(result, manual: true);
     });
   }
@@ -5931,11 +6024,15 @@ class _DropoHomePageState extends State<DropoHomePage>
   }
 
   Future<void> _performUpdate(UpdateInfo result) async {
-    if (_isPlayDistribution) {
+    if (_isPlayDistribution || result.usesPlay) {
       await widget.bridge.openExternal(_playStoreUrl);
       return;
     }
-    if (!result.success || !result.hasUpdate || uiBusy || quitting) {
+    if (!result.success ||
+        !result.hasUpdate ||
+        uiBusy ||
+        quitting ||
+        automaticUpdateDownloading) {
       return;
     }
     final android = _isAndroidPlatform;
@@ -6004,6 +6101,27 @@ class _DropoHomePageState extends State<DropoHomePage>
         if (download != true || !mounted) {
           return;
         }
+        await _runBusy(() async {
+          final response = await widget.bridge.callMap(
+            'DownloadUpdateOnly',
+            args: [true],
+            timeout: const Duration(minutes: 16),
+          );
+          if (!mounted) return;
+          if (response['success'] == true) {
+            setState(() => preparedUpdate = result.updateKey);
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  response['error']?.toString() ??
+                      'Не удалось скачать архив обновления.',
+                ),
+              ),
+            );
+          }
+        });
+        return;
       }
       await widget.bridge.openExternal(link);
       return;
@@ -6764,7 +6882,11 @@ class _DropoHomePageState extends State<DropoHomePage>
         builder: (context, bounds) => ListView(
           key: const PageStorageKey('android-home-scroll'),
           children: [
-            ?_buildUpdateNotice(),
+            if (_buildUpdateNotice() case final notice?)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                child: notice,
+              ),
             _AndroidAnimatedHome(
               sceneHeight: (bounds.maxHeight * .76).clamp(450.0, 640.0),
               connectedFooter: Padding(
@@ -7030,7 +7152,9 @@ class _DropoHomePageState extends State<DropoHomePage>
     return _UpdateStrip(
       key: ValueKey('available-update-${info.latestVersion}'),
       info: info,
-      onUpdate: controlsDisabled || uiBusy
+      downloading: automaticUpdateDownloading,
+      ready: preparedUpdate == info.updateKey,
+      onUpdate: controlsDisabled || uiBusy || automaticUpdateDownloading
           ? null
           : () => unawaited(_performUpdate(info)),
     );
@@ -7926,35 +8050,87 @@ class _DependencyStrip extends StatelessWidget {
 }
 
 class _UpdateStrip extends StatelessWidget {
-  const _UpdateStrip({super.key, required this.info, required this.onUpdate});
+  const _UpdateStrip({
+    super.key,
+    required this.info,
+    required this.downloading,
+    required this.ready,
+    required this.onUpdate,
+  });
   final UpdateInfo info;
+  final bool downloading, ready;
   final VoidCallback? onUpdate;
 
   @override
-  Widget build(BuildContext context) => Semantics(
-    key: const ValueKey('update-available-notice'),
-    label: 'Доступна новая версия Dropo ${info.latestVersion}',
-    child: TextButton.icon(
+  Widget build(BuildContext context) {
+    final title = info.latestVersion.isEmpty
+        ? 'Вышла новая версия Dropo'
+        : 'Вышла новая версия Dropo ${info.latestVersion}';
+    final action = FilledButton.icon(
       key: const ValueKey('update-available-action'),
       onPressed: onUpdate,
-      icon: const Icon(Icons.system_update_alt_rounded, size: 18),
+      icon: Icon(info.usesPlay ? Icons.shop_outlined : Icons.download_rounded),
       label: Text(
-        'Обновление · ${info.latestVersion}',
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
+        downloading
+            ? 'Скачиваем'
+            : info.usesPlay
+            ? 'Google Play'
+            : 'Обновиться',
       ),
-      style: TextButton.styleFrom(
-        foregroundColor: _atlasMint,
-        minimumSize: const Size(0, 48),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        textStyle: const TextStyle(
-          fontFamily: 'Inter',
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
+      style: FilledButton.styleFrom(
+        backgroundColor: _atlasMint,
+        foregroundColor: const Color(0xFF052316),
+        minimumSize: const Size(0, 44),
+      ),
+    );
+    final headline = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            color: _atlasText,
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        if (ready)
+          const Text('Обновление скачано', style: TextStyle(color: _atlasMint)),
+      ],
+    );
+    return Semantics(
+      key: const ValueKey('update-available-notice'),
+      label: 'Доступна новая версия Dropo ${info.latestVersion}',
+      liveRegion: true,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF123528),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: _atlasMint.withValues(alpha: .7)),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            if (constraints.maxWidth < 380) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [headline, const SizedBox(height: 6), action],
+              );
+            }
+            return Row(
+              children: [
+                const Icon(Icons.system_update_alt_rounded, color: _atlasMint),
+                const SizedBox(width: 12),
+                Expanded(child: headline),
+                const SizedBox(width: 12),
+                action,
+              ],
+            );
+          },
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _MiniStrip extends StatelessWidget {
@@ -10813,7 +10989,7 @@ class _SettingsDialogState extends State<_SettingsDialog>
           _SettingsGroup(
             title: 'Обновления',
             children: [
-              if (_isPlayDistribution)
+              if (_isPlayDistribution || widget.updateInfo?.usesPlay == true)
                 _ButtonSetting(
                   title: 'Обновления через Google Play',
                   description:
@@ -10822,11 +10998,12 @@ class _SettingsDialogState extends State<_SettingsDialog>
                   icon: Icons.shop_outlined,
                   onPressed: canUseLiveSafe ? widget.onCheckUpdates : null,
                 ),
-              if (!_isPlayDistribution) ...[
+              if (!_isPlayDistribution &&
+                  widget.updateInfo?.usesPlay != true) ...[
                 _SwitchSetting(
-                  title: 'Проверять обновления автоматически',
+                  title: 'Скачивать обновления автоматически',
                   description:
-                      'Сообщать о новых версиях. Скачивание и установка — только по вашему нажатию',
+                      'Dropo проверяет новую версию при запуске. Если загрузка выключена, предложит обновиться вручную',
                   value: config.checkUpdates,
                   onChanged: canUseLiveSafe
                       ? (value) =>

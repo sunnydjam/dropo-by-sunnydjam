@@ -748,7 +748,10 @@ void main() {
     expect(notice, findsOneWidget);
     expect(
       find
-          .descendant(of: notice, matching: find.text('Обновление · 3.0.4'))
+          .descendant(
+            of: notice,
+            matching: find.text('Вышла новая версия Dropo 3.0.4'),
+          )
           .hitTestable(),
       findsOneWidget,
       reason: 'the published version must be visible in the compact notice',
@@ -756,7 +759,7 @@ void main() {
     final action = find.byKey(const ValueKey('update-available-action'));
     expect(action.hitTestable(), findsOneWidget);
     expect(
-      find.descendant(of: action, matching: find.text('Обновление · 3.0.4')),
+      find.descendant(of: action, matching: find.text('Обновиться')),
       findsOneWidget,
     );
     expect(

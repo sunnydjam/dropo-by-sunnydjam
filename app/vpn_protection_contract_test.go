@@ -27,6 +27,17 @@ func TestWindowsVPNStatusDoesNotClaimReconnectProtection(t *testing.T) {
 			},
 		},
 		{
+			name:      "applying traffic plan after child startup",
+			wantState: "starting",
+			setup: func(app *App) {
+				app.desiredConnected.Store(true)
+				app.mu.Lock()
+				app.isStarting = true
+				app.isRunning = true
+				app.mu.Unlock()
+			},
+		},
+		{
 			name:          "connected",
 			wantState:     "connected",
 			wantConnected: true,

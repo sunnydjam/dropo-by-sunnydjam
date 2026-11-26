@@ -148,6 +148,7 @@ func TestNativePlanIncludesManualVPNServiceWithoutZapretStrategy(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings := storage.GetAppSettings()
+	settings.RoutingMode = RoutingModeBlockedOnly
 	settings.FreeAccessMethods = DefaultFreeAccessServiceMethodState()
 	settings.FreeAccessMethods["discord"] = FreeAccessMethodVPN
 	if err := storage.UpdateAppSettings(settings); err != nil {

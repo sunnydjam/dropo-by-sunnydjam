@@ -828,8 +828,8 @@ func (a *App) backgroundServiceStrategyTags() []string {
 		return nil
 	}
 	settings := a.storage.GetAppSettings()
-	// Full-tunnel mode has no service-specific selectors: sing-box/TUN carries
-	// every public service through the VPN. Requiring the optional packet engine
+	// Catalog mode has no per-service selectors: sing-box/TUN classifies the
+	// two VPN catalogs. Requiring the optional packet engine
 	// here would turn a missing WinDivert runtime into a failed VPN connection.
 	// WireGuard camouflage is checked separately by startComposedTransparentEngine.
 	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {

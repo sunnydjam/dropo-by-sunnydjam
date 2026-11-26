@@ -504,21 +504,7 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 	for _, svc := range DefaultFreeAccessServices {
 		if mode == RoutingModeAllTraffic {
 			method, outbound, delay := summarizeAllTrafficProxy(proxies)
-			services = append(services, map[string]interface{}{
-				"tag":             svc.Tag,
-				"name":            svc.DisplayName,
-				"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
-				"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
-				"requiresVpn":     true,
-				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
-				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
-				"vpnOnly":         aicatalog.VPNOnly(svc.Tag),
-				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
-				"group":           "proxy",
-				"method":          method,
-				"outbound":        outbound,
-				"delay":           delay,
-			})
+			services = append(services, catalogServiceRouteSummary(settings, svc, method, outbound, delay))
 			continue
 		}
 		enabled := FreeAccessServiceEnabled(settings, svc.Tag)
@@ -634,6 +620,29 @@ func (a *App) GetBypassRouteSummary() map[string]interface{} {
 	}
 }
 
+func catalogServiceRouteSummary(settings GlobalAppSettings, svc FreeAccessService, method, outbound string, delay int) map[string]interface{} {
+	requiresVPN := aicatalog.VPNOnly(svc.Tag)
+	group := "proxy"
+	if !requiresVPN {
+		method, outbound, group, delay = "По каталогу блокировок", "", "", 0
+	}
+	return map[string]interface{}{
+		"tag":             svc.Tag,
+		"name":            svc.DisplayName,
+		"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
+		"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
+		"requiresVpn":     requiresVPN,
+		"vpnOnly":         requiresVPN,
+		"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
+		"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
+		"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
+		"group":           group,
+		"method":          method,
+		"outbound":        outbound,
+		"delay":           delay,
+	}
+}
+
 func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode RoutingMode) map[string]interface{} {
 	storedStrategies, _ := a.loadFreeAccessStrategies()
 	serviceFallbackCache := a.loadServiceStrategyCache()
@@ -645,21 +654,7 @@ func (a *App) transparentBypassRouteSummary(settings GlobalAppSettings, mode Rou
 			continue
 		}
 		if mode == RoutingModeAllTraffic {
-			services = append(services, map[string]interface{}{
-				"tag":             svc.Tag,
-				"name":            svc.DisplayName,
-				"domainSuffixes":  append([]string(nil), svc.DomainSuffixes...),
-				"ipCidrs":         append([]string(nil), svc.IPCIDRs...),
-				"requiresVpn":     true,
-				"homeVisible":     HomeRouteServiceVisible(settings, svc.Tag),
-				"selectedMethod":  FreeAccessServiceMethod(settings, svc.Tag),
-				"vpnOnly":         aicatalog.VPNOnly(svc.Tag),
-				"zapretSupported": runtime.GOOS == "windows" && serviceHasFreeBypass(svc.Tag),
-				"group":           "proxy",
-				"method":          "VPN",
-				"outbound":        "",
-				"delay":           0,
-			})
+			services = append(services, catalogServiceRouteSummary(settings, svc, "VPN", "", 0))
 			continue
 		}
 

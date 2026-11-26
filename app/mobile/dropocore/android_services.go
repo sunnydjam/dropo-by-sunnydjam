@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -388,15 +389,12 @@ func androidEffectiveRoutePolicies(policies map[string]string, hasVPN bool) map[
 }
 
 func androidEffectiveRoutePoliciesForMode(policies map[string]string, hasVPN bool, routingMode string) map[string]string {
-	result := androidEffectiveRoutePolicies(policies, hasVPN)
-	if normalizeAndroidRoutingMode(routingMode) != "all_traffic" {
-		return result
+	if normalizeAndroidRoutingMode(routingMode) == "all_traffic" {
+		// The catalog preset has its own domain and IP rules and only pins
+		// protected identities. Individual service preferences do not apply.
+		return nil
 	}
-	// The preset covers every named catalog entry. Unlisted traffic stays direct.
-	for tag := range result {
-		result[tag] = androidRoutePolicyVPN
-	}
-	return result
+	return androidEffectiveRoutePolicies(policies, hasVPN)
 }
 
 func androidRoutePoliciesLocked() map[string]string {
@@ -422,7 +420,13 @@ func androidServiceRoutesLocked(live bool) []routeInfo {
 	for _, service := range catalog {
 		selectedPolicy := androidServicePolicy(service, policies)
 		effectivePolicy := effectivePolicies[service.Tag]
+		if aicatalog.VPNOnly(service.Tag) {
+			effectivePolicy = androidRoutePolicyVPN
+		}
 		methodLabel := androidRoutePolicyLabel(effectivePolicy)
+		if effectivePolicy == "" {
+			methodLabel = "По каталогу блокировок"
+		}
 		if current.Connected && current.adaptiveActive[service.Tag] {
 			methodLabel = "TLS напрямую · UDP через VPN"
 		}
@@ -519,7 +523,7 @@ func androidServiceDomainSuffixesByPolicy(policies map[string]string, policy str
 	}
 	result := []string{}
 	for _, service := range androidServiceCatalog() {
-		if androidServicePolicy(service, policies) != policy {
+		if policies[service.Tag] != policy {
 			continue
 		}
 		result = append(result, service.DomainSuffixes...)
@@ -534,7 +538,7 @@ func androidServiceIPCIDRsByPolicy(policies map[string]string, policy string) []
 	}
 	result := []string{}
 	for _, service := range androidServiceCatalog() {
-		if androidServicePolicy(service, policies) != policy {
+		if policies[service.Tag] != policy {
 			continue
 		}
 		result = append(result, service.IPCIDRs...)
@@ -549,7 +553,7 @@ func androidServicePackageNamesByPolicy(policies map[string]string, policy strin
 	}
 	result := []string{}
 	for _, service := range androidServiceCatalog() {
-		if androidServicePolicy(service, policies) != policy {
+		if policies[service.Tag] != policy {
 			continue
 		}
 		result = append(result, service.PackageNames...)
@@ -619,6 +623,11 @@ func runAndroidClientQuickCheckWithProbe(readOnly bool, probe func(context.Conte
 	startedAt := time.Now()
 	mu.Lock()
 	services := androidServiceRoutesLocked(true)
+	if normalizeAndroidRoutingMode(current.Config.RoutingMode) == "all_traffic" {
+		// Dropo's UID is outside the TUN. Only VPN-only services have an
+		// unambiguous per-service destination in catalog mode.
+		services = slices.DeleteFunc(services, func(service routeInfo) bool { return !service.VPNOnly })
+	}
 	vpnCheck := androidVPNCheck
 	if vpnCheck.generation != current.sourceSession || current.sourceSession == 0 {
 		vpnCheck.client = nil

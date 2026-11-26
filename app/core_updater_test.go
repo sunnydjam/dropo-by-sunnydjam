@@ -1,13 +1,37 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestVerifiedUpdateDownloadIsReused(t *testing.T) {
+	app := newInitializedSettingsScenarioApp(t)
+	directory := filepath.Join(app.storage.GetResourcesPath(), "update-downloads")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte("verified update fixture")
+	path := filepath.Join(directory, "dropo-update.zip")
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	info := &UpdateInfo{
+		DownloadURL: "https://github.com/sunnydjam/dropo-by-sunnydjam/releases/download/v4.0.4/dropo-Windows-Portable-x64.zip",
+		FileSize:    int64(len(contents)),
+		SHA256:      fmt.Sprintf("%x", sha256.Sum256(contents)),
+	}
+	if downloaded, err := app.prepareUpdateDownload(info); err != nil || downloaded != path {
+		t.Fatalf("matching cache was not reused: path=%q err=%v", downloaded, err)
+	}
+}
 
 func TestSelectUpdateAssetPrefersWindowsSingleExecutable(t *testing.T) {
 	asset, ok := selectUpdateAssetFor([]GitHubReleaseAsset{

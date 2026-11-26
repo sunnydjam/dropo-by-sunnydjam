@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"runtime"
+	"slices"
 )
 
 func relaxTunStrictRoute(config map[string]interface{}) bool {
@@ -56,6 +57,32 @@ func useWindowsSystemTunStack(config map[string]interface{}) bool {
 		}
 	}
 	return changed
+}
+
+// Give the Windows catalog TUN both address families. Ordinary destinations
+// still take the physical interface through the direct outbound.
+func enableWindowsCatalogIPv6(config map[string]interface{}) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	inbounds, _ := config["inbounds"].([]interface{})
+	for _, raw := range inbounds {
+		inbound, _ := raw.(map[string]interface{})
+		if inbound["type"] != "tun" {
+			continue
+		}
+		addresses := interfaceStringSlice(inbound["address"])
+		if !slices.ContainsFunc(addresses, func(address string) bool { return !isIPv6AddressOrCIDR(address) }) {
+			addresses = append(addresses, "172.19.0.1/30")
+		}
+		if !slices.ContainsFunc(addresses, isIPv6AddressOrCIDR) {
+			addresses = append(addresses, "fdfe:dcba:9876::1/126")
+		}
+		inbound["address"] = addresses
+	}
+	if dns, ok := config["dns"].(map[string]interface{}); ok {
+		dns["strategy"] = "prefer_ipv4"
+	}
 }
 
 func disableTunIPv6(config map[string]interface{}) bool {

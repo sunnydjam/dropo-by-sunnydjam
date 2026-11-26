@@ -9,6 +9,23 @@ import (
 	traffic "dropo/trafficorchestrator"
 )
 
+func TestCatalogModeNativePlanIgnoresSavedServicePolicies(t *testing.T) {
+	app := newInitializedSettingsScenarioApp(t)
+	settings := app.storage.GetAppSettings()
+	settings.RoutingMode = RoutingModeAllTraffic
+	settings.FreeAccessMethods["twitch"] = FreeAccessMethodVPN
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := app.buildNativeTrafficPlan(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Services) != 0 || len(plan.DirectRules) != 0 {
+		t.Fatalf("catalog TUN must own all service routing, got %+v", plan.Services)
+	}
+}
+
 func TestTelegramAssignedTCPPortsInSelectiveVPN(t *testing.T) {
 	settings := GlobalAppSettings{FreeAccessMethods: DefaultFreeAccessServiceMethodState()}
 	settings.FreeAccessMethods["telegram"] = FreeAccessMethodVPN

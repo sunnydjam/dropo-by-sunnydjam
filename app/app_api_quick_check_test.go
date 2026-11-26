@@ -421,19 +421,17 @@ func TestClientQuickCheckKeepsDirectGuardsAndSelectedServicesOnly(t *testing.T) 
 }
 
 func TestClientQuickCheckCatalogVPNKeepsOrdinaryEndpointsDirect(t *testing.T) {
-	app := &App{}
-	settings := GlobalAppSettings{RoutingMode: RoutingModeAllTraffic, HideRuTraffic: true}
-	for _, service := range []clientQuickCheckService{
-		{Name: "Yandex", Category: "Direct-RU"},
-		{Name: "Steam Store", Category: "Direct-Game"},
-		{Name: "Discord", Category: "Blocked", ServiceTag: "discord"},
+	domains := []string{"discord.com", "gql.twitch.tv"}
+	for _, tc := range []struct{ host, service, want string }{
+		{"yandex.ru", "", clientQuickCheckRouteDirect},
+		{"steamcommunity.com", "", clientQuickCheckRouteDirect},
+		{"twitch.tv", "twitch", clientQuickCheckRouteDirect},
+		{"gql.twitch.tv", "twitch", clientQuickCheckRouteVPN},
+		{"www.discord.com", "discord", clientQuickCheckRouteVPN},
+		{"api.anthropic.com", "claude", clientQuickCheckRouteVPN},
 	} {
-		want := clientQuickCheckRouteDirect
-		if service.ServiceTag == "discord" {
-			want = clientQuickCheckRouteVPN
-		}
-		if got := app.clientQuickCheckExpectedRoute(settings, nil, service); got != want {
-			t.Fatalf("catalog route for %s = %q, want %q", service.Name, got, want)
+		if got := catalogQuickCheckRoute(clientQuickCheckService{URL: "https://" + tc.host, ServiceTag: tc.service}, domains); got != tc.want {
+			t.Fatalf("%s route = %q, want %q", tc.host, got, tc.want)
 		}
 	}
 }

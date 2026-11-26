@@ -6,6 +6,30 @@ active kill switch. `GetStatus().reconnectProtected` and
 guard confirms its live WFP policy. Automatic process reconnection is not leak
 protection.
 
+## Independent Wintun router and Windows acceptance
+
+The Windows protected-routing setting defaults to enabled. While the Dropo
+core is open, a separate process from the verified bundled runtime owns
+`Dropo Protected Routing`.
+It uses the VPN-only catalog, provides local synthetic DNS for catalog names,
+and sends recognized flows only to an authenticated loopback transport link.
+Ordinary traffic has a direct outbound. Disconnecting the VPN closes the
+transport link while keeping the router available. The Windows setting is in
+«Сервисы с обязательным VPN». Closing the core ends this router, and the
+persistent WFP service described below is still a separate deliverable.
+
+Run `tools/test-windows-protected-routing.ps1` in the dedicated Dropo Hyper-V
+guest using a hash-verified portable archive and a fresh isolated data folder.
+The fixture checks the cold-start default, the IPv4 routing interface, a
+synthetic Claude DNS record, the local VPN-required page and event, direct
+HTTPS with the VPN off and in both routing modes, and TLS classification for
+two names at the same IPv4 address. It connects an isolated loopback VLESS
+peer to verify forwarding of a cached protected address in both modes.
+Manual Stop and a forced transport crash must retain the router, while
+toggling the feature off restores the original Windows route. Physical
+packet capture across TCP/QUIC and IPv4/IPv6, enterprise DNS, and other VPN
+coexistence remain part of the release acceptance below.
+
 The implementation groundwork now includes a typed and bounded `wfpguard.Policy`
 validator, a strict revision-fenced IPC request decoder, a read-only native
 WFP object inspector, a non-executable filter review plan, and a separate SCM
@@ -24,26 +48,16 @@ a kill-switch guarantee.
 
 ## Product boundary
 
-The accepted product direction has two distinct scopes, not one universal
-toggle. In **All traffic through VPN**, protection should cover the device,
-including other user sessions and system-originated Internet traffic, with an
-explicit choice between disconnect-only and always-on behavior. Necessary
-link/bootstrap traffic and approved local/work-network/WireGuard overlay routes
-must be narrow, visible exceptions. In **Selected services**, unrelated traffic,
-games and explicitly direct services must remain direct; only positively
-classified VPN-designated traffic may be denied when the tunnel is unavailable.
-A machine-wide physical-egress deny in that mode would break the product
-contract. The Hide-RU toggle has no routing effect in full-tunnel mode; its
-selective-mode RU proxy is part of the separate selective policy. Portable
-builds remain unsupported until they have a
-reliable elevated install, upgrade and uninstall lifecycle for the guard.
+Both routing modes leave ordinary traffic on the physical connection. The
+catalog preset routes listed blocked destinations and VPN-only services through
+VPN. The service preset also follows explicit per-service policies. A future
+guard may deny positively identified VPN destinations during a tunnel outage.
+Ordinary Internet, local and work-network traffic must stay available.
 
-The first activation target remains installed Windows full-tunnel mode. Do not
-advertise selected-service kill-switch protection merely because the in-process
-classifier can block already-seen flows: after core/WinDivert exit, a shared
-CDN IP or browser process is not sufficient evidence that a new flow belongs
-to a selected service. Any broader selective protection requires a durable
-classifier with the same conservative service evidence and release tests.
+A process or shared CDN address alone can misidentify a new browser connection
+after the core exits. The existing WFP review plan validates known flow
+evidence. Durable enforcement still requires an independent classifier, a
+trusted service lifecycle, and dual-stack VM tests before activation.
 
 The existing user core keeps ownership of user settings, sing-box and the one
 in-process WinDivert handle. A separate, minimal Dropo Windows service owns
@@ -52,7 +66,7 @@ strategy files, download code, or execute shell commands.
 
 ## Security invariant
 
-When the user explicitly enables protection, a persistent physical-egress deny
+When the user explicitly enables protection, a persistent deny for positively classified VPN egress
 must be committed **before** sing-box starts or default routes change. The deny
 must survive core/UI exit, sing-box crash, background reconnect, network change
 and service restart while armed. A failed policy update retains the previous
@@ -115,11 +129,11 @@ bootstrap exceptions have clean-VM leak-test evidence.
 
 - Fresh install, silent upgrade, rollback and uninstall on clean Windows 10/11.
 - Service crash/restart and UI/core/sing-box process death while guarded: no
-  physical IPv4 or IPv6 egress, no broken LAN/work overlay route.
+  physical IPv4 or IPv6 egress for VPN destinations, with ordinary and work routes intact.
 - VPN endpoint failover, DNS bootstrap, IPv6-only/dual-stack, network switch,
   sleep/resume, captive portal and independent VPN-source failover.
-- Selected-services and Hide-RU regressions: direct traffic remains direct and
-  WFP protection is never reported active in those modes.
+- Both routing presets and Hide-RU: ordinary traffic stays direct, and the
+  reported protection scope matches the enforcing filters.
 - Readback of provider/sublayer/filter GUIDs, revision and interface/endpoint
   allowlist before claiming protection. Regression tests for malformed IPC,
   overly broad exceptions, stale session generations and service-path changes.

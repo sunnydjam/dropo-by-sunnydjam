@@ -2,6 +2,9 @@ package `in`.droponevedimka.dropo
 
 import android.Manifest
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.appwidget.AppWidgetManager
 import android.app.PendingIntent
 import android.app.admin.DevicePolicyManager
@@ -29,6 +32,8 @@ import android.util.Base64
 import android.util.Log
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.StandardIntegrityManager
+import com.google.android.play.core.appupdate.AppUpdateManagerFactory
+import com.google.android.play.core.install.model.UpdateAvailability
 import java.security.MessageDigest
 import android.widget.Toast
 import dropoandroid.Dropoandroid
@@ -55,6 +60,18 @@ class MainActivity : FlutterActivity() {
     private var pendingConnectResult: MethodChannel.Result? = null
     private var prepareVpnOnly = false
     private var requestedNotificationPermission = false
+    private var pendingUpdateNotice: String? = null
+    private val updatesFromPlay by lazy {
+        BuildConfig.PLAY_DISTRIBUTION || runCatching {
+            val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                packageManager.getInstallSourceInfo(packageName).installingPackageName
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getInstallerPackageName(packageName)
+            }
+            installer == "com.android.vending"
+        }.getOrDefault(false)
+    }
     private val apkUpdater by lazy { AndroidApkUpdater(this) }
     private var destroyed = false
     private var resumedForReview = false
@@ -215,6 +232,14 @@ class MainActivity : FlutterActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_UPDATE_NOTIFICATIONS) {
+            val version = pendingUpdateNotice
+            pendingUpdateNotice = null
+            if (!destroyed && version != null && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                postUpdateNotice(version)
+            }
+            return
+        }
         if (requestCode == REQUEST_POST_NOTIFICATIONS) {
             if (destroyed || pendingConnectResult == null) return
             continueVpnPrepare()
@@ -259,6 +284,47 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleCoreCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "androidCheckPlayUpdate") {
+            if (!updatesFromPlay) {
+                result.success(mapOf("managedByPlay" to false))
+                return
+            }
+            AppUpdateManagerFactory.create(this).appUpdateInfo
+                .addOnSuccessListener { info ->
+                    result.success(mapOf(
+                        "managedByPlay" to true, "success" to true,
+                        "hasUpdate" to (info.updateAvailability() == UpdateAvailability.UPDATE_AVAILABLE ||
+                            info.updateAvailability() == UpdateAvailability.DEVELOPER_TRIGGERED_UPDATE_IN_PROGRESS),
+                        "platform" to "android", "distributionMode" to "play",
+                        "releaseId" to info.availableVersionCode().toString(),
+                    ))
+                }
+                .addOnFailureListener {
+                    result.success(mapOf(
+                        "managedByPlay" to true, "success" to false,
+                        "distributionMode" to "play", "error" to "Google Play недоступен.",
+                    ))
+                }
+            return
+        }
+        if (call.method == "androidNotifyUpdateAvailable") {
+            val version = call.argument<String>("version").orEmpty().take(64)
+            if (androidNotificationsEnabled()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    if (!requestedNotificationPermission && pendingConnectResult == null) {
+                        requestedNotificationPermission = true
+                        pendingUpdateNotice = version
+                        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_UPDATE_NOTIFICATIONS)
+                    }
+                } else {
+                    postUpdateNotice(version)
+                }
+            }
+            result.success(mapOf("success" to true))
+            return
+        }
         if (call.method == "requestPlayIntegrity") {
             requestPlayIntegrity(call, result)
             return
@@ -346,12 +412,12 @@ class MainActivity : FlutterActivity() {
             return
         }
         val requestedMethod = if (call.method == "call") stringArg(call, "method") else call.method
-        if (AndroidDistributionPolicy.blocksMethod(BuildConfig.PLAY_DISTRIBUTION, requestedMethod)) {
+        if (AndroidDistributionPolicy.blocksMethod(updatesFromPlay, requestedMethod)) {
             result.success(errorJson("Эта версия обновляется только через Google Play."))
             return
         }
-        if (call.method == "androidInstallUpdate") {
-            apkUpdater.start(result)
+        if (call.method == "androidInstallUpdate" || call.method == "androidDownloadUpdate") {
+            apkUpdater.start(result, downloadOnly = call.method == "androidDownloadUpdate")
             return
         }
         if (call.method == "call" && stringArg(call, "method") == "CancelAndroidUpdate") {
@@ -638,6 +704,23 @@ class MainActivity : FlutterActivity() {
     private fun ensureCoreStarted(): String {
         Dropoandroid.configureDistribution(BuildConfig.PLAY_DISTRIBUTION)
         return Dropoandroid.ensureStarted(filesDir.absolutePath, packageVersionName())
+    }
+
+    private fun postUpdateNotice(version: String) {
+        val manager = getSystemService(NotificationManager::class.java)
+        val channel = "dropo-updates"
+        manager.createNotificationChannel(NotificationChannel(channel, "Обновления Dropo", NotificationManager.IMPORTANCE_DEFAULT))
+        val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val open = PendingIntent.getActivity(this, UPDATE_NOTIFICATION_ID, intent, PendingIntent.FLAG_IMMUTABLE)
+        val message = if (version.isEmpty()) "Откройте Dropo, чтобы обновить приложение." else "Доступна версия $version. Откройте Dropo, чтобы обновиться."
+        val notice = Notification.Builder(this, channel)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Вышла новая версия Dropo")
+            .setContentText(message)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        runCatching { manager.notify(UPDATE_NOTIFICATION_ID, notice) }
     }
 
     private fun androidNotificationsEnabled(): Boolean {
@@ -1397,6 +1480,8 @@ class MainActivity : FlutterActivity() {
         )
         private const val REQUEST_VPN_PREPARE = 4101
         private const val REQUEST_POST_NOTIFICATIONS = 4102
+        private const val REQUEST_UPDATE_NOTIFICATIONS = 4103
+        private const val UPDATE_NOTIFICATION_ID = 4104
         private const val REQUEST_MANAGED_PROFILE_PROVISIONING = 4103
         private const val PREF_COMPAT_PROMPT_DISMISSED = "compat_prompt_dismissed"
         private const val ACTION_DROPO_SPACE_SHORTCUT = "in.droponevedimka.dropo.action.DROPO_SPACE_SHORTCUT"

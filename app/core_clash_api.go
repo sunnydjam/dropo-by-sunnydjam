@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -81,6 +83,62 @@ func (c *clashAPIAccess) baseURL() string {
 		return ""
 	}
 	return "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(c.port))
+}
+
+func waitForSingBoxReady(access *clashAPIAccess, exited <-chan error, current func() bool, budget time.Duration) error {
+	if err := access.validate(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	transport := &http.Transport{DisableKeepAlives: true}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   250 * time.Millisecond,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	defer transport.CloseIdleConnections()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if !current() {
+			return context.Canceled
+		}
+		select {
+		case err := <-exited:
+			if err != nil {
+				return fmt.Errorf("процесс завершился до готовности: %w", err)
+			}
+			return fmt.Errorf("процесс завершился до готовности")
+		default:
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, access.baseURL()+"/version", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+access.secret)
+		resp, err := client.Do(req)
+		if err == nil {
+			var reply struct{ Version string }
+			decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&reply)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && decodeErr == nil && strings.HasPrefix(reply.Version, "sing-box ") {
+				return nil
+			}
+		}
+		select {
+		case err := <-exited:
+			if err != nil {
+				return fmt.Errorf("процесс завершился до готовности: %w", err)
+			}
+			return fmt.Errorf("процесс завершился до готовности")
+		case <-ctx.Done():
+			return fmt.Errorf("локальный VPN API не подтвердил готовность: %w", ctx.Err())
+		case <-tick.C:
+		}
+	}
 }
 
 func (a *App) clashAPIAccessSnapshot() *clashAPIAccess {

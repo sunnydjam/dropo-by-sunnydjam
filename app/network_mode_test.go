@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -282,6 +283,27 @@ func TestDeepWindowsProxyFallbackConfigRemovesTunWithoutEnablingSystemProxy(t *t
 	mixedTag, _ := mixed["tag"].(string)
 	if !containsStringValue(interfaceStringSlice(pinned["inbound"]), mixedTag) || pinned["outbound"] != "auto-select" {
 		t.Fatalf("selective inbound pin = %#v, mixed=%#v", pinned, mixed)
+	}
+}
+
+func TestSelectiveProxyUsesConfiguredAvailablePort(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	busyPort := listener.Addr().(*net.TCPAddr).Port
+	app, path := newDeepWindowsTestApp(t, map[string]interface{}{
+		"inbounds":  []interface{}{map[string]interface{}{"type": "mixed", "tag": "mixed-in", "listen_port": busyPort}},
+		"outbounds": []interface{}{map[string]interface{}{"type": "direct", "tag": "direct"}},
+	})
+	path, err = app.writeDeepWindowsProxyFallbackConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, err := configuredSelectiveProxyAddress(path)
+	if err != nil || address == listener.Addr().String() || strings.HasSuffix(address, ":0") {
+		t.Fatalf("selective proxy retained unavailable port %d: %q %v", busyPort, address, err)
 	}
 }
 

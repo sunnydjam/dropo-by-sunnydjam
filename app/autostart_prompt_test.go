@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // stubApplyAutoStart replaces the OS-level autostart applier with a recorder for
 // the duration of a test, so no real registry / Scheduled Task is touched.
@@ -36,29 +40,32 @@ func TestDefaultAutoStartAwaitsPrompt(t *testing.T) {
 	}
 }
 
-func TestEnsureAutoStartRegistrationDefersUntilPrompted(t *testing.T) {
+func TestEnsureAutoStartRegistrationEnablesUnknownChoiceAndKeepsExplicitOptOut(t *testing.T) {
 	app := newInitializedSettingsScenarioApp(t)
 	calls := stubApplyAutoStart(t)
 	originalConsume := consumeInstallerAutoStartPreference
 	consumeInstallerAutoStartPreference = func() (bool, bool) { return false, false }
 	t.Cleanup(func() { consumeInstallerAutoStartPreference = originalConsume })
 
-	// Not prompted yet: startup must NOT touch the OS autostart entry.
+	settings := app.storage.GetAppSettings()
+	settings.AutoStart = false
+	if err := app.storage.UpdateAppSettings(settings); err != nil {
+		t.Fatal(err)
+	}
 	app.ensureAutoStartRegistration()
-	if len(*calls) != 0 {
-		t.Fatalf("autostart applied before the prompt was answered: %v", *calls)
+	if len(*calls) != 1 || !(*calls)[0] || !app.storage.GetAppSettings().AutoStart {
+		t.Fatalf("unknown legacy preference must enable autostart: %v", *calls)
 	}
 
-	// Once answered, startup syncs the stored preference to the OS.
-	settings := app.storage.GetAppSettings()
+	settings = app.storage.GetAppSettings()
 	settings.AutoStartPrompted = true
-	settings.AutoStart = true
+	settings.AutoStart = false
 	if err := app.storage.UpdateAppSettings(settings); err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
 	app.ensureAutoStartRegistration()
-	if len(*calls) != 1 || (*calls)[0] != true {
-		t.Fatalf("expected one apply(true) after prompt answered, got %v", *calls)
+	if len(*calls) != 2 || (*calls)[1] {
+		t.Fatalf("explicit opt-out must survive startup: %v", *calls)
 	}
 }
 
@@ -76,6 +83,34 @@ func TestEnsureAutoStartRegistrationImportsInstallerChoice(t *testing.T) {
 	}
 	if len(*calls) != 1 || (*calls)[0] {
 		t.Fatalf("expected installer choice apply(false), got %v", *calls)
+	}
+}
+
+func TestLegacySettingsDefaultAutoDownloadsAndPreserveUserOptOut(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		app  string
+		want bool
+	}{
+		{"no metadata", `{}`, true},
+		{"explicit off", `{"check_updates":false}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStorage(t.TempDir())
+			if err := os.MkdirAll(store.GetResourcesPath(), 0700); err != nil {
+				t.Fatal(err)
+			}
+			settings := []byte(`{"version":8,"app":` + tc.app + `}`)
+			if err := os.WriteFile(filepath.Join(store.GetResourcesPath(), SettingsFileName), settings, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Load(); err != nil {
+				t.Fatal(err)
+			}
+			if got := store.GetAppSettings().CheckUpdates; got != tc.want {
+				t.Fatalf("automatic downloads=%t, want %t", got, tc.want)
+			}
+		})
 	}
 }
 

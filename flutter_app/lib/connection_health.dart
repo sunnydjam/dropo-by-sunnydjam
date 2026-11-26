@@ -373,7 +373,7 @@ class _ConnectionHealthPanelState extends State<_ConnectionHealthPanel> {
                     icon: allTraffic ? Icons.public : Icons.grid_view_rounded,
                     label: allTraffic
                         ? 'Заблокированные сервисы через VPN'
-                        : 'Только выбранные сервисы',
+                        : 'Маршруты выбранных сервисов и каталоги',
                     color: const Color(0xFF8BC5FF),
                   ),
                 ],

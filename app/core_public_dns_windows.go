@@ -54,6 +54,37 @@ func systemDNSServers() []netip.Addr {
 
 func allowDefaultDNSFallback() bool { return false }
 
+func windowsPhysicalIPv6Available() bool {
+	size := uint32(15 * 1024)
+	for attempt := 0; attempt < 3; attempt++ {
+		buffer := make([]byte, size)
+		first := (*windows.IpAdapterAddresses)(unsafe.Pointer(&buffer[0]))
+		err := windows.GetAdaptersAddresses(windows.AF_INET6, windows.GAA_FLAG_INCLUDE_GATEWAYS, 0, first, &size)
+		if errors.Is(err, windows.ERROR_BUFFER_OVERFLOW) {
+			continue
+		}
+		if err != nil {
+			return false
+		}
+		for adapter := first; adapter != nil; adapter = adapter.Next {
+			if adapter.OperStatus != windows.IfOperStatusUp {
+				continue
+			}
+			switch adapter.IfType {
+			case 6, 71, 243, 244: // Ethernet, Wi-Fi, and mobile broadband
+				for gateway := adapter.FirstGatewayAddress; gateway != nil; gateway = gateway.Next {
+					address, ok := netip.AddrFromSlice(gateway.Address.IP())
+					if ok && address.Unmap().Is6() && !address.IsUnspecified() {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	return false
+}
+
 // Windows network GUIDs distinguish physical networks with identical LAN prefixes.
 func vpnSourceNetworkKey() string {
 	id, _ := residentialPhysicalNetwork()

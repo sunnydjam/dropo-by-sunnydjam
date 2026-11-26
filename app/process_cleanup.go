@@ -28,7 +28,8 @@ func (a *App) cleanupManagedSidecarOrphans(reason string) {
 		return
 	}
 
-	killed, err := killWindowsDropoManagedSidecars(paths, roots)
+	protectedPID, _ := a.protectedRouter.status()
+	killed, err := killWindowsDropoManagedSidecars(paths, roots, protectedPID)
 	if err != nil {
 		a.writeLog(fmt.Sprintf("[Cleanup] failed to scan managed sidecar processes (%s): %v", reason, err))
 		return
@@ -434,11 +435,11 @@ func pathIsInside(path, basePath string) bool {
 	return strings.HasPrefix(strings.ToLower(path), strings.ToLower(baseWithSeparator))
 }
 
-func killWindowsDropoManagedSidecars(paths []string, roots []string) ([]int, error) {
+func killWindowsDropoManagedSidecars(paths []string, roots []string, excludedPID int) ([]int, error) {
 	if runtime.GOOS != "windows" || len(paths) == 0 && len(roots) == 0 {
 		return nil, nil
 	}
-	return killWindowsDropoManagedSidecarsNative(paths, roots)
+	return killWindowsDropoManagedSidecarsNative(paths, roots, excludedPID)
 }
 
 // killWindowsDropoManagedSidecarsPowerShell remains as a non-runtime fallback

@@ -46,7 +46,9 @@ func TestAndroidLiveRoutingKeepsPreparedPoolAndActiveCandidate(t *testing.T) {
 		apply("SetFreeAccessServiceMethod", `["meta","direct"]`)
 		assertAndroidLiveMetaRoute(t, activeConfig, "direct", "dns-direct")
 		apply("SetRoutingMode", `["all_traffic"]`)
-		assertAndroidLiveMetaRoute(t, activeConfig, "proxy", "dns-remote")
+		assertAndroidLiveMetaRoute(t, activeConfig, "", "")
+		apply("SetRoutingMode", `["blocked_only"]`)
+		assertAndroidLiveMetaRoute(t, activeConfig, "direct", "dns-direct")
 		gotID, gotTag := ActiveAndroidSource()
 		if gotID != candidate.ID || gotTag != candidate.Tag || !reflect.DeepEqual(current.preparedSources, candidates) ||
 			!current.Connected || current.StartedAt != startedAt || current.TotalSessions != totalSessions {
@@ -58,9 +60,17 @@ func TestAndroidLiveRoutingKeepsPreparedPoolAndActiveCandidate(t *testing.T) {
 func assertAndroidLiveMetaRoute(t *testing.T, config, outbound, dns string) {
 	t.Helper()
 	var parsed map[string]interface{}
-	if json.Unmarshal([]byte(config), &parsed) != nil ||
-		!androidContainsDomainRoute(parsed, "instagram.com", outbound) ||
-		!androidContainsDNSServer(parsed, "instagram.com", dns) {
+	if err := json.Unmarshal([]byte(config), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if outbound == "" {
+		if androidContainsDomainRoute(parsed, "instagram.com", "direct") || androidContainsDomainRoute(parsed, "instagram.com", "proxy") ||
+			androidContainsDNSServer(parsed, "instagram.com", "dns-direct") || androidContainsDNSServer(parsed, "instagram.com", "dns-remote") {
+			t.Fatal("catalog preset hardcoded a per-service override")
+		}
+		return
+	}
+	if !androidContainsDomainRoute(parsed, "instagram.com", outbound) || !androidContainsDNSServer(parsed, "instagram.com", dns) {
 		t.Fatalf("expected Instagram route %s and DNS %s", outbound, dns)
 	}
 	policy := parsed["dns"].(map[string]interface{})

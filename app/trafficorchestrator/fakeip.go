@@ -16,7 +16,7 @@ import (
 
 const maxFakeIPMappings = 8192
 
-var selectiveVPNFakeIPv4Prefix = netip.MustParsePrefix("198.18.0.0/15")
+var selectiveVPNFakeIPv4Prefix = netip.MustParsePrefix("198.18.0.0/16")
 
 type FakeIPTarget struct {
 	Address   netip.Addr
@@ -33,7 +33,7 @@ type FakeIPDirectory struct {
 	mu        sync.Mutex
 	routing   atomic.Pointer[fakeIPRouting]
 	lastUse   map[string]time.Time
-	used      [1 << 11]uint64 // one bit per address in the /15, never recycle within a session
+	used      [1 << 10]uint64 // one bit per address in the /16, never recycle within a session
 	nextSweep time.Time
 	byHost    map[string]FakeIPTarget
 	byAddress map[netip.Addr]FakeIPTarget

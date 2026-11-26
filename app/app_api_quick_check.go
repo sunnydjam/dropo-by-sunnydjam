@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"dropocore/aicatalog"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -176,10 +177,21 @@ func (a *App) runClientQuickCheck(deep, readOnly bool, serviceCatalog []clientQu
 		settings = a.storage.GetAppSettings()
 	}
 	cache := a.loadServiceStrategyCache()
+	var blockedDomains []string
+	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
+		blockedDomains, _ = readBlockedCatalogLines(filepath.Join(a.runtimeBasePath(), "bin", FiltersFolder, blockedDomainsFileName), true)
+	}
 	services := make([]clientQuickCheckService, 0, len(catalog))
 	for i := range catalog {
 		catalog[i].ServiceTag = clientQuickCheckServiceTag(catalog[i].Name)
-		catalog[i].ExpectedRoute = a.clientQuickCheckExpectedRoute(settings, cache, catalog[i])
+		if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
+			catalog[i].ExpectedRoute = catalogQuickCheckRoute(catalog[i], blockedDomains)
+			if catalog[i].ExpectedRoute == "" {
+				continue // Missing catalog: do not send an ambiguous probe.
+			}
+		} else {
+			catalog[i].ExpectedRoute = a.clientQuickCheckExpectedRoute(settings, cache, catalog[i])
+		}
 		// Unselected service catalogs are not application failures: their
 		// explicit Direct policy is the intended default. Keep representative
 		// regional/foreign and game Direct guards, plus every selected non-direct
@@ -376,14 +388,30 @@ func denseClientQuickCheckServices(catalog []clientQuickCheckService) []clientQu
 	return services
 }
 
-func (a *App) clientQuickCheckExpectedRoute(settings GlobalAppSettings, cache map[string]serviceStrategyCacheEntry, svc clientQuickCheckService) string {
-	if strings.Contains(svc.Category, "VPNOnly") {
+func catalogQuickCheckRoute(service clientQuickCheckService, blockedDomains []string) string {
+	if aicatalog.VPNOnly(service.ServiceTag) || strings.Contains(service.Category, "VPNOnly") {
 		return clientQuickCheckRouteVPN
 	}
-	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
-		if strings.HasPrefix(svc.Category, "Direct") {
-			return clientQuickCheckRouteDirect
+	target, err := url.Parse(service.URL)
+	if err != nil || target.Hostname() == "" || len(blockedDomains) == 0 {
+		return ""
+	}
+	domain := strings.ToLower(strings.TrimSuffix(target.Hostname(), "."))
+	for domain != "" {
+		if index := sort.SearchStrings(blockedDomains, domain); index < len(blockedDomains) && blockedDomains[index] == domain {
+			return clientQuickCheckRouteVPN
 		}
+		_, next, found := strings.Cut(domain, ".")
+		if !found {
+			break
+		}
+		domain = next
+	}
+	return clientQuickCheckRouteDirect
+}
+
+func (a *App) clientQuickCheckExpectedRoute(settings GlobalAppSettings, cache map[string]serviceStrategyCacheEntry, svc clientQuickCheckService) string {
+	if strings.Contains(svc.Category, "VPNOnly") {
 		return clientQuickCheckRouteVPN
 	}
 	if settings.HideRuTraffic && strings.HasPrefix(svc.Category, "Direct-RU") {

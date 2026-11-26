@@ -34,6 +34,15 @@ class _AtlasHomeLayout extends StatelessWidget {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) => Column(
       children: [
+        if (updateNotice != null)
+          Padding(
+            key: const ValueKey('home-update-slot'),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 760),
+              child: updateNotice!,
+            ),
+          ),
         Expanded(child: _body(context)),
         if (turboOffer != null &&
             MediaQuery.viewInsetsOf(context).bottom == 0 &&
@@ -98,25 +107,6 @@ class _AtlasHomeLayout extends StatelessWidget {
                       if (!_isMobileShell) const SizedBox(height: 16),
                       routes,
                       if (_isMobileShell) const SizedBox(height: 8),
-                      if (!_compactDesktopHome(context))
-                        SizedBox(
-                          key: const ValueKey('home-update-slot'),
-                          // Keep the connection scene stable when an update is
-                          // discovered. The manual action has its own space,
-                          // including two lines at larger accessibility scales.
-                          height:
-                              math.max(
-                                56,
-                                MediaQuery.textScalerOf(context).scale(14) *
-                                        2.6 +
-                                    20,
-                              ) -
-                              (_isMobileShell ? 0 : 8),
-                          child: Align(
-                            alignment: Alignment.centerRight,
-                            child: updateNotice ?? const SizedBox.shrink(),
-                          ),
-                        ),
                     ],
                   ),
                   footerExpanded: servicesExpanded,
@@ -128,13 +118,6 @@ class _AtlasHomeLayout extends StatelessWidget {
             ),
           ),
         ),
-        if (_compactDesktopHome(context) && updateNotice != null)
-          Positioned(
-            top: 64,
-            left: 12,
-            width: math.min(188, constraints.maxWidth * .3),
-            child: updateNotice!,
-          ),
         if (telemetry != null &&
             constraints.maxWidth >= 760 &&
             MediaQuery.textScalerOf(context).scale(12) <= 18)
@@ -738,7 +721,8 @@ class _AtlasRouteControls extends StatelessWidget {
             final showIcons = stacked || constraints.maxWidth >= 340;
             final buttons = [
               _AccessibleDescription(
-                message: 'Только выбранные сервисы. Остальное — напрямую.',
+                message:
+                    'Сохранённые маршруты сервисов и каталоги блокировок. Остальное — напрямую.',
                 child: _mode(
                   'selected',
                   'По сервисам',
@@ -750,7 +734,7 @@ class _AtlasRouteControls extends StatelessWidget {
               ),
               _AccessibleDescription(
                 message: c.hasSubscription
-                    ? 'Заблокированные и ИИ-сервисы через VPN, обычные сайты напрямую'
+                    ? 'Заблокированные сервисы и сервисы с ограничениями для РФ через VPN, обычные сайты напрямую'
                     : 'Можно использовать бесплатный публичный источник или свою подписку',
                 child: _mode(
                   'all-vpn',

@@ -26,7 +26,7 @@ func TestSelectiveWinDivertFilterIsNarrowAndDeterministic(t *testing.T) {
 		"udp.SrcPort == 32123",
 		"udp.DstPort == 53",
 		"ip.DstAddr >= 198.18.0.0",
-		"ip.DstAddr <= 198.19.255.255",
+		"ip.DstAddr <= 198.18.255.255",
 		"ip.DstAddr >= 66.22.192.0",
 		"ip.DstAddr <= 66.22.255.255",
 		"tcp.DstPort == 80",

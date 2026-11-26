@@ -90,10 +90,16 @@ class _LiveProfileClient extends OwnedVPNClient {
     DateTime? turboUntil, {
     AccountTransport? transport,
     bool Function()? isCurrent,
+    bool windowsLive = false,
   }) async {
     expect(isCurrent!(), true);
+    final hadTurbo = applied.lastOrNull != null;
     applied.add(turboUntil);
-    return {'success': true};
+    return {
+      'success': true,
+      'turboActivated': windowsLive && !hadTurbo && turboUntil != null,
+      'turboRemoved': windowsLive && hadTurbo && turboUntil == null,
+    };
   }
 }
 
@@ -276,7 +282,7 @@ void main() {
   });
 
   testWidgets(
-    'a live grant updates the UI during VPN and applies once after stop',
+    'Windows applies a grant and revoke during VPN and displays both notices',
     (tester) async {
       final api = _DisplayTransport();
       final profiles = _LiveProfileClient();
@@ -294,15 +300,18 @@ void main() {
       await tester.pump(const Duration(seconds: 30));
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('free-plan-banner')), findsNothing);
-      expect(profiles.applied, isNot(contains(until)));
-      bridge.connected = false;
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pumpAndSettle();
+      expect(profiles.applied.where((expiry) => expiry == until), hasLength(1));
+      expect(find.text('Dropo Turbo активирован'), findsOneWidget);
+      api.turboUntil = null;
       await tester.pump(const Duration(seconds: 30));
       await tester.pumpAndSettle();
-      expect(profiles.applied.where((expiry) => expiry == until), hasLength(1));
+      expect(profiles.applied, [null, until, null]);
+      expect(find.text('Dropo Turbo отключён'), findsOneWidget);
+      expect(find.byKey(const ValueKey('free-plan-banner')), findsOneWidget);
+      expect(bridge.connected, true);
       await tester.pumpWidget(const SizedBox.shrink());
     },
+    skip: !Platform.isWindows,
   );
 
   testWidgets('returning from a gift link checks Turbo before the next timer', (
@@ -462,10 +471,7 @@ void main() {
       final all = find.byKey(const ValueKey('home-routing-all-vpn'));
       final planetBefore = tester.getRect(planet);
       final modesBefore = tester.getRect(selected);
-      final updateSlot = tester.getRect(
-        find.byKey(const ValueKey('home-update-slot')),
-      );
-      expect(updateSlot.overlaps(planetBefore), isFalse);
+      expect(find.byKey(const ValueKey('home-update-slot')), findsNothing);
       expect(find.byKey(const ValueKey('home-routing-live')), findsNothing);
       bridge.connected = true;
       await tester.pump(const Duration(seconds: 3));

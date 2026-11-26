@@ -183,6 +183,31 @@ class _VPNOnlyServicesPage extends StatefulWidget {
 
 class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
   late Future<List<RouteService>> catalog = widget.bridge.routes();
+  late Future<Map<String, dynamic>> protection = widget.bridge.appConfig();
+  bool savingProtection = false;
+  String protectionError = '';
+
+  Future<void> _setProtection(bool enabled) async {
+    setState(() {
+      savingProtection = true;
+      protectionError = '';
+    });
+    try {
+      final result = await widget.bridge.callMap(
+        'SetProtectedRouting',
+        args: [enabled],
+      );
+      if (result['success'] != true) {
+        throw StateError(result['error']?.toString() ?? 'Ошибка сохранения');
+      }
+      if (mounted) setState(() => protection = widget.bridge.appConfig());
+    } catch (error) {
+      if (mounted) setState(() => protectionError = _cleanError(error));
+    } finally {
+      if (mounted) setState(() => savingProtection = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => _FeaturePage(
     title: 'Сервисы с обязательным VPN',
@@ -211,6 +236,44 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (Theme.of(context).platform == TargetPlatform.windows)
+                    FutureBuilder<Map<String, dynamic>>(
+                      future: protection,
+                      builder: (context, protectionSnapshot) {
+                        final settings = protectionSnapshot.data;
+                        final enabled =
+                            settings?['protectedRoutingEnabled'] != false;
+                        final ready =
+                            settings?['protectedRoutingReady'] == true;
+                        final message = protectionError.isNotEmpty
+                            ? protectionError
+                            : settings?['protectedRoutingError']?.toString() ??
+                                  '';
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SwitchListTile.adaptive(
+                              key: const ValueKey('protect-vpn-only-when-off'),
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text(
+                                'Защищать сервисы при выключенном VPN',
+                              ),
+                              subtitle: Text(
+                                enabled && settings != null && !ready
+                                    ? 'Локальный маршрутизатор недоступен'
+                                    : 'Обычные сайты открываются напрямую',
+                              ),
+                              value: enabled,
+                              onChanged: savingProtection || settings == null
+                                  ? null
+                                  : _setProtection,
+                            ),
+                            if (message.isNotEmpty) Text(message),
+                            const Divider(),
+                          ],
+                        );
+                      },
+                    ),
                   Text(
                     _uiText(
                       context,

@@ -32,6 +32,14 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 	if a != nil && a.trafficEngine != nil {
 		plan.Revision = a.trafficEngine.CurrentPlan().Revision + 1
 	}
+	if a != nil && a.storage != nil &&
+		NormalizeRoutingMode(a.storage.GetAppSettings().RoutingMode) == RoutingModeAllTraffic {
+		// WireGuard may activate WinDivert alongside the catalog TUN. Only
+		// WireGuard actions belong in that plan; saved service choices are idle.
+		plan.DirectRules = nil
+		a.addNativeWireGuardRules(&plan)
+		return plan, traffic.ValidatePlan(plan)
+	}
 	for _, service := range DefaultFreeAccessServices {
 		selection, selected := selections[service.Tag]
 		if !selected || aicatalog.VPNOnly(service.Tag) {

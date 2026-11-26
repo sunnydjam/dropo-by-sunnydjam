@@ -35,11 +35,17 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			observed := make(chan string, 4)
 			outbounds := []any{}
-			for _, tag := range []string{"direct", "proxy"} {
+			var vpnExit *httptest.Server
+			for _, tag := range []string{"direct", "vpn-fixture"} {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { observed <- tag; w.WriteHeader(http.StatusBadGateway) }))
+				if tag == "vpn-fixture" {
+					vpnExit = server
+				}
 				t.Cleanup(server.Close)
 				outbounds = append(outbounds, map[string]any{"type": "http", "tag": tag, "server": "127.0.0.1", "server_port": server.Listener.Addr().(*net.TCPAddr).Port})
 			}
+			outbounds = append(outbounds, buildVPNSourceFallbackOutbound([]string{"vpn-fixture"}),
+				map[string]any{"type": "selector", "tag": "proxy", "outbounds": []string{"auto-select", "vpn-fixture"}})
 			dir, err := filepath.Abs(filepath.Join("..", "dependencies", "filters"))
 			if err != nil {
 				t.Fatal(err)
@@ -100,12 +106,15 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 			transport := &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: addr}), DisableKeepAlives: true}
 			defer transport.CloseIdleConnections()
 			client := http.Client{Transport: transport, Timeout: 2 * time.Second}
-			cases := map[string]string{"vk.com": "direct", "www.ozon.ru": "direct", "online.sberbank.ru": "direct", "ordinary.example": "direct", "rutracker.org": "proxy", "api.anthropic.com": "proxy", "chatgpt.com": "proxy", "gemini.google.com": "proxy", "slack.com": "proxy", "youtube.com": "proxy", "discord.com": "proxy", "twitch.tv": "proxy"}
+			cases := map[string]string{"vk.com": "direct", "www.ozon.ru": "direct", "online.sberbank.ru": "direct", "ordinary.example": "direct", "rutracker.org": "proxy", "api.anthropic.com": "proxy", "chatgpt.com": "proxy", "gemini.google.com": "proxy", "slack.com": "proxy", "youtube.com": "proxy", "discord.com": "proxy", "twitch.tv": "direct", "gql.twitch.tv": "proxy", "facetime.apple.com": "direct"}
 			if mode == RoutingModeBlockedOnly {
 				cases["youtube.com"] = "direct"
-				cases["twitch.tv"] = "direct"
+				delete(cases, "gql.twitch.tv") // The saved service policy takes precedence here.
 			}
 			for host, want := range cases {
+				if want == "proxy" {
+					want = "vpn-fixture"
+				}
 				resp, _ := client.Get(fmt.Sprintf("http://%s/", host))
 				if resp != nil {
 					resp.Body.Close()
@@ -117,6 +126,23 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 					}
 				case <-time.After(300 * time.Millisecond):
 					t.Fatalf("%s did not reach either local exit", host)
+				}
+			}
+			vpnExit.Close()
+			for _, host := range []string{"chatgpt.com", "rutracker.org", "vk.com"} {
+				resp, _ := client.Get("http://" + host + "/")
+				if resp != nil {
+					resp.Body.Close()
+				}
+				select {
+				case got := <-observed:
+					if host != "vk.com" || got != "direct" {
+						t.Fatalf("VPN unavailable: %s escaped through %s", host, got)
+					}
+				default:
+					if host == "vk.com" {
+						t.Fatal("VPN unavailable: VK lost its ordinary direct route")
+					}
 				}
 			}
 		})

@@ -905,6 +905,9 @@ func protectedServiceRules(settings GlobalAppSettings, hasVPN, catalog bool) []a
 		if catalog {
 			outbound = "proxy"
 		}
+		if len(service.ExactHosts) > 0 {
+			rules = append(rules, map[string]any{"domain": service.ExactHosts, "action": "route", "outbound": outbound})
+		}
 		if len(service.DomainSuffixes) > 0 {
 			rules = append(rules, map[string]any{"domain_suffix": service.DomainSuffixes, "action": "route", "outbound": outbound})
 		}
@@ -930,18 +933,6 @@ func applyCatalogVPNRoutes(route map[string]any, manager *FilterManager) {
 		map[string]any{"process_name": []string{XrayExeName}, "action": "route", "outbound": "direct"},
 	}
 	rules = append(rules, protectedServiceRules(GlobalAppSettings{}, true, true)...)
-	rules = append(rules, buildDirectServiceRules()...)
-	for _, svc := range DefaultFreeAccessServices {
-		if aicatalog.VPNOnly(svc.Tag) {
-			continue
-		}
-		if len(svc.DomainSuffixes) > 0 {
-			rules = append(rules, map[string]any{"domain_suffix": svc.DomainSuffixes, "action": "route", "outbound": "proxy"})
-		}
-		if len(svc.ProcessNames) > 0 {
-			rules = append(rules, map[string]any{"process_name": svc.ProcessNames, "action": "route", "outbound": "proxy"})
-		}
-	}
 	rules = append(rules, buildBlockedCatalogRouteRules(filters, "proxy", []string{"refilter-domains"}, []string{"refilter-ips"})...)
 	route["rules"], route["final"] = rules, "direct"
 }

@@ -238,12 +238,14 @@ func TestBothAndroidModesUseCatalogWithDirectBoundary(t *testing.T) {
 		if stage != 3 || !androidContainsDomainRoute(config, "chatgpt.com", "proxy") || !androidContainsDNSServer(config, "chatgpt.com", "dns-remote") {
 			t.Fatal("missing protected service routing", mode)
 		}
-		want := "direct"
 		if mode == "all_traffic" {
-			want = "proxy"
-		}
-		if !androidContainsDomainRoute(config, "youtube.com", want) {
-			t.Fatalf("%s lost named service policy", mode)
+			for _, host := range []string{"youtube.com", "twitch.tv", "instagram.com", "facetime.apple.com"} {
+				if androidContainsDomainRoute(config, host, "direct") || androidContainsDomainRoute(config, host, "proxy") {
+					t.Fatalf("%s got a blanket named policy ahead of the catalog", host)
+				}
+			}
+		} else if !androidContainsDomainRoute(config, "youtube.com", "direct") {
+			t.Fatal("selective mode lost the saved YouTube choice")
 		}
 	}
 }

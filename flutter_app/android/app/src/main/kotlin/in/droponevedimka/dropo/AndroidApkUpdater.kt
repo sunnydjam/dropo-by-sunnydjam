@@ -24,7 +24,7 @@ import java.util.concurrent.Future
 import java.util.concurrent.locks.ReentrantLock
 import java.util.zip.ZipFile
 
-/** User-requested updates only. Download/verification never stop or mutate the VPN session. */
+/** Uses the same verified APK cache for startup downloads and manual installation. */
 internal class AndroidApkUpdater(private val activity: Activity) {
     private val executor = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
@@ -44,7 +44,7 @@ internal class AndroidApkUpdater(private val activity: Activity) {
         var watchdog: Runnable? = null
     }
 
-    fun start(result: MethodChannel.Result) {
+    fun start(result: MethodChannel.Result, downloadOnly: Boolean = false) {
         if (BuildConfig.PLAY_DISTRIBUTION) {
             result.success(json(false, "Эта версия обновляется только через Google Play."))
             return
@@ -133,7 +133,17 @@ internal class AndroidApkUpdater(private val activity: Activity) {
                     }
                     request.download.checkCancelled()
                     request.verifiedFile = completed
-                    handler.post { if (active(request)) requestInstall(request) }
+                    handler.post {
+                        if (!active(request)) return@post
+                        if (downloadOnly) {
+                            finish(request, JSONObject(mapOf(
+                                "success" to true, "downloaded" to true,
+                                "version" to descriptor.version,
+                            )).toString())
+                        } else {
+                            requestInstall(request)
+                        }
+                    }
                 } finally {
                     cacheLock.unlock()
                 }

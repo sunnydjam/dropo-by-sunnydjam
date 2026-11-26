@@ -9,3 +9,5 @@ func systemDNSServers() []netip.Addr {
 }
 
 func allowDefaultDNSFallback() bool { return true }
+
+func windowsPhysicalIPv6Available() bool { return false }

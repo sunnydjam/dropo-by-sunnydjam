@@ -25,17 +25,21 @@ var bridgeCallableMethods = map[string]struct{}{
 	"AddWireGuard":                    {},
 	"AddVPNSource":                    {},
 	"AddManagedVPNSource":             {},
+	"ApplyManagedVPNEntitlement":      {},
 	"RestoreManagedVPNSource":         {},
 	"ValidateManagedCatalog":          {},
 	"AddPublicVPNSource":              {},
 	"CaptureDPIFingerprint":           {},
 	"CheckExternalVPNConflicts":       {},
 	"CheckForUpdates":                 {},
+	"DownloadUpdateOnly":              {},
+	"NotifyUpdateAvailable":           {},
 	"CreateProfile":                   {},
 	"DeleteProfile":                   {},
 	"DeleteWireGuard":                 {},
 	"DownloadAndInstallUpdate":        {},
 	"GetAppConfig":                    {},
+	"SetProtectedRouting":             {},
 	"GetBypassRouteSummary":           {},
 	"GetCurrentSubscription":          {},
 	"GetFreeAccessConfig":             {},
@@ -129,6 +133,20 @@ func newBridgeMux(app *App, token string) http.Handler {
 			"version":      GetVersionInfo(),
 			"dependencies": app.DependenciesStatus(),
 		})
+	})
+
+	handle("/vpn-required", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(`<!doctype html><html lang="ru"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Для этого сервиса нужен VPN</title>
+<main id="vpn-required"><h1>Для этого сервиса нужен VPN</h1>
+<p>Откройте Dropo, нажмите «Включить VPN» и повторите попытку.</p></main></html>`))
 	})
 
 	handle("/api/status", func(w http.ResponseWriter, r *http.Request) {

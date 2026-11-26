@@ -26,39 +26,72 @@ func (a *App) GetAppConfig() map[string]interface{} {
 	settings := a.storage.GetAppSettings()
 	versionInfo := GetVersionInfo()
 	networkMode := a.currentNetworkModeStatus()
+	protectedRouterPID, protectedRouterError := a.protectedRouter.status()
 
 	return map[string]interface{}{
-		"success":           true,
-		"autoStart":         settings.AutoStart,
-		"autoStartPrompted": settings.AutoStartPrompted,
-		"enableLogging":     settings.EnableLogging,
-		"checkUpdates":      settings.CheckUpdates,
-		"reduceMotion":      settings.ReduceMotion,
-		"notifications":     settings.Notifications,
-		"theme":             settings.Theme,
-		"language":          settings.Language,
-		"logLevel":          settings.LogLevel,
-		"routingMode":       string(settings.RoutingMode),
-		"networkMode":       string(settings.NetworkMode),
-		"autoUpdateSub":     settings.AutoUpdateSub,
-		"subUpdateInterval": settings.SubUpdateInterval,
-		"lastSubUpdate":     settings.LastSubUpdate.Format(time.RFC3339),
-		"hideRuTraffic":     settings.HideRuTraffic,
-		"ruProxyAddress":    settings.RuProxyAddress,
-		"disableFreeAccess": settings.DisableFreeAccess,
-		"wireGuardVersion":  settings.WireGuardVersion,
-		"appVersion":        versionInfo["version"],
-		"appFullVersion":    versionInfo["fullVersion"],
-		"appName":           versionInfo["name"],
-		"singboxVersion":    versionInfo["singboxVersion"],
-		"buildHash":         versionInfo["buildHash"],
-		"buildTime":         versionInfo["buildTime"],
-		"githubRepo":        versionInfo["githubRepo"],
-		"githubURL":         versionInfo["githubURL"],
-		"telegramName":      versionInfo["telegramName"],
-		"telegramURL":       versionInfo["telegramURL"],
-		"networkModeStatus": networkModeStatusPayload(networkMode),
+		"success":                 true,
+		"autoStart":               settings.AutoStart,
+		"autoStartPrompted":       settings.AutoStartPrompted,
+		"enableLogging":           settings.EnableLogging,
+		"checkUpdates":            settings.CheckUpdates,
+		"reduceMotion":            settings.ReduceMotion,
+		"notifications":           settings.Notifications,
+		"theme":                   settings.Theme,
+		"language":                settings.Language,
+		"logLevel":                settings.LogLevel,
+		"routingMode":             string(settings.RoutingMode),
+		"networkMode":             string(settings.NetworkMode),
+		"protectedRoutingEnabled": !settings.DisableProtectedRouting,
+		"protectedRoutingReady":   protectedRouterPID != 0,
+		"protectedRoutingError":   protectedRouterError,
+		"autoUpdateSub":           settings.AutoUpdateSub,
+		"subUpdateInterval":       settings.SubUpdateInterval,
+		"lastSubUpdate":           settings.LastSubUpdate.Format(time.RFC3339),
+		"hideRuTraffic":           settings.HideRuTraffic,
+		"ruProxyAddress":          settings.RuProxyAddress,
+		"disableFreeAccess":       settings.DisableFreeAccess,
+		"wireGuardVersion":        settings.WireGuardVersion,
+		"appVersion":              versionInfo["version"],
+		"appFullVersion":          versionInfo["fullVersion"],
+		"appName":                 versionInfo["name"],
+		"singboxVersion":          versionInfo["singboxVersion"],
+		"buildHash":               versionInfo["buildHash"],
+		"buildTime":               versionInfo["buildTime"],
+		"githubRepo":              versionInfo["githubRepo"],
+		"githubURL":               versionInfo["githubURL"],
+		"telegramName":            versionInfo["telegramName"],
+		"telegramURL":             versionInfo["telegramURL"],
+		"networkModeStatus":       networkModeStatusPayload(networkMode),
 	}
+}
+
+func (a *App) SetProtectedRouting(enabled bool) map[string]interface{} {
+	a.waitForInit()
+	a.settingsPolicyMu.Lock()
+	defer a.settingsPolicyMu.Unlock()
+	a.vpnLifecycleMu.Lock()
+	defer a.vpnLifecycleMu.Unlock()
+	if runtime.GOOS != "windows" || a.storage == nil || a.isShuttingDown() {
+		return map[string]interface{}{"success": false, "error": "Локальная защита доступна в Windows"}
+	}
+	settings := a.storage.GetAppSettings()
+	previous := settings.DisableProtectedRouting
+	if enabled {
+		if err := a.startWindowsProtectedRouter(); err != nil {
+			return map[string]interface{}{"success": false, "error": err.Error()}
+		}
+	}
+	settings.DisableProtectedRouting = !enabled
+	if err := a.storage.UpdateAppSettings(settings); err != nil {
+		if previous {
+			a.protectedRouter.stop()
+		}
+		return map[string]interface{}{"success": false, "error": err.Error()}
+	}
+	if !enabled {
+		a.protectedRouter.stop()
+	}
+	return map[string]interface{}{"success": true, "protectedRoutingEnabled": enabled}
 }
 
 // SetReduceMotion changes presentation only, without rebuilding a profile.

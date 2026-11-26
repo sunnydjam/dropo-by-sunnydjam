@@ -61,6 +61,7 @@ class _Bridge extends MockCoreBridge {
   List<Map<String, dynamic>>? references;
   final added = <String>[];
   final removed = <String>[];
+  final liveEntitlements = <List<dynamic>>[];
   @override
   Future<CoreStatus> status() async {
     if (failStatus) throw StateError('Native status unavailable');
@@ -75,6 +76,10 @@ class _Bridge extends MockCoreBridge {
   }) async {
     if (method == 'ValidateManagedCatalog') {
       return {'success': true, 'revision': 1};
+    }
+    if (method == 'ApplyManagedVPNEntitlement') {
+      liveEntitlements.add(List.of(args));
+      return {'success': !failBoost, 'restarted': connected};
     }
     if (method == 'AddManagedVPNSource') {
       added.add(args[0] as String);
@@ -369,6 +374,44 @@ void main() {
     },
   );
 
+  test(
+    'connected Windows applies gift and revocation without stopping in Dart',
+    () async {
+      bridge.connected = true;
+      final granted = await HttpOverrides.runWithHttpOverrides(
+        () => client.synchronizeEntitlement(
+          bridge,
+          'registered-fixture',
+          until,
+          transport: api,
+          windowsLive: true,
+        ),
+        _HTTP(),
+      );
+      expect(granted['turboActivated'], true);
+      expect(granted['restarted'], true);
+      expect(bridge.added, isEmpty);
+      expect(bridge.moves, isEmpty);
+      expect(bridge.liveEntitlements.single, [
+        contains('#free'),
+        contains('#boost'),
+        true,
+      ]);
+      final revoked = await client.synchronizeEntitlement(
+        bridge,
+        'registered-fixture',
+        null,
+        transport: api,
+        windowsLive: true,
+      );
+      expect(revoked['turboRemoved'], true);
+      expect(revoked['restarted'], true);
+      expect(bridge.liveEntitlements.last, ['', '', false]);
+      expect(vault.record['boostKey'], isNull);
+      expect(vault.record['boostUntil'], 0);
+    },
+  );
+
   test('unchanged entitlement does not query or reissue profiles', () async {
     vault.value = base64UrlEncode(
       utf8.encode(
@@ -391,6 +434,36 @@ void main() {
     expect(api.calls, isEmpty);
     expect(bridge.added, isEmpty);
   });
+
+  test(
+    'expired Turbo is removed from a running Windows session offline',
+    () async {
+      final expired = DateTime.now().subtract(const Duration(minutes: 1));
+      vault.value = base64UrlEncode(
+        utf8.encode(
+          jsonEncode({
+            ...vault.record,
+            'boostKey': 'expired-boost',
+            'boostUntil': expired.millisecondsSinceEpoch ~/ 1000,
+          }),
+        ),
+      );
+      api.fail = true;
+      bridge.connected = true;
+      final result = await client.synchronizeEntitlement(
+        bridge,
+        'registered-fixture',
+        expired,
+        transport: api,
+        windowsLive: true,
+      );
+      expect(result['turboRemoved'], true);
+      expect(result['restarted'], true);
+      expect(bridge.liveEntitlements.single, ['', '', false]);
+      expect(vault.record['boostKey'], isNull);
+      expect(api.calls, isEmpty);
+    },
+  );
   for (final busy in ['connected', 'running', 'connecting', 'disconnecting']) {
     test(
       'account refresh during $busy keeps pending Boost uncached and applies after restart',

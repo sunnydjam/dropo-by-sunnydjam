@@ -288,6 +288,7 @@ class OwnedVPNClient {
     String? registeredToken,
     CoreBridge? bridge,
     bool Function()? isCurrent,
+    bool windowsLive = false,
   }) async {
     await _ownedStep('protected_storage_read', _load);
     if (_record?['deletionPending'] == true) {
@@ -485,6 +486,13 @@ class OwnedVPNClient {
         throw const AccountIdentityChanged();
       }
     }
+    if (windowsLive && boost == null) {
+      return {'success': true, 'deferred': true};
+    }
+    final hadTurbo =
+        ((_record?['boostUntil'] as num?)?.toInt() ?? 0) >
+            DateTime.now().millisecondsSinceEpoch ~/ 1000 &&
+        _record?['boostApplyPending'] != true;
     if (((_record?['boostUntil'] as num?)?.toInt() ?? 0) <=
             DateTime.now().millisecondsSinceEpoch ~/ 1000 ||
         boost == null) {
@@ -497,12 +505,31 @@ class OwnedVPNClient {
       _record!['boostApplyPending'] = true;
     }
     await _persist();
-    final result = await _apply(save, bridge);
+    final result = windowsLive && bridge != null && boost != null
+        ? await _applyWindowsEntitlement(bridge, free, boost)
+        : await _apply(save, bridge);
     if (result['success'] == true &&
         _record!.remove('boostApplyPending') != null) {
       await _persist();
     }
-    return result;
+    return windowsLive && result['success'] == true
+        ? {...result, 'turboActivated': !hadTurbo}
+        : result;
+  }
+
+  Future<Map<String, dynamic>> _applyWindowsEntitlement(
+    CoreBridge bridge,
+    String free,
+    String boost,
+  ) async {
+    final result = await bridge.callMap(
+      'ApplyManagedVPNEntitlement',
+      args: [free, boost, !_turboSelectionHandled],
+      timeout: const Duration(minutes: 2),
+    );
+    if (result['success'] != true) return result;
+    _turboSelectionHandled = true;
+    return {...result, 'turboReady': true};
   }
 
   Future<String> _downloadKey(Object? value, int until) async {
@@ -734,14 +761,14 @@ class OwnedVPNClient {
     () => _linkAccount(bridge, token, consent, transport: transport),
   );
 
-  /// Account entitlements can change on the web while this local profile stays
-  /// cached. Reconcile changed entitlements while the native session is idle.
+  /// Windows applies changes through the native reconnect transaction.
   Future<Map<String, dynamic>> synchronizeEntitlement(
     CoreBridge bridge,
     String token,
     DateTime? turboUntil, {
     AccountTransport? transport,
     bool Function()? isCurrent,
+    bool windowsLive = false,
   }) => _serialize(() async {
     await _load();
     if (isCurrent?.call() == false) return {'success': false};
@@ -757,12 +784,16 @@ class OwnedVPNClient {
         _record?['boostApplyPending'] != true) {
       return {'success': true, 'unchanged': true};
     }
-    if (!active && _record?['boostKey'] == null && cachedUntil == 0) {
+    if (!active &&
+        !windowsLive &&
+        _record?['boostKey'] == null &&
+        cachedUntil == 0) {
       return {'success': true, 'unchanged': true};
     }
-    if (_ownedProfileSessionBusy(
-      await bridge.status().timeout(const Duration(seconds: 5)),
-    )) {
+    final status = await bridge.status().timeout(const Duration(seconds: 5));
+    if (windowsLive
+        ? status.connecting || status.disconnecting
+        : _ownedProfileSessionBusy(status)) {
       return {'success': true, 'deferred': true};
     }
     if (isCurrent?.call() == false) return {'success': false};
@@ -775,7 +806,23 @@ class OwnedVPNClient {
         false,
         transport: transport,
         isCurrent: isCurrent,
+        windowsLive: windowsLive,
       );
+    }
+    if (windowsLive) {
+      final result = await bridge.callMap(
+        'ApplyManagedVPNEntitlement',
+        args: ['', '', false],
+        timeout: const Duration(minutes: 2),
+      );
+      if (result['success'] != true) return result;
+      final hadTurbo = cachedUntil != 0 || _record?['boostKey'] != null;
+      await _forgetTurbo();
+      return {
+        ...result,
+        'unchanged': !hadTurbo && result['unchanged'] == true,
+        'turboRemoved': hadTurbo || result['unchanged'] != true,
+      };
     }
     final view = await bridge.callMap('GetVPNSources');
     for (final source in _ownedFamilyRepresentatives(
@@ -786,13 +833,24 @@ class OwnedVPNClient {
       final result = await bridge.removeVpnSource(source['id'].toString());
       if (result['success'] != true) return result;
     }
-    _turboSelectionHandled = false;
-    _record!.remove('boostKey');
-    _record!.remove('boostApplyPending');
-    _record!['boostUntil'] = 0;
-    await _persist();
+    await _forgetTurbo();
     return {'success': true, 'turboRemoved': true};
   });
+
+  Future<void> _forgetTurbo() async {
+    _turboSelectionHandled = false;
+    final record = _record;
+    if (record == null ||
+        (record['boostKey'] == null &&
+            record['boostApplyPending'] != true &&
+            ((record['boostUntil'] as num?)?.toInt() ?? 0) == 0)) {
+      return;
+    }
+    record.remove('boostKey');
+    record.remove('boostApplyPending');
+    record['boostUntil'] = 0;
+    await _persist();
+  }
 
   Future<Map<String, dynamic>> _linkAccount(
     CoreBridge bridge,
@@ -800,6 +858,7 @@ class OwnedVPNClient {
     bool consent, {
     AccountTransport? transport,
     bool Function()? isCurrent,
+    bool windowsLive = false,
   }) async {
     final api = transport ?? _AccountApi(endpoint);
     try {
@@ -812,13 +871,10 @@ class OwnedVPNClient {
           identity['accountKind'] != 'registered') {
         throw const AccountIdentityChanged();
       }
-      // Enrollment caches the delivered keys before native application. Do not
-      // advance that cache while the native source pool is busy: a later
-      // connection could otherwise mistake an unapplied Boost for an unchanged
-      // entitlement. The next stopped-session sync still sees the old expiry.
-      if (_ownedProfileSessionBusy(
-        await bridge.status().timeout(const Duration(seconds: 5)),
-      )) {
+      if (!windowsLive &&
+          _ownedProfileSessionBusy(
+            await bridge.status().timeout(const Duration(seconds: 5)),
+          )) {
         return {'success': true, 'deferred': true};
       }
       if (_record?['standaloneGuest'] == true) {
@@ -900,6 +956,7 @@ class OwnedVPNClient {
         registeredToken: token,
         bridge: bridge,
         isCurrent: isCurrent,
+        windowsLive: windowsLive,
       );
       if (result['success'] == true && _record?['boostKey'] == null) {
         final view = await bridge.callMap('GetVPNSources');

@@ -63,8 +63,9 @@ type GlobalAppSettings struct {
 	ReduceMotion bool     `json:"reduce_motion"`
 
 	// Routing settings
-	RoutingMode RoutingMode `json:"routing_mode"` // persisted choice; fresh Windows installs start in all_traffic
-	NetworkMode NetworkMode `json:"network_mode"` // Windows desktop always migrates to windows_unified
+	RoutingMode             RoutingMode `json:"routing_mode"` // persisted choice; fresh Windows installs start in all_traffic
+	NetworkMode             NetworkMode `json:"network_mode"` // Windows desktop always migrates to windows_unified
+	DisableProtectedRouting bool        `json:"disable_protected_routing,omitempty"`
 
 	// Free access settings — opening blocked-in-RF
 	// services without a VPN key, via local DPI-bypass methods (ByeDPI).
@@ -199,7 +200,7 @@ func (s *Storage) Load() error {
 		return fmt.Errorf("failed to read settings: %w", err)
 	}
 
-	var settings SettingsFile
+	settings := SettingsFile{App: GlobalAppSettings{AutoStart: true, CheckUpdates: true}}
 	if err := json.Unmarshal(data, &settings); err != nil {
 		// Backup corrupted file and create new
 		backupPath := s.settingsPath + ".backup"
@@ -925,9 +926,13 @@ func (s *Storage) WriteActiveConfigToFile() (string, error) {
 			// Windows TUN + TCP Fast Open/MPTCP can break TLS handshakes for
 			// Google/YouTube in direct fallback mode. Keep direct conservative.
 			s.disableRiskyDirectOptions(config)
-			s.preferIPv4Resolution(config)
+			if NormalizeRoutingMode(s.data.App.RoutingMode) == RoutingModeAllTraffic {
+				enableWindowsCatalogIPv6(config)
+			} else {
+				s.preferIPv4Resolution(config)
+				disableTunIPv6(config)
+			}
 			relaxTunStrictRoute(config)
-			disableTunIPv6(config)
 			useWindowsSystemTunStack(config)
 			clearDirectOutboundInterface(config)
 			addTunRouteExcludesForProxyEndpoints(config, s.data.Profiles[i].XrayConfig)
@@ -1775,7 +1780,7 @@ func (b *ConfigBuilderForStorage) prepareConfigForProfileSources(ctx context.Con
 		// the full-tunnel session even when sing-box restores its cache file.
 		if experimental, ok := template["experimental"].(map[string]interface{}); ok {
 			if cacheFile, ok := experimental["cache_file"].(map[string]interface{}); ok {
-				cacheFile["path"] = "cache-catalog-vpn-v2.db"
+				cacheFile["path"] = catalogVPNCacheFile
 			}
 		}
 	}
@@ -2682,7 +2687,7 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 			}
 		}
 	}
-	if len(DirectDomainSuffixes) > 0 {
+	if b.routingMode != RoutingModeAllTraffic && len(DirectDomainSuffixes) > 0 {
 		rules = append(rules, map[string]interface{}{
 			"domain_suffix": DirectDomainSuffixes,
 			"action":        "route",
@@ -2691,6 +2696,9 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 	}
 
 	for _, svc := range DefaultFreeAccessServices {
+		if b.routingMode == RoutingModeAllTraffic && !aicatalog.VPNOnly(svc.Tag) {
+			continue
+		}
 		if len(svc.ExactHosts)+len(svc.DomainSuffixes) == 0 {
 			continue
 		}
@@ -3192,9 +3200,12 @@ func (s *Storage) MigrateFromOldFormat(basePath string) error {
 	if fileExists(oldAppConfigPath) {
 		data, err := os.ReadFile(oldAppConfigPath)
 		if err == nil {
-			var oldConfig AppConfigLegacy
+			oldConfig := AppConfigLegacy{AutoStart: true, CheckUpdates: true}
 			if json.Unmarshal(data, &oldConfig) == nil {
 				s.data.App.AutoStart = oldConfig.AutoStart
+				if !oldConfig.AutoStart {
+					s.data.App.AutoStartPrompted = true
+				}
 				s.data.App.Notifications = true
 				s.data.App.CheckUpdates = oldConfig.CheckUpdates
 				s.data.App.EnableLogging = true

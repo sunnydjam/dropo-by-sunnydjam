@@ -819,18 +819,16 @@ func TestAndroidRuntimeSettingsValidateAndInvalidateCache(t *testing.T) {
 	if dns["final"] != "dns-direct" {
 		t.Fatalf("all_traffic dns final = %v, want dns-direct", dns["final"])
 	}
-	if !androidContainsDomainRoute(config, "steam.com", "direct") ||
-		!androidContainsPackageRoute(config, "com.valvesoftware.android.steam.community", "direct") ||
-		!androidContainsDNSServer(config, "steam.com", "dns-direct") {
-		t.Fatal("all_traffic must preserve Steam direct")
+	if androidContainsDomainRoute(config, "steam.com", "proxy") ||
+		androidContainsPackageRoute(config, "com.valvesoftware.android.steam.community", "proxy") ||
+		androidContainsDNSServer(config, "steam.com", "dns-remote") {
+		t.Fatal("catalog mode assigned Steam to VPN")
 	}
 	if androidContainsDomainRoute(config, "instagram.com", "direct") ||
-		androidContainsDNSServer(config, "instagram.com", "dns-direct") {
-		t.Fatal("all_traffic must override a saved per-service Direct policy")
-	}
-	if !androidContainsDomainRoute(config, "instagram.com", "proxy") ||
-		!androidContainsDNSServer(config, "instagram.com", "dns-remote") {
-		t.Fatal("all_traffic must route the saved Direct service and its DNS through VPN")
+		androidContainsDNSServer(config, "instagram.com", "dns-direct") ||
+		androidContainsDomainRoute(config, "instagram.com", "proxy") ||
+		androidContainsDNSServer(config, "instagram.com", "dns-remote") {
+		t.Fatal("catalog mode installed a blanket Instagram policy")
 	}
 }
 
@@ -1135,7 +1133,7 @@ func TestAndroidRoutesExposeAutoDirectAndVPNMethods(t *testing.T) {
 	}
 }
 
-func TestAndroidAllTrafficRouteSummaryOverridesSavedDirectWithoutSyntheticLatency(t *testing.T) {
+func TestAndroidCatalogRouteSummarySeparatesSavedDirectFromCatalogPolicy(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
 	current.BasePath = t.TempDir()
@@ -1157,8 +1155,8 @@ func TestAndroidAllTrafficRouteSummaryOverridesSavedDirectWithoutSyntheticLatenc
 		if service["selectedMethod"] != androidRoutePolicyDirect {
 			t.Fatalf("saved meta policy = %v, want direct", service["selectedMethod"])
 		}
-		if service["effectiveMethodLabel"] != androidRoutePolicyLabel(androidRoutePolicyVPN) || service["requiresVpn"] != true {
-			t.Fatalf("all-traffic meta route is not effective VPN: %#v", service)
+		if service["effectiveMethodLabel"] != "По каталогу блокировок" || service["requiresVpn"] != false {
+			t.Fatalf("catalog preset mislabeled the saved Meta route: %#v", service)
 		}
 		if service["delayMs"] != float64(0) {
 			t.Fatalf("unmeasured Android route latency = %v, want 0", service["delayMs"])

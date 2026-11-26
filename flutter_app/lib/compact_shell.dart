@@ -814,6 +814,21 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
                               padding: EdgeInsets.only(left: railWidth),
                               child: Column(
                                 children: [
+                                  if (widget.updateNotice != null)
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        8,
+                                        4,
+                                        8,
+                                        6,
+                                      ),
+                                      child: ConstrainedBox(
+                                        constraints: const BoxConstraints(
+                                          maxWidth: 760,
+                                        ),
+                                        child: widget.updateNotice!,
+                                      ),
+                                    ),
                                   Expanded(
                                     child: android
                                         ? _androidPageWithDrawer(
@@ -901,27 +916,16 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
                           ),
                         ),
                       ),
-                    if ((widget.notice != null ||
-                            widget.updateNotice != null) &&
-                        !_open)
+                    if (widget.notice != null && !_open)
                       Positioned(
                         top: 4,
                         left: railWidth + 8,
                         right: 8,
                         child: _AtlasNoticeOverlay(
-                          identity: ValueKey((
-                            widget.notice?.key,
-                            widget.updateNotice?.key,
-                          )),
+                          identity: widget.notice!.key,
                           maxHeight: 96,
-                          pinnedChild: widget.updateNotice,
-                          hasDetails: widget.notice != null,
-                          collapsedLabel:
-                              widget.updateNotice != null &&
-                                  widget.notice == null
-                              ? 'Новое обновление'
-                              : 'Сообщения',
-                          child: widget.notice ?? const SizedBox.shrink(),
+                          collapsedLabel: 'Сообщения',
+                          child: widget.notice!,
                         ),
                       ),
                     if (!widget.homeSceneReady)
@@ -975,17 +979,12 @@ class _AtlasNoticeOverlay extends StatefulWidget {
     required this.child,
     required this.maxHeight,
     this.identity,
-    this.pinnedChild,
-    this.hasDetails = true,
     this.collapsedLabel = 'Сообщения',
   });
 
   final Widget child;
   final double maxHeight;
   final Key? identity;
-  // Actions must never sit inside the height-limited message scroll viewport.
-  final Widget? pinnedChild;
-  final bool hasDetails;
   final String collapsedLabel;
 
   @override
@@ -1024,9 +1023,7 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
                     ),
                   ],
                 ),
-                if (widget.pinnedChild != null) widget.pinnedChild!,
-                if (widget.hasDetails)
-                  Flexible(child: SingleChildScrollView(child: widget.child)),
+                Flexible(child: SingleChildScrollView(child: widget.child)),
               ],
             ),
           ),
@@ -1059,38 +1056,21 @@ class _AtlasNoticeOverlayState extends State<_AtlasNoticeOverlay> {
                   Expanded(
                     child: Semantics(
                       liveRegion: true,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (widget.pinnedChild != null) widget.pinnedChild!,
-                          // Reserve the compact action row before allocating
-                          // the shared height budget to passive messages. In
-                          // small/large-text viewports their details stay in
-                          // the expand dialog instead of covering Connect.
-                          if (widget.hasDetails &&
-                              (widget.pinnedChild == null ||
-                                  widget.maxHeight >= 96))
-                            ConstrainedBox(
-                              constraints: BoxConstraints(
-                                maxHeight:
-                                    widget.maxHeight -
-                                    (widget.pinnedChild == null ? 0 : 48),
-                              ),
-                              child: SingleChildScrollView(child: widget.child),
-                            ),
-                        ],
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: widget.maxHeight,
+                        ),
+                        child: SingleChildScrollView(child: widget.child),
                       ),
                     ),
                   ),
-                  if (widget.hasDetails)
-                    _AccessibleIconButton(
-                      key: const ValueKey('expand-notice'),
-                      tooltip: 'Открыть сообщение полностью',
-                      mouseCursor: SystemMouseCursors.click,
-                      onPressed: _showDetails,
-                      icon: const Icon(Icons.open_in_full, size: 16),
-                    ),
+                  _AccessibleIconButton(
+                    key: const ValueKey('expand-notice'),
+                    tooltip: 'Открыть сообщение полностью',
+                    mouseCursor: SystemMouseCursors.click,
+                    onPressed: _showDetails,
+                    icon: const Icon(Icons.open_in_full, size: 16),
+                  ),
                   _AccessibleIconButton(
                     key: const ValueKey('dismiss-notice'),
                     tooltip: 'Свернуть сообщение',
