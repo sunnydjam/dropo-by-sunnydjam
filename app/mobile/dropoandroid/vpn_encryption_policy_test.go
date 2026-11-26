@@ -47,6 +47,18 @@ func playPolicyFixture(t *testing.T) {
 func storedCoreFixture(t *testing.T) string {
 	t.Helper()
 	base := t.TempDir()
+	// DropoVpnService installs these two APK assets before the production engine
+	// parses a configuration. Exercise the same on-disk catalog in native tests.
+	for _, name := range []string{"refilter_domains.srs", "refilter_ips.srs"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "..", "dependencies", "filters", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(base, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// EnsureStarted may preserve an existing in-memory core for a missing file;
 	// use explicit empty synthetic persisted state to isolate fixture sources.
 	if os.WriteFile(filepath.Join(base, "dropocore_state.json"), []byte(`{"subscription":"","vpnSources":[],"cachedSingBoxConfig":"","cachedConfigSubscription":"","cachedConfigSignature":"","config":{"autoUpdateSub":false},"serviceState":"stopped","connected":false}`), 0600) != nil {
