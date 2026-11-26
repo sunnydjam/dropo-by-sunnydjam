@@ -967,14 +967,7 @@ class _AtlasServiceRow extends StatelessWidget {
         service.tag == 'discord' ? 'Zapret (эксп.)' : 'Обход · Zapret',
       _ => 'Авто',
     };
-    final options = service.vpnOnly
-        ? const ['vpn']
-        : [
-            'vpn',
-            if (!_isMobileShell && service.zapretSupported) 'zapret',
-            'direct',
-            'auto',
-          ];
+    final options = _homeRoutePolicyOptions(service);
     final dropdown = Semantics(
       label: 'Способ подключения: ${_homeRouteName(service)}',
       child: Container(

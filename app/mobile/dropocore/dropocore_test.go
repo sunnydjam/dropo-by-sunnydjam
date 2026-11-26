@@ -509,17 +509,17 @@ func TestAndroidBlockedOnlyRoutesOnlyBlockedServicesThroughVPN(t *testing.T) {
 	if final := route["final"]; final != "direct" {
 		t.Fatalf("route final = %v, want direct", final)
 	}
-	if !androidContainsDomainRoute(config, "instagram.com", "proxy") {
-		t.Fatal("instagram.com must route through proxy by default")
+	if !androidContainsDomainRoute(config, "instagram.com", "direct") {
+		t.Fatal("instagram.com must route directly by default")
 	}
 	if !androidContainsPackageRoute(config, "com.discord", "proxy") {
 		t.Fatal("Discord package traffic, including IP-only voice UDP, must route through proxy by default")
 	}
-	if !androidContainsPackageRoute(config, "org.telegram.messenger", "proxy") {
-		t.Fatal("Telegram package traffic, including IP-only endpoints, must route through proxy by default")
+	if !androidContainsPackageRoute(config, "org.telegram.messenger", "direct") {
+		t.Fatal("Telegram package traffic must go directly by default")
 	}
-	if !androidContainsDNSServer(config, "instagram.com", "dns-remote") {
-		t.Fatal("instagram.com must resolve through remote DNS by default")
+	if !androidContainsDNSServer(config, "instagram.com", "dns-direct") {
+		t.Fatal("instagram.com must resolve through direct DNS by default")
 	}
 	if !androidContainsDNSServer(config, "yandex.ru", "dns-direct") {
 		t.Fatal("yandex.ru must resolve through direct DNS in blocked-only mode")
@@ -787,6 +787,7 @@ func TestAndroidDirectFirstSchemaInvalidatesPriorCachedConfig(t *testing.T) {
 func TestAndroidRuntimeSettingsValidateAndInvalidateCache(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
+	current.Config.RoutingMode = "blocked_only"
 	current.BasePath = t.TempDir()
 	current.Subscription = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fws&host=example.com&sni=example.com&fp=chrome#demo"
 	current.CachedSingBoxConfig = `{"old":true}`
@@ -804,10 +805,11 @@ func TestAndroidRuntimeSettingsValidateAndInvalidateCache(t *testing.T) {
 		t.Fatal("SetAndroidRoutePolicy(meta, direct) success = false")
 	}
 	mu.Lock()
-	if current.CachedSingBoxConfig != "" {
+	cached := current.CachedSingBoxConfig
+	mu.Unlock()
+	if cached != "" {
 		t.Fatal("cached config must be cleared after routing mode change")
 	}
-	mu.Unlock()
 	config := buildConfigForTest(t)
 	route := config["route"].(map[string]interface{})
 	if route["final"] != "direct" {
@@ -1120,8 +1122,8 @@ func TestAndroidRoutesExposeAutoDirectAndVPNMethods(t *testing.T) {
 	if cache["meta"] != androidRoutePolicyDirect {
 		t.Fatalf("meta method cache = %v, want direct", cache["meta"])
 	}
-	if cache["youtube"] != androidRoutePolicyAuto {
-		t.Fatalf("youtube method cache = %v, want auto", cache["youtube"])
+	if cache["youtube"] != androidRoutePolicyVPN {
+		t.Fatalf("youtube method cache = %v, want VPN", cache["youtube"])
 	}
 
 	var rejected map[string]interface{}

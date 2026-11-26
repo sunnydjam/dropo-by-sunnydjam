@@ -3116,6 +3116,19 @@ String _homeRouteName(RouteService service) {
   }
 }
 
+List<String> _homeRoutePolicyOptions(
+  RouteService service, {
+  bool showUnavailable = false,
+}) => [
+  'vpn',
+  if (!service.vpnOnly) ...[
+    if (!_isMobileShell && (service.zapretSupported || showUnavailable))
+      'zapret',
+    'direct',
+    'auto',
+  ],
+];
+
 String _normalizedHomeRoutePolicy(RouteService service) {
   if (service.vpnOnly) return 'vpn';
   switch (service.selectedMethod.trim().toLowerCase()) {
@@ -6670,7 +6683,9 @@ class _DropoHomePageState extends State<DropoHomePage>
         routes
             .where(
               (route) =>
-                  !route.vpnOnly && !route.homeVisible && !isPrimaryHomeRouteService(route.tag),
+                  !route.vpnOnly &&
+                  !route.homeVisible &&
+                  !isPrimaryHomeRouteService(route.tag),
             )
             .toList(growable: false)
           ..sort((left, right) => left.name.compareTo(right.name));
@@ -7026,7 +7041,9 @@ class _DropoHomePageState extends State<DropoHomePage>
     summaryOnly: summaryOnly,
     services: routes
         .where(
-          (route) => !route.vpnOnly && (route.homeVisible || isPrimaryHomeRouteService(route.tag)),
+          (route) =>
+              !route.vpnOnly &&
+              (route.homeVisible || isPrimaryHomeRouteService(route.tag)),
         )
         .toList(growable: false),
     enabled: !controlsDisabled && !connectionBusy,

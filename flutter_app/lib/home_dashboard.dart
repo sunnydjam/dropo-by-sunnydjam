@@ -742,26 +742,34 @@ class _HomeRouteServiceRow extends StatelessWidget {
             LayoutBuilder(
               builder: (context, bounds) {
                 final options = [
-                  _homeRouteButton(service, 'vpn', 'VPN', selected),
-                  if (!_isMobileShell && !service.vpnOnly)
-                    _AccessibleDescription(
-                      message: service.zapretSupported
-                          ? service.tag == 'discord'
-                                ? 'Эксперимент: web/API могут работать, voice/video не гарантируются'
-                                : 'Встроенный обход блокировки'
-                          : 'Zapret недоступен для этого сервиса',
-                      child: _homeRouteButton(
-                        service,
-                        'zapret',
-                        service.tag == 'discord' ? 'Zapret (эксп.)' : 'Zapret',
-                        selected,
-                        supported: service.zapretSupported,
-                      ),
-                    ),
-                  if (!service.vpnOnly)
-                    _homeRouteButton(service, 'direct', 'Напрямую', selected),
-                  if (!service.vpnOnly)
-                    _homeRouteButton(service, 'auto', 'Авто', selected),
+                  for (final method in _homeRoutePolicyOptions(
+                    service,
+                    showUnavailable: true,
+                  ))
+                    if (method == 'zapret')
+                      _AccessibleDescription(
+                        message: service.zapretSupported
+                            ? service.tag == 'discord'
+                                  ? 'Эксперимент: web/API могут работать, voice/video не гарантируются'
+                                  : 'Встроенный обход блокировки'
+                            : 'Zapret недоступен для этого сервиса',
+                        child: _homeRouteButton(
+                          service,
+                          'zapret',
+                          service.tag == 'discord'
+                              ? 'Zapret (эксп.)'
+                              : 'Zapret',
+                          selected,
+                          supported: service.zapretSupported,
+                        ),
+                      )
+                    else
+                      _homeRouteButton(service, method, switch (method) {
+                        'vpn' => 'VPN',
+                        'direct' => 'Напрямую',
+                        'auto' => 'Авто',
+                        _ => method,
+                      }, selected),
                 ];
                 final stacked =
                     bounds.maxWidth < 340 ||

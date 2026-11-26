@@ -10,7 +10,7 @@ func TestAdaptiveGraphStartsOnVPNAndScopesTLSOnly(t *testing.T) {
 	resetSourceTest(t)
 	sourceSuccess(t, "AddVPNSource", "One", sourceTestKey)
 	sourceSuccess(t, "SetRoutingMode", "blocked_only")
-	current.RoutePolicies = map[string]string{"meta": "vpn"}
+	current.RoutePolicies = map[string]string{"youtube": "auto", "meta": "vpn"}
 	var result struct {
 		Config string `json:"config"`
 	}
@@ -54,6 +54,7 @@ func stringValue(v interface{}) string { s, _ := v.(string); return s }
 
 func TestFullVPNNeverOffersOrCommitsAdaptiveDirectStrategies(t *testing.T) {
 	gen := preparedSourceSession(t)
+	current.RoutePolicies = map[string]string{"youtube": "auto"}
 	if current.Config.RoutingMode != "all_traffic" {
 		t.Fatal("fixture must use full VPN")
 	}
@@ -84,6 +85,7 @@ func TestFullVPNNeverOffersOrCommitsAdaptiveDirectStrategies(t *testing.T) {
 
 func TestAdaptiveCommitRequiresThreeAndFencesStoppedSession(t *testing.T) {
 	gen := preparedSourceSession(t)
+	current.RoutePolicies = map[string]string{"youtube": "auto"}
 	current.Config.RoutingMode = "blocked_only"
 	selector := &testSourceSelector{}
 	for _, n := range []int{1, 2, 4} {
@@ -100,7 +102,7 @@ func TestAdaptiveCommitRequiresThreeAndFencesStoppedSession(t *testing.T) {
 	if CommitAndroidAdaptive(gen, "discord", 3, selector) {
 		t.Fatal("unsupported UDP/media service accepted")
 	}
-	current.RoutePolicies = map[string]string{"meta": "vpn"}
+	current.RoutePolicies["meta"] = "vpn"
 	if CommitAndroidAdaptive(gen, "meta", 3, selector) {
 		t.Fatal("manual policy overridden")
 	}
