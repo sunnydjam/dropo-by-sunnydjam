@@ -121,10 +121,12 @@ Future<void> _tap(WidgetTester tester, String key) async {
 
 ScrollableState _homeScroll(WidgetTester tester) =>
     tester.state<ScrollableState>(
-      find.descendant(
-        of: _key('home-scroll'),
-        matching: find.byType(Scrollable),
-      ),
+      find
+          .descendant(
+            of: _key('home-scroll'),
+            matching: find.byType(Scrollable),
+          )
+          .first,
     );
 
 void main() {
@@ -152,13 +154,8 @@ void main() {
           ..empty = source == 'empty'
           ..publicSource = source == 'public';
         await _pump(tester, bridge, size: size);
-        expect(_homeScroll(tester).position.maxScrollExtent, 0);
-        for (final key in [
-          'home-connect',
-          'nav-sources',
-          'home-routing-all-vpn',
-          'home-routing-selected',
-        ]) {
+        expect(_homeScroll(tester).position.pixels, 0);
+        for (final key in ['home-connect', 'nav-sources']) {
           final rect = tester.getRect(_key(key));
           expect(rect.bottom, lessThanOrEqualTo(size.height));
           expect(rect.top, greaterThanOrEqualTo(0));
@@ -168,7 +165,8 @@ void main() {
         final hint = find.text('Подключиться');
         final actionLabel = tester.renderObject<RenderParagraph>(hint);
         final hintRect = tester.getRect(hint);
-        final modesTop = tester.getTopLeft(_key('home-routing-selected')).dy;
+        expect(_key('home-routing-selected'), findsNothing);
+        expect(_key('home-routing-all-vpn'), findsNothing);
         final scene = tester.getRect(_key('atlas-planet-motion'));
         final globe = atlasPlanetGlobeBoundsForTesting(
           tester
@@ -177,7 +175,6 @@ void main() {
           scene.size,
         ).shift(scene.topLeft);
         expect(hintRect.top, greaterThan(globe.bottom));
-        expect(modesTop - hintRect.bottom, greaterThanOrEqualTo(16));
         expect(
           actionLabel.size.height,
           lessThanOrEqualTo(actionLabel.preferredLineHeight + 0.1),
@@ -214,8 +211,8 @@ void main() {
         size: const Size(320, 480),
         scale: 2,
       );
-      expect(_homeScroll(tester).position.maxScrollExtent, greaterThan(0));
-      await tester.ensureVisible(_key('home-routing-all-vpn'));
+      expect(_key('home-routing-all-vpn'), findsNothing);
+      await tester.ensureVisible(_key('home-connect'));
       await tester.pump();
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -335,15 +332,13 @@ void main() {
   testWidgets('desktop click surfaces expose an actual pointer cursor', (
     tester,
   ) async {
-    await _pump(tester, _FeedbackBridge());
+    await _pump(tester, _FeedbackBridge()..connected = true);
     final mouse = await tester.createGesture(kind: ui.PointerDeviceKind.mouse);
     await mouse.addPointer(location: Offset.zero);
     await _tap(tester, 'home-routing-selected');
-    for (final key in [
-      'home-connect',
-      'nav-sources',
-      'toggle-home-route-services',
-    ]) {
+    for (final key in ['home-connect', 'nav-sources', 'routing-tab-apps']) {
+      await tester.ensureVisible(_key(key));
+      await tester.pumpAndSettle();
       await mouse.moveTo(tester.getCenter(_key(key)));
       await tester.pump();
       expect(

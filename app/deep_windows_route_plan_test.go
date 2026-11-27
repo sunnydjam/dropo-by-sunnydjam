@@ -22,8 +22,8 @@ func TestDeepWindowsRoutePlanBlockedOnlyPrefersTransparentZapret(t *testing.T) {
 	if !planContainsString(plan.TransparentServices, "youtube") {
 		t.Fatalf("transparent services = %v, want youtube through zapret", plan.TransparentServices)
 	}
-	if !planContainsString(plan.DirectServices, "telegram") {
-		t.Fatalf("direct services = %v, want telegram direct until tg-proxy/subscription is available", plan.DirectServices)
+	if !planContainsString(plan.BlockedServices, "telegram") {
+		t.Fatalf("blocked services = %v, want Telegram blocked until a VPN is available", plan.BlockedServices)
 	}
 	if plan.ForeignTraffic != DeepWindowsTrafficDirect || plan.RUTraffic != DeepWindowsTrafficDirect {
 		t.Fatalf("foreign/ru = %s/%s, want direct/direct", plan.ForeignTraffic, plan.RUTraffic)
@@ -143,6 +143,7 @@ func TestDeepWindowsRoutePlanForcedVPNWithSubscriptionUsesProxyEndpoint(t *testi
 func TestDeepWindowsRoutePlanDisableFreeMethodsDoesNotOverrideExplicitDirect(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
 	settings.FreeAccessMethods["youtube"] = FreeAccessMethodDirect
+	settings.FreeAccessMethods["telegram"] = FreeAccessMethodDirect
 	settings.DisableFreeAccess = true
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, true, true, true)
@@ -164,6 +165,7 @@ func TestDeepWindowsRoutePlanDisableFreeMethodsDoesNotOverrideExplicitDirect(t *
 func TestDeepWindowsRoutePlanDisableFreeMethodsWithoutSubscriptionGoesDirectForNonVPNServices(t *testing.T) {
 	settings := defaultDeepWindowsPlanSettings()
 	settings.FreeAccessMethods["youtube"] = FreeAccessMethodDirect
+	settings.FreeAccessMethods["telegram"] = FreeAccessMethodDirect
 	settings.DisableFreeAccess = true
 
 	plan := buildDeepWindowsRoutePlanForSettings(settings, false, true, true)

@@ -9,7 +9,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _VariantBridge extends MockCoreBridge {
-  _VariantBridge({this.connected = false});
+  _VariantBridge({this.connected = false, this.reduceMotion = true});
+  final bool reduceMotion;
   bool connected;
   final external = <String>[];
 
@@ -18,7 +19,7 @@ class _VariantBridge extends MockCoreBridge {
     ...await super.appConfig(),
     'autoStartPrompted': true,
     'checkUpdates': false,
-    'reduceMotion': true,
+    'reduceMotion': reduceMotion,
   };
 
   @override
@@ -130,7 +131,7 @@ Future<void> _pump(
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context).copyWith(
             textScaler: TextScaler.linear(scale),
-            disableAnimations: true,
+            disableAnimations: bridge.reduceMotion,
           ),
           child: child!,
         ),
@@ -138,7 +139,12 @@ Future<void> _pump(
       ),
     ),
   );
-  await tester.pumpAndSettle();
+  if (bridge.reduceMotion) {
+    await tester.pumpAndSettle();
+  } else {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+  }
 }
 
 Future<void> _tap(WidgetTester tester, String key) async {
@@ -322,10 +328,12 @@ void main() {
     debugAccountSessionToken = 'fixture-restored-session';
     await _pump(tester, size: const Size(390, 844), mobile: true);
     expect(find.byKey(const ValueKey('free-plan-banner')), findsOneWidget);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
     api.turboUntil = DateTime.now().add(const Duration(days: 1));
     await tester.pump(const Duration(minutes: 2));
     expect(api.profileReads, 1);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pumpAndSettle();
     expect(api.profileReads, 2);
@@ -404,7 +412,13 @@ void main() {
     testWidgets(
       'mode changes preserve Earth and equal segments at $size $scale',
       (tester) async {
-        await _pump(tester, size: size, mobile: mobile, scale: scale);
+        await _pump(
+          tester,
+          size: size,
+          mobile: mobile,
+          scale: scale,
+          connected: true,
+        );
         final planet = find.byKey(const ValueKey('atlas-planet'));
         final connect = find.byKey(const ValueKey('home-connect'));
         final selected = find.byKey(const ValueKey('home-routing-selected'));
@@ -432,18 +446,27 @@ void main() {
           expect(tester.getRect(planet), planetRect);
           expect(tester.getRect(selected), selectedRect);
         }
-        expect(
-          find.byKey(const ValueKey('toggle-home-route-services')),
-          findsNothing,
-        );
+        expect(find.byKey(const ValueKey('routing-tab-apps')), findsNothing);
         await _tap(tester, 'home-routing-selected');
         expect(tester.getSize(planet), before);
-        await _tap(tester, 'toggle-home-route-services');
-        expect(tester.getSize(planet), before);
+        expect(find.byKey(const ValueKey('service-search')), findsOneWidget);
         expect(tester.getSize(selected), selectedSize);
         if (scale == 1) {
           expect(tester.getRect(planet), planetRect);
           expect(tester.getRect(selected), selectedRect);
+        }
+        final manualTabs = find.byType(TabBar);
+        await tester.ensureVisible(manualTabs);
+        await tester.pumpAndSettle();
+        if (scale == 1) {
+          final tabBarRect = tester.getRect(manualTabs);
+          for (final tab in ['apps', 'protected', 'domains']) {
+            final rect = tester.getRect(
+              find.byKey(ValueKey('routing-tab-$tab')),
+            );
+            expect(rect.left, greaterThanOrEqualTo(tabBarRect.left));
+            expect(rect.right, lessThanOrEqualTo(tabBarRect.right));
+          }
         }
         await _capture(
           tester,
@@ -456,40 +479,70 @@ void main() {
   }
 
   testWidgets(
-    'Android changes routing while connected and keeps planet stable',
+    'Windows reveals routing after connection and hides it on disconnect',
     (tester) async {
-      final bridge = _VariantBridge();
+      final bridge = _VariantBridge(reduceMotion: false);
       await _pump(
         tester,
-        size: const Size(390, 844),
-        mobile: true,
-        mode: 'all_traffic',
+        size: const Size(960, 640),
         providedBridge: bridge,
+        mode: 'all_traffic',
       );
-      final planet = find.byKey(const ValueKey('atlas-planet'));
-      final selected = find.byKey(const ValueKey('home-routing-selected'));
-      final all = find.byKey(const ValueKey('home-routing-all-vpn'));
-      final planetBefore = tester.getRect(planet);
-      final modesBefore = tester.getRect(selected);
-      expect(find.byKey(const ValueKey('home-update-slot')), findsNothing);
-      expect(find.byKey(const ValueKey('home-routing-live')), findsNothing);
+      final selector = find.byKey(const ValueKey('home-routing-selected'));
+      expect(selector, findsNothing);
       bridge.connected = true;
       await tester.pump(const Duration(seconds: 3));
       await tester.pump();
-      expect(find.byKey(const ValueKey('home-routing-live')), findsOneWidget);
-      expect(tester.widget<OutlinedButton>(selected).onPressed, isNotNull);
-      expect(tester.widget<OutlinedButton>(all).onPressed, isNotNull);
-      expect(tester.getRect(planet), planetBefore);
-      expect(tester.getRect(selected), modesBefore);
-      await tester.ensureVisible(selected);
-      await tester.tap(selected);
-      await tester.pumpAndSettle();
-      expect((await bridge.appConfig())['routingMode'], 'blocked_only');
-      expect(bridge.connected, isTrue);
-      expect(tester.takeException(), isNull);
+      final reveal = find
+          .ancestor(of: selector, matching: find.byType(Opacity))
+          .first;
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(tester.widget<Opacity>(reveal).opacity, inExclusiveRange(0, 1));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(tester.widget<Opacity>(reveal).opacity, 1);
+      bridge.connected = false;
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+      expect(selector, findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
+
+  testWidgets('Android reveals routing while keeping the planet centered', (
+    tester,
+  ) async {
+    final bridge = _VariantBridge();
+    await _pump(
+      tester,
+      size: const Size(390, 844),
+      mobile: true,
+      mode: 'all_traffic',
+      providedBridge: bridge,
+    );
+    final planet = find.byKey(const ValueKey('atlas-planet'));
+    final selected = find.byKey(const ValueKey('home-routing-selected'));
+    final all = find.byKey(const ValueKey('home-routing-all-vpn'));
+    final planetBefore = tester.getRect(planet);
+    expect(selected, findsNothing);
+    expect(all, findsNothing);
+    expect(find.byKey(const ValueKey('home-update-slot')), findsNothing);
+    expect(find.byKey(const ValueKey('home-routing-live')), findsNothing);
+    bridge.connected = true;
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('home-routing-live')), findsOneWidget);
+    expect(tester.widget<OutlinedButton>(selected).onPressed, isNotNull);
+    expect(tester.widget<OutlinedButton>(all).onPressed, isNotNull);
+    expect(tester.getRect(planet).size, planetBefore.size);
+    expect(tester.getCenter(planet).dx, planetBefore.center.dx);
+    await tester.ensureVisible(selected);
+    await tester.tap(selected);
+    await tester.pumpAndSettle();
+    expect((await bridge.appConfig())['routingMode'], 'blocked_only');
+    expect(bridge.connected, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   for (final (size, mobile, scale) in [
     (const Size(684, 461), false, 1.0),

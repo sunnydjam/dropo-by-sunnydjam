@@ -181,26 +181,6 @@ class _MinimalSettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final entries = switch (section) {
-      'manual-routing' => <(String, String, String, IconData)>[
-        (
-          'routing-apps',
-          'Приложения',
-          'Маршруты сервисов и привязки файлов .exe',
-          Icons.apps_rounded,
-        ),
-        (
-          'vpn-only-services',
-          'Всегда через VPN',
-          'Встроенные и добавленные вами сервисы',
-          Icons.lock_outline,
-        ),
-        (
-          'blocked-catalog',
-          'Домены и IP-адреса',
-          'Поиск по общему каталогу блокировок',
-          Icons.manage_search,
-        ),
-      ],
       'advanced' => <(String, String, String, IconData)>[
         if (!_isMobileShell)
           (
@@ -273,20 +253,12 @@ class _MinimalSettingsPage extends StatelessWidget {
               : 'Обход, профили и рабочие сети',
           Icons.shield_outlined,
         ),
-        if (!_isMobileShell)
-          (
-            'manual-routing',
-            'Ручное',
-            'Приложения, обязательный VPN и каталог блокировок',
-            Icons.tune,
-          ),
-        if (_isMobileShell)
-          (
-            'vpn-only-services',
-            'Всегда через VPN',
-            'ИИ и сервисы с региональными ограничениями',
-            Icons.public_outlined,
-          ),
+        (
+          'manual-routing',
+          'Списки маршрутизации',
+          'Приложения, защита от блокировок, домены и IP-адреса',
+          Icons.tune,
+        ),
         ('help', 'Помощь', 'Решение проблем и диагностика', Icons.help_outline),
       ],
     };
@@ -320,7 +292,8 @@ class _MinimalSettingsPage extends StatelessWidget {
 }
 
 class _VPNOnlyServicesPage extends StatefulWidget {
-  const _VPNOnlyServicesPage({required this.bridge});
+  const _VPNOnlyServicesPage({required this.bridge, this.inline = false});
+  final bool inline;
   final CoreBridge bridge;
 
   @override
@@ -333,6 +306,7 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
   bool savingProtection = false;
   String protectionError = '';
   String serviceError = '';
+  String? expandedService;
 
   Future<void> _editCustomService([_CustomVPNService? service]) async {
     final changed = await showDialog<bool>(
@@ -425,148 +399,165 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
   }
 
   @override
-  Widget build(BuildContext context) => _FeaturePage(
-    title: _uiText(context, 'Всегда через VPN'),
-    icon: Icons.public_outlined,
-    headerAction: FilledButton.tonalIcon(
-      key: const ValueKey('add-custom-vpn-service'),
+  Widget build(BuildContext context) {
+    final add = _CatalogAddButton(
+      buttonKey: const ValueKey('add-custom-vpn-service'),
+      label: 'Добавить сервис',
       onPressed: _editCustomService,
-      icon: const Icon(Icons.add),
-      label: Text(_uiText(context, 'Добавить')),
-    ),
-    slivers: [
-      SliverPadding(
-        padding: const EdgeInsets.all(16),
-        sliver: SliverToBoxAdapter(
-          child: FutureBuilder<List<RouteService>>(
-            future: catalog,
-            builder: (context, snapshot) {
-              if (snapshot.connectionState != ConnectionState.done) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              if (snapshot.hasError) {
-                return TextButton(
-                  onPressed: () => setState(() {
-                    catalog = widget.bridge.routes();
-                  }),
-                  child: Text(_uiText(context, 'Повторить загрузку')),
-                );
-              }
-              final services =
-                  (snapshot.data ?? []).where((s) => s.vpnOnly).toList()..sort(
-                    (a, b) => _homeRouteName(a).compareTo(_homeRouteName(b)),
-                  );
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (Theme.of(context).platform == TargetPlatform.windows)
-                    FutureBuilder<Map<String, dynamic>>(
-                      future: protection,
-                      builder: (context, protectionSnapshot) {
-                        final settings = protectionSnapshot.data;
-                        final enabled =
-                            settings?['protectedRoutingEnabled'] != false;
-                        final ready =
-                            settings?['protectedRoutingReady'] == true;
-                        final message = protectionError.isNotEmpty
-                            ? protectionError
-                            : settings?['protectedRoutingError']?.toString() ??
-                                  '';
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SwitchListTile.adaptive(
-                              key: const ValueKey('protect-vpn-only-when-off'),
-                              contentPadding: EdgeInsets.zero,
-                              title: const Text(
-                                'Защищать сервисы при выключенном VPN',
-                              ),
-                              subtitle: Text(
-                                enabled && settings != null && !ready
-                                    ? 'Локальный маршрутизатор недоступен'
-                                    : 'Обычные сайты открываются напрямую',
-                              ),
-                              value: enabled,
-                              onChanged: savingProtection || settings == null
-                                  ? null
-                                  : _setProtection,
-                            ),
-                            if (message.isNotEmpty) Text(message),
-                            const Divider(),
-                          ],
-                        );
-                      },
-                    ),
-                  Text(
-                    _uiText(
-                      context,
-                      'В обоих режимах эти сервисы используют только VPN. Если VPN недоступен, соединение останавливается.',
-                    ),
-                  ),
-                  FutureBuilder<Map<String, dynamic>>(
-                    future: protection,
-                    builder: (context, snapshot) {
-                      final raw = snapshot.data?['customVPNServices'];
-                      final custom = raw is List
-                          ? raw.whereType<Map>().map(_CustomVPNService.fromJson)
-                          : const <_CustomVPNService>[];
-                      return Column(
-                        children: [
-                          if (serviceError.isNotEmpty) Text(serviceError),
-                          for (final service in custom)
-                            ListTile(
-                              key: ValueKey('custom-vpn-${service.id}'),
-                              contentPadding: EdgeInsets.zero,
-                              title: Text(service.name),
-                              subtitle: SelectableText(
-                                service.domains.join(', '),
-                              ),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    tooltip: _tr(
-                                      context,
-                                      'Редактировать',
-                                      'Edit',
-                                    ),
-                                    onPressed: () =>
-                                        _editCustomService(service),
-                                    icon: const Icon(Icons.edit_outlined),
-                                  ),
-                                  IconButton(
-                                    tooltip: _uiText(context, 'Удалить'),
-                                    onPressed: () =>
-                                        _removeCustomService(service),
-                                    icon: const Icon(Icons.delete_outline),
-                                  ),
-                                ],
-                              ),
-                            ),
-                        ],
-                      );
-                    },
-                  ),
-                  for (final service in services)
-                    ListTile(
-                      key: ValueKey('vpn-only-${service.tag}'),
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(_homeRouteName(service)),
-                      subtitle: SelectableText(
-                        [
-                          ...service.domainSuffixes,
-                          ...service.processNames,
-                        ].join(', '),
+    );
+    final content = FutureBuilder<List<RouteService>>(
+      future: catalog,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return TextButton(
+            onPressed: () => setState(() {
+              catalog = widget.bridge.routes();
+            }),
+            child: Text(_uiText(context, 'Повторить загрузку')),
+          );
+        }
+        final services = (snapshot.data ?? []).where((s) => s.vpnOnly).toList()
+          ..sort((a, b) => _homeRouteName(a).compareTo(_homeRouteName(b)));
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                _uiText(
+                  context,
+                  'Пассивная защита от блокировок при потере соединения с VPN.',
+                ),
+                style: const TextStyle(
+                  color: _atlasMuted,
+                  fontSize: 14,
+                  height: 1.4,
+                ),
+              ),
+            ),
+            if (Theme.of(context).platform == TargetPlatform.windows)
+              FutureBuilder<Map<String, dynamic>>(
+                future: protection,
+                builder: (context, protectionSnapshot) {
+                  final settings = protectionSnapshot.data;
+                  final enabled = settings?['protectedRoutingEnabled'] != false;
+                  final ready = settings?['protectedRoutingReady'] == true;
+                  final message = protectionError.isNotEmpty
+                      ? protectionError
+                      : settings?['protectedRoutingError']?.toString() ?? '';
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SwitchListTile.adaptive(
+                        key: const ValueKey('protect-vpn-only-when-off'),
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Защищать сервисы при выключенном VPN',
+                        ),
+                        subtitle: Text(
+                          enabled && settings != null && !ready
+                              ? 'Локальный маршрутизатор недоступен'
+                              : 'Обычные сайты открываются напрямую',
+                        ),
+                        value: enabled,
+                        onChanged: savingProtection || settings == null
+                            ? null
+                            : _setProtection,
                       ),
-                    ),
-                ],
-              );
-            },
-          ),
-        ),
-      ),
-    ],
-  );
+                      if (message.isNotEmpty) Text(message),
+                      const Divider(height: 1, color: _atlasBorder),
+                    ],
+                  );
+                },
+              ),
+            FutureBuilder<Map<String, dynamic>>(
+              future: protection,
+              builder: (context, snapshot) {
+                final raw = snapshot.data?['customVPNServices'];
+                final custom = raw is List
+                    ? raw.whereType<Map>().map(_CustomVPNService.fromJson)
+                    : const <_CustomVPNService>[];
+                return Column(
+                  children: [
+                    if (serviceError.isNotEmpty) Text(serviceError),
+                    for (final service in custom)
+                      _CatalogRow(
+                        key: ValueKey('custom-vpn-${service.id}'),
+                        icon: const Icon(
+                          Icons.shield_outlined,
+                          color: _atlasMint,
+                        ),
+                        title: service.name,
+                        subtitle: service.domains.join(', '),
+                        actions: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: _tr(context, 'Редактировать', 'Edit'),
+                              onPressed: () => _editCustomService(service),
+                              icon: const Icon(Icons.edit_outlined),
+                            ),
+                            IconButton(
+                              tooltip: _uiText(context, 'Удалить'),
+                              onPressed: () => _removeCustomService(service),
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+            for (final service in services)
+              _CatalogRow(
+                rowKey: ValueKey('vpn-only-${service.tag}'),
+                title: _homeRouteName(service),
+                icon: _ServiceBrandIcon(tag: service.tag),
+                expanded: expandedService == service.tag,
+                badge: 'VPN',
+                accentBadge: true,
+                onTap: () => setState(
+                  () => expandedService = expandedService == service.tag
+                      ? null
+                      : service.tag,
+                ),
+                detail: expandedService == service.tag
+                    ? Padding(
+                        padding: const EdgeInsets.only(left: 46, bottom: 12),
+                        child: SelectableText(
+                          [
+                            ...service.domainSuffixes,
+                            ...service.processNames,
+                          ].join(', '),
+                          style: const TextStyle(
+                            color: _atlasMuted,
+                            fontSize: 12,
+                            height: 1.4,
+                          ),
+                        ),
+                      )
+                    : null,
+              ),
+          ],
+        );
+      },
+    );
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [content, add],
+    );
+    return widget.inline
+        ? body
+        : _FeaturePage(
+            title: _uiText(context, 'Защита от блокировок'),
+            icon: Icons.public_outlined,
+            child: body,
+          );
+  }
 }
 
 class _CustomVPNService {

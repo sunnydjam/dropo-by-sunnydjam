@@ -12,11 +12,21 @@ type androidRoutingChange struct {
 	mode, tag, method string
 	policies          map[string]string
 	customServices    []aicatalog.CustomService
+	personal          androidPersonalRouting
 	unchanged         bool
 }
 
 func prepareAndroidRoutingChangeLocked(method string, args []interface{}) (androidRoutingChange, error) {
-	change := androidRoutingChange{mode: current.Config.RoutingMode, policies: androidRoutePoliciesLocked(), customServices: current.CustomVPNServices}
+	change := androidRoutingChange{mode: current.Config.RoutingMode, policies: androidRoutePoliciesLocked(), customServices: current.CustomVPNServices, personal: current.Personal}
+	if method == "SetPersonalAddress" {
+		entries, err := change.personal.Addresses.Edit(stringArg(args, 0, ""), boolArg(args, 1, false))
+		change.personal.Addresses = entries
+		return change, err
+	}
+	if method == "SetApplicationBinding" {
+		err := change.personal.editPackage(stringArg(args, 0, ""), stringArg(args, 1, ""), stringArg(args, 2, ""))
+		return change, err
+	}
 	if method == "SetCustomVPNService" {
 		var err error
 		change.customServices, err = aicatalog.EditCustomService(current.CustomVPNServices,
@@ -63,9 +73,11 @@ func (change androidRoutingChange) saveLocked() error {
 		return nil
 	}
 	previousMode, previousPolicies := current.Config.RoutingMode, current.RoutePolicies
+	previousPersonal := current.Personal
 	previousServices := current.CustomVPNServices
 	previousCache, prepared := captureAndroidSubscriptionStateLocked(), current.preparedSources
 	current.Config.RoutingMode, current.RoutePolicies = change.mode, change.policies
+	current.Personal = change.personal
 	current.CustomVPNServices = change.customServices
 	clearCachedConfigLocked()
 	if current.Connected {
@@ -73,6 +85,7 @@ func (change androidRoutingChange) saveLocked() error {
 	}
 	if err := saveLocked(); err != nil {
 		current.Config.RoutingMode, current.RoutePolicies = previousMode, previousPolicies
+		current.Personal = previousPersonal
 		current.CustomVPNServices = previousServices
 		restoreAndroidSubscriptionStateLocked(previousCache)
 		current.preparedSources = prepared
@@ -201,6 +214,7 @@ func replaceAndroidRoutingPolicy(activeConfig string, change androidRoutingChang
 	config["dns"] = buildAndroidDNSPolicy(hasProxy, change.mode, hideRU, policies, customDomains...)
 	route["rules"], route["final"] = buildAndroidRouteRules(change.mode, hideRU, ruOutbound, policies, customDomains...), "direct"
 	configureAndroidCatalog(route, change.mode)
+	change.personal.apply(config)
 	if change.mode == "blocked_only" {
 		addAndroidAdaptiveGraph(config, change.policies)
 	}

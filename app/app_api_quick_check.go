@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"dropocore/aicatalog"
+	"dropocore/blockedlist"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -183,7 +184,7 @@ func (a *App) runClientQuickCheck(deep, readOnly bool, serviceCatalog []clientQu
 	cache := a.loadServiceStrategyCache()
 	var blockedDomains []string
 	if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
-		blockedDomains, _ = readBlockedCatalogLines(filepath.Join(a.runtimeBasePath(), "bin", FiltersFolder, blockedDomainsFileName), true)
+		blockedDomains, _ = blockedlist.ReadLines(filepath.Join(a.runtimeBasePath(), "bin", FiltersFolder, blockedDomainsFileName), true)
 	}
 	services := make([]clientQuickCheckService, 0, len(catalog))
 	for i := range catalog {

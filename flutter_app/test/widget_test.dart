@@ -165,6 +165,7 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
 
       final bridge = MockCoreBridge();
+      await bridge.setConnected(true);
       await tester.pumpWidget(
         MaterialApp(
           theme: ThemeData.dark(),
@@ -195,15 +196,15 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       await tester.tap(allServices);
       await tester.pump(const Duration(milliseconds: 300));
-      await openHomeService(tester, 'google');
-      final pinGoogle = find.byKey(const ValueKey('pin-service-google'));
-      await tester.ensureVisible(pinGoogle);
+      await openHomeService(tester, 'twitch');
+      final pinTwitch = find.byKey(const ValueKey('pin-service-twitch'));
+      await tester.ensureVisible(pinTwitch);
       await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(pinGoogle);
+      await tester.tap(pinTwitch);
       await tester.pump(const Duration(milliseconds: 800));
       expect(
         (await bridge.routes())
-            .firstWhere((route) => route.tag == 'google')
+            .firstWhere((route) => route.tag == 'twitch')
             .homeVisible,
         isTrue,
       );
@@ -214,19 +215,19 @@ void main() {
       await tester.tap(pinned);
       await tester.pump(const Duration(milliseconds: 300));
       expect(
-        find.byKey(const ValueKey('home-service-row-google')),
+        find.byKey(const ValueKey('home-service-row-twitch')),
         findsOneWidget,
       );
-      await tester.ensureVisible(pinGoogle);
+      await tester.ensureVisible(pinTwitch);
       await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(pinGoogle);
+      await tester.tap(pinTwitch);
       await tester.pump(const Duration(milliseconds: 800));
       expect(
-        find.byKey(const ValueKey('home-service-row-google')),
+        find.byKey(const ValueKey('home-service-row-twitch')),
         findsNothing,
       );
       final disclosure = find.byKey(
-        const ValueKey<String>('toggle-home-route-services'),
+        const ValueKey<String>('routing-tab-protected'),
       );
       await tester.ensureVisible(disclosure);
       await tester.pump(const Duration(milliseconds: 200));
@@ -247,6 +248,7 @@ void main() {
 
     final bridge = MockCoreBridge();
     await bridge.saveSubscription('https://vpn.example/subscription');
+    await bridge.setConnected(true);
     await bridge.setFreeAccessServiceMethod('discord', 'vpn');
     await tester.pumpWidget(
       MaterialApp(
@@ -263,10 +265,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect((await bridge.routingMode())['mode'], 'all_traffic');
-    expect(
-      find.byKey(const ValueKey('toggle-home-route-services')),
-      findsNothing,
-    );
+    expect(find.byKey(const ValueKey('routing-tab-apps')), findsNothing);
     expect(find.byKey(const ValueKey('service-search')), findsNothing);
     expect(
       (await bridge.routes())
@@ -863,8 +862,22 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('route-probe-details')));
       await tester.pump();
       expect(find.textContaining('проверяем голосовую связь'), findsOneWidget);
-      final discordTop = tester.getTopLeft(find.text('Discord').first).dy;
-      final youtubeTop = tester.getTopLeft(find.text('YouTube').first).dy;
+      final discordTop = tester
+          .getTopLeft(
+            find.descendant(
+              of: find.byKey(const ValueKey('probe-panel')),
+              matching: find.text('Discord'),
+            ),
+          )
+          .dy;
+      final youtubeTop = tester
+          .getTopLeft(
+            find.descendant(
+              of: find.byKey(const ValueKey('probe-panel')),
+              matching: find.text('YouTube'),
+            ),
+          )
+          .dy;
       expect(discordTop, lessThan(youtubeTop));
 
       bridge.emit('route-probe-service', const {

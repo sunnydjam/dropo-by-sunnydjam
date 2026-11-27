@@ -9,6 +9,29 @@ const _atlasText = Color(0xFFEDF5EF);
 const _atlasMuted = Color(0xFFADB8C2);
 const _atlasMint = Color(0xFF5CF0B0);
 
+class _RoutingReveal extends StatelessWidget {
+  const _RoutingReveal({required this.motion, required this.child});
+  final Widget child;
+  final bool motion;
+  @override
+  Widget build(BuildContext context) {
+    if (!motion || MediaQuery.disableAnimationsOf(context)) return child;
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOutCubic,
+      tween: Tween(begin: 0, end: 1),
+      child: child,
+      builder: (context, value, content) => ClipRect(
+        child: Align(
+          alignment: Alignment.topCenter,
+          heightFactor: value,
+          child: Opacity(opacity: value, child: content),
+        ),
+      ),
+    );
+  }
+}
+
 class _AtlasHomeLayout extends StatelessWidget {
   const _AtlasHomeLayout({
     required this.connection,
@@ -16,8 +39,7 @@ class _AtlasHomeLayout extends StatelessWidget {
     required this.notices,
     this.updateNotice,
     this.telemetry,
-    this.servicesExpanded = false,
-    this.servicesVisible = true,
+    required this.catalog,
     this.noticeLabel = 'Сообщения',
     this.turboOffer,
   });
@@ -25,8 +47,7 @@ class _AtlasHomeLayout extends StatelessWidget {
   final Widget? notices;
   final Widget? updateNotice;
   final Widget? telemetry;
-  final bool servicesExpanded;
-  final bool servicesVisible;
+  final Widget catalog;
   final String noticeLabel;
   final Widget? turboOffer;
 
@@ -109,10 +130,8 @@ class _AtlasHomeLayout extends StatelessWidget {
                       if (_isMobileShell) const SizedBox(height: 8),
                     ],
                   ),
-                  footerExpanded: servicesExpanded,
-                  footerReserveExtent: servicesVisible
-                      ? 0
-                      : _homeServicesHeaderExtent(context),
+                  catalog: catalog,
+                  footerReserveExtent: _homeServicesHeaderExtent(context),
                 ),
               ),
             ),
@@ -156,15 +175,14 @@ class _AtlasAdaptiveHomeBody extends MultiChildRenderObjectWidget {
   _AtlasAdaptiveHomeBody({
     required this.viewportHeight,
     required this.minimumConnectionExtent,
-    required this.footerExpanded,
+    required Widget catalog,
     required this.footerReserveExtent,
     required Widget connection,
     required Widget footer,
-  }) : super(children: [connection, footer]);
+  }) : super(children: [connection, footer, catalog]);
 
   final double viewportHeight;
   final double minimumConnectionExtent;
-  final bool footerExpanded;
   final double footerReserveExtent;
 
   @override
@@ -172,7 +190,6 @@ class _AtlasAdaptiveHomeBody extends MultiChildRenderObjectWidget {
       _RenderAtlasAdaptiveHomeBody(
         viewportHeight,
         minimumConnectionExtent,
-        footerExpanded,
         footerReserveExtent,
       );
 
@@ -183,7 +200,6 @@ class _AtlasAdaptiveHomeBody extends MultiChildRenderObjectWidget {
   ) {
     renderObject.viewportHeight = viewportHeight;
     renderObject.minimumConnectionExtent = minimumConnectionExtent;
-    renderObject.footerExpanded = footerExpanded;
     renderObject.footerReserveExtent = footerReserveExtent;
   }
 }
@@ -203,21 +219,11 @@ class _RenderAtlasAdaptiveHomeBody extends RenderBox
   _RenderAtlasAdaptiveHomeBody(
     this._viewportHeight,
     this._minimumConnectionExtent,
-    this._footerExpanded,
     this._footerReserveExtent,
   );
   double _viewportHeight;
   double _minimumConnectionExtent;
-  bool _footerExpanded;
   double _footerReserveExtent;
-  double? _collapsedFooterHeight;
-
-  set footerExpanded(bool value) {
-    if (value == _footerExpanded) return;
-    _footerExpanded = value;
-    markNeedsLayout();
-  }
-
   set footerReserveExtent(double value) {
     if (value == _footerReserveExtent) return;
     _footerReserveExtent = value;
@@ -246,16 +252,15 @@ class _RenderAtlasAdaptiveHomeBody extends RenderBox
   @override
   void performLayout() {
     final connection = firstChild!;
-    final footer = lastChild!;
+    final footer = childAfter(connection)!;
+    final catalog = lastChild!;
+    catalog.layout(
+      BoxConstraints.tightFor(width: constraints.maxWidth),
+      parentUsesSize: true,
+    );
     final width = constraints.maxWidth;
     footer.layout(BoxConstraints.tightFor(width: width), parentUsesSize: true);
-    // Expanding services adds content below the unchanged primary controls.
-    // Keep the measured collapsed extent, instead of shrinking/recentring the
-    // planet to make room for an arbitrarily long catalogue.
-    if (!_footerExpanded) {
-      _collapsedFooterHeight = footer.size.height + _footerReserveExtent;
-    }
-    final summaryHeight = _collapsedFooterHeight ?? footer.size.height;
+    final summaryHeight = footer.size.height + _footerReserveExtent;
     final planetExtent = math.min(
       width,
       math.max(
@@ -277,14 +282,25 @@ class _RenderAtlasAdaptiveHomeBody extends RenderBox
       0.0,
       (_viewportHeight - summaryContentHeight) / 2 - wideSceneBias,
     );
+    // A shorter tab must still let the tab bar stay at the top of the viewport.
+    final catalogHeight = catalog.size.height > 0
+        ? math.max(catalog.size.height, _viewportHeight)
+        : 0.0;
     size = constraints.constrain(
-      Size(width, math.max(top + contentHeight, _viewportHeight)),
+      Size(
+        width,
+        math.max(top + contentHeight + catalogHeight, _viewportHeight),
+      ),
     );
     (connection.parentData! as ContainerBoxParentData<RenderBox>).offset =
         Offset(0, top);
     (footer.parentData! as ContainerBoxParentData<RenderBox>).offset = Offset(
       0,
       top + connection.size.height + 8,
+    );
+    (catalog.parentData! as ContainerBoxParentData<RenderBox>).offset = Offset(
+      0,
+      top + contentHeight,
     );
   }
 

@@ -338,10 +338,7 @@ func androidServicePolicy(service androidService, policies map[string]string) st
 			return policy
 		}
 	}
-	if service.Tag == "youtube" || service.Tag == "discord" {
-		return androidRoutePolicyVPN
-	}
-	return androidRoutePolicyDirect
+	return androidRoutePolicyVPN
 }
 
 func normalizeAndroidRoutePolicy(value string) string {

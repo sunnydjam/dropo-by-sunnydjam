@@ -1,7 +1,6 @@
 package main
 
 import (
-	"dropocore/aicatalog"
 	"dropocore/dnspolicy"
 	"encoding/json"
 	"os"
@@ -64,10 +63,7 @@ func TestDefaultStorageSettingsMatchCurrentNetworkPolicy(t *testing.T) {
 		t.Fatal("free access state should remain enabled for legacy UI/API compatibility")
 	}
 	for _, svc := range DefaultFreeAccessServices {
-		wantMethod := FreeAccessMethodDirect
-		if svc.Tag == "youtube" || svc.Tag == "discord" || aicatalog.VPNOnly(svc.Tag) {
-			wantMethod = FreeAccessMethodVPN
-		}
+		wantMethod := FreeAccessMethodVPN
 		if got := settings.FreeAccessMethods[svc.Tag]; got != wantMethod {
 			t.Fatalf("fresh route for %s = %q, want %q", svc.Tag, got, wantMethod)
 		}
@@ -100,7 +96,7 @@ func TestLegacyServiceDefaultsMigrateOnce(t *testing.T) {
 	s.data.Profiles[0].SingboxConfig = map[string]interface{}{"outbounds": []interface{}{"legacy"}}
 	s.data.App.FreeAccessMethods = map[string]string{"youtube": "auto", "meta": "vpn", "telegram": "auto", "twitch": "direct"}
 	s.normalizeAppSettings()
-	for tag, want := range map[string]string{"youtube": "vpn", "discord": "vpn", "telegram": "direct", "meta": "vpn", "twitch": "direct", "claude": "vpn"} {
+	for tag, want := range map[string]string{"youtube": "vpn", "discord": "vpn", "telegram": "vpn", "meta": "vpn", "twitch": "direct", "claude": "vpn"} {
 		if got := s.data.App.FreeAccessMethods[tag]; got != want {
 			t.Fatalf("migrated %s = %q, want %q", tag, got, want)
 		}

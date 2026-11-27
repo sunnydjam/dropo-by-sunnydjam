@@ -1,6 +1,6 @@
 part of 'main.dart';
 
-// The home anchor reserves this same collapsed header in both routing modes;
+// The home anchor reserves the tabs’ height in both routing modes;
 // hiding services therefore never rescales the Earth or the mode selector.
 double _homeServicesHeaderExtent(BuildContext context) => math.max(
   _compactDesktopHome(context) ? 48 : 56,
@@ -8,36 +8,47 @@ double _homeServicesHeaderExtent(BuildContext context) => math.max(
       (_compactDesktopHome(context) ? 16 : 24),
 );
 
+enum _RoutingTab {
+  apps('Приложения'),
+  protected('Защита от блокировок'),
+  domains('Домены и IP-адреса');
+
+  const _RoutingTab(this.label);
+  final String label;
+}
+
 /// Home owns the scroll position; neither the catalog nor a service detail
 /// creates a nested scrollable or an independent tinted surface.
-class _HomeServicesAccordion extends StatefulWidget {
-  const _HomeServicesAccordion({
+class _HomeRoutingCatalog extends StatefulWidget {
+  const _HomeRoutingCatalog({
     super.key,
     required this.bridge,
     required this.connected,
     required this.enabled,
     required this.routingMode,
     required this.onBusyChanged,
-    required this.expanded,
-    required this.onExpandedChanged,
     this.onChanged,
     this.routeSnapshot,
-    this.onOpenCatalog,
   });
 
   final CoreBridge bridge;
-  final bool connected, enabled, expanded;
+  final bool connected, enabled;
   final String routingMode;
-  final ValueChanged<bool> onBusyChanged, onExpandedChanged;
+  final ValueChanged<bool> onBusyChanged;
   final VoidCallback? onChanged;
-  final ValueChanged<String>? onOpenCatalog;
   final List<RouteService>? routeSnapshot;
 
   @override
-  State<_HomeServicesAccordion> createState() => _HomeServicesAccordionState();
+  State<_HomeRoutingCatalog> createState() => _HomeRoutingCatalogState();
 }
 
-class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
+class _HomeRoutingCatalogState extends State<_HomeRoutingCatalog>
+    with SingleTickerProviderStateMixin {
+  late final tabs = TabController(
+    length: _RoutingTab.values.length,
+    vsync: this,
+  );
+
   final search = TextEditingController();
   List<RouteService> services = const [];
   bool loading = false, busy = false, pinnedOnly = true;
@@ -58,12 +69,13 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
   @override
   void dispose() {
     ++loadGeneration;
+    tabs.dispose();
     search.dispose();
     super.dispose();
   }
 
   @override
-  void didUpdateWidget(covariant _HomeServicesAccordion oldWidget) {
+  void didUpdateWidget(covariant _HomeRoutingCatalog oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!busy &&
         widget.routeSnapshot != null &&
@@ -113,14 +125,15 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
       busy = true;
       feedback = 'Сохраняем…';
     });
-    widget.onBusyChanged(true);
+    final onBusyChanged = widget.onBusyChanged;
+    onBusyChanged(true);
     try {
       final result = await action();
       if (result['success'] != true) {
         throw StateError(result['error']?.toString() ?? 'Не удалось сохранить');
       }
-      widget.onChanged?.call();
       if (!mounted) return;
+      widget.onChanged?.call();
       setState(
         () => feedback = !routeChange
             ? 'Список сохранён.'
@@ -140,7 +153,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
         );
       }
     } finally {
-      widget.onBusyChanged(false);
+      onBusyChanged(false);
       if (mounted) setState(() => busy = false);
     }
   }
@@ -174,253 +187,154 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.routingMode == 'all_traffic') return const SizedBox.shrink();
-    final pinnedCount = services.where(_pinned).length;
-    final available = widget.enabled && !busy && !loading && loadError.isEmpty;
-    final filtered = _filtered;
     return Material(
       color: Colors.transparent,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          DecoratedBox(
-            decoration: const BoxDecoration(
-              border: Border(
-                top: BorderSide(color: _atlasBorder),
-                bottom: BorderSide(color: _atlasBorder),
-              ),
-            ),
-            child: Semantics(
-              button: true,
-              expanded: widget.expanded,
-              child: InkWell(
-                key: const ValueKey('toggle-home-route-services'),
-                mouseCursor: SystemMouseCursors.click,
-                onTap: () => widget.onExpandedChanged(!widget.expanded),
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    minHeight: _homeServicesHeaderExtent(context),
-                  ),
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(
-                      vertical: _compactDesktopHome(context) ? 8 : 12,
+          LayoutBuilder(
+            builder: (context, bounds) {
+              final scroll =
+                  bounds.maxWidth < MediaQuery.textScalerOf(context).scale(290);
+              return TabBar(
+                controller: tabs,
+                isScrollable: scroll,
+                tabAlignment: scroll ? TabAlignment.start : TabAlignment.fill,
+                indicatorColor: _atlasMint,
+                labelColor: _atlasMint,
+                unselectedLabelColor: _atlasMuted,
+                dividerColor: _atlasBorder,
+                labelPadding: EdgeInsets.symmetric(horizontal: scroll ? 12 : 4),
+                tabs: [
+                  for (final tab in _RoutingTab.values)
+                    Tab(
+                      key: ValueKey('routing-tab-${tab.name}'),
+                      child: Text(
+                        _uiText(context, tab.label),
+                        textAlign: TextAlign.center,
+                        maxLines: scroll ? 1 : 2,
+                      ),
                     ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.grid_view_rounded,
-                          size: 20,
-                          color: _atlasText,
-                        ),
-                        const SizedBox(width: 12),
-                        const Expanded(
-                          child: Text(
-                            'Сервисы',
-                            style: TextStyle(
-                              color: _atlasText,
-                              fontSize: 17,
-                              height: 1.2,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        Text(
-                          '$pinnedCount',
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(
-                            color: _atlasMuted,
-                            fontSize: 12,
-                            height: 1.2,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Icon(
-                          widget.expanded
-                              ? Icons.expand_less
-                              : Icons.expand_more,
-                          color: _atlasText,
-                          size: 20,
-                        ),
-                      ],
-                    ),
-                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          ListenableBuilder(
+            listenable: tabs,
+            builder: (context, _) {
+              final tab = _RoutingTab.values[tabs.index];
+              return switch (tab) {
+                _RoutingTab.apps => _applications(),
+                _RoutingTab.protected => _VPNOnlyServicesPage(
+                  bridge: widget.bridge,
+                  inline: true,
                 ),
+                _RoutingTab.domains => _BlockedCatalogPage(
+                  bridge: widget.bridge,
+                  inline: true,
+                ),
+              };
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _applications() {
+    final pinnedCount = services.where(_pinned).length;
+    final available = widget.enabled && !busy && !loading && loadError.isEmpty;
+    final filtered = _filtered;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          key: const ValueKey('service-search'),
+          controller: search,
+          onChanged: (_) => setState(() {}),
+          style: const TextStyle(color: _atlasText, fontSize: 14),
+          decoration: _catalogSearchDecoration(
+            'Найти приложение или домен',
+            onClear: search.text.isEmpty ? null : () => setState(search.clear),
+          ),
+        ),
+        Row(
+          children: [
+            _tab('services-pinned', 'Закреплённые $pinnedCount', true),
+            const SizedBox(width: 12),
+            _tab('services-all', 'Все ${services.length}', false),
+          ],
+        ),
+        if (loading || busy) const LinearProgressIndicator(minHeight: 2),
+        if (!widget.enabled)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 10),
+            child: Text(
+              'Настройки временно недоступны. Проверьте состояние подключения.',
+              style: TextStyle(color: _atlasMuted, fontSize: 12, height: 1.4),
+            ),
+          ),
+        if (loadError.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              'Не удалось обновить каталог: $loadError. Показанные данные могут быть устаревшими.',
+              style: const TextStyle(
+                color: Colors.orangeAccent,
+                fontSize: 12,
+                height: 1.4,
               ),
             ),
           ),
-          if (widget.expanded) ...[
-            const SizedBox(height: 12),
-            if (!_isMobileShell)
-              Wrap(
-                spacing: 8,
-                children: [
-                  for (final (section, label, icon) in const [
-                    ('routing-apps', 'Приложения', Icons.apps_outlined),
-                    (
-                      'vpn-only-services',
-                      'Всегда через VPN',
-                      Icons.lock_outline,
-                    ),
-                    (
-                      'blocked-catalog',
-                      'Домены и IP-адреса',
-                      Icons.manage_search,
-                    ),
-                  ])
-                    TextButton.icon(
-                      onPressed: busy
-                          ? null
-                          : () => widget.onOpenCatalog?.call(section),
-                      icon: Icon(icon),
-                      label: Text(_uiText(context, label)),
-                    ),
-                ],
-              ),
-            TextField(
-              key: const ValueKey('service-search'),
-              controller: search,
-              onChanged: (_) => setState(() {}),
-              style: const TextStyle(color: _atlasText, fontSize: 14),
-              decoration: InputDecoration(
-                hintText: 'Найти сервис или домен',
-                hintStyle: const TextStyle(color: _atlasMuted, fontSize: 14),
-                prefixIcon: const Icon(Icons.search, size: 22),
-                filled: true,
-                fillColor: _atlasSurface,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 13,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: _atlasBorder),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: _atlasBorder),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: _atlasMint),
-                ),
-                suffixIcon: search.text.isEmpty
-                    ? null
-                    : _AccessibleIconButton(
-                        tooltip: 'Очистить поиск',
-                        onPressed: () => setState(search.clear),
-                        icon: const Icon(Icons.close),
-                      ),
-              ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: const ValueKey('retry-home-services'),
+              onPressed: busy ? null : _load,
+              child: const Text('Повторить загрузку'),
             ),
-            Row(
-              children: [
-                _tab('services-pinned', 'Закреплённые $pinnedCount', true),
-                const SizedBox(width: 12),
-                _tab('services-all', 'Все ${services.length}', false),
-              ],
-            ),
-            if (loading || busy) const LinearProgressIndicator(minHeight: 2),
-            if (!widget.enabled)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 10),
-                child: Text(
-                  'Настройки временно недоступны. Проверьте состояние подключения.',
-                  style: TextStyle(
-                    color: _atlasMuted,
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                ),
-              ),
-            if (loadError.isNotEmpty) ...[
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Text(
-                  'Не удалось обновить каталог: $loadError. Показанные данные могут быть устаревшими.',
-                  style: const TextStyle(
-                    color: Colors.orangeAccent,
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                ),
-              ),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton(
-                  key: const ValueKey('retry-home-services'),
-                  onPressed: busy ? null : _load,
-                  child: const Text('Повторить загрузку'),
-                ),
-              ),
-            ],
-            if (!loading && loadError.isEmpty && filtered.isEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 20),
-                child: Text(
-                  search.text.trim().isEmpty && pinnedOnly
-                      ? 'Нет закреплённых сервисов. Откройте «Все», чтобы добавить их.'
-                      : 'Сервисы не найдены. Измените поиск или предложите новый сервис.',
-                  style: const TextStyle(color: _atlasMuted, height: 1.4),
-                ),
-              ),
-            for (final service in filtered)
-              _service(service, available: available),
-            if (!_isMobileShell && widget.connected)
-              const Padding(
-                padding: EdgeInsets.only(top: 12),
-                child: Text(
-                  'При изменении настроек VPN переподключится. Связь ненадолго прервётся.',
-                  key: ValueKey('home-services-reconnect-note'),
-                  style: TextStyle(
-                    color: _atlasMuted,
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                ),
-              ),
-            if (feedback.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Text(
-                  feedback,
-                  key: const ValueKey('service-feedback'),
-                  style: const TextStyle(
-                    color: _atlasText,
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                ),
-              ),
-            const SizedBox(height: 16),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                key: const ValueKey('request-home-service'),
-                onPressed: busy
-                    ? null
-                    : () => showDialog<void>(
-                        context: context,
-                        builder: (_) =>
-                            _RequestServiceDialog(bridge: widget.bridge),
-                      ),
-                icon: const Icon(
-                  Icons.add_circle_outline,
-                  color: _atlasMuted,
-                  size: 25,
-                ),
-                label: const Text(
-                  'Предложить сервис',
-                  style: TextStyle(color: _atlasText, fontSize: 14),
-                ),
-                style: TextButton.styleFrom(
-                  minimumSize: const Size(48, 48),
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                ),
-              ),
-            ),
-          ],
+          ),
         ],
-      ),
+        if (!loading && loadError.isEmpty && filtered.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 20),
+            child: Text(
+              search.text.trim().isEmpty && pinnedOnly
+                  ? 'Нет закреплённых приложений. Откройте «Все», чтобы добавить их.'
+                  : 'Приложения не найдены. Измените поиск или добавьте приложение.',
+              style: const TextStyle(color: _atlasMuted, height: 1.4),
+            ),
+          ),
+        for (final service in filtered) _service(service, available: available),
+        if (!_isMobileShell && widget.connected)
+          const Padding(
+            padding: EdgeInsets.only(top: 12),
+            child: Text(
+              'При изменении настроек VPN переподключится. Связь ненадолго прервётся.',
+              key: ValueKey('home-services-reconnect-note'),
+              style: TextStyle(color: _atlasMuted, fontSize: 12, height: 1.4),
+            ),
+          ),
+        if (feedback.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Text(
+              feedback,
+              key: const ValueKey('service-feedback'),
+              style: const TextStyle(
+                color: _atlasText,
+                fontSize: 12,
+                height: 1.4,
+              ),
+            ),
+          ),
+        _ApplicationBindingsEditor(
+          bridge: widget.bridge,
+          enabled: available,
+          onBusyChanged: widget.onBusyChanged,
+        ),
+      ],
     );
   }
 
@@ -469,77 +383,17 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
       'zapret' => 'Zapret',
       _ => 'Авто',
     };
-    return DecoratedBox(
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: _atlasBorder)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Semantics(
-            button: true,
-            expanded: expanded,
-            child: InkWell(
-              key: ValueKey('home-service-row-${service.tag}'),
-              mouseCursor: SystemMouseCursors.click,
-              onTap: () => setState(
-                () => openServiceTag = expanded ? null : service.tag,
-              ),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: 60),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Row(
-                    children: [
-                      _ServiceBrandIcon(tag: service.tag, size: 32),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Text(
-                          _homeRouteName(service),
-                          style: const TextStyle(
-                            color: _atlasText,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Flexible(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 9,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: policy == 'vpn'
-                                ? _atlasMint.withValues(alpha: .10)
-                                : _atlasSurface,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            label,
-                            textAlign: TextAlign.right,
-                            style: TextStyle(
-                              color: policy == 'vpn' ? _atlasMint : _atlasText,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Icon(
-                        expanded ? Icons.expand_less : Icons.chevron_right,
-                        color: _atlasMuted,
-                        size: 20,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          if (expanded)
-            Column(
+    return _CatalogRow(
+      rowKey: ValueKey('home-service-row-${service.tag}'),
+      icon: _ServiceBrandIcon(tag: service.tag, size: 32),
+      title: _homeRouteName(service),
+      expanded: expanded,
+      onTap: () =>
+          setState(() => openServiceTag = expanded ? null : service.tag),
+      badge: label,
+      accentBadge: policy == 'vpn',
+      detail: expanded
+          ? Column(
               key: ValueKey('home-service-details-${service.tag}'),
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -627,9 +481,8 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
                   ),
                 const SizedBox(height: 10),
               ],
-            ),
-        ],
-      ),
+            )
+          : null,
     );
   }
 }

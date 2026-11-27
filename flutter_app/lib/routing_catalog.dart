@@ -1,7 +1,175 @@
 part of 'main.dart';
 
+InputDecoration _catalogSearchDecoration(
+  String hint, {
+  VoidCallback? onClear,
+}) => InputDecoration(
+  hintText: hint,
+  hintStyle: const TextStyle(color: _atlasMuted, fontSize: 14),
+  prefixIcon: const Icon(Icons.search, size: 22),
+  filled: true,
+  fillColor: _atlasSurface,
+  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+  border: OutlineInputBorder(
+    borderRadius: BorderRadius.circular(12),
+    borderSide: const BorderSide(color: _atlasBorder),
+  ),
+  enabledBorder: OutlineInputBorder(
+    borderRadius: BorderRadius.circular(12),
+    borderSide: const BorderSide(color: _atlasBorder),
+  ),
+  focusedBorder: OutlineInputBorder(
+    borderRadius: BorderRadius.circular(12),
+    borderSide: const BorderSide(color: _atlasMint),
+  ),
+  suffixIcon: onClear == null
+      ? null
+      : _AccessibleIconButton(
+          tooltip: 'Очистить поиск',
+          onPressed: onClear,
+          icon: const Icon(Icons.close),
+        ),
+);
+
+class _CatalogRow extends StatelessWidget {
+  const _CatalogRow({
+    super.key,
+    this.rowKey,
+    required this.title,
+    required this.icon,
+    this.subtitle,
+    this.actions,
+    this.badge,
+    this.accentBadge = false,
+    this.expanded,
+    this.onTap,
+    this.detail,
+    this.selectable = false,
+  });
+  final Key? rowKey;
+  final String title;
+  final String? subtitle, badge;
+  final Widget icon;
+  final Widget? actions, detail;
+  final bool accentBadge, selectable;
+  final bool? expanded;
+  final VoidCallback? onTap;
+  @override
+  Widget build(BuildContext context) {
+    const titleStyle = TextStyle(
+      color: _atlasText,
+      fontSize: 14,
+      fontWeight: FontWeight.w500,
+    );
+    final header = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 60),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          children: [
+            SizedBox.square(dimension: 32, child: Center(child: icon)),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (selectable)
+                    SelectableText(title, style: titleStyle)
+                  else
+                    Text(title, style: titleStyle),
+                  if (subtitle != null)
+                    SelectableText(
+                      subtitle!,
+                      style: const TextStyle(
+                        color: _atlasMuted,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (badge != null) ...[
+              const SizedBox(width: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: accentBadge
+                      ? _atlasMint.withValues(alpha: .10)
+                      : _atlasSurface,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  badge!,
+                  style: TextStyle(
+                    color: accentBadge ? _atlasMint : _atlasText,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ],
+            ?actions,
+            if (onTap != null) ...[
+              const SizedBox(width: 12),
+              Icon(
+                expanded == true ? Icons.expand_less : Icons.chevron_right,
+                color: _atlasMuted,
+                size: 20,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: _atlasBorder)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (onTap != null)
+            Semantics(
+              button: true,
+              expanded: expanded,
+              child: InkWell(key: rowKey, onTap: onTap, child: header),
+            )
+          else
+            header,
+          ?detail,
+        ],
+      ),
+    );
+  }
+}
+
+class _CatalogAddButton extends StatelessWidget {
+  const _CatalogAddButton({
+    required this.buttonKey,
+    required this.label,
+    required this.onPressed,
+  });
+  final String label;
+  final Key buttonKey;
+  final VoidCallback? onPressed;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 12),
+    child: Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        key: buttonKey,
+        onPressed: onPressed,
+        icon: const Icon(Icons.add_circle_outline),
+        label: Text(_uiText(context, label)),
+      ),
+    ),
+  );
+}
+
 class _BlockedCatalogPage extends StatefulWidget {
-  const _BlockedCatalogPage({required this.bridge});
+  const _BlockedCatalogPage({required this.bridge, this.inline = false});
+  final bool inline;
   final CoreBridge bridge;
   @override
   State<_BlockedCatalogPage> createState() => _BlockedCatalogPageState();
@@ -9,7 +177,72 @@ class _BlockedCatalogPage extends StatefulWidget {
 
 class _BlockedCatalogPageState extends State<_BlockedCatalogPage> {
   Timer? debounce;
-  String query = '';
+  final searchText = TextEditingController();
+  String query = '', editError = '';
+  bool saving = false;
+  Future<void> change([String? remove]) async {
+    if (saving) return;
+    String input = '';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(
+          remove == null
+              ? _uiText(ctx, 'Добавить домен или IP-адрес')
+              : 'Удалить адрес?',
+        ),
+        content: remove == null
+            ? TextField(
+                key: const ValueKey('personal-address-input'),
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Домен, IP или подсеть',
+                  hintText: 'example.org',
+                ),
+                onChanged: (value) => input = value,
+              )
+            : Text(remove),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            key: const ValueKey('save-personal-address'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(remove == null ? 'Добавить' : 'Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() {
+      saving = true;
+      editError = '';
+    });
+    try {
+      final result = await widget.bridge.callMap(
+        'SetPersonalAddress',
+        args: [remove ?? input.trim(), remove != null],
+        timeout: const Duration(minutes: 2),
+      );
+      if (result['success'] != true) {
+        throw StateError(result['error']?.toString() ?? 'Ошибка сохранения');
+      }
+      if (!mounted) return;
+      debounce?.cancel();
+      if (remove == null) {
+        searchText.clear();
+        query = '';
+      }
+      setState(() => page = fetch(query));
+    } catch (e) {
+      if (mounted) setState(() => editError = _cleanError(e));
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
   late Future<Map<String, dynamic>> page = fetch('');
   Future<Map<String, dynamic>> fetch(String value) async {
     final response = await widget.bridge.callMap(
@@ -36,21 +269,29 @@ class _BlockedCatalogPageState extends State<_BlockedCatalogPage> {
   @override
   void dispose() {
     debounce?.cancel();
+    searchText.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => _FeaturePage(
-    title: 'Домены и IP-адреса',
-    icon: Icons.manage_search,
-    child: Column(
+  Widget build(BuildContext context) {
+    final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         TextField(
+          controller: searchText,
           maxLength: 253,
-          decoration: const InputDecoration(
-            labelText: 'Поиск домена, IP или подсети',
-            prefixIcon: Icon(Icons.search),
+          buildCounter:
+              (_, {required currentLength, required isFocused, maxLength}) =>
+                  null,
+          decoration: _catalogSearchDecoration(
+            'Поиск домена, IP или подсети',
+            onClear: searchText.text.isEmpty
+                ? null
+                : () {
+                    searchText.clear();
+                    search('');
+                  },
           ),
           onChanged: search,
         ),
@@ -88,19 +329,46 @@ class _BlockedCatalogPageState extends State<_BlockedCatalogPage> {
                         : 'Совпадения (до 10)',
                   ),
                   for (final item in items)
-                    ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      title: SelectableText(item),
+                    _CatalogRow(
+                      title: item,
+                      selectable: true,
+                      icon: Icon(
+                        item.contains('/') ||
+                                InternetAddress.tryParse(item) != null
+                            ? Icons.dns_outlined
+                            : Icons.language_rounded,
+                        color: _atlasMuted,
+                        size: 24,
+                      ),
+                      actions: _asStringList(data['personal']).contains(item)
+                          ? IconButton(
+                              tooltip: 'Удалить адрес',
+                              onPressed: saving ? null : () => change(item),
+                              icon: const Icon(Icons.delete_outline),
+                            )
+                          : null,
                     ),
                 ],
               ],
             );
           },
         ),
+        if (editError.isNotEmpty) Text(editError),
+        _CatalogAddButton(
+          buttonKey: const ValueKey('add-personal-address'),
+          label: 'Добавить домен или IP-адрес',
+          onPressed: saving ? null : change,
+        ),
       ],
-    ),
-  );
+    );
+    return widget.inline
+        ? content
+        : _FeaturePage(
+            title: 'Домены и IP-адреса',
+            icon: Icons.manage_search,
+            child: content,
+          );
+  }
 }
 
 class _ApplicationBindingsEditor extends StatefulWidget {
@@ -138,7 +406,8 @@ class _ApplicationBindingsEditorState
       busy = true;
       error = '';
     });
-    widget.onBusyChanged?.call(true);
+    final onBusyChanged = widget.onBusyChanged;
+    onBusyChanged?.call(true);
     try {
       String path = '', tag = '';
       if (remove) {
@@ -188,7 +457,7 @@ class _ApplicationBindingsEditorState
     } catch (e) {
       if (mounted) setState(() => error = _cleanError(e));
     } finally {
-      widget.onBusyChanged?.call(false);
+      onBusyChanged?.call(false);
       if (mounted) setState(() => busy = false);
     }
   }
@@ -197,11 +466,6 @@ class _ApplicationBindingsEditorState
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      FilledButton.tonalIcon(
-        onPressed: !widget.enabled || busy ? null : () => change(null),
-        icon: const Icon(Icons.add),
-        label: const Text('Привязать приложение'),
-      ),
       FutureBuilder<List<Map>>(
         future: bindings,
         builder: (ctx, snapshot) {
@@ -249,6 +513,11 @@ class _ApplicationBindingsEditorState
         },
       ),
       if (error.isNotEmpty) Text(error),
+      _CatalogAddButton(
+        buttonKey: const ValueKey('add-local-app'),
+        label: 'Добавить приложение',
+        onPressed: widget.enabled && !busy ? () => change(null) : null,
+      ),
       const SizedBox(height: 12),
     ],
   );
@@ -267,7 +536,9 @@ class _ApplicationBindingDialogState extends State<_ApplicationBindingDialog> {
   late final path = TextEditingController(
     text: widget.old?['path']?.toString(),
   );
-  late String? tag = widget.old?['service']?.toString();
+  late String? tag =
+      widget.old?['service']?.toString() ??
+      (widget.services.containsKey('user-app-vpn') ? 'user-app-vpn' : null);
   String error = '';
   @override
   void dispose() {
@@ -288,7 +559,11 @@ class _ApplicationBindingDialogState extends State<_ApplicationBindingDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Привязка приложения'),
+    title: Text(
+      widget.old == null
+          ? _uiText(context, 'Добавить приложение')
+          : _tr(context, 'Изменить приложение', 'Edit application'),
+    ),
     content: SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -298,31 +573,40 @@ class _ApplicationBindingDialogState extends State<_ApplicationBindingDialog> {
             controller: path,
             onChanged: (_) => setState(() {}),
             decoration: InputDecoration(
-              labelText: 'Полный путь к .exe',
-              suffixIcon: IconButton(
-                onPressed: pick,
-                tooltip: 'Выбрать файл',
-                icon: const Icon(Icons.folder_open),
-              ),
+              labelText: _isMobileShell
+                  ? 'Имя пакета Android'
+                  : 'Полный путь к .exe',
+              hintText: _isMobileShell ? 'com.example.app' : null,
+              suffixIcon: _isMobileShell
+                  ? null
+                  : IconButton(
+                      onPressed: pick,
+                      tooltip: 'Выбрать файл',
+                      icon: const Icon(Icons.folder_open),
+                    ),
             ),
           ),
-          DropdownButtonFormField<String>(
-            initialValue: tag,
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Сервис'),
-            items: [
-              for (final s in widget.services.entries)
-                DropdownMenuItem(
-                  value: s.key,
-                  child: Text(s.value, overflow: TextOverflow.ellipsis),
-                ),
-            ],
-            onChanged: (value) => setState(() => tag = value),
-          ),
+          if (!_isMobileShell)
+            DropdownButtonFormField<String>(
+              initialValue: tag,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Сервис'),
+              items: [
+                for (final s in widget.services.entries)
+                  DropdownMenuItem(
+                    value: s.key,
+                    child: Text(s.value, overflow: TextOverflow.ellipsis),
+                  ),
+              ],
+              onChanged: (value) => setState(() => tag = value),
+            ),
           const SizedBox(height: 12),
-          const Text(
-            'Правило действует для всех интернет-соединений выбранного файла. Для браузера это включает все его вкладки.',
-          ),
+          if (_isMobileShell)
+            const Text('Соединения добавленного приложения пойдут через VPN.')
+          else
+            const Text(
+              'Правило действует для всех интернет-соединений выбранного файла. Для браузера это включает все его вкладки.',
+            ),
           if (error.isNotEmpty) Text(error),
         ],
       ),

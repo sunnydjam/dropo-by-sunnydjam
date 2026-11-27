@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"dropocore/aicatalog"
+	"dropocore/blockedlist"
 	"dropocore/dnspolicy"
 	"dropocore/residential"
 	"dropocore/sourcehistory"
@@ -68,6 +69,7 @@ type GlobalAppSettings struct {
 	NetworkMode             NetworkMode               `json:"network_mode"` // Windows desktop always migrates to windows_unified
 	DisableProtectedRouting bool                      `json:"disable_protected_routing,omitempty"`
 	ApplicationBindings     []applicationBinding      `json:"application_bindings,omitempty"`
+	PersonalAddresses       blockedlist.Personal      `json:"personal_addresses,omitempty"`
 	CustomVPNServices       []aicatalog.CustomService `json:"custom_vpn_services,omitempty"`
 
 	// Free access settings — opening blocked-in-RF
@@ -336,7 +338,7 @@ func (s *Storage) normalizeAppSettings() {
 		raw, exists := app.FreeAccessMethods[svc.Tag]
 		normalized := NormalizeFreeAccessServiceMethod(raw)
 		if !exists || strings.TrimSpace(raw) == "" || (s.data.Version < 8 && normalized == FreeAccessMethodAuto) {
-			normalized = defaultServiceMethod(svc.Tag)
+			normalized = FreeAccessMethodVPN
 		}
 		if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(normalized) || IsFreeAccessTransparentMethod(normalized)) {
 			if serviceHasFreeBypass(svc.Tag) {
@@ -356,7 +358,7 @@ func (s *Storage) normalizeAppSettings() {
 			delete(app.ZapretStrategies, svc.Tag)
 			delete(app.ZapretStrategyModes, svc.Tag)
 		}
-		if s.data.Version < 8 && normalized != NormalizeFreeAccessServiceMethod(raw) {
+		if normalized != NormalizeFreeAccessServiceMethod(raw) {
 			serviceRoutesChanged = true
 		}
 		app.FreeAccessMethods[svc.Tag] = normalized
@@ -478,6 +480,7 @@ func cloneGlobalAppSettings(settings GlobalAppSettings) GlobalAppSettings {
 	}
 	cloned.HomeRouteServices = append([]string(nil), settings.HomeRouteServices...)
 	cloned.ApplicationBindings = slices.Clone(settings.ApplicationBindings)
+	cloned.PersonalAddresses = slices.Clone(settings.PersonalAddresses)
 	cloned.CustomVPNServices = slices.Clone(settings.CustomVPNServices)
 	for i := range cloned.CustomVPNServices {
 		cloned.CustomVPNServices[i].Domains = slices.Clone(settings.CustomVPNServices[i].Domains)
@@ -967,6 +970,7 @@ func (s *Storage) writeActiveConfig(ctx context.Context) (string, error) {
 				}
 				runtimeConfig = withCustomVPNRules(runtimeConfig, ruleSet)
 				applyApplicationBindings(runtimeConfig, s.data.App)
+				s.data.App.PersonalAddresses.Apply(runtimeConfig)
 			}
 			data, err := json.MarshalIndent(runtimeConfig, "", "  ")
 			if err != nil {

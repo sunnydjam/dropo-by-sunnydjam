@@ -538,16 +538,9 @@ func DefaultFreeAccessServiceState() map[string]bool {
 func DefaultFreeAccessServiceMethodState() map[string]string {
 	state := make(map[string]string, len(DefaultFreeAccessServices))
 	for _, s := range DefaultFreeAccessServices {
-		state[s.Tag] = defaultServiceMethod(s.Tag)
+		state[s.Tag] = FreeAccessMethodVPN
 	}
 	return state
-}
-
-func defaultServiceMethod(tag string) string {
-	if aicatalog.VPNOnly(tag) || tag == "youtube" || tag == "discord" {
-		return FreeAccessMethodVPN
-	}
-	return FreeAccessMethodDirect
 }
 
 func FreeAccessMethodTags() []string {
@@ -625,7 +618,10 @@ func FreeAccessServiceMethod(settings GlobalAppSettings, serviceTag string) stri
 	}
 	raw, exists := settings.FreeAccessMethods[serviceTag]
 	if !exists || strings.TrimSpace(raw) == "" {
-		return defaultServiceMethod(serviceTag)
+		if _, catalogued := findFreeAccessService(serviceTag); !catalogued {
+			return FreeAccessMethodDirect
+		}
+		return FreeAccessMethodVPN
 	}
 	method := NormalizeFreeAccessServiceMethod(raw)
 	if runtime.GOOS == "windows" && (IsFreeAccessProxyMethod(method) || IsFreeAccessTransparentMethod(method)) {

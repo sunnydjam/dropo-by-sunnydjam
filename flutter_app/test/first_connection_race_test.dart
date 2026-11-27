@@ -160,20 +160,14 @@ void main() {
   ) async {
     final bridge = _DelayedSourceBridge();
     await _pump(tester, bridge);
-    await _tap(tester, 'toggle-home-route-services');
-    await _tap(tester, 'home-service-row-youtube');
-    final route = find.descendant(
-      of: _key('service-route-youtube-vpn'),
-      matching: find.byType(OutlinedButton),
-    );
-    expect(tester.widget<OutlinedButton>(route).onPressed, isNotNull);
-
+    final modes = _key('home-routing-selected');
+    expect(modes, findsNothing);
     final pending = Completer<List<VpnSourceInfo>>();
     bridge.pendingSources = pending;
     await _tap(tester, 'home-connect');
     expect(tester.widget<FilledButton>(_key('home-connect')).onPressed, isNull);
-    expect(tester.widget<OutlinedButton>(route).onPressed, isNull);
-    await _tap(tester, 'service-route-youtube-vpn');
+    expect(modes, findsNothing);
+    expect(_key('routing-tab-apps'), findsNothing);
     expect(bridge.routeWrites, 0);
     await _tap(tester, 'home-connect');
     expect(bridge.starts, 0);
@@ -182,6 +176,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(bridge.starts, 1);
     expect(bridge.connected, isTrue);
+    expect(modes, findsOneWidget);
     expect(bridge.routeWrites, 0);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());

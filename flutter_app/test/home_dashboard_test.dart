@@ -129,6 +129,7 @@ class _ProtectedSettingsBridge extends _HomeBridge {
 
 class _CatalogBridge extends _HomeBridge {
   final queries = <String>[];
+  final addresses = <String>[];
   final apps = <Map<String, String>>[];
   @override
   Future<Map<String, dynamic>> callMap(
@@ -136,14 +137,26 @@ class _CatalogBridge extends _HomeBridge {
     List<Object?> args = const [],
     Duration timeout = const Duration(seconds: 12),
   }) async {
+    if (method == 'SetPersonalAddress') {
+      if (args[1] == true) {
+        addresses.remove(args[0]);
+      } else {
+        addresses.add(args[0] as String);
+      }
+      return {'success': true};
+    }
     if (method == 'SearchBlockedCatalog') {
       final q = args.single as String;
       queries.add(q);
       return {
         'success': true,
-        'total': 99000,
+        'total': 99000 + addresses.length,
+        'personal': addresses,
         'items': q.isEmpty
-            ? List.generate(10, (i) => 'host$i.example')
+            ? [
+                ...addresses,
+                ...List.generate(10, (i) => 'host$i.example'),
+              ].take(10).toList()
             : ['old-match.example'],
       };
     }
@@ -151,7 +164,11 @@ class _CatalogBridge extends _HomeBridge {
       return {
         'success': true,
         'bindings': List.of(apps),
-        'services': {'discord': 'Discord', 'claude': 'Claude'},
+        'services': {
+          'user-app-vpn': 'Через VPN',
+          'discord': 'Discord',
+          'claude': 'Claude',
+        },
       };
     }
     if (method == 'SetApplicationBinding') {
@@ -1184,7 +1201,7 @@ void main() {
     await _pumpHome(tester, bridge, size: const Size(760, 560));
     await openSection(tester, 'settings');
     await _tap(tester, 'link-manual-routing');
-    await _tap(tester, 'link-vpn-only-services');
+    await _tap(tester, 'routing-tab-protected');
 
     const key = 'protect-vpn-only-when-off';
     final control = find.byKey(const ValueKey(key));
@@ -1212,11 +1229,11 @@ void main() {
           );
           expect(tester.takeException(), isNull);
           await _tap(tester, 'nav-service-settings');
-          await _tap(tester, 'toggle-home-route-services');
-          await _tap(tester, 'toggle-home-route-services');
+          await _tap(tester, 'routing-tab-protected');
+          await _tap(tester, 'routing-tab-apps');
           expect(tester.takeException(), isNull);
-          await _tap(tester, 'request-home-service');
-          expect(find.text('Предложить сервис'), findsWidgets);
+          await _tap(tester, 'add-local-app');
+          expect(find.text('Добавить приложение'), findsWidgets);
           expect(tester.takeException(), isNull);
         },
       );
@@ -1289,7 +1306,12 @@ void main() {
       testWidgets(
         'compact shell ${size.width}x${size.height} at $scale remains usable',
         (tester) async {
-          await _pumpHome(tester, _HomeBridge(), size: size, scale: scale);
+          await _pumpHome(
+            tester,
+            _HomeBridge()..connected = true,
+            size: size,
+            scale: scale,
+          );
           final connect = find.byKey(const ValueKey('home-connect'));
           if (scale == 1) {
             expect(
@@ -1322,13 +1344,17 @@ void main() {
   testWidgets(
     '700x500 keeps planet, modes and service entry on screen without dropdowns',
     (tester) async {
-      await _pumpHome(tester, _HomeBridge(), size: const Size(700, 500));
+      await _pumpHome(
+        tester,
+        _HomeBridge()..connected = true,
+        size: const Size(700, 500),
+      );
       for (final key in [
         'atlas-planet',
         'home-connect',
         'home-routing-selected',
         'home-routing-all-vpn',
-        'toggle-home-route-services',
+        'routing-tab-apps',
       ]) {
         final rect = tester.getRect(find.byKey(ValueKey(key)));
         expect(rect.top, greaterThanOrEqualTo(0));
@@ -1482,19 +1508,19 @@ void main() {
         expect(find.byKey(ValueKey('home-service-row-$tag')), findsNothing);
       }
       expect(bridge.policyWrites, 0);
-      await _tap(tester, 'toggle-home-route-services');
+      await _tap(tester, 'routing-tab-protected');
       expect(find.byKey(const ValueKey('service-search')), findsNothing);
-      await _tap(tester, 'toggle-home-route-services');
+      await _tap(tester, 'routing-tab-apps');
       await tester.enterText(
         find.byKey(const ValueKey('service-search')),
-        'google',
+        'twitch',
       );
       await tester.pump();
-      await _tap(tester, 'home-service-row-google');
-      expect(find.byKey(const ValueKey('pin-service-google')), findsOneWidget);
+      await _tap(tester, 'home-service-row-twitch');
+      expect(find.byKey(const ValueKey('pin-service-twitch')), findsOneWidget);
       await openSection(tester, 'settings');
       await _tap(tester, 'link-manual-routing');
-      await _tap(tester, 'link-vpn-only-services');
+      await _tap(tester, 'routing-tab-protected');
       for (final tag in ['openai', 'claude', 'ai-other']) {
         expect(find.byKey(ValueKey('vpn-only-$tag')), findsOneWidget);
       }
@@ -1871,9 +1897,13 @@ void main() {
     tester,
   ) async {
     final bridge = _HomeBridge();
-    await _pumpHome(tester, bridge, size: const Size(700, 500));
-    await _tap(tester, 'toggle-home-route-services');
-    await _tap(tester, 'toggle-home-route-services');
+    await _pumpHome(
+      tester,
+      bridge..connected = true,
+      size: const Size(700, 500),
+    );
+    await _tap(tester, 'routing-tab-protected');
+    await _tap(tester, 'routing-tab-apps');
     expect(find.byKey(const ValueKey('home-connect')), findsOneWidget);
     await _tap(tester, 'nav-settings');
     await _tap(tester, 'nav-app-settings');
@@ -1905,30 +1935,67 @@ void main() {
     },
   );
 
+  testWidgets('Home routing tabs add local entries inline', (tester) async {
+    final bridge = _CatalogBridge();
+    await _pumpHome(tester, bridge, size: const Size(684, 461));
+    await openSection(tester, 'services');
+    await _tap(tester, 'add-local-app');
+    final dialog = find.byType(AlertDialog);
+    await tester.enterText(
+      find.descendant(of: dialog, matching: find.byType(TextField)),
+      r'C:\Programs\demo.exe',
+    );
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Сохранить'));
+    await tester.pumpAndSettle();
+    expect(bridge.apps.single['service'], 'user-app-vpn');
+    expect(find.text(r'C:\Programs\demo.exe'), findsOneWidget);
+    await _tap(tester, 'routing-tab-protected');
+    expect(find.text('Добавить сервис'), findsOneWidget);
+    await _tap(tester, 'routing-tab-domains');
+    expect(find.text('Записей в каталоге: 99000'), findsOneWidget);
+    await _tap(tester, 'add-personal-address');
+    await tester.enterText(
+      find.byKey(const ValueKey('personal-address-input')),
+      'example.org',
+    );
+    await _tap(tester, 'save-personal-address');
+    expect(find.text('example.org'), findsOneWidget);
+    expect(find.text('Записей в каталоге: 99001'), findsOneWidget);
+    final remove = find.byTooltip('Удалить адрес');
+    await tester.ensureVisible(remove);
+    await tester.tap(remove);
+    await tester.pumpAndSettle();
+    await _tap(tester, 'save-personal-address');
+    expect(bridge.addresses, isEmpty);
+    expect(find.text('Записей в каталоге: 99000'), findsOneWidget);
+  });
+
   testWidgets(
     'Manual lists search the whole catalog and edit an executable binding',
     (tester) async {
       final bridge = _CatalogBridge();
+      await bridge.setRoutingMode('all_traffic');
       await _pumpHome(tester, bridge, size: const Size(1000, 800));
       await openSection(tester, 'settings');
       await _tap(tester, 'link-manual-routing');
-      for (final id in [
-        'routing-apps',
-        'vpn-only-services',
-        'blocked-catalog',
-      ]) {
-        expect(find.byKey(ValueKey('link-$id')), findsOneWidget);
+      for (final tab in ['apps', 'protected', 'domains']) {
+        expect(find.byKey(ValueKey('routing-tab-$tab')), findsOneWidget);
       }
-      await _tap(tester, 'link-blocked-catalog');
+      await _tap(tester, 'routing-tab-domains');
       expect(find.text('Записей в каталоге: 99000'), findsOneWidget);
       await tester.enterText(find.byType(TextField), 'old-match');
       await tester.pump(const Duration(milliseconds: 350));
       await tester.pump();
       expect(bridge.queries, ['', 'old-match']);
       expect(find.text('old-match.example'), findsOneWidget);
-      await _tap(tester, 'breadcrumb-manual-routing');
-      await _tap(tester, 'link-routing-apps');
-      await tester.tap(find.text('Привязать приложение'));
+      await _tap(tester, 'routing-tab-apps');
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('add-local-app')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await _tap(tester, 'add-local-app');
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 350));
       const path = r'C:\Programs\alternative.exe';
@@ -1949,6 +2016,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 350));
       await tester.pump();
       expect(bridge.apps.single, {'path': path, 'service': 'discord'});
+      await tester.ensureVisible(find.byTooltip('Удалить привязку'));
       await tester.tap(find.byTooltip('Удалить привязку'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 350));
@@ -1965,7 +2033,7 @@ void main() {
     await _pumpHome(tester, bridge, size: const Size(900, 650));
     await _tap(tester, 'nav-settings');
     await _tap(tester, 'link-manual-routing');
-    await _tap(tester, 'link-vpn-only-services');
+    await _tap(tester, 'routing-tab-protected');
     await _tap(tester, 'add-custom-vpn-service');
     await tester.enterText(
       find.byKey(const ValueKey('custom-vpn-name')),
@@ -2016,20 +2084,24 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Android can save all-traffic mode before adding a source', (
-    tester,
-  ) async {
-    debugMobileShellOverride = true;
-    addTearDown(() => debugMobileShellOverride = null);
-    final bridge = _OnboardingBridge();
-    await _pumpHome(tester, bridge, size: const Size(390, 844));
-    await _tap(tester, 'home-routing-all-vpn');
-    expect((await bridge.appConfig())['routingMode'], 'all_traffic');
-    expect(find.byType(VpnSourcesDialog), findsNothing);
-    expect(bridge.personalAdds, 0);
-    expect(bridge.toggles, 0);
-    expect(tester.takeException(), isNull);
-  });
+  testWidgets(
+    'Android can edit all three lists offline without adding a source',
+    (tester) async {
+      debugMobileShellOverride = true;
+      addTearDown(() => debugMobileShellOverride = null);
+      final bridge = _OnboardingBridge();
+      await _pumpHome(tester, bridge, size: const Size(390, 844));
+      expect(find.byKey(const ValueKey('home-routing-all-vpn')), findsNothing);
+      await openSection(tester, 'manual-routing');
+      for (final tab in ['apps', 'protected', 'domains']) {
+        await _tap(tester, 'routing-tab-$tab');
+      }
+      expect(find.byType(VpnSourcesDialog), findsNothing);
+      expect(bridge.personalAdds, 0);
+      expect(bridge.toggles, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('Android add form remains usable with keyboard and large text', (
     tester,
@@ -2106,11 +2178,13 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     final moved = phase();
     expect(moved, greaterThan(first));
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
     await tester.pump(const Duration(seconds: 1));
     final paused = phase();
     await tester.pump(const Duration(seconds: 2));
     expect(phase(), paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));

@@ -111,9 +111,10 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 		for _, method := range commonMethods {
 			commonCandidateIDs = append(commonCandidateIDs, method.NativeStrategyID)
 		}
+		personalDomains, _ := settings.PersonalAddresses.Split()
 		plan.Services = append(plan.Services, traffic.ServiceRule{
 			ID: commonBlockedServiceTag, DisplayName: "Bundled blocked catalog",
-			DomainSuffixes: catalog.Domains, IPCIDRs: catalog.IPCIDRs,
+			DomainSuffixes: append(catalog.Domains, personalDomains...), IPCIDRs: catalog.IPCIDRs,
 			IPMatchPolicy: traffic.IPMatchHostless,
 			TCPPorts:      []int{80, 443}, UDPPorts: []int{443},
 			CandidateStrategyIDs: commonCandidateIDs,
@@ -140,7 +141,8 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 			}
 			// The narrow sing-box TUN handles IP-only entries. Domain rules here
 			// drive synthetic DNS and PAC without expanding WinDivert to all HTTPS.
-			plan.Services = append(plan.Services, traffic.ServiceRule{ID: commonBlockedServiceTag, DisplayName: "Blocked domains", DomainSuffixes: catalog.Domains})
+			personalDomains, _ := settings.PersonalAddresses.Split()
+			plan.Services = append(plan.Services, traffic.ServiceRule{ID: commonBlockedServiceTag, DisplayName: "Blocked domains", DomainSuffixes: append(catalog.Domains, personalDomains...)})
 			plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: commonBlockedServiceTag, Kind: kind})
 		}
 	}

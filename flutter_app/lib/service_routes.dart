@@ -274,12 +274,6 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (!_isMobileShell)
-                  _ApplicationBindingsEditor(
-                    bridge: widget.bridge,
-                    enabled: enabled,
-                    onBusyChanged: widget.onBusyChanged,
-                  ),
                 const Text(
                   'Выберите маршрут для сервиса. Звёздочка добавляет его в быстрый список.',
                   style: TextStyle(color: _homeMuted, height: 1.5),
@@ -330,17 +324,6 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                       'Найдено: ${filtered.length}',
                       style: const TextStyle(color: _homeMuted),
                     ),
-                    TextButton.icon(
-                      onPressed: busy
-                          ? null
-                          : () => showDialog<void>(
-                              context: context,
-                              builder: (_) =>
-                                  _RequestServiceDialog(bridge: widget.bridge),
-                            ),
-                      icon: const Icon(Icons.add),
-                      label: const Text('Предложить сервис'),
-                    ),
                   ],
                 ),
                 if (loading || busy) const LinearProgressIndicator(),
@@ -372,7 +355,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                   const Padding(
                     padding: EdgeInsets.all(20),
                     child: Text(
-                      'Сервисы не найдены. Измените поиск или предложите новый сервис.',
+                      'Сервисы не найдены. Измените поиск или добавьте приложение.',
                     ),
                   ),
               ],
@@ -479,6 +462,16 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                 ],
               );
             },
+          ),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          sliver: SliverToBoxAdapter(
+            child: _ApplicationBindingsEditor(
+              bridge: widget.bridge,
+              enabled: enabled,
+              onBusyChanged: widget.onBusyChanged,
+            ),
           ),
         ),
       ],

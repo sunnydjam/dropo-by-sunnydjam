@@ -131,25 +131,24 @@ Future<void> _tap(WidgetTester tester, String key) async {
 }
 
 void main() {
-  testWidgets(
-    'full mode can be selected without a source and does not connect implicitly',
-    (tester) async {
-      final bridge = _FirstRunBridge()..mode = 'blocked_only';
-      await _pump(tester, bridge);
-      await _tap(tester, 'home-routing-all-vpn');
-      expect(bridge.mode, 'all_traffic');
-      expect(bridge.starts, 0);
-      expect(bridge.publicAdds, 0);
-      expect(_key('full-vpn-onboarding'), findsNothing);
-      await _tap(tester, 'home-connect');
-      expect(_key('full-vpn-onboarding'), findsOneWidget);
-      expect(bridge.publicAdds, 0);
-      await _tap(tester, 'onboarding-cancel');
-      expect(bridge.starts, 0);
-      expect(bridge.publicAdds, 0);
-      expect(bridge.mode, 'all_traffic');
-    },
-  );
+  testWidgets('saved full mode without a source still prompts on Connect', (
+    tester,
+  ) async {
+    final bridge = _FirstRunBridge();
+    await _pump(tester, bridge);
+    expect(_key('home-routing-all-vpn'), findsNothing);
+    expect(bridge.mode, 'all_traffic');
+    expect(bridge.starts, 0);
+    expect(bridge.publicAdds, 0);
+    expect(_key('full-vpn-onboarding'), findsNothing);
+    await _tap(tester, 'home-connect');
+    expect(_key('full-vpn-onboarding'), findsOneWidget);
+    expect(bridge.publicAdds, 0);
+    await _tap(tester, 'onboarding-cancel');
+    expect(bridge.starts, 0);
+    expect(bridge.publicAdds, 0);
+    expect(bridge.mode, 'all_traffic');
+  });
 
   testWidgets('free connection requires consent and then starts once', (
     tester,

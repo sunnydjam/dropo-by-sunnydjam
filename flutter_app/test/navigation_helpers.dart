@@ -1,15 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Exercise real navigation; legacy service test names open Home's accordion.
+/// Exercise real navigation; service settings open the Applications tab on Home.
 Future<void> openSection(WidgetTester tester, String section) async {
   if (section == 'services' || section == 'service-settings') {
     await openSection(tester, 'home');
-    if (find
-        .byKey(const ValueKey('toggle-home-route-services'))
-        .evaluate()
-        .isEmpty) {
+    if (find.byKey(const ValueKey('routing-tab-apps')).evaluate().isEmpty) {
       final selectedMode = find.byKey(const ValueKey('home-routing-selected'));
+      if (selectedMode.evaluate().isEmpty) {
+        await openSection(tester, 'manual-routing');
+        return;
+      }
       await tester.ensureVisible(selectedMode);
       await tester.pump(const Duration(milliseconds: 300));
       await tester.tap(selectedMode);
@@ -17,9 +18,7 @@ Future<void> openSection(WidgetTester tester, String section) async {
       await tester.pump(const Duration(milliseconds: 600));
     }
     if (find.byKey(const ValueKey('service-search')).evaluate().isEmpty) {
-      final disclosure = find.byKey(
-        const ValueKey('toggle-home-route-services'),
-      );
+      final disclosure = find.byKey(const ValueKey('routing-tab-apps'));
       await tester.ensureVisible(disclosure);
       await tester.pump(const Duration(milliseconds: 300));
       await tester.tap(disclosure);

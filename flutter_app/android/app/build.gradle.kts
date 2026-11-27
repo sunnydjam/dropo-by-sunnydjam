@@ -107,7 +107,7 @@ val targetAbis = flutterTargetPlatforms.mapNotNull {
 
 val catalogAssets = tasks.register<Sync>("stageBlockedCatalog") {
     from(rootProject.file("../../dependencies/filters")) {
-        include("refilter_domains.srs", "refilter_ips.srs")
+        include("refilter_domains.srs", "refilter_ips.srs", "domains_all.lst", "ipsum.lst")
     }
     into(layout.buildDirectory.dir("generated/blockedCatalog"))
 }

@@ -527,6 +527,23 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    // Materialize the APK's search lists only when this catalog is opened.
+    private val blockedSearchFiles by lazy {
+        for (name in listOf("domains_all.lst", "ipsum.lst")) {
+            val file = android.util.AtomicFile(java.io.File(filesDir, name))
+            assets.open(name).use { input ->
+                val output = file.startWrite()
+                try {
+                    input.copyTo(output)
+                    file.finishWrite(output)
+                } catch (error: Throwable) {
+                    file.failWrite(output)
+                    throw error
+                }
+            }
+        }
+    }
+
     private fun handleCoreCallInBackground(call: MethodCall): String {
         return when (call.method) {
             "ensureStarted" -> ensureCoreStarted()
@@ -545,7 +562,11 @@ class MainActivity : FlutterActivity() {
                 val method = stringArg(call, "method")
                 val args = stringArg(call, "argsJson", "[]")
                 when (method) {
-                    "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod", "SetCustomVPNService" ->
+                    "SearchBlockedCatalog" -> {
+                        blockedSearchFiles
+                        Dropoandroid.call(method, args)
+                    }
+                    "SetApplicationBinding", "SetPersonalAddress", "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod", "SetCustomVPNService" ->
                         DropoVpnService.applyRoutingChange(method, args)
                     else -> Dropoandroid.call(method, args)
                 }

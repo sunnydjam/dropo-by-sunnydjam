@@ -100,12 +100,22 @@ const _englishUi = <String, String>{
   'Анимации интерфейса': 'Interface animations',
   'Планета, звёзды и мягкий рассвет. Движение останавливается, когда приложение свёрнуто; системное уменьшение движения имеет приоритет.':
       'Animate Earth, stars, and dawn. Animations pause in the background and respect the device’s reduced-motion setting.',
-  'Всегда через VPN': 'Always through VPN',
+  'Добавить приложение': 'Add application',
+  'Добавить сервис': 'Add service',
+  'Добавить домен или IP-адрес': 'Add domain or IP address',
+  'Защита от блокировок': 'Block protection',
+  'Списки маршрутизации': 'Routing lists',
+  'Приложения, защита от блокировок, домены и IP-адреса':
+      'Applications, block protection, domains and IP addresses',
+  'Пассивная защита от блокировок при потере соединения с VPN.':
+      'Passive protection if the VPN connection is lost.',
   'Ручное': 'Manual',
   'Приложения': 'Applications',
   'Домены и IP-адреса': 'Domains and IP addresses',
-  'ИИ и сервисы с региональными ограничениями': 'AI and region-restricted services',
-  'В обоих режимах эти сервисы используют только VPN. Если VPN недоступен, соединение останавливается.': 'These services use VPN in both modes. If VPN is unavailable, the connection stops.',
+  'ИИ и сервисы с региональными ограничениями':
+      'AI and region-restricted services',
+  'В обоих режимах эти сервисы используют только VPN. Если VPN недоступен, соединение останавливается.':
+      'These services use VPN in both modes. If VPN is unavailable, the connection stops.',
   'Маршрутизация': 'Routing',
   'Подключиться': 'Connect',
   'Попробовать снова': 'Try again',

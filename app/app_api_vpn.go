@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"dropocore/aicatalog"
+	"dropocore/blockedlist"
 	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
@@ -947,11 +948,14 @@ func scopeSelectiveTunToCatalog(config map[string]interface{}) int {
 	route, _ := config["route"].(map[string]any)
 	sets, _ := route["rule_set"].([]any)
 	hasCatalog := false
+	captureSets := []string{"refilter-ips"}
 	for _, raw := range sets {
 		rs, _ := raw.(map[string]any)
+		if rs["tag"] == blockedlist.PersonalIPTag {
+			captureSets = append(captureSets, blockedlist.PersonalIPTag)
+		}
 		if rs["tag"] == "refilter-ips" && rs["type"] == "local" {
 			hasCatalog = true
-			break
 		}
 	}
 
@@ -965,7 +969,7 @@ func scopeSelectiveTunToCatalog(config map[string]interface{}) int {
 		inboundMap, ok := inbound.(map[string]interface{})
 		if ok && inboundMap["type"] == "tun" {
 			if hasCatalog {
-				inboundMap["route_address_set"] = []string{"refilter-ips"}
+				inboundMap["route_address_set"] = captureSets
 				// Keep even an empty future rule set from producing a default route.
 				inboundMap["route_address"] = []string{"172.19.0.2/32"}
 				inboundMap["dns_mode"] = "disabled"

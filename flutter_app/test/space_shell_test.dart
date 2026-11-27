@@ -171,7 +171,7 @@ void main() {
       ];
       await bridge.setRoutingMode('blocked_only');
       await _pumpScene(tester, bridge, const Size(390, 844), 1);
-      expect(find.byKey(const ValueKey('service-search')), findsNothing);
+      expect(find.byKey(const ValueKey('service-search')), findsOneWidget);
       expect(find.byKey(const ValueKey('nav-services')), findsNothing);
       await _capture(tester, 'android-home-services-collapsed-390');
       await openSection(tester, 'services');
@@ -231,14 +231,9 @@ void main() {
       await _capture(tester, 'android-home-${size.width.toInt()}-$scale');
       expect(find.byKey(const ValueKey('link-service-settings')), findsNothing);
       final selectedMode = find.byKey(const ValueKey('home-routing-selected'));
-      await tester.ensureVisible(selectedMode);
-      await tester.pump();
-      await tester.tap(selectedMode);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      final disclosure = find.byKey(
-        const ValueKey('toggle-home-route-services'),
-      );
+      expect(selectedMode, findsNothing);
+      await openSection(tester, 'manual-routing');
+      final disclosure = find.byKey(const ValueKey('routing-tab-apps'));
       await tester.ensureVisible(disclosure);
       await tester.pump();
       expect(disclosure.hitTestable(), findsOneWidget);

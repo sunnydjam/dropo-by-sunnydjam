@@ -12,6 +12,8 @@ import (
 	"strings"
 )
 
+const personalAppVPN = "user-app-vpn"
+
 type applicationBinding struct {
 	Path    string `json:"path"`
 	Service string `json:"service"`
@@ -106,6 +108,16 @@ func applyApplicationBindings(config map[string]any, settings GlobalAppSettings)
 	all := NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic
 	outbounds, _ := config["outbounds"].([]any)
 	hasVPN := outboundTagExists(outbounds, "auto-select")
+	for _, binding := range settings.ApplicationBindings {
+		if binding.Service != personalAppVPN {
+			continue
+		}
+		rule := map[string]any{"process_path_regex": []string{applicationPathPattern(binding.Path)}, "action": "reject"}
+		if protectedLinkUsesVPN(outbounds, "proxy", map[string]bool{}) {
+			rule["action"], rule["outbound"] = "route", "proxy"
+		}
+		entries = append(entries, rule)
+	}
 	for _, svc := range DefaultFreeAccessServices {
 		if aicatalog.VPNOnly(svc.Tag) {
 			continue
@@ -173,7 +185,7 @@ func editApplicationBinding(settings GlobalAppSettings, oldPath, path, tag strin
 	if len(path) > 32767 || !filepath.IsAbs(path) || len(filepath.VolumeName(path)) != 2 || strings.ContainsAny(path[2:], ":*?\"<>|\r\n") || !strings.EqualFold(filepath.Ext(path), ".exe") {
 		return nil, errors.New("Укажите полный локальный путь к файлу .exe")
 	}
-	if _, ok := findFreeAccessService(tag); !ok && !isCustomBindingTarget(settings.CustomVPNServices, tag) {
+	if _, ok := findFreeAccessService(tag); !ok && tag != personalAppVPN && !isCustomBindingTarget(settings.CustomVPNServices, tag) {
 		return nil, errors.New("Неизвестный сервис")
 	}
 	name := filepath.Base(path)
@@ -201,7 +213,7 @@ func (a *App) GetApplicationBindings() map[string]any {
 		return map[string]any{"success": false, "error": "Хранилище недоступно"}
 	}
 	settings := a.storage.GetAppSettings()
-	services := map[string]string{}
+	services := map[string]string{personalAppVPN: "Через VPN"}
 	for _, svc := range DefaultFreeAccessServices {
 		services[svc.Tag] = svc.DisplayName
 	}
@@ -212,6 +224,26 @@ func (a *App) GetApplicationBindings() map[string]any {
 }
 
 func (a *App) SetApplicationBinding(oldPath, path, tag string) map[string]any {
+	return a.editLocalRouting("Применяем настройки приложения", func(next *GlobalAppSettings) (bool, error) {
+		bindings, err := editApplicationBinding(*next, oldPath, path, tag)
+		changed := !slices.Equal(next.ApplicationBindings, bindings)
+		next.ApplicationBindings = bindings
+		return changed, err
+	})
+}
+
+func (a *App) SetPersonalAddress(value string, remove bool) map[string]any {
+	return a.editLocalRouting("Применяем настройки адреса", func(next *GlobalAppSettings) (bool, error) {
+		entries, err := next.PersonalAddresses.Edit(value, remove)
+		if err != nil {
+			return false, err
+		}
+		next.PersonalAddresses = entries
+		return true, nil
+	})
+}
+
+func (a *App) editLocalRouting(reason string, edit func(*GlobalAppSettings) (bool, error)) map[string]any {
 	a.waitForInit()
 	a.settingsPolicyMu.Lock()
 	defer a.settingsPolicyMu.Unlock()
@@ -229,16 +261,15 @@ func (a *App) SetApplicationBinding(oldPath, path, tag string) map[string]any {
 	}
 	previous := a.storage.GetAppSettings()
 	next := previous
-	bindings, err := editApplicationBinding(previous, oldPath, path, tag)
+	changed, err := edit(&next)
 	if err != nil {
 		return fail(err)
 	}
-	if slices.Equal(previous.ApplicationBindings, bindings) {
-		return map[string]any{"success": true, "bindings": bindings}
+	if !changed {
+		return map[string]any{"success": true, "bindings": next.ApplicationBindings}
 	}
-	next.ApplicationBindings = bindings
 	if running {
-		generation := a.beginVPNTransactionalReconnect("Применяем привязку приложения")
+		generation := a.beginVPNTransactionalReconnect(reason)
 		defer a.finishVPNTransactionalReconnect(generation)
 		if r := a.stopVPNForReconnect(); !apiResultSucceeded(r) {
 			return r
@@ -261,5 +292,5 @@ func (a *App) SetApplicationBinding(oldPath, path, tag string) map[string]any {
 		recovery := a.recoverAfterServicePolicyRollback(running, rollback == nil)
 		return fail(fmt.Errorf("%w%s", errors.Join(err, rollback), recovery))
 	}
-	return map[string]any{"success": true, "bindings": bindings}
+	return map[string]any{"success": true, "bindings": next.ApplicationBindings}
 }

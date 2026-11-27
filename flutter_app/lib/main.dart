@@ -3998,6 +3998,7 @@ class _DropoHomePageState extends State<DropoHomePage>
   String updateError = '';
   int updateDownloaded = 0;
   int updateTotal = 0;
+  final _androidCatalogAnchor = GlobalKey();
   bool homeRoutesExpanded = false;
   bool preparingFullVpnSource = false;
   int connectionAttempt = 0;
@@ -6856,116 +6857,137 @@ class _DropoHomePageState extends State<DropoHomePage>
         _usesServiceRoutes &&
         (routeProbeActive || routeProbeFailed) &&
         routeProbeProgress.isNotEmpty;
+    final showRouting =
+        online &&
+        !booting &&
+        status.connected &&
+        !connectionBusy &&
+        status.vpnState != 'reconnecting' &&
+        status.vpnState != 'error';
+    final manualCatalog = showRouting && appConfig.routingMode != 'all_traffic';
     // Platform views are instantiated only on a real Android runtime. Desktop
     // and host widget tests retain the native Flutter layout.
     if (Platform.isAndroid) {
       final source = homeSources.where((source) => source.active).firstOrNull;
       return LayoutBuilder(
-        builder: (context, bounds) => ListView(
+        builder: (context, bounds) => SingleChildScrollView(
           key: const PageStorageKey('android-home-scroll'),
-          children: [
-            if (_buildUpdateNotice() case final notice?)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                child: notice,
-              ),
-            _AndroidAnimatedHome(
-              sceneHeight: (bounds.maxHeight * .76).clamp(450.0, 640.0),
-              connectedFooter: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Column(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (_buildUpdateNotice() case final notice?)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                  child: notice,
+                ),
+              _AndroidAnimatedHome(
+                sceneHeight: (bounds.maxHeight * .76).clamp(450.0, 640.0),
+                connectedFooter: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: _buildRouteControls(summaryOnly: true),
+                ),
+                connected: online && status.connected,
+                connectedAt: _androidConnectedAt,
+                connecting:
+                    (preparingFullVpnSource && !_androidAwaitingPermission) ||
+                    status.connecting ||
+                    busyTasks.containsKey('vpn-connect'),
+                disconnecting:
+                    _androidCancelPending ||
+                    status.disconnecting ||
+                    busyTasks.containsKey('vpn-disconnect'),
+                busy: isBusy || preparingFullVpnSource,
+                enabled: powerEnabled,
+                canCancel:
+                    online &&
+                    status.connecting &&
+                    !status.disconnecting &&
+                    !_androidCancelPending &&
+                    !preparingFullVpnSource &&
+                    !quitting &&
+                    !sectionBusy,
+                motionEnabled: !appConfig.reduceMotion,
+                visible: windowVisible && activeMenuSection == 'home',
+                responseMs: status.vpnResponse.current
+                    ? status.vpnResponse.latencyMs
+                    : null,
+                onPresented: () {
+                  if (mounted && !_androidHomeVisible) {
+                    setState(() => _androidHomeVisible = true);
+                  }
+                },
+                routingMode: appConfig.routingMode,
+                source: source?.name ?? '',
+                message: showHint ? normalizedHint : '',
+                error: hintDanger,
+                onConnectionRequested: (target) =>
+                    unawaited(_toggleConnection(requestedTarget: target)),
+                onCancel: () => unawaited(_cancelAndroidConnection()),
+                onMode: (mode) => unawaited(_chooseAndroidHomeMode(mode)),
+                onSources: () => unawaited(_openSubscription()),
+                onServices: () {
+                  final anchor = _androidCatalogAnchor.currentContext;
+                  if (anchor != null) Scrollable.ensureVisible(anchor);
+                },
+                onHelp: () => unawaited(_selectMenuSection('guided-help')),
+                fallback: (onLanded) => Column(
                   children: [
-                    _buildRouteControls(summaryOnly: true),
-                    _buildHomeServices(),
+                    Expanded(
+                      child: _HomeConnectionPanel(
+                        atlas: true,
+                        animatedScene: true,
+                        connectionAttempt: connectionAttempt,
+                        status: status,
+                        online: online,
+                        booting: booting,
+                        busy: isBusy,
+                        starting:
+                            busyTasks.containsKey('vpn-connect') &&
+                            !status.connected,
+                        disconnecting:
+                            status.disconnecting ||
+                            busyTasks.containsKey('vpn-disconnect'),
+                        routingMode: appConfig.routingMode,
+                        enabled: powerEnabled,
+                        onPressed: _toggleConnection,
+                        operationError:
+                            connectionHintDanger && !status.connected,
+                        motionEnabled:
+                            !appConfig.reduceMotion &&
+                            windowVisible &&
+                            activeMenuSection == 'home',
+                        onLanded: onLanded,
+                      ),
+                    ),
+                    if (showHint)
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Text(normalizedHint),
+                      ),
                   ],
                 ),
               ),
-              connected: online && status.connected,
-              connectedAt: _androidConnectedAt,
-              connecting:
-                  (preparingFullVpnSource && !_androidAwaitingPermission) ||
-                  status.connecting ||
-                  busyTasks.containsKey('vpn-connect'),
-              disconnecting:
-                  _androidCancelPending ||
-                  status.disconnecting ||
-                  busyTasks.containsKey('vpn-disconnect'),
-              busy: isBusy || preparingFullVpnSource,
-              enabled: powerEnabled,
-              canCancel:
-                  online &&
-                  status.connecting &&
-                  !status.disconnecting &&
-                  !_androidCancelPending &&
-                  !preparingFullVpnSource &&
-                  !quitting &&
-                  !sectionBusy,
-              motionEnabled: !appConfig.reduceMotion,
-              visible: windowVisible && activeMenuSection == 'home',
-              responseMs: status.vpnResponse.current
-                  ? status.vpnResponse.latencyMs
-                  : null,
-              onPresented: () {
-                if (mounted && !_androidHomeVisible) {
-                  setState(() => _androidHomeVisible = true);
-                }
-              },
-              routingMode: appConfig.routingMode,
-              source: source?.name ?? '',
-              message: showHint ? normalizedHint : '',
-              error: hintDanger,
-              onConnectionRequested: (target) =>
-                  unawaited(_toggleConnection(requestedTarget: target)),
-              onCancel: () => unawaited(_cancelAndroidConnection()),
-              onMode: (mode) => unawaited(_chooseAndroidHomeMode(mode)),
-              onSources: () => unawaited(_openSubscription()),
-              onServices: () =>
-                  setState(() => homeRoutesExpanded = !homeRoutesExpanded),
-              onHelp: () => unawaited(_selectMenuSection('guided-help')),
-              fallback: (onLanded) => Column(
-                children: [
-                  Expanded(
-                    child: _HomeConnectionPanel(
-                      atlas: true,
-                      animatedScene: true,
-                      connectionAttempt: connectionAttempt,
-                      status: status,
-                      online: online,
-                      booting: booting,
-                      busy: isBusy,
-                      starting:
-                          busyTasks.containsKey('vpn-connect') &&
-                          !status.connected,
-                      disconnecting:
-                          status.disconnecting ||
-                          busyTasks.containsKey('vpn-disconnect'),
-                      routingMode: appConfig.routingMode,
-                      enabled: powerEnabled,
-                      onPressed: _toggleConnection,
-                      operationError: connectionHintDanger && !status.connected,
-                      motionEnabled:
-                          !appConfig.reduceMotion &&
-                          windowVisible &&
-                          activeMenuSection == 'home',
-                      onLanded: onLanded,
+              if (manualCatalog)
+                _RoutingReveal(
+                  motion: !appConfig.reduceMotion,
+                  child: ConstrainedBox(
+                    key: _androidCatalogAnchor,
+                    constraints: BoxConstraints(minHeight: bounds.maxHeight),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: _buildRoutingCatalog(),
                     ),
                   ),
-                  if (showHint)
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Text(normalizedHint),
-                    ),
-                ],
-              ),
-            ),
-            if (!online && !booting && !quitting)
-              TextButton.icon(
-                key: const ValueKey('home-retry-core'),
-                onPressed: () => unawaited(_bootstrap()),
-                icon: const Icon(Icons.refresh),
-                label: const Text('Повторить запуск Dropo'),
-              ),
-          ],
+                ),
+              if (!online && !booting && !quitting)
+                TextButton.icon(
+                  key: const ValueKey('home-retry-core'),
+                  onPressed: () => unawaited(_bootstrap()),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Повторить запуск Dropo'),
+                ),
+            ],
+          ),
         ),
       );
     }
@@ -7095,23 +7117,29 @@ class _DropoHomePageState extends State<DropoHomePage>
               },
             )
           : null,
-      servicesExpanded:
-          homeRoutesExpanded && appConfig.routingMode == 'blocked_only',
-      servicesVisible: appConfig.routingMode == 'blocked_only',
-      routes: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildRouteControls(summaryOnly: true),
-          SizedBox(height: _compactDesktopHome(context) ? 6 : 12),
-          _buildHomeServices(),
-        ],
-      ),
+      catalog: manualCatalog
+          ? _RoutingReveal(
+              motion: !appConfig.reduceMotion,
+              child: _buildRoutingCatalog(),
+            )
+          : const SizedBox.shrink(),
+      routes: showRouting
+          ? _RoutingReveal(
+              motion: !appConfig.reduceMotion,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildRouteControls(summaryOnly: true),
+                  SizedBox(height: _compactDesktopHome(context) ? 6 : 12),
+                ],
+              ),
+            )
+          : const SizedBox.shrink(),
     );
   }
 
-  Widget _buildHomeServices() => _HomeServicesAccordion(
+  Widget _buildRoutingCatalog() => _HomeRoutingCatalog(
     key: const ValueKey('home-services'),
-    onOpenCatalog: (section) => unawaited(_selectMenuSection(section)),
     bridge: widget.bridge,
     routeSnapshot: online ? routes : null,
     connected: online && status.connected,
@@ -7122,9 +7150,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         !connectionBusy &&
         !preparingFullVpnSource,
     routingMode: appConfig.routingMode,
-    expanded: homeRoutesExpanded,
-    onExpandedChanged: (expanded) =>
-        setState(() => homeRoutesExpanded = expanded),
     onBusyChanged: _setSectionBusy,
     onChanged: () => unawaited(_refresh(all: true)),
   );
@@ -7181,7 +7206,6 @@ class _DropoHomePageState extends State<DropoHomePage>
     switch (activeMenuSection) {
       case 'settings':
       case 'advanced':
-      case 'manual-routing':
       case 'help':
         return _MinimalSettingsPage(
           section: activeMenuSection,
@@ -7190,6 +7214,12 @@ class _DropoHomePageState extends State<DropoHomePage>
           onWorkNetworks: controlsDisabled || _isMobileShell
               ? null
               : _openWireGuard,
+        );
+      case 'manual-routing':
+        return _FeaturePage(
+          title: _uiText(context, 'Списки маршрутизации'),
+          icon: Icons.tune,
+          child: _buildRoutingCatalog(),
         );
       case 'routing-apps':
         return ServiceRoutesPage(
@@ -7832,6 +7862,7 @@ class _RouteProbePanelState extends State<_RouteProbePanel> {
         : 'Настраиваем сервисы';
     final color = widget.failed ? const Color(0xFFFCA5A5) : _atlasMuted;
     return Column(
+      key: const ValueKey('probe-panel'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         TextButton(
@@ -11276,82 +11307,6 @@ class _SettingsDialogState extends State<_SettingsDialog>
   }
 }
 
-class _RequestServiceDialog extends StatelessWidget {
-  const _RequestServiceDialog({required this.bridge});
-
-  static const requestServiceUrl =
-      'https://github.com/sunnydjam/dropo-by-sunnydjam/issues/new';
-
-  final CoreBridge bridge;
-
-  @override
-  Widget build(BuildContext context) {
-    return _AppDialog(
-      title: 'Добавить сервис',
-      icon: Icons.add_link,
-      centered: true,
-      width: 520,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'Если нужного сервиса нет в списке, создайте запрос в GitHub Issues и укажите домены и приложение, которые требуется добавить.',
-            style: TextStyle(color: Color(0xFFD8E4E0), height: 1.35),
-          ),
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.22),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
-            ),
-            child: const Row(
-              children: [
-                Icon(Icons.code, size: 18, color: Color(0xFF93C5FD)),
-                SizedBox(width: 9),
-                Expanded(
-                  child: SelectableText(
-                    'github.com/sunnydjam/dropo-by-sunnydjam/issues',
-                    style: TextStyle(
-                      color: Color(0xFFBBD7FF),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                child: _ActionButton(
-                  label: 'Открыть GitHub Issues',
-                  icon: Icons.open_in_new,
-                  onPressed: () async {
-                    await bridge.openExternal(requestServiceUrl);
-                  },
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _ActionButton(
-                  label: 'Закрыть',
-                  icon: Icons.close,
-                  secondary: true,
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _ServiceRoutePolicyButton extends StatelessWidget {
   const _ServiceRoutePolicyButton({
     super.key,
@@ -12709,13 +12664,18 @@ String _routePolicyFromJson(Map<String, dynamic> json) {
   if (json['requiresVpn'] == true) {
     return 'vpn';
   }
-  final effective = [
-    json['effectiveMethod'],
-    json['method'],
-    json['outbound'],
-    json['effectiveMethodLabel'],
-    json['methodLabel'],
-  ].whereType<Object>().map((value) => value.toString().toLowerCase());
+  final effective =
+      [
+            json['effectiveMethod'],
+            json['method'],
+            json['outbound'],
+            json['effectiveMethodLabel'],
+            json['methodLabel'],
+          ]
+          .whereType<Object>()
+          .map((value) => value.toString().trim().toLowerCase())
+          .where((value) => value.isNotEmpty);
+  if (effective.isEmpty) return 'vpn';
   return effective.any(
         (value) =>
             value == 'vpn' || value.contains('vpn') || value == 'auto-select',
@@ -12790,21 +12750,27 @@ const List<RouteService> fallbackRoutes = [
     domainSuffixes: ['instagram.com', 'cdninstagram.com', 'threads.net'],
   ),
   RouteService(
-    tag: 'google',
-    name: 'Google Search',
-    method: 'Напрямую',
-    selectedMethod: 'direct',
-    requiresVpn: false,
+    tag: 'twitch',
+    name: 'Twitch',
+    method: 'Через VPN',
+    selectedMethod: 'vpn',
+    requiresVpn: true,
     delayMs: 0,
-    domainSuffixes: ['google.com', 'google.ru', 'gstatic.com'],
+    domainSuffixes: [
+      'twitch.tv',
+      'ttvnw.net',
+      'jtvnw.net',
+      'twitchcdn.net',
+      'ext-twitch.tv',
+    ],
   ),
   RouteService(
-    tag: 'gosuslugi',
-    name: 'Gosuslugi and RU services',
-    method: 'Напрямую',
-    selectedMethod: 'direct',
-    requiresVpn: false,
+    tag: 'spotify',
+    name: 'Spotify',
+    method: 'Через VPN',
+    selectedMethod: 'vpn',
+    requiresVpn: true,
     delayMs: 0,
-    domainSuffixes: ['gosuslugi.ru', 'mos.ru', 'nalog.ru'],
+    domainSuffixes: ['spotify.com', 'scdn.co', 'spotifycdn.com', 'spoti.fi'],
   ),
 ];

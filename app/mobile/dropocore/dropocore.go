@@ -3,6 +3,7 @@ package dropocore
 import (
 	"crypto/sha256"
 	"dropocore/aicatalog"
+	"dropocore/blockedlist"
 	"dropocore/catalog"
 	"dropocore/sourcehistory"
 	"encoding/json"
@@ -61,6 +62,7 @@ type coreState struct {
 	ServiceUpdatedAt         string                           `json:"serviceUpdatedAt"`
 	WireGuards               []wireGuardConfig                `json:"wireguards"`
 	RoutePolicies            map[string]string                `json:"routePolicies,omitempty"`
+	Personal                 androidPersonalRouting           `json:"personalRouting,omitempty"`
 	CustomVPNServices        []aicatalog.CustomService        `json:"customVPNServices,omitempty"`
 	HomeRouteServices        []string                         `json:"homeRouteServices,omitempty"`
 	AdaptiveCache            map[string]androidAdaptiveRecord `json:"adaptiveCache,omitempty"`
@@ -336,6 +338,8 @@ func normalizeServiceState(state string) string {
 	}
 }
 
+var androidBlockedIndex blockedlist.Index
+
 func Call(method, argsJSON string) string {
 	if method == "ValidateManagedCatalog" {
 		args := decodeArgs(argsJSON)
@@ -352,6 +356,13 @@ func Call(method, argsJSON string) string {
 		return encode(map[string]interface{}{"success": true, "revision": p.Revision})
 	}
 	args := decodeArgs(argsJSON)
+	if method == "SearchBlockedCatalog" {
+		dir, _ := androidRuleDirectory.Load().(string)
+		mu.Lock()
+		personal := current.Personal.Addresses
+		mu.Unlock()
+		return encode(androidBlockedIndex.Search(dir, stringArg(args, 0, ""), personal))
+	}
 	if method == "GetPublicVPNProviders" {
 		return androidPublicProviders()
 	}
@@ -460,7 +471,9 @@ func Call(method, argsJSON string) string {
 		return encode(map[string]interface{}{"success": false, "error": "Profiles are not editable on Android yet"})
 	case "GetRoutingMode":
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.RoutingMode})
-	case "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod", "SetCustomVPNService":
+	case "GetApplicationBindings":
+		return encode(current.Personal.bindings())
+	case "SetPersonalAddress", "SetApplicationBinding", "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod", "SetCustomVPNService":
 		return setAndroidRoutingLocked(method, args)
 	case "GetNetworkMode":
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.NetworkMode})

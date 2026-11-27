@@ -33,6 +33,11 @@ func TestApplicationBindingEditsAndProtection(t *testing.T) {
 			t.Fatalf("binding %q: %v", path, result)
 		}
 	}
+	call("", path, personalAppVPN, true)
+	call(path, "", "", true)
+	if !apiResultSucceeded(a.SetPersonalAddress("Example.ORG", false)) || !apiResultSucceeded(a.SetPersonalAddress("8.8.8.8", false)) || apiResultSucceeded(a.SetPersonalAddress("10.0.0.1", false)) {
+		t.Fatal("personal address validation")
+	}
 	call("", path, "discord", true)
 	call("", path, "claude", false)
 	call("", `C:\Unrelated\Claude.exe`, "discord", false)
@@ -45,6 +50,9 @@ func TestApplicationBindingEditsAndProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	prefs := reopened.GetAppSettings()
+	if !slices.Equal(prefs.PersonalAddresses, []string{"example.org", "8.8.8.8/32"}) || !apiResultSucceeded(a.SetPersonalAddress("example.org", true)) {
+		t.Fatalf("personal entries: %v", prefs.PersonalAddresses)
+	}
 	if !slices.Equal(prefs.ApplicationBindings, []applicationBinding{{Path: path, Service: "claude"}}) {
 		t.Fatalf("persisted bindings: %v", prefs.ApplicationBindings)
 	}
@@ -73,17 +81,17 @@ func TestBlockedCatalogPageBounded(t *testing.T) {
 	for i := range 35 {
 		c.Domains = append(c.Domains, fmt.Sprintf("site%02d.example", i))
 	}
-	first := blockedCatalogPage(c, "")
+	first := c.Page("")
 	items := first["items"].([]string)
 	if first["total"] != 36 || len(items) != 10 || items[0] != c.IPCIDRs[0] || items[1] != "site34.example" {
 		t.Fatal(first)
 	}
 	for _, tc := range []struct{ query, want string }{{"site00", "site00.example"}, {"104.29.136.217", c.IPCIDRs[0]}} {
-		if !slices.Equal(blockedCatalogPage(c, tc.query)["items"].([]string), []string{tc.want}) {
+		if !slices.Equal(c.Page(tc.query)["items"].([]string), []string{tc.want}) {
 			t.Fatal(tc)
 		}
 	}
-	if len(blockedCatalogPage(c, "not-present")["items"].([]string)) != 0 {
+	if len(c.Page("not-present")["items"].([]string)) != 0 {
 		t.Fatal("unexpected matches")
 	}
 }
@@ -273,7 +281,7 @@ func TestExactCatalogHitPrecedesMoreThanTenSubstringMatches(t *testing.T) {
 	for i := range 12 {
 		c.Domains = append(c.Domains, fmt.Sprintf("site%02d.app.example", i))
 	}
-	got := blockedCatalogPage(c, "app.example")["items"].([]string)
+	got := c.Page("app.example")["items"].([]string)
 	if len(got) != 10 || got[0] != "app.example" {
 		t.Fatalf("exact match: %v", got)
 	}

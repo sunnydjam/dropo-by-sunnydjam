@@ -1,7 +1,6 @@
 package main
 
 import (
-	"dropocore/aicatalog"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -101,27 +100,40 @@ func TestFreshWindowsSettingsUseReleaseRecommendedRoutes(t *testing.T) {
 	}
 	methods := storage.GetAppSettings().FreeAccessMethods
 	for _, service := range DefaultFreeAccessServices {
-		want := FreeAccessMethodDirect
-		if aicatalog.VPNOnly(service.Tag) || service.Tag == "youtube" || service.Tag == "discord" {
-			want = FreeAccessMethodVPN
-		}
+		want := FreeAccessMethodVPN
 		if got := methods[service.Tag]; got != want {
 			t.Fatalf("fresh %s policy = %q", service.Tag, got)
 		}
 	}
+	if got := FreeAccessServiceMethod(storage.GetAppSettings(), "uncatalogued"); got != FreeAccessMethodDirect {
+		t.Fatalf("uncatalogued default = %q, want direct", got)
+	}
 }
 
 func TestReleaseDefaultsDoNotOverwriteSavedExplicitRoutes(t *testing.T) {
-	storage := NewStorage(t.TempDir())
+	dir := t.TempDir()
+	storage := NewStorage(dir)
 	if err := storage.Init(); err != nil {
 		t.Fatal(err)
 	}
 	storage.data.App.FreeAccessMethods["youtube"] = FreeAccessMethodVPN
 	storage.data.App.FreeAccessMethods["discord"] = FreeAccessMethodZapret
-	storage.normalizeAppSettings()
-
-	methods := storage.GetAppSettings().FreeAccessMethods
-	if methods["youtube"] != FreeAccessMethodVPN || methods["discord"] != FreeAccessMethodZapret {
+	storage.data.App.FreeAccessMethods["telegram"] = FreeAccessMethodDirect
+	delete(storage.data.App.FreeAccessMethods, "twitch")
+	storage.data.App.RoutingMode = RoutingModeBlockedOnly
+	storage.data.Profiles[0].SingboxConfig = map[string]any{"stale": true}
+	if err := storage.Save(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewStorage(dir)
+	if err := reopened.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.data.Profiles[0].SingboxConfig != nil {
+		t.Fatal("cached routes survived a catalog default change")
+	}
+	methods := reopened.GetAppSettings().FreeAccessMethods
+	if methods["youtube"] != FreeAccessMethodVPN || methods["discord"] != FreeAccessMethodZapret || methods["telegram"] != FreeAccessMethodDirect || methods["twitch"] != FreeAccessMethodVPN {
 		t.Fatalf("saved explicit routes were replaced: %+v", methods)
 	}
 }

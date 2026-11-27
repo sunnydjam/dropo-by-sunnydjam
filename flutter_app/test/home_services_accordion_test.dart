@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _ServicesBridge extends MockCoreBridge {
-  bool connected = false, failWrite = false, failRead = false;
+  bool connected = true, failWrite = false, failRead = false;
   int routeWrites = 0, disconnects = 0;
   String savedPolicy = 'auto';
   String? liveMethod;
@@ -167,8 +167,7 @@ Future<void> _tap(WidgetTester tester, String key) async {
   await tester.pumpAndSettle();
 }
 
-Future<void> _open(WidgetTester tester) =>
-    _tap(tester, 'toggle-home-route-services');
+Future<void> _open(WidgetTester tester) => _tap(tester, 'routing-tab-apps');
 
 Future<void> _search(WidgetTester tester, String query) async {
   final input = find.byKey(const ValueKey('service-search'));
@@ -199,7 +198,7 @@ void main() {
   ) async {
     final bridge = _ServicesBridge();
     await _pump(tester, bridge);
-    expect(find.byKey(const ValueKey('service-search')), findsNothing);
+    expect(find.byKey(const ValueKey('service-search')), findsOneWidget);
     expect(find.byKey(const ValueKey('nav-services')), findsNothing);
     await _open(tester);
     expect(find.text('Закреплённые 3'), findsOneWidget);
@@ -246,10 +245,7 @@ void main() {
       await _tap(tester, 'service-route-youtube-vpn');
       expect(bridge.savedPolicy, 'vpn');
       await _tap(tester, 'home-routing-all-vpn');
-      expect(
-        find.byKey(const ValueKey('toggle-home-route-services')),
-        findsNothing,
-      );
+      expect(find.byKey(const ValueKey('routing-tab-apps')), findsNothing);
       expect(find.byKey(const ValueKey('service-search')), findsNothing);
       await _tap(tester, 'home-routing-selected');
       expect(find.byKey(const ValueKey('service-search')), findsOneWidget);
@@ -349,11 +345,11 @@ void main() {
     );
   });
 
-  testWidgets('disclosure preserves the planet position and size', (
+  testWidgets('switching catalog tabs preserves the planet position and size', (
     tester,
   ) async {
     await _pump(tester, _ServicesBridge());
-    final disclosure = find.byKey(const ValueKey('toggle-home-route-services'));
+    final disclosure = find.byKey(const ValueKey('routing-tab-domains'));
     await tester.ensureVisible(disclosure);
     await tester.pumpAndSettle();
     final planet = find.byKey(const ValueKey('atlas-planet'));
@@ -538,16 +534,13 @@ void main() {
         find.byKey(const ValueKey('home-routing-all-vpn')),
         findsOneWidget,
       );
-      expect(find.text('Подключиться'), findsOneWidget);
+      expect(find.byKey(const ValueKey('planet-connected')), findsOneWidget);
       await _open(tester);
       await _tap(tester, 'home-service-row-youtube');
       await _tap(tester, 'service-route-youtube-vpn');
       await _tap(tester, 'nav-settings');
       expect(find.byKey(const ValueKey('link-service-settings')), findsNothing);
-      expect(
-        find.byKey(const ValueKey('toggle-home-route-services')),
-        findsNothing,
-      );
+      expect(find.byKey(const ValueKey('routing-tab-apps')), findsNothing);
       await _tap(tester, 'link-advanced');
       expect(find.text('Режим маршрутизации'), findsNothing);
       expect(find.text('Скрывать RU-трафик от провайдера'), findsNothing);
@@ -555,10 +548,7 @@ void main() {
       await _tap(tester, 'nav-home');
       expect(find.byKey(const ValueKey('service-search')), findsOneWidget);
       await _tap(tester, 'home-routing-all-vpn');
-      expect(
-        find.byKey(const ValueKey('toggle-home-route-services')),
-        findsNothing,
-      );
+      expect(find.byKey(const ValueKey('routing-tab-apps')), findsNothing);
       expect(find.byKey(const ValueKey('service-search')), findsNothing);
       expect(bridge.policies, {'youtube': 'vpn'});
       await _tap(tester, 'home-routing-selected');

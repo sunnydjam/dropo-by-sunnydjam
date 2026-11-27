@@ -293,6 +293,7 @@ void main() {
     tester,
   ) async {
     final bridge = _CatalogBridge()..pendingWrite = Completer<void>();
+    await bridge.setConnected(true);
     await _pump(tester, DropoHomePage(bridge: bridge));
     await openHomeService(tester, 'discord');
     await _tap(tester, 'service-route-discord-vpn');
@@ -392,10 +393,7 @@ void main() {
           expect((await bridge.routingMode())['mode'], mode);
           expect(bridge.modeWrites, 0);
           expect(bridge.writes, 0);
-          expect(
-            find.byKey(const ValueKey('toggle-home-route-services')),
-            mode == 'blocked_only' ? findsOneWidget : findsNothing,
-          );
+          expect(find.byKey(const ValueKey('routing-tab-apps')), findsNothing);
           expect(tester.takeException(), isNull);
         },
       );

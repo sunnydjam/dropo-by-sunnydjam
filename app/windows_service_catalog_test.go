@@ -4,6 +4,7 @@ import (
 	"bytes"
 	traffic "dropo/trafficorchestrator"
 	"dropocore/aicatalog"
+	"dropocore/blockedlist"
 	"fmt"
 	"net"
 	"net/http"
@@ -197,7 +198,8 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 			cases := map[string]string{"vk.com": "direct", "www.ozon.ru": "direct", "online.sberbank.ru": "direct", "ordinary.example": "direct", "rutracker.org": "proxy", "api.anthropic.com": "proxy", "chatgpt.com": "proxy", "gemini.google.com": "proxy", "slack.com": "proxy", "youtube.com": "proxy", "discord.com": "proxy", "gateway.discord.gg": "proxy", "c-arn02-85d3b23f.discord.media": "proxy", "discord.media.ordinary.example": "direct", "twitch.tv": "direct", "gql.twitch.tv": "proxy", "facetime.apple.com": "direct"}
 			if mode == RoutingModeBlockedOnly {
 				cases["youtube.com"] = "direct"
-				delete(cases, "gql.twitch.tv") // The saved service policy takes precedence here.
+				cases["twitch.tv"] = "proxy"
+				cases["facetime.apple.com"] = "proxy"
 			}
 			for host, want := range cases {
 				if want == "proxy" {
@@ -280,7 +282,7 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 // PAC evaluation also covers Secure-DNS browsers that never consume the
 // native synthetic DNS response. Execute the exact PAC delivered to browsers.
 func TestSelectiveBundledPACAndScopedIPRoutes(t *testing.T) {
-	domains, err := readBlockedCatalogLines(filepath.Join("..", "dependencies", "filters", blockedDomainsFileName), true)
+	domains, err := blockedlist.ReadLines(filepath.Join("..", "dependencies", "filters", blockedDomainsFileName), true)
 	if err != nil {
 		t.Fatal(err)
 	}

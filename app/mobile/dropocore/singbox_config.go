@@ -19,7 +19,7 @@ import (
 
 const (
 	androidKnownDomainRegex = "^.+$"
-	androidConfigSchema     = "android-package-routing-v30-catalog-only"
+	androidConfigSchema     = "android-package-routing-v32-personal"
 )
 
 const androidSingBoxVersion = "1.14.4"
@@ -70,11 +70,12 @@ func BuildSingBoxConfig() string {
 	autoUpdateSub := current.Config.AutoUpdateSub
 	routePolicies := androidRoutePoliciesLocked()
 	customDomains := aicatalog.CustomDomains(current.CustomVPNServices)
+	personal := current.Personal
 	cachedConfig := current.CachedSingBoxConfig
 	cachedProxyCount := current.CachedProxyCount
 	cachedSubscription := current.CachedConfigSubscription
 	cachedSignature := current.CachedConfigSignature
-	signature := androidConfigSignature(subscription, enableLogging, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, customDomains...)
+	signature := androidConfigSignature(subscription, enableLogging, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, customDomains...) + personal.signature()
 	if selectedNodeID != "" {
 		signature += "|node=" + selectedNodeID
 	}
@@ -93,13 +94,13 @@ func BuildSingBoxConfig() string {
 	}
 	mu.Unlock()
 
-	config, proxies, err := buildAndroidSingBoxConfigForNodeContext(buildCtx, subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID, customDomains...)
+	config, proxies, err := buildAndroidSingBoxConfigForNodeContext(buildCtx, subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID, personal, customDomains...)
 
 	mu.Lock()
 	defer mu.Unlock()
 	liveSignature := androidConfigSignature(current.Subscription, current.Config.EnableLogging,
 		effectiveAndroidLogLevel(current.Config.EnableLogging, current.Config.LogLevel), current.Config.RoutingMode,
-		current.Config.HideRuTraffic, strings.TrimSpace(current.Config.RuProxyAddress), androidRoutePoliciesLocked(), aicatalog.CustomDomains(current.CustomVPNServices)...)
+		current.Config.HideRuTraffic, strings.TrimSpace(current.Config.RuProxyAddress), androidRoutePoliciesLocked(), aicatalog.CustomDomains(current.CustomVPNServices)...) + current.Personal.signature()
 	if selectedNodeID != "" {
 		liveSignature += "|node=" + selectedNodeID
 	}
@@ -170,10 +171,10 @@ func buildAndroidSingBoxConfig(subscription, logLevel, routingMode string, hideR
 }
 
 func buildAndroidSingBoxConfigForNode(subscription, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string, selectedNodeID string) (string, []proxyConfig, error) {
-	return buildAndroidSingBoxConfigForNodeContext(context.Background(), subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID)
+	return buildAndroidSingBoxConfigForNodeContext(context.Background(), subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID, androidPersonalRouting{})
 }
 
-func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string, selectedNodeID string, customDomains ...string) (string, []proxyConfig, error) {
+func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string, selectedNodeID string, personal androidPersonalRouting, customDomains ...string) (string, []proxyConfig, error) {
 	if subscription == "" {
 		return "", nil, fmt.Errorf("VPN subscription is empty")
 	}
@@ -209,11 +210,11 @@ func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, 
 		}
 		outbounds, ruOutbound = appendAndroidProxyOutbounds(outbounds, ruProxies, "ru-proxy")
 	}
-	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags, logLevel, routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies, customDomains, routePolicies)
+	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags, logLevel, routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies, personal, customDomains, routePolicies)
 	return config, filtered, err
 }
 
-func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string, customDomains []string, adaptivePolicies ...map[string]string) (string, error) {
+func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string, personal androidPersonalRouting, customDomains []string, adaptivePolicies ...map[string]string) (string, error) {
 	finalOutbound := "direct"
 	dns := buildAndroidDNSPolicy(len(proxyTags) > 0, routingMode, hideRuTraffic, effectiveRoutePolicies, customDomains...)
 	config := map[string]interface{}{
@@ -249,6 +250,7 @@ func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, lo
 	}
 
 	configureAndroidCatalog(config["route"].(map[string]any), routingMode)
+	personal.apply(config)
 	// Full VPN must never acquire an automatic direct route. Adaptive service
 	// strategies are available only in selective mode; new sessions still
 	// bootstrap their selectors on VPN until all targets pass fresh probes.
@@ -329,7 +331,7 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 	policies := androidEffectiveRoutePoliciesForMode(androidRoutePoliciesLocked(), true, routingMode)
 	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags,
 		effectiveAndroidLogLevel(current.Config.EnableLogging, current.Config.LogLevel), routingMode,
-		current.Config.HideRuTraffic, ruOutbound, policies, aicatalog.CustomDomains(current.CustomVPNServices), androidRoutePoliciesLocked())
+		current.Config.HideRuTraffic, ruOutbound, policies, current.Personal, aicatalog.CustomDomains(current.CustomVPNServices), androidRoutePoliciesLocked())
 	if err != nil {
 		return androidSourceError("Не удалось подготовить Android VPN.")
 	}

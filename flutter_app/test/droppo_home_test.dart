@@ -244,7 +244,8 @@ void main() {
           expect(tester.takeException(), isNull);
 
           final mode = _key('home-routing-selected');
-          final modeRect = tester.getRect(mode);
+          expect(mode, state == 'connected' ? findsOneWidget : findsNothing);
+          final modeRect = state == 'connected' ? tester.getRect(mode) : null;
           final captureName =
               'droppo-$platform-${viewport.width.toInt()}-$state-$scale';
           if (state == 'error') {
@@ -264,7 +265,11 @@ void main() {
             );
             expect(action.hitTestable(), findsOneWidget);
             expect(tester.getRect(action), actionRect);
-            expect(tester.getRect(mode), modeRect);
+            if (modeRect != null) {
+              expect(tester.getRect(mode), modeRect);
+            } else {
+              expect(mode, findsNothing);
+            }
             expect(tester.getRect(_key('atlas-planet-motion')), scene);
             expect(tester.takeException(), isNull);
           }
@@ -275,7 +280,11 @@ void main() {
           await tester.pump(const Duration(seconds: 3));
           await tester.pump();
           expect(tester.getRect(action), actionRect);
-          expect(tester.getRect(mode), modeRect);
+          if (modeRect != null) {
+            expect(tester.getRect(mode), modeRect);
+          } else {
+            expect(mode, findsNothing);
+          }
           expect(tester.takeException(), isNull);
 
           if (state == 'connected') {
@@ -292,7 +301,9 @@ void main() {
               'waiting',
             );
             expect(
-              (tester.getRect(action).center - scene.center).distance,
+              (tester.getRect(action).center -
+                      tester.getRect(_key('atlas-planet-motion')).center)
+                  .distance,
               lessThan(0.1),
             );
           }

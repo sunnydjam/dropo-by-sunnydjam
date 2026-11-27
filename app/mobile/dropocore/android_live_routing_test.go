@@ -85,6 +85,25 @@ func TestAndroidCustomVPNDomainSurvivesModeChangesAndIsRemovedLive(t *testing.T)
 			t.Fatalf("custom VPN rule presence must be %t", want)
 		}
 	}
+	apply("SetPersonalAddress", `["test.example",false]`)
+	apply("SetPersonalAddress", `["8.8.8.8",false]`)
+	apply("SetApplicationBinding", `["","com.example.player","user-app-vpn"]`)
+	for _, mode := range []string{"all_traffic", "blocked_only"} {
+		apply("SetRoutingMode", `["`+mode+`"]`)
+		for _, entry := range []string{"test.example", "dropo-user-ips", "8.8.8.8/32", "com.example.player"} {
+			if !strings.Contains(active, entry) {
+				t.Fatal("personal route missing", entry, mode)
+			}
+		}
+	}
+	apply("SetApplicationBinding", `["com.example.player","",""]`)
+	apply("SetPersonalAddress", `["test.example",true]`)
+	apply("SetPersonalAddress", `["8.8.8.8",true]`)
+	for _, entry := range []string{"test.example", "dropo-user-ips", "com.example.player"} {
+		if strings.Contains(active, entry) {
+			t.Fatal("personal route retained", entry)
+		}
+	}
 	apply("SetCustomVPNService", `["","Custom VK","vk.com",false]`)
 	assertRoute(true)
 	apply("SetRoutingMode", `["blocked_only"]`)

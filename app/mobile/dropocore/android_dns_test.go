@@ -140,7 +140,7 @@ func TestAndroidHostnameEndpointsBootstrapOutsideTheirOwnTunnel(t *testing.T) {
 
 func TestAndroidDNSWithoutProxyHasNoDanglingDetour(t *testing.T) {
 	outbounds, tags := buildAndroidOutbounds(nil)
-	text, err := marshalAndroidSingBoxConfig(outbounds, tags, "error", "blocked_only", false, "direct", nil, nil)
+	text, err := marshalAndroidSingBoxConfig(outbounds, tags, "error", "blocked_only", false, "direct", nil, androidPersonalRouting{}, nil)
 	config := decodeAndroidDNSFixture(t, text, err)
 	assertAndroidSystemDNS(t, config)
 	for _, tag := range []string{"dns-remote", "dns-bootstrap"} {

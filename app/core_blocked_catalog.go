@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"crypto/rand"
+	"dropocore/blockedlist"
 	"encoding/binary"
 	"fmt"
 	"net/netip"
-	"os"
 	"path/filepath"
-	"slices"
-	"sort"
 	"strings"
 
 	traffic "dropo/trafficorchestrator"
@@ -20,25 +17,17 @@ const (
 	blockedDomainsFileName  = "domains_all.lst"
 	blockedIPsFileName      = "ipsum.lst"
 	commonBlockedProbeCount = 4
-	maxBlockedCatalogItems  = 250_000
-	// Broad provider/CDN ranges are weak evidence that every address inside the
-	// range is blocked. Route at most 16-address prefixes automatically; named
-	// services keep their separately reviewed CIDRs.
-	maxBlockedCatalogHostBits = 4
 )
 
-type blockedCatalog struct {
-	Domains []string
-	IPCIDRs []string
-}
+type blockedCatalog = blockedlist.Catalog
 
 func loadBlockedCatalog(runtimeBasePath string) (blockedCatalog, error) {
 	filtersPath := filepath.Join(runtimeBasePath, "bin", FiltersFolder)
-	domains, err := readBlockedCatalogLines(filepath.Join(filtersPath, blockedDomainsFileName), true)
+	domains, err := blockedlist.ReadLines(filepath.Join(filtersPath, blockedDomainsFileName), true)
 	if err != nil {
 		return blockedCatalog{}, err
 	}
-	cidrs, err := readBlockedCatalogLines(filepath.Join(filtersPath, blockedIPsFileName), false)
+	cidrs, err := blockedlist.ReadLines(filepath.Join(filtersPath, blockedIPsFileName), false)
 	if err != nil {
 		return blockedCatalog{}, err
 	}
@@ -77,61 +66,15 @@ func (a *App) loadBlockedCatalogCached() (blockedCatalog, error) {
 // Only ten entries cross the desktop bridge. Files are immutable within a verified runtime.
 func (a *App) SearchBlockedCatalog(query string) map[string]any {
 	a.waitForInit()
-	query = strings.ToLower(strings.TrimSpace(query))
-	if len(query) > 253 {
-		return map[string]any{"success": false, "error": "Запрос слишком длинный"}
-	}
 	base := a.runtimeBasePath()
-	a.applicationIndexMu.Lock()
-	defer a.applicationIndexMu.Unlock()
-	if base == "" {
-		return map[string]any{"success": false, "error": "Каталог ещё не готов"}
+	if base != "" {
+		base = filepath.Join(base, "bin", FiltersFolder)
 	}
-	if a.applicationIndexBase != base {
-		dir := filepath.Join(base, "bin", FiltersFolder)
-		domains, err := readBlockedCatalogLines(filepath.Join(dir, blockedDomainsFileName), true)
-		if err != nil {
-			return map[string]any{"success": false, "error": err.Error()}
-		}
-		cidrs, err := readBlockedCatalogLines(filepath.Join(dir, blockedIPsFileName), false)
-		if err != nil {
-			return map[string]any{"success": false, "error": err.Error()}
-		}
-		a.applicationIndex = blockedCatalog{Domains: domains, IPCIDRs: cidrs}
-		a.applicationIndexBase = base
+	var personal blockedlist.Personal
+	if a.storage != nil {
+		personal = a.storage.GetAppSettings().PersonalAddresses
 	}
-	return blockedCatalogPage(a.applicationIndex, query)
-}
-
-func blockedCatalogPage(catalog blockedCatalog, query string) map[string]any {
-	total := len(catalog.Domains) + len(catalog.IPCIDRs)
-	items := make([]string, 0, 10)
-	if query != "" {
-		for _, group := range [][]string{catalog.Domains, catalog.IPCIDRs} {
-			if _, exact := slices.BinarySearch(group, query); exact {
-				items = append(items, query)
-				break
-			}
-		}
-	}
-	queryIP, _ := netip.ParseAddr(query)
-	for groupIndex, group := range [][]string{catalog.IPCIDRs, catalog.Domains} {
-		for i := len(group) - 1; i >= 0 && len(items) < 10; i-- {
-			value := group[i]
-			if value == query {
-				continue
-			}
-			match := strings.Contains(value, query)
-			if groupIndex == 0 && queryIP.IsValid() {
-				prefix, err := netip.ParsePrefix(value)
-				match = err == nil && prefix.Contains(queryIP)
-			}
-			if match {
-				items = append(items, value)
-			}
-		}
-	}
-	return map[string]any{"success": true, "total": total, "items": items}
+	return a.applicationIndex.Search(base, query, personal)
 }
 
 func cloneBlockedCatalog(catalog blockedCatalog) blockedCatalog {
@@ -157,102 +100,6 @@ func excludeDirectDomains(domains []string) []string {
 		}
 	}
 	return result
-}
-
-func readBlockedCatalogLines(path string, domains bool) ([]string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open bundled blocked catalog %s: %w", filepath.Base(path), err)
-	}
-	defer file.Close()
-
-	seen := make(map[string]struct{})
-	items := make([]string, 0, 32_768)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 4096), 64*1024)
-	for scanner.Scan() {
-		value := strings.ToLower(strings.TrimSpace(scanner.Text()))
-		if value == "" || strings.HasPrefix(value, "#") {
-			continue
-		}
-		if domains {
-			if !validCatalogDomain(value) {
-				return nil, fmt.Errorf("invalid domain %q in %s", value, filepath.Base(path))
-			}
-		} else {
-			prefix, parseErr := netip.ParsePrefix(value)
-			if parseErr != nil {
-				return nil, fmt.Errorf("invalid CIDR %q in %s: %w", value, filepath.Base(path), parseErr)
-			}
-			prefix = prefix.Masked()
-			if !publicCatalogPrefix(prefix) || !specificBlockedCatalogPrefix(prefix) {
-				continue
-			}
-			value = prefix.String()
-		}
-		if _, duplicate := seen[value]; duplicate {
-			continue
-		}
-		if len(items) >= maxBlockedCatalogItems {
-			return nil, fmt.Errorf("%s exceeds the %d-entry safety limit", filepath.Base(path), maxBlockedCatalogItems)
-		}
-		seen[value] = struct{}{}
-		items = append(items, value)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read bundled blocked catalog %s: %w", filepath.Base(path), err)
-	}
-	if len(items) == 0 {
-		return nil, fmt.Errorf("bundled blocked catalog %s is empty", filepath.Base(path))
-	}
-	sort.Strings(items)
-	return items, nil
-}
-
-func specificBlockedCatalogPrefix(prefix netip.Prefix) bool {
-	if !prefix.IsValid() {
-		return false
-	}
-	return prefix.Addr().BitLen()-prefix.Bits() <= maxBlockedCatalogHostBits
-}
-
-func validCatalogDomain(value string) bool {
-	if len(value) > 253 || strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") || !strings.Contains(value, ".") {
-		return false
-	}
-	for _, label := range strings.Split(value, ".") {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, character := range label {
-			if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' || character == '_' {
-				continue
-			}
-			return false
-		}
-	}
-	return true
-}
-
-func publicCatalogPrefix(prefix netip.Prefix) bool {
-	address := prefix.Addr()
-	if !address.IsValid() || address.IsUnspecified() || address.IsLoopback() || address.IsMulticast() || address.IsPrivate() || address.IsLinkLocalUnicast() {
-		return false
-	}
-	reserved := []netip.Prefix{
-		netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
-		netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("169.254.0.0/16"),
-		netip.MustParsePrefix("224.0.0.0/4"), netip.MustParsePrefix("240.0.0.0/4"),
-		netip.MustParsePrefix("::/128"), netip.MustParsePrefix("::1/128"),
-		netip.MustParsePrefix("fc00::/7"), netip.MustParsePrefix("fe80::/10"),
-		netip.MustParsePrefix("ff00::/8"),
-	}
-	for _, blocked := range reserved {
-		if blocked.Contains(address) || prefix.Contains(blocked.Addr()) {
-			return false
-		}
-	}
-	return true
 }
 
 func excludeNamedServiceDomains(domains []string) []string {

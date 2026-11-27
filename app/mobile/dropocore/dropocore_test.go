@@ -38,6 +38,48 @@ func TestAndroidCoreLifecycle(t *testing.T) {
 	}
 }
 
+func TestAndroidBlockedSearchBeforeVPNStart(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := androidRuleDirectory.Load().(string)
+	androidRuleDirectory.Store(dir)
+	t.Cleanup(func() { androidRuleDirectory.Store(prev) })
+	search := func(query string) struct {
+		Success bool
+		Total   int
+		Items   []string
+	} {
+		t.Helper()
+		args, _ := json.Marshal([]string{query})
+		var result struct {
+			Success bool
+			Total   int
+			Items   []string
+		}
+		if err := json.Unmarshal([]byte(Call("SearchBlockedCatalog", string(args))), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	if search("").Success {
+		t.Fatal("catalog reported ready before its files existed")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "domains_all.lst"), []byte("a.test\nb.test\nc.test\nd.test\ne.test\nf.test\ng.test\nh.test\ni.test\nj.test\nk.test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ipsum.lst"), []byte("8.8.8.8/32\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	page := search("")
+	if !page.Success || page.Total != 12 || len(page.Items) != 10 {
+		t.Fatalf("initial page: %+v", page)
+	}
+	for query, want := range map[string]string{"A.TEST": "a.test", "8.8.8.8": "8.8.8.8/32"} {
+		if page := search(query); !page.Success || len(page.Items) != 1 || page.Items[0] != want {
+			t.Fatalf("%s: %+v", query, page)
+		}
+	}
+}
+
 func TestAndroidCoreSubscriptionCall(t *testing.T) {
 	mu.Lock()
 	current = defaultState()
@@ -509,17 +551,17 @@ func TestAndroidBlockedOnlyRoutesOnlyBlockedServicesThroughVPN(t *testing.T) {
 	if final := route["final"]; final != "direct" {
 		t.Fatalf("route final = %v, want direct", final)
 	}
-	if !androidContainsDomainRoute(config, "instagram.com", "direct") {
-		t.Fatal("instagram.com must route directly by default")
+	if !androidContainsDomainRoute(config, "instagram.com", "proxy") {
+		t.Fatal("instagram.com must use VPN by default")
 	}
 	if !androidContainsPackageRoute(config, "com.discord", "proxy") {
 		t.Fatal("Discord package traffic, including IP-only voice UDP, must route through proxy by default")
 	}
-	if !androidContainsPackageRoute(config, "org.telegram.messenger", "direct") {
-		t.Fatal("Telegram package traffic must go directly by default")
+	if !androidContainsPackageRoute(config, "org.telegram.messenger", "proxy") {
+		t.Fatal("Telegram package traffic must use VPN by default")
 	}
-	if !androidContainsDNSServer(config, "instagram.com", "dns-direct") {
-		t.Fatal("instagram.com must resolve through direct DNS by default")
+	if !androidContainsDNSServer(config, "instagram.com", "dns-remote") {
+		t.Fatal("instagram.com must resolve through VPN DNS by default")
 	}
 	if !androidContainsDNSServer(config, "yandex.ru", "dns-direct") {
 		t.Fatal("yandex.ru must resolve through direct DNS in blocked-only mode")
@@ -1079,10 +1121,7 @@ func TestAndroidRoutesExposeAutoDirectAndVPNMethods(t *testing.T) {
 	}
 	for _, raw := range services {
 		service := raw.(map[string]interface{})
-		selected, effective := androidRoutePolicyDirect, androidRoutePolicyDirect
-		if service["vpnOnly"] == true || service["tag"] == "youtube" || service["tag"] == "discord" {
-			selected, effective = androidRoutePolicyVPN, androidRoutePolicyVPN
-		}
+		selected, effective := androidRoutePolicyVPN, androidRoutePolicyVPN
 		if service["selectedMethod"] != selected || service["effectiveMethodLabel"] != androidRoutePolicyLabel(effective) {
 			t.Fatalf("default policy for %v = %v/%v, want %s/%s", service["tag"], service["selectedMethod"], service["effectiveMethodLabel"], selected, effective)
 		}

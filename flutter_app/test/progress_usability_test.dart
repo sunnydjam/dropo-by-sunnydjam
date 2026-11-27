@@ -197,7 +197,13 @@ void main() {
       });
       await tester.pump(const Duration(milliseconds: 300));
       final visibleWarning = _expectWarningActuallyVisible(tester);
-      expect(find.textContaining('Discord'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('route-probe-details')),
+          matching: find.textContaining('Discord'),
+        ),
+        findsOneWidget,
+      );
       expect(find.textContaining('способ 1/3'), findsOneWidget);
       expect(find.textContaining('попытка 2/4'), findsOneWidget);
       await tester.tapAt(visibleWarning);

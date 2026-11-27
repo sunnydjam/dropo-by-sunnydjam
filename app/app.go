@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"dropocore/blockedlist"
 	"fmt"
 	"os"
 	"os/exec"
@@ -90,9 +91,7 @@ type App struct {
 	transparentReselectionDone  bool
 	serviceStrategyCacheMu      sync.Mutex
 	serviceEngineComposeMu      sync.Mutex
-	applicationIndexMu          sync.Mutex
-	applicationIndexBase        string
-	applicationIndex            blockedCatalog
+	applicationIndex            blockedlist.Index
 	blockedCatalogMu            sync.Mutex
 	blockedCatalogPath          string
 	blockedCatalogValue         blockedCatalog

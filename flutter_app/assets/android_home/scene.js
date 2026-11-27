@@ -55,7 +55,7 @@
     $('.dp-source-row').setAttribute('aria-label', text('Выбрать источник VPN', 'Choose a VPN source'));
     $('.dp-source-row > span:nth-child(2)').textContent = text('Источник', 'Source');
     $('.dp-time-row > span:nth-child(2)').textContent = text('Время сессии', 'Session time');
-    $('.dp-services').textContent = text('Настроить сервисы', 'Configure services');
+    $('.dp-services').textContent = text('Настроить маршруты', 'Configure routes');
     $('.dp-disconnect span').textContent = text('Отключить', 'Disconnect');
     service.textContent = text('Ручное', 'Manual');
     all.textContent = text('Всё через VPN', 'All traffic via VPN');

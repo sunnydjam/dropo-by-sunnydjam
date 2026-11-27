@@ -200,8 +200,8 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 	if containsDomainSuffixRouteRule(config, "telegram.org", ServiceBypassGroupTag("telegram")) {
 		t.Fatal("generated config without subscription must not route telegram.org through a fake Telegram bypass group")
 	}
-	if containsDNSDomainSuffixServer(config, "telegram.org", "dns-remote") {
-		t.Fatal("generated config without subscription must not force telegram.org through dns-remote")
+	if !containsDNSDomainSuffixServer(config, "telegram.org", "dns-remote") {
+		t.Fatal("a VPN-policy Telegram DNS request must not resolve directly")
 	}
 	for _, domain := range []string{"youtubei.googleapis.com", "googlevideo.com", "ytstatic.com"} {
 		expectedRoute := NoRouteOutboundTag
@@ -220,11 +220,11 @@ func TestBuildConfigWithoutSubscriptionUsesFreeAccess(t *testing.T) {
 		if tag == "" {
 			t.Fatalf("test fixture has no expected service for %s", domain)
 		}
-		if !containsDomainSuffixRouteRule(config, domain, "direct") {
-			t.Fatalf("generated config does not route %s directly by default", domain)
+		if !containsDomainSuffixRouteRule(config, domain, NoRouteOutboundTag) {
+			t.Fatalf("generated config does not block %s without its default VPN", domain)
 		}
-		if !containsDNSDomainSuffixServer(config, domain, "dns-direct") {
-			t.Fatalf("generated config does not resolve %s through dns-direct", domain)
+		if !containsDNSDomainSuffixServer(config, domain, "dns-remote") {
+			t.Fatalf("generated config does not resolve %s through dns-remote", domain)
 		}
 	}
 	if !containsScopedIPProcessRoute(config, "66.22.192.0/18", "Discord.exe", NoRouteOutboundTag) {
