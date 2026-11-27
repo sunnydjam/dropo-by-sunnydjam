@@ -223,15 +223,28 @@ func (lease *windowsSelectiveProxyLease) Restore() error {
 	if err != nil {
 		restoreErr = fmt.Errorf("open Windows proxy settings for restore: %w", err)
 	} else {
-		restoreErr = errors.Join(
-			restoreRegistryStringState(key, "AutoConfigURL", autoConfig),
-			restoreRegistryDWORDState(key, "ProxyEnable", proxyEnable),
-			restoreRegistryDWORDState(key, "AutoDetect", autoDetect),
-		)
+		if readRegistryStringState(key, "AutoConfigURL").value == lease.pacURL {
+			current, readErr := readWindowsConnectionProxyState()
+			restoreErr = readErr
+			if readErr == nil && current.AutoConfigURL == lease.pacURL {
+				// A different client can take over the proxy flags while retaining our URL.
+				if current == selectivePACConnectionState(lease.pacURL) {
+					restoreErr = errors.Join(
+						restoreRegistryStringState(key, "AutoConfigURL", autoConfig),
+						restoreRegistryDWORDState(key, "ProxyEnable", proxyEnable),
+						restoreRegistryDWORDState(key, "AutoDetect", autoDetect),
+						applyWindowsConnectionProxyState(connection),
+					)
+				} else {
+					current.AutoConfigURL = ""
+					current.Flags = current.Flags&^proxyTypeAutoProxyURL | proxyTypeDirect
+					restoreErr = applyWindowsConnectionProxyState(current)
+				}
+				notifyWindowsProxySettingsChanged()
+			}
+		}
 		_ = key.Close()
 	}
-	restoreErr = errors.Join(restoreErr, applyWindowsConnectionProxyState(connection))
-	notifyWindowsProxySettingsChanged()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if server != nil {
@@ -290,13 +303,22 @@ func (noopSelectiveProxyLease) PACURL() string                   { return "" }
 func (noopSelectiveProxyLease) DomainCount() int                 { return 0 }
 func (noopSelectiveProxyLease) Update(traffic.TrafficPlan) error { return nil }
 
-func loopbackPACPort(value string) int {
+func dropoPACPort(value string) int {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0
 	}
 	request, err := http.NewRequest(http.MethodGet, value, nil)
 	if err != nil || request.URL == nil {
+		return 0
+	}
+	u := request.URL
+	token, ok := strings.CutPrefix(u.Path, "/dropo-selective-")
+	token, suffix := strings.CutSuffix(token, ".pac")
+	if !ok || !suffix || len(token) != 32 || u.User != nil || u.Scheme != "http" {
+		return 0
+	}
+	if _, err := hex.DecodeString(token); err != nil {
 		return 0
 	}
 	host, portText, err := net.SplitHostPort(request.URL.Host)

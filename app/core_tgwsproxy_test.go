@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func telegramTestSubscriptionConfig() map[string]interface{} {
@@ -263,7 +264,23 @@ func TestPrepareQuitShowsTelegramNoticeWhenInjectedSidecarRanThisSession(t *test
 	}
 	app.tgProxyStartedSession.Store(true)
 
-	status := app.PrepareQuit()
+	// Both callers must wait for the same cleanup, even after shutdown is requested.
+	app.startupDone = make(chan struct{})
+	results := make(chan TelegramProxyStatusInfo, 2)
+	for i := 0; i < 2; i++ {
+		go func() { results <- app.PrepareQuit() }()
+	}
+	select {
+	case <-results:
+		close(app.startupDone)
+		t.Fatal("quit returned before startup released its runtime resources")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(app.startupDone)
+	status := <-results
+	if again := <-results; again != status {
+		t.Fatalf("concurrent quit returned a different result: %+v / %+v", again, status)
+	}
 
 	if !status.Injected {
 		t.Fatal("expected Telegram proxy injected flag to be reported")

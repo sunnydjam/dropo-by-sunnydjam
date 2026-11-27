@@ -76,7 +76,7 @@ func (a *App) startWindowsProtectedRouter() (startErr error) {
 			router.failure = startErr.Error()
 		}
 	}()
-	if router.process != nil {
+	if a.isShuttingDown() || router.process != nil {
 		return nil
 	}
 	if !bundledRuntimeEnabled() || !a.DependenciesStatus().Ready {

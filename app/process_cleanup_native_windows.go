@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -12,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -20,7 +18,6 @@ import (
 )
 
 const internetSettingsRegistryPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-const internetConnectionsRegistryPath = internetSettingsRegistryPath + `\Connections`
 
 var internetSetOption = windows.NewLazySystemDLL("wininet.dll").NewProc("InternetSetOptionW")
 var sendMessageTimeout = windows.NewLazySystemDLL("user32.dll").NewProc("SendMessageTimeoutW")
@@ -32,49 +29,42 @@ const (
 	proxyRefreshWaitMS = uintptr(2000)
 )
 
-func resetWindowsSystemProxyNativeForPorts(ports []int) (bool, string, error) {
-	if len(ports) == 0 {
-		return false, "", nil
-	}
+// A port number, an unreachable listener or WPAD alone cannot identify Dropo.
+func resetStaleDropoPAC() (bool, string, error) {
 	key, err := registry.OpenKey(registry.CURRENT_USER, internetSettingsRegistryPath, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		return false, "", err
 	}
 	defer key.Close()
-
-	proxy, _, _ := key.GetStringValue("ProxyServer")
-	autoConfigURL, _, _ := key.GetStringValue("AutoConfigURL")
-	proxyPort := loopbackProxyPort(proxy)
-	pacPort := loopbackPACPort(autoConfigURL)
-	ownedPort := cleanupContainsInt(ports, proxyPort)
-	staleLoopback := proxyPort > 0 && !loopbackPortListening(proxyPort)
-	staleLoopbackPAC := pacPort > 0 && !loopbackPortListening(pacPort)
-	connectionNeedsReset := connectionSettingsNeedReset(ports, strings.TrimSpace(proxy) == "")
-	if !ownedPort && !staleLoopback && !staleLoopbackPAC && !connectionNeedsReset {
-		return false, proxy, nil
+	pac, _, err := key.GetStringValue("AutoConfigURL")
+	if errors.Is(err, registry.ErrNotExist) {
+		return false, "", nil
 	}
-
-	if err := key.SetDWordValue("ProxyEnable", 0); err != nil {
-		return false, proxy, err
+	if err != nil {
+		return false, "", err
 	}
-	_ = key.SetDWordValue("AutoDetect", 0)
-	_ = key.DeleteValue("ProxyServer")
-	_ = key.DeleteValue("AutoConfigURL")
-	connectionErr := applyWindowsConnectionProxyState(windowsConnectionProxyState{Flags: proxyTypeDirect})
-	if connectionErr != nil {
-		// Preserve the old byte-level cleanup only as a last-resort fallback for
-		// damaged WinINet profiles. Normal runtime changes use the documented API.
-		resetConnectionSettingsFlags()
+	port := dropoPACPort(pac)
+	if port == 0 || loopbackPortListening(port) {
+		return false, "", nil
 	}
-
-	// INTERNET_OPTION_SETTINGS_CHANGED and INTERNET_OPTION_REFRESH notify
-	// WinINet consumers directly. WM_SETTINGCHANGE also reaches long-running
-	// Chromium/Steam processes which can otherwise retain a removed proxy until
-	// their next restart. No PowerShell Add-Type or reg.exe is needed.
-	_, _, _ = internetSetOption.Call(0, 39, 0, 0)
-	_, _, _ = internetSetOption.Call(0, 37, 0, 0)
-	broadcastWindowsProxySettingsChanged()
-	return true, proxy, connectionErr
+	state, err := readWindowsConnectionProxyState()
+	if err != nil {
+		return false, pac, err
+	}
+	if state.AutoConfigURL == pac {
+		state.AutoConfigURL = ""
+		state.Flags = state.Flags&^proxyTypeAutoProxyURL | proxyTypeDirect
+		if err := applyWindowsConnectionProxyState(state); err != nil {
+			return false, pac, err
+		}
+	}
+	if readRegistryStringState(key, "AutoConfigURL").value == pac {
+		if err := key.DeleteValue("AutoConfigURL"); err != nil {
+			return false, pac, err
+		}
+	}
+	notifyWindowsProxySettingsChanged()
+	return true, pac, nil
 }
 
 func broadcastWindowsProxySettingsChanged() {
@@ -94,38 +84,6 @@ func broadcastWindowsProxySettingsChanged() {
 	)
 }
 
-func cleanupContainsInt(values []int, target int) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
-
-func loopbackProxyPort(proxy string) int {
-	for _, token := range strings.FieldsFunc(proxy, func(r rune) bool {
-		return r == ';' || r == ',' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
-	}) {
-		if _, value, ok := strings.Cut(token, "="); ok {
-			token = value
-		}
-		token = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(token), "http://"), "https://")
-		host, portText, err := net.SplitHostPort(token)
-		if err != nil {
-			continue
-		}
-		if !strings.EqualFold(host, "localhost") && host != "127.0.0.1" && host != "::1" {
-			continue
-		}
-		port, err := strconv.Atoi(portText)
-		if err == nil && port > 0 && port <= 65535 {
-			return port
-		}
-	}
-	return 0
-}
-
 func loopbackPortListening(port int) bool {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
 	if err != nil {
@@ -133,55 +91,6 @@ func loopbackPortListening(port int) bool {
 	}
 	_ = conn.Close()
 	return true
-}
-
-func connectionSettingsNeedReset(ports []int, proxyEmpty bool) bool {
-	key, err := registry.OpenKey(registry.CURRENT_USER, internetConnectionsRegistryPath, registry.QUERY_VALUE)
-	if err != nil {
-		return false
-	}
-	defer key.Close()
-	for _, name := range []string{"DefaultConnectionSettings", "SavedLegacySettings"} {
-		value, _, err := key.GetBinaryValue(name)
-		if err != nil || len(value) <= 8 {
-			continue
-		}
-		if connectionBlobReferencesPorts(value, ports) || (proxyEmpty && value[8]&(2|4|8) != 0) {
-			return true
-		}
-	}
-	return false
-}
-
-func connectionBlobReferencesPorts(value []byte, ports []int) bool {
-	words := make([]uint16, 0, len(value)/2)
-	for index := 0; index+1 < len(value); index += 2 {
-		words = append(words, binary.LittleEndian.Uint16(value[index:index+2]))
-	}
-	text := strings.ToLower(string(utf16.Decode(words)))
-	for _, port := range ports {
-		needle := ":" + strconv.Itoa(port)
-		if strings.Contains(text, "127.0.0.1"+needle) || strings.Contains(text, "localhost"+needle) {
-			return true
-		}
-	}
-	return false
-}
-
-func resetConnectionSettingsFlags() {
-	key, err := registry.OpenKey(registry.CURRENT_USER, internetConnectionsRegistryPath, registry.QUERY_VALUE|registry.SET_VALUE)
-	if err != nil {
-		return
-	}
-	defer key.Close()
-	for _, name := range []string{"DefaultConnectionSettings", "SavedLegacySettings"} {
-		value, _, err := key.GetBinaryValue(name)
-		if err != nil || len(value) <= 8 {
-			continue
-		}
-		value[8] = 1
-		_ = key.SetBinaryValue(name, value)
-	}
 }
 
 func killWindowsDropoManagedSidecarsNative(paths []string, roots []string, excludedPID int) ([]int, error) {
@@ -221,7 +130,7 @@ func killWindowsDropoManagedSidecarsNative(paths []string, roots []string, exclu
 	currentPID := uint32(os.Getpid())
 	for {
 		if entry.ProcessID != 0 && int(entry.ProcessID) != excludedPID && entry.ProcessID != currentPID && ownedNames[strings.ToLower(windows.UTF16ToString(entry.ExeFile[:]))] {
-			process, openErr := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE, false, entry.ProcessID)
+			process, openErr := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE, false, entry.ProcessID)
 			if openErr == nil {
 				imagePath, pathErr := processImagePath(process)
 				owned := pathErr == nil && processPathOwned(imagePath, exact, normalizedRoots)

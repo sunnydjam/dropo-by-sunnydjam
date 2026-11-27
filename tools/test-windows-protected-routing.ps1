@@ -101,6 +101,9 @@ try {
         Where-Object State -eq 'Alive').Count -gt 0
     $referenceIP = Resolve-DnsName -Name 'example.com' -Type A -DnsOnly -ErrorAction SilentlyContinue |
         Where-Object Type -eq 'A' | Select-Object -First 1 -ExpandProperty IPAddress
+    $beforeRoute = Get-RouteIndex
+    $proxyKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+    $beforePAC = (Get-ItemProperty -LiteralPath $proxyKey).AutoConfigURL
     $core = Start-Process -FilePath $exe.FullName -ArgumentList '--listen','127.0.0.1:32890','--no-tray' -WindowStyle Hidden -PassThru
     $deadline = (Get-Date).AddSeconds(25)
     while (!(Test-Path -LiteralPath $tokenPath) -and (Get-Date) -lt $deadline) {
@@ -162,8 +165,11 @@ try {
                     $stream = $client.GetStream()
                     $stream.ReadTimeout = 2500
                     $reader = [IO.StreamReader]::new($stream)
+                    $requestLine = $reader.ReadLine()
                     while ($reader.ReadLine()) {}
-                    $body = 'dropo-vpn-only-fixture'
+                    $body = if ($requestLine -match '^GET /external-vpn\.pac ') {
+                        'function FindProxyForURL(url,host){return "DIRECT";}'
+                    } else { 'dropo-vpn-only-fixture' }
                     $response = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nConnection: close`r`nContent-Length: $($body.Length)`r`n`r`n$body")
                     $stream.Write($response, 0, $response.Length)
                 } catch {} finally {
@@ -239,6 +245,23 @@ try {
         $result.mockObservedProtectedFlow = [bool](Select-String -LiteralPath $fixtureLog -Pattern 'inbound connection to claude.ai:80' -SimpleMatch -Quiet)
         $result.mockFatal = @(Select-String -LiteralPath $fixtureLog -Pattern 'FATAL' | Select-Object -Last 2 -ExpandProperty Line)
     }
+    Require-Success (Invoke-Core 'SetRoutingMode' @('blocked_only')) 'Set manual mode for exit'
+    Require-Success (Invoke-Bridge '/api/connect' @{}) 'Connect before full exit'
+    $null = Wait-Status { param($s) $s.connected -and $s.protectedRoutingReady }
+    $owned = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($core.Id)" |
+        Where-Object Name -in 'sing-box.exe','xray.exe','tg-ws-proxy.exe','ciadpi.exe')
+    if ($owned.Count -lt 2) { throw 'Expected independent router and connected transport before quit.' }
+    $foreignPAC = "http://127.0.0.1:$httpPort/external-vpn.pac"
+    Set-ItemProperty -LiteralPath $proxyKey -Name AutoConfigURL -Value $foreignPAC
+    $null = Invoke-Bridge '/api/quit' @{}
+    $checks.quitStopsChildrenBeforeFinalize = @($owned | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }).Count -eq 0
+    $null = Invoke-Bridge '/api/quit/finalize' @{}
+    $checks.quitStopsCore = $core.WaitForExit(10000)
+    $checks.quitRestoresRoute = (Get-RouteIndex) -eq $beforeRoute
+    $checks.quitPreservesForeignPAC = (Get-ItemProperty -LiteralPath $proxyKey).AutoConfigURL -ceq $foreignPAC -and
+        ((& curl.exe -fsS --noproxy '*' --max-time 3 $foreignPAC) -match 'FindProxyForURL')
+    $checks.quitPreservesForeignProcess = !$fixtureVPN.HasExited
+    $checks.quitOrdinaryHTTPS = Test-OrdinaryHTTPS
     $result.success = $checks.crashRetainsIndependentRoute -and @($checks.Values | Where-Object { $_ -ne $true }).Count -eq 0
 } catch {
     $result.error = $_.Exception.Message
@@ -248,6 +271,10 @@ try {
             Where-Object { $_ -match '\[ProtectedRouting\]|\[Start\]|FATAL|bind:' } | Select-Object -Last 8)
     } catch {}
 } finally {
+    if ($foreignPAC -and (Get-ItemProperty -LiteralPath $proxyKey).AutoConfigURL -ceq $foreignPAC) {
+        if ($null -eq $beforePAC) { Remove-ItemProperty -LiteralPath $proxyKey -Name AutoConfigURL }
+        else { Set-ItemProperty -LiteralPath $proxyKey -Name AutoConfigURL -Value $beforePAC }
+    }
     if ($fixtureVPN -and !$fixtureVPN.HasExited) {
         Stop-Process -Id $fixtureVPN.Id -Force
         $null = $fixtureVPN.WaitForExit(5000)

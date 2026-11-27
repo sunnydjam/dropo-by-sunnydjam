@@ -15,6 +15,9 @@ import (
 
 // App is the main application struct that holds all state and dependencies.
 type App struct {
+	quitOnce               sync.Once
+	quitStatus             TelegramProxyStatusInfo
+	startupDone            chan struct{}
 	ctx                    context.Context
 	cmd                    *exec.Cmd
 	cmdDone                chan error
@@ -146,10 +149,19 @@ func NewApp() *App {
 
 // startup is called when the app starts.
 func (a *App) startup(ctx context.Context) {
+	a.mu.Lock()
+	if a.isShuttingDown() {
+		a.mu.Unlock()
+		return
+	}
 	a.ctx = ctx
+	done := make(chan struct{})
+	a.startupDone = done
+	a.mu.Unlock()
 
 	// Perform heavy initialization in goroutine to not block UI
 	go func() {
+		defer close(done)
 		startedAt := time.Now()
 		busyID := a.beginBusy("Инициализация приложения...")
 		defer a.endBusy(busyID)
@@ -359,43 +371,8 @@ func (a *App) restoreVPNOnStartup() {
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
-	a.requestShutdown()
-	// Stop sing-box
-	a.Stop()
-	a.protectedRouter.stop()
-
-	// Stop WireGuard health check and all tunnels
-	if a.nativeWG != nil {
-		a.writeLog("Stopping WireGuard health check...")
-		a.nativeWG.StopHealthCheck()
-		a.writeLog("Stopping all Native WireGuard tunnels...")
-		a.nativeWG.StopAllTunnels()
-	}
-
-	// Stop free access (ByeDPI) process
-	if a.byeDPI != nil {
-		a.byeDPI.Stop()
-	}
-	if a.trafficEngine != nil {
-		a.trafficEngine.Stop()
-	}
-	if a.tgwsproxy != nil {
-		a.tgwsproxy.Stop()
-	}
-	if a.xrayBridge != nil {
-		a.xrayBridge.Stop()
-	}
-	a.cleanupDropoRuntimeResidue("shutdown")
-	closeManagedProcessJob(a.writeLog)
-
+	a.PrepareQuit()
 	a.closeLogFile()
-
-	// Save traffic stats
-	if a.trafficStats != nil {
-		a.trafficStats.Save()
-	}
-
-	// Storage auto-saves on every change, no need to save here
 }
 
 // initStorage initializes the unified storage

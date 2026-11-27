@@ -21,10 +21,6 @@ func (a *App) Quit() {
 // other callers: stop everything, then exit. The in-app exit button instead
 // uses the two-step PrepareQuit + FinalizeQuit so a closing notice can be shown.
 func (a *App) QuitApp() {
-	if a.isShuttingDown() {
-		os.Exit(0)
-	}
-	a.PrepareQuit()
 	a.FinalizeQuit()
 }
 
@@ -67,8 +63,17 @@ func (a *App) RequestFrontendQuit(source string) {
 // before the portable app finally closes. The frontend calls FinalizeQuit once
 // the notice is dismissed (or its timer elapses).
 func (a *App) PrepareQuit() TelegramProxyStatusInfo {
-	if a.isShuttingDown() {
-		return TelegramProxyStatusInfo{}
+	a.quitOnce.Do(func() { a.quitStatus = a.prepareQuit() })
+	return a.quitStatus
+}
+
+func (a *App) prepareQuit() TelegramProxyStatusInfo {
+	a.requestShutdown()
+	a.mu.Lock()
+	startupDone := a.startupDone
+	a.mu.Unlock()
+	if startupDone != nil {
+		<-startupDone
 	}
 	quitBusyID := "app-exit"
 	a.emitBusy(quitBusyID, true, "Завершаем сеанс: останавливаем VPN, WinDivert и фоновые процессы...")
@@ -78,33 +83,22 @@ func (a *App) PrepareQuit() TelegramProxyStatusInfo {
 	a.writeLog("Application quit requested")
 	a.emitBusy(quitBusyID, true, "Останавливаем VPN и дочерние процессы dropo...")
 	telegramStatus := a.TelegramProxyStatus()
-	a.requestShutdown()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if a.isInitialized() {
-			a.Stop()
-		}
-		if a.nativeWG != nil {
-			a.writeLog("Stopping WireGuard health check...")
-			a.nativeWG.StopHealthCheck()
-			a.writeLog("Stopping all Native WireGuard tunnels...")
-			a.nativeWG.StopAllTunnels()
-		}
-		a.stopFreeAccess()
-		a.stopXrayBridge()
-		a.cleanupDropoRuntimeResidue("quit")
-		closeManagedProcessJob(a.writeLog)
-		if a.trafficStats != nil {
-			a.trafficStats.Save()
-		}
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(4 * time.Second):
-		a.writeLog("Quit cleanup timed out; forcing process exit")
+	if a.isInitialized() {
+		a.Stop()
+	}
+	if a.nativeWG != nil {
+		a.writeLog("Stopping WireGuard health check...")
+		a.nativeWG.StopHealthCheck()
+		a.writeLog("Stopping all Native WireGuard tunnels...")
+		a.nativeWG.StopAllTunnels()
+	}
+	a.protectedRouter.stop()
+	a.stopFreeAccess()
+	a.stopXrayBridge()
+	a.cleanupDropoRuntimeResidue("quit")
+	closeManagedProcessJob(a.writeLog)
+	if a.trafficStats != nil {
+		a.trafficStats.Save()
 	}
 
 	a.emitBusy(quitBusyID, false, "")
@@ -123,9 +117,6 @@ func (a *App) PrepareQuit() TelegramProxyStatusInfo {
 // then — only if the Telegram sidecar ran this session — bring the window up and
 // show the cleanup notice. Otherwise exit immediately.
 func (a *App) QuitWithTelegramNotice() {
-	if a.isShuttingDown() {
-		os.Exit(0)
-	}
 	status := a.PrepareQuit()
 	if status.ShowNotice {
 		a.ShowWindow()
@@ -141,12 +132,9 @@ func (a *App) QuitWithTelegramNotice() {
 // FinalizeQuit performs the actual process exit. Call after PrepareQuit (and
 // after any closing notice has been dismissed).
 func (a *App) FinalizeQuit() {
+	a.PrepareQuit()
 	removeBridgeToken(a.dataPath)
 	a.closeLogFile()
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		os.Exit(0)
-	}()
 	os.Exit(0)
 }
 

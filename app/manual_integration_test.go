@@ -385,7 +385,7 @@ func TestManualWindowsUnifiedAppRuntimeFromEnv(t *testing.T) {
 	}
 	requireManualLiveRuntimeFiles(t, basePath)
 
-	if changed, current, err := resetWindowsSystemProxyForPorts([]int{defaultDropoMixedProxyPort, 7301}); err != nil {
+	if changed, current, err := resetStaleDropoPAC(); err != nil {
 		t.Fatalf("preflight proxy reset failed: %v", err)
 	} else if changed {
 		t.Logf("preflight reset stale dropo proxy: %s", current)
@@ -401,7 +401,7 @@ func TestManualWindowsUnifiedAppRuntimeFromEnv(t *testing.T) {
 		app.closeLogFile()
 		assertNoRuntimeProcesses(t, basePath, "after live smoke cleanup")
 		assertWinDivertNotOwnedByRuntime(t, basePath)
-		if changed, current, err := resetWindowsSystemProxyForPorts([]int{defaultDropoMixedProxyPort, 7301}); err != nil {
+		if changed, current, err := resetStaleDropoPAC(); err != nil {
 			t.Fatalf("post-cleanup proxy verification failed: %v", err)
 		} else if changed {
 			t.Fatalf("dropo system proxy was left after cleanup and had to be reset: %s", current)

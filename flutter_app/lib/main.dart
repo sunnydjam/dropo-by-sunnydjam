@@ -959,7 +959,7 @@ class HttpCoreBridge implements CoreBridge {
   @override
   Future<TelegramExitInfo> prepareQuit() async {
     return TelegramExitInfo.fromJson(
-      await _postMap('/api/quit', timeout: const Duration(seconds: 15)),
+      await _postMap('/api/quit', timeout: const Duration(minutes: 1)),
     );
   }
 

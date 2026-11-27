@@ -2,7 +2,7 @@
 
 package main
 
-func resetWindowsSystemProxyNativeForPorts(_ []int) (bool, string, error) {
+func resetStaleDropoPAC() (bool, string, error) {
 	return false, "", nil
 }
 

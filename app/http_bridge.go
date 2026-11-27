@@ -242,6 +242,9 @@ func newBridgeMux(app *App, token string) http.Handler {
 			return
 		}
 		writeBridgeJSON(w, map[string]interface{}{"success": true})
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 		go app.FinalizeQuit()
 	})
 
