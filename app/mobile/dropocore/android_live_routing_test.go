@@ -57,6 +57,48 @@ func TestAndroidLiveRoutingKeepsPreparedPoolAndActiveCandidate(t *testing.T) {
 	}
 }
 
+func TestAndroidCustomVPNDomainSurvivesModeChangesAndIsRemovedLive(t *testing.T) {
+	resetOwnedReserveTest(t)
+	sourceSuccess(t, "AddVPNSource", "Personal", sourceTestKey)
+	if !decodeSuccess(BuildSingBoxConfig()) {
+		t.Fatal("could not prepare VPN config")
+	}
+	active := current.CachedSingBoxConfig
+	SetConnected(true)
+	apply := func(method, args string) {
+		t.Helper()
+		result, err := ApplyAndroidRoutingChange(method, args, active, func(config string) error {
+			active = config
+			return nil
+		})
+		if err != nil || !decodeSuccess(result) {
+			t.Fatalf("%s: %s (%v)", method, result, err)
+		}
+	}
+	assertRoute := func(want bool) {
+		t.Helper()
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(active), &parsed); err != nil {
+			t.Fatal(err)
+		}
+		if androidContainsDomainRoute(parsed, "vk.com", "proxy") != want || androidContainsDNSServer(parsed, "vk.com", "dns-remote") != want {
+			t.Fatalf("custom VPN rule presence must be %t", want)
+		}
+	}
+	apply("SetCustomVPNService", `["","Custom VK","vk.com",false]`)
+	assertRoute(true)
+	apply("SetRoutingMode", `["blocked_only"]`)
+	assertRoute(true)
+	apply("SetRoutingMode", `["all_traffic"]`)
+	assertRoute(true)
+	args, err := json.Marshal([]any{current.CustomVPNServices[0].ID, "", "", true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply("SetCustomVPNService", string(args))
+	assertRoute(false)
+}
+
 func assertAndroidLiveMetaRoute(t *testing.T, config, outbound, dns string) {
 	t.Helper()
 	var parsed map[string]interface{}

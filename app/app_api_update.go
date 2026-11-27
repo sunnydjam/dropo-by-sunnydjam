@@ -17,7 +17,8 @@ func (a *App) NotifyUpdateAvailable(version string) map[string]interface{} {
 	a.waitForInit()
 	allowed := a.storage != nil && a.storage.GetAppSettings().Notifications &&
 		len(version) <= 64 && !strings.ContainsAny(version, "\x00\r\n")
-	return map[string]interface{}{"success": true, "shown": allowed && showUpdateSystemNotice(version)}
+	return map[string]interface{}{"success": true, "shown": allowed && showSystemNotice(
+		"Доступно обновление Dropo", "Вышла новая версия "+version+". Откройте Dropo, чтобы обновить приложение.")}
 }
 
 func (a *App) DownloadUpdateOnly(reveal bool) map[string]interface{} {

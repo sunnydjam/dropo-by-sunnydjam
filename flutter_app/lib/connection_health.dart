@@ -799,6 +799,8 @@ class _HealthGroup {
 
   bool get success => results.every((item) => item.success);
   bool get routeVerified => results.every((item) => item.routeVerified);
+  bool get tlsReachable =>
+      results.any((item) => item.statusText == 'TLS_REACHABLE');
   int get latencyMs =>
       results.fold<int>(0, (value, item) => math.max(value, item.latencyMs));
   String get error {
@@ -827,7 +829,7 @@ class _HealthResultRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = group.regionalLimit
+    final color = group.regionalLimit || group.tlsReachable
         ? const Color(0xFFFFB74D)
         : group.success
         ? _atlasMint
@@ -837,6 +839,12 @@ class _HealthResultRow extends StatelessWidget {
     final actual = route == null ? '' : _healthActualRoute(route.method);
     final responseText = group.regionalLimit
         ? 'Адрес недоступен из текущего региона'
+        : group.tlsReachable
+        ? _tr(
+            context,
+            'Сервер отвечает · сертификат HTTPS не прошёл проверку',
+            'Server responds · HTTPS certificate could not be verified',
+          )
         : group.routeVerified
         ? group.success
               ? 'Маршрут отвечает через: $expected'
@@ -866,6 +874,8 @@ class _HealthResultRow extends StatelessWidget {
           Icon(
             group.regionalLimit
                 ? Icons.language_outlined
+                : group.tlsReachable
+                ? Icons.warning_amber_outlined
                 : group.success
                 ? Icons.check_circle
                 : Icons.cancel_outlined,

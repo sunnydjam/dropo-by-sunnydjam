@@ -40,6 +40,7 @@ var bridgeCallableMethods = map[string]struct{}{
 	"DownloadAndInstallUpdate":        {},
 	"GetAppConfig":                    {},
 	"SetProtectedRouting":             {},
+	"SetCustomVPNService":             {},
 	"GetBypassRouteSummary":           {},
 	"GetCurrentSubscription":          {},
 	"GetFreeAccessConfig":             {},
@@ -144,8 +145,8 @@ func newBridgeMux(app *App, token string) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write([]byte(`<!doctype html><html lang="ru"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Для этого сервиса нужен VPN</title>
-<main id="vpn-required"><h1>Для этого сервиса нужен VPN</h1>
+<title>Включите VPN в Dropo</title>
+<main id="vpn-required"><h1>Включите VPN в Dropo</h1>
 <p>Откройте Dropo, нажмите «Включить VPN» и повторите попытку.</p></main></html>`))
 	})
 

@@ -4,7 +4,6 @@ package main
 
 import (
 	"os"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -25,7 +24,7 @@ type updateNotifyIcon struct {
 	balloonIcon         windows.Handle
 }
 
-func showUpdateSystemNotice(version string) bool {
+func showSystemNotice(titleText, messageText string) bool {
 	if !isSystrayReady() {
 		return false
 	}
@@ -33,8 +32,14 @@ func showUpdateSystemNotice(version string) bool {
 	find := user32.NewProc("FindWindowExW")
 	pidOf := user32.NewProc("GetWindowThreadProcessId")
 	class, _ := windows.UTF16PtrFromString("SystrayClass")
-	title, _ := windows.UTF16FromString("Доступно обновление Dropo")
-	message, _ := windows.UTF16FromString(strings.TrimSpace("Вышла новая версия " + version + ". Откройте Dropo, чтобы обновить приложение."))
+	title, err := windows.UTF16FromString(titleText)
+	if err != nil {
+		return false
+	}
+	message, err := windows.UTF16FromString(messageText)
+	if err != nil {
+		return false
+	}
 	var window uintptr
 	for {
 		window, _, _ = find.Call(0, window, uintptr(unsafe.Pointer(class)), 0)

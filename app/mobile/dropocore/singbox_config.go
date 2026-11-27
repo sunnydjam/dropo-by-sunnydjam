@@ -3,6 +3,7 @@ package dropocore
 import (
 	"context"
 	"crypto/sha256"
+	"dropocore/aicatalog"
 	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
@@ -68,11 +69,12 @@ func BuildSingBoxConfig() string {
 	ruProxyAddress := strings.TrimSpace(current.Config.RuProxyAddress)
 	autoUpdateSub := current.Config.AutoUpdateSub
 	routePolicies := androidRoutePoliciesLocked()
+	customDomains := aicatalog.CustomDomains(current.CustomVPNServices)
 	cachedConfig := current.CachedSingBoxConfig
 	cachedProxyCount := current.CachedProxyCount
 	cachedSubscription := current.CachedConfigSubscription
 	cachedSignature := current.CachedConfigSignature
-	signature := androidConfigSignature(subscription, enableLogging, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies)
+	signature := androidConfigSignature(subscription, enableLogging, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, customDomains...)
 	if selectedNodeID != "" {
 		signature += "|node=" + selectedNodeID
 	}
@@ -91,13 +93,13 @@ func BuildSingBoxConfig() string {
 	}
 	mu.Unlock()
 
-	config, proxies, err := buildAndroidSingBoxConfigForNodeContext(buildCtx, subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID)
+	config, proxies, err := buildAndroidSingBoxConfigForNodeContext(buildCtx, subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID, customDomains...)
 
 	mu.Lock()
 	defer mu.Unlock()
 	liveSignature := androidConfigSignature(current.Subscription, current.Config.EnableLogging,
 		effectiveAndroidLogLevel(current.Config.EnableLogging, current.Config.LogLevel), current.Config.RoutingMode,
-		current.Config.HideRuTraffic, strings.TrimSpace(current.Config.RuProxyAddress), androidRoutePoliciesLocked())
+		current.Config.HideRuTraffic, strings.TrimSpace(current.Config.RuProxyAddress), androidRoutePoliciesLocked(), aicatalog.CustomDomains(current.CustomVPNServices)...)
 	if selectedNodeID != "" {
 		liveSignature += "|node=" + selectedNodeID
 	}
@@ -171,7 +173,7 @@ func buildAndroidSingBoxConfigForNode(subscription, logLevel, routingMode string
 	return buildAndroidSingBoxConfigForNodeContext(context.Background(), subscription, logLevel, routingMode, hideRuTraffic, ruProxyAddress, routePolicies, selectedNodeID)
 }
 
-func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string, selectedNodeID string) (string, []proxyConfig, error) {
+func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string, selectedNodeID string, customDomains ...string) (string, []proxyConfig, error) {
 	if subscription == "" {
 		return "", nil, fmt.Errorf("VPN subscription is empty")
 	}
@@ -207,13 +209,13 @@ func buildAndroidSingBoxConfigForNodeContext(ctx context.Context, subscription, 
 		}
 		outbounds, ruOutbound = appendAndroidProxyOutbounds(outbounds, ruProxies, "ru-proxy")
 	}
-	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags, logLevel, routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies, routePolicies)
+	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags, logLevel, routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies, customDomains, routePolicies)
 	return config, filtered, err
 }
 
-func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string, adaptivePolicies ...map[string]string) (string, error) {
+func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, logLevel, routingMode string, hideRuTraffic bool, ruOutbound string, effectiveRoutePolicies map[string]string, customDomains []string, adaptivePolicies ...map[string]string) (string, error) {
 	finalOutbound := "direct"
-	dns := buildAndroidDNSPolicy(len(proxyTags) > 0, routingMode, hideRuTraffic, effectiveRoutePolicies)
+	dns := buildAndroidDNSPolicy(len(proxyTags) > 0, routingMode, hideRuTraffic, effectiveRoutePolicies, customDomains...)
 	config := map[string]interface{}{
 		"log": map[string]interface{}{
 			"level":     logLevel,
@@ -236,7 +238,7 @@ func marshalAndroidSingBoxConfig(outbounds []interface{}, proxyTags []string, lo
 		},
 		"outbounds": outbounds,
 		"route": map[string]interface{}{
-			"rules":                   buildAndroidRouteRules(routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies),
+			"rules":                   buildAndroidRouteRules(routingMode, hideRuTraffic, ruOutbound, effectiveRoutePolicies, customDomains...),
 			"final":                   finalOutbound,
 			"auto_detect_interface":   true,
 			"default_domain_resolver": map[string]interface{}{"server": "dns-direct", "strategy": "ipv4_only"},
@@ -327,7 +329,7 @@ func buildPreparedAndroidSourcePool(ctx context.Context) string {
 	policies := androidEffectiveRoutePoliciesForMode(androidRoutePoliciesLocked(), true, routingMode)
 	config, err := marshalAndroidSingBoxConfig(outbounds, proxyTags,
 		effectiveAndroidLogLevel(current.Config.EnableLogging, current.Config.LogLevel), routingMode,
-		current.Config.HideRuTraffic, ruOutbound, policies, androidRoutePoliciesLocked())
+		current.Config.HideRuTraffic, ruOutbound, policies, aicatalog.CustomDomains(current.CustomVPNServices), androidRoutePoliciesLocked())
 	if err != nil {
 		return androidSourceError("Не удалось подготовить Android VPN.")
 	}
@@ -576,9 +578,9 @@ func addTransport(out map[string]interface{}, proxy proxyConfig) {
 	out["transport"] = transport
 }
 
-func buildAndroidDNSPolicy(throughVPN bool, routingMode string, hideRuTraffic bool, effectiveRoutePolicies map[string]string) map[string]interface{} {
+func buildAndroidDNSPolicy(throughVPN bool, routingMode string, hideRuTraffic bool, effectiveRoutePolicies map[string]string, customDomains ...string) map[string]interface{} {
 	dnsServers := buildAndroidDNSServers(throughVPN)
-	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies)
+	dnsRules := buildAndroidDNSRules(routingMode, hideRuTraffic, effectiveRoutePolicies, customDomains...)
 	finalDNSServer := "dns-direct"
 	dns := map[string]interface{}{
 		"servers": dnsServers, "rules": dnsRules, "final": finalDNSServer,
@@ -598,7 +600,7 @@ func buildAndroidDNSServers(throughVPN bool) []interface{} {
 	}
 }
 
-func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies map[string]string) []interface{} {
+func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies map[string]string, customDomains ...string) []interface{} {
 	rules := []interface{}{
 		map[string]interface{}{
 			"domain_suffix": []string{"local", "internal", "corp", "lan", "home", "intranet", "private"},
@@ -607,6 +609,7 @@ func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies 
 		},
 	}
 	domains, _ := androidProtectedIdentities()
+	domains = append(domains, customDomains...)
 	rules = append(rules, map[string]any{"domain_suffix": domains, "action": "route", "server": "dns-remote"})
 	if routingMode != "all_traffic" {
 		rules = append(rules, map[string]interface{}{
@@ -644,7 +647,7 @@ func buildAndroidDNSRules(routingMode string, hideRuTraffic bool, routePolicies 
 	return rules
 }
 
-func buildAndroidRouteRules(routingMode string, hideRuTraffic bool, ruOutbound string, routePolicies map[string]string) []interface{} {
+func buildAndroidRouteRules(routingMode string, hideRuTraffic bool, ruOutbound string, routePolicies map[string]string, customDomains ...string) []interface{} {
 	rules := []interface{}{
 		map[string]interface{}{"action": "sniff"},
 		map[string]interface{}{"protocol": "dns", "action": "hijack-dns"},
@@ -656,6 +659,7 @@ func buildAndroidRouteRules(routingMode string, hideRuTraffic bool, ruOutbound s
 		},
 	}
 	domains, packages := androidProtectedIdentities()
+	domains = append(domains, customDomains...)
 	rules = append(rules, map[string]any{"domain_suffix": domains, "action": "route", "outbound": "proxy"}, map[string]any{"package_name": packages, "action": "route", "outbound": "proxy"})
 	if routingMode != "all_traffic" {
 		rules = append(rules,
@@ -775,7 +779,7 @@ func androidLatencySensitiveDirectPackageNames() []string {
 	}
 }
 
-func androidConfigSignature(subscription string, enableLogging bool, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string) string {
+func androidConfigSignature(subscription string, enableLogging bool, logLevel, routingMode string, hideRuTraffic bool, ruProxyAddress string, routePolicies map[string]string, customDomains ...string) string {
 	parts := []string{
 		"singbox=" + androidSingBoxVersion,
 		"schema=" + androidConfigSchema,
@@ -792,6 +796,9 @@ func androidConfigSignature(subscription string, enableLogging bool, logLevel, r
 	sort.Strings(keys)
 	for _, key := range keys {
 		parts = append(parts, "route."+key+"="+normalizeAndroidRoutePolicy(routePolicies[key]))
+	}
+	for _, domain := range customDomains {
+		parts = append(parts, "vpn-domain="+domain)
 	}
 	return strings.Join(parts, "\n")
 }

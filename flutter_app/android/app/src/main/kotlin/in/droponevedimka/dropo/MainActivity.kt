@@ -545,7 +545,7 @@ class MainActivity : FlutterActivity() {
                 val method = stringArg(call, "method")
                 val args = stringArg(call, "argsJson", "[]")
                 when (method) {
-                    "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod" ->
+                    "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod", "SetCustomVPNService" ->
                         DropoVpnService.applyRoutingChange(method, args)
                     else -> Dropoandroid.call(method, args)
                 }

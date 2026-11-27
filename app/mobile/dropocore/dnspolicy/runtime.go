@@ -142,33 +142,36 @@ func ConfigureRuntimeFailover(config map[string]interface{}) {
 		return
 	}
 	var expanded []interface{}
-	appendChain := func(rule map[string]interface{}, tag string) {
-		for _, suffix := range []string{"-fi", ""} {
-			evaluation := maps.Clone(rule)
-			resultTag := "dropo-dns-" + strconv.Itoa(len(expanded))
-			evaluation["action"], evaluation["server"], evaluation["tag"], evaluation["timeout"] = "evaluate", tag+suffix, resultTag, "2s"
-			expanded = append(expanded, evaluation)
-			for _, response := range []string{"NOERROR", "NXDOMAIN"} {
-				expanded = append(expanded, map[string]interface{}{"action": "respond", "match_response": resultTag, "response_rcode": response})
-			}
-		}
-		last := maps.Clone(rule)
-		last["server"], last["timeout"] = tag+"-lv", "2s"
-		expanded = append(expanded, last)
-	}
 	for _, raw := range rules {
 		rule, _ := raw.(map[string]interface{})
 		tag, _ := rule["server"].(string)
 		if managed[tag] && rule["action"] == "route" {
-			appendChain(rule, tag)
+			expanded = AppendRuntimeFailoverRules(expanded, rule, tag, "dropo-dns-")
 		} else {
 			expanded = append(expanded, raw)
 		}
 	}
 	if managed[final] {
-		appendChain(map[string]interface{}{"action": "route", "domain_regex": []string{"^.+$"}}, final)
+		expanded = AppendRuntimeFailoverRules(expanded, map[string]interface{}{"action": "route", "domain_regex": []string{"^.+$"}}, final, "dropo-dns-")
 	}
 	config["servers"], config["rules"] = servers, expanded
+}
+
+// AppendRuntimeFailoverRules uses the configured encrypted resolver pool.
+// resultPrefix must be unique within a DNS rule list.
+func AppendRuntimeFailoverRules(rules []any, rule map[string]any, tag, resultPrefix string) []any {
+	for _, suffix := range []string{"-fi", ""} {
+		evaluation := maps.Clone(rule)
+		resultTag := resultPrefix + strconv.Itoa(len(rules))
+		evaluation["action"], evaluation["server"], evaluation["tag"], evaluation["timeout"] = "evaluate", tag+suffix, resultTag, "2s"
+		rules = append(rules, evaluation)
+		for _, response := range []string{"NOERROR", "NXDOMAIN"} {
+			rules = append(rules, map[string]any{"action": "respond", "match_response": resultTag, "response_rcode": response})
+		}
+	}
+	last := maps.Clone(rule)
+	last["server"], last["timeout"] = tag+"-lv", "2s"
+	return append(rules, last)
 }
 
 func isManagedDoH(server map[string]interface{}, tag string) bool {

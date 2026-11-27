@@ -33,6 +33,7 @@ var (
 	findWindow                  = user32.NewProc("FindWindowW")
 	showWindow                  = user32.NewProc("ShowWindow")
 	setForeground               = user32.NewProc("SetForegroundWindow")
+	messageBox                  = user32.NewProc("MessageBoxW")
 	sendMessage                 = user32.NewProc("SendMessageW")
 	postMessage                 = user32.NewProc("PostMessageW")
 	getWindowThreadProcessID    = user32.NewProc("GetWindowThreadProcessId")
@@ -56,6 +57,7 @@ const (
 
 var systrayReady = make(chan struct{})
 var systrayReadyClosed atomic.Bool
+var trayQuitPromptOpen atomic.Bool
 
 func acquireSingleInstance() (func(), bool) {
 	mutexName, _ := syscall.UTF16PtrFromString("Global\\dropo_SingleInstance")
@@ -196,11 +198,37 @@ func onSystrayReady() {
 		}
 	})
 	mQuit.Click(func() {
-		if appInstance != nil {
-			appInstance.writeLog("Systray quit requested")
-			appInstance.RequestFrontendQuit("tray")
+		app := appInstance
+		if app == nil || app.isShuttingDown() || app.frontendQuitRequested.Load() || !trayQuitPromptOpen.CompareAndSwap(false, true) {
+			return
 		}
+		go func() {
+			defer trayQuitPromptOpen.Store(false)
+			app.waitForInit()
+			if app.storage != nil && !app.storage.GetAppSettings().DisableProtectedRouting && !confirmProtectedTrayExit() {
+				return
+			}
+			app.writeLog("Systray quit requested")
+			app.RequestFrontendQuit("tray")
+		}()
 	})
+}
+
+func confirmProtectedTrayExit() bool {
+	const (
+		mbYesNo         = 0x00000004
+		mbIconWarning   = 0x00000030
+		mbDefaultNo     = 0x00000100
+		mbTaskModal     = 0x00002000
+		mbSetForeground = 0x00010000
+		mbTopmost       = 0x00040000
+		idYes           = 6
+	)
+	title, _ := syscall.UTF16PtrFromString("Закрыть Dropo?")
+	message, _ := syscall.UTF16PtrFromString("После выхода локальная защита отключится. Запросы к ChatGPT, Claude и другим сервисам с обязательным VPN смогут пойти напрямую.\n\nВы уверены, что хотите закрыть Dropo?")
+	choice, _, _ := messageBox.Call(0, uintptr(unsafe.Pointer(message)), uintptr(unsafe.Pointer(title)),
+		mbYesNo|mbIconWarning|mbDefaultNo|mbTaskModal|mbSetForeground|mbTopmost)
+	return choice == idYes
 }
 
 func onSystrayExit() {

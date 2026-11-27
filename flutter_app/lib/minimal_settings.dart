@@ -1,5 +1,123 @@
 part of 'main.dart';
 
+class _SettingsBreadcrumbs extends StatelessWidget {
+  const _SettingsBreadcrumbs({
+    required this.sections,
+    required this.labels,
+    required this.onSelect,
+  });
+
+  final List<String> sections;
+  final Map<String, String> labels;
+  final ValueChanged<String>? onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    const style = TextStyle(
+      fontFamily: 'Inter',
+      fontSize: 13,
+      fontWeight: FontWeight.w600,
+    );
+    const separator = Icon(Icons.chevron_right, size: 14, color: _atlasMuted);
+    final titles = [
+      for (final section in sections)
+        _uiText(context, labels[section] ?? section),
+    ];
+    final widths = [
+      for (final title in titles)
+        (TextPainter(
+              text: TextSpan(text: title, style: style),
+              textDirection: Directionality.of(context),
+              textScaler: MediaQuery.textScalerOf(context),
+              maxLines: 1,
+            )..layout()).width.ceilToDouble() +
+            12,
+    ];
+    Widget item(int index) {
+      final current = index == sections.length - 1;
+      return TextButton(
+        key: ValueKey('breadcrumb-${sections[index]}'),
+        style: TextButton.styleFrom(
+          textStyle: style,
+          disabledForegroundColor: current ? _atlasText : _atlasMuted,
+          foregroundColor: _atlasMuted,
+          minimumSize: const Size(0, 40),
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        onPressed: current || onSelect == null
+            ? null
+            : () => onSelect!(sections[index]),
+        child: Text(
+          titles[index],
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const menuWidth = 40.0;
+        const chevronWidth = 14.0;
+        if (widths.reduce((a, b) => a + b) +
+                chevronWidth * (widths.length - 1) <=
+            constraints.maxWidth) {
+          return Row(
+            children: [
+              for (var index = 0; index < sections.length; index++) ...[
+                if (index > 0) separator,
+                SizedBox(width: widths[index], child: item(index)),
+              ],
+            ],
+          );
+        }
+        var shownFrom = sections.length;
+        var used = widths.first + chevronWidth + menuWidth;
+        while (shownFrom > 2 &&
+            used + chevronWidth + widths[shownFrom - 1] <=
+                constraints.maxWidth) {
+          shownFrom--;
+          used += chevronWidth + widths[shownFrom];
+        }
+        return Row(
+          children: [
+            Flexible(child: item(0)),
+            separator,
+            SizedBox(
+              width: menuWidth,
+              child: PopupMenuButton<String>(
+                key: const ValueKey('breadcrumb-overflow'),
+                tooltip: _tr(
+                  context,
+                  'Другие разделы пути',
+                  'More sections in the path',
+                ),
+                padding: EdgeInsets.zero,
+                icon: const Icon(Icons.more_horiz, size: 20),
+                enabled: onSelect != null,
+                onSelected: onSelect,
+                itemBuilder: (context) => [
+                  for (var index = 1; index < shownFrom; index++)
+                    PopupMenuItem(
+                      value: sections[index],
+                      enabled: index != sections.length - 1,
+                      child: Text(titles[index]),
+                    ),
+                ],
+              ),
+            ),
+            for (var index = shownFrom; index < sections.length; index++) ...[
+              separator,
+              SizedBox(width: widths[index], child: item(index)),
+            ],
+          ],
+        );
+      },
+    );
+  }
+}
+
 /// One navigation row, shared by the connection screen and settings hubs.
 /// Navigating never changes a saved route or starts a network operation.
 class _SettingsLink extends StatelessWidget {
@@ -186,6 +304,72 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
   late Future<Map<String, dynamic>> protection = widget.bridge.appConfig();
   bool savingProtection = false;
   String protectionError = '';
+  String serviceError = '';
+
+  Future<void> _editCustomService([_CustomVPNService? service]) async {
+    final changed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _CustomVPNServiceDialog(
+        service: service,
+        onSave: (name, domains) async {
+          final result = await widget.bridge.callMap(
+            'SetCustomVPNService',
+            args: [service?.id ?? '', name, domains, false],
+          );
+          if (result['success'] != true) {
+            throw StateError(
+              result['error']?.toString() ?? 'Ошибка сохранения',
+            );
+          }
+        },
+      ),
+    );
+    if (changed == true && mounted) {
+      setState(() {
+        serviceError = '';
+        protection = widget.bridge.appConfig();
+      });
+    }
+  }
+
+  Future<void> _removeCustomService(_CustomVPNService service) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_tr(context, 'Удалить сервис?', 'Remove service?')),
+        content: Text(service.name),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_uiText(context, 'Отмена')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_uiText(context, 'Удалить')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      final result = await widget.bridge.callMap(
+        'SetCustomVPNService',
+        args: [service.id, '', '', true],
+      );
+      if (result['success'] != true) {
+        throw StateError(result['error']?.toString() ?? 'Ошибка сохранения');
+      }
+      if (mounted) {
+        setState(() {
+          serviceError = '';
+          protection = widget.bridge.appConfig();
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => serviceError = _cleanError(error));
+    }
+  }
 
   Future<void> _setProtection(bool enabled) async {
     setState(() {
@@ -210,8 +394,14 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
 
   @override
   Widget build(BuildContext context) => _FeaturePage(
-    title: 'Сервисы с обязательным VPN',
+    title: _uiText(context, 'Сервисы с обязательным VPN'),
     icon: Icons.public_outlined,
+    headerAction: FilledButton.tonalIcon(
+      key: const ValueKey('add-custom-vpn-service'),
+      onPressed: _editCustomService,
+      icon: const Icon(Icons.add),
+      label: Text(_uiText(context, 'Добавить')),
+    ),
     slivers: [
       SliverPadding(
         padding: const EdgeInsets.all(16),
@@ -280,6 +470,50 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
                       'В обоих режимах эти сервисы используют только VPN. Если VPN недоступен, соединение останавливается.',
                     ),
                   ),
+                  FutureBuilder<Map<String, dynamic>>(
+                    future: protection,
+                    builder: (context, snapshot) {
+                      final raw = snapshot.data?['customVPNServices'];
+                      final custom = raw is List
+                          ? raw.whereType<Map>().map(_CustomVPNService.fromJson)
+                          : const <_CustomVPNService>[];
+                      return Column(
+                        children: [
+                          if (serviceError.isNotEmpty) Text(serviceError),
+                          for (final service in custom)
+                            ListTile(
+                              key: ValueKey('custom-vpn-${service.id}'),
+                              contentPadding: EdgeInsets.zero,
+                              title: Text(service.name),
+                              subtitle: SelectableText(
+                                service.domains.join(', '),
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: _tr(
+                                      context,
+                                      'Редактировать',
+                                      'Edit',
+                                    ),
+                                    onPressed: () =>
+                                        _editCustomService(service),
+                                    icon: const Icon(Icons.edit_outlined),
+                                  ),
+                                  IconButton(
+                                    tooltip: _uiText(context, 'Удалить'),
+                                    onPressed: () =>
+                                        _removeCustomService(service),
+                                    icon: const Icon(Icons.delete_outline),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
                   for (final service in services)
                     ListTile(
                       key: ValueKey('vpn-only-${service.tag}'),
@@ -294,6 +528,128 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
             },
           ),
         ),
+      ),
+    ],
+  );
+}
+
+class _CustomVPNService {
+  const _CustomVPNService(this.id, this.name, this.domains);
+
+  factory _CustomVPNService.fromJson(Map json) => _CustomVPNService(
+    json['id']?.toString() ?? '',
+    json['name']?.toString() ?? '',
+    (json['domains'] as List? ?? const []).whereType<String>().toList(),
+  );
+
+  final String id, name;
+  final List<String> domains;
+}
+
+class _CustomVPNServiceDialog extends StatefulWidget {
+  const _CustomVPNServiceDialog({required this.service, required this.onSave});
+
+  final _CustomVPNService? service;
+  final Future<void> Function(String name, String domains) onSave;
+
+  @override
+  State<_CustomVPNServiceDialog> createState() =>
+      _CustomVPNServiceDialogState();
+}
+
+class _CustomVPNServiceDialogState extends State<_CustomVPNServiceDialog> {
+  late final name = TextEditingController(text: widget.service?.name);
+  late final domains = TextEditingController(
+    text: widget.service?.domains.join('\n'),
+  );
+  bool saving = false;
+  String error = '';
+
+  @override
+  void dispose() {
+    name.dispose();
+    domains.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      saving = true;
+      error = '';
+    });
+    try {
+      await widget.onSave(name.text, domains.text);
+      if (mounted) Navigator.pop(context, true);
+    } catch (failure) {
+      if (mounted) {
+        setState(() {
+          saving = false;
+          error = _cleanError(failure);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(
+      widget.service == null
+          ? _tr(context, 'Добавить сервис', 'Add service')
+          : _tr(context, 'Редактировать сервис', 'Edit service'),
+    ),
+    scrollable: true,
+    content: SizedBox(
+      width: 400,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            key: const ValueKey('custom-vpn-name'),
+            controller: name,
+            autofocus: true,
+            enabled: !saving,
+            decoration: InputDecoration(
+              labelText: _tr(context, 'Название', 'Name'),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey('custom-vpn-domains'),
+            controller: domains,
+            enabled: !saving,
+            minLines: 2,
+            maxLines: 5,
+            decoration: InputDecoration(
+              labelText: _tr(context, 'Домены сервиса', 'Service domains'),
+              hintText: 'example.org',
+              helperText: _tr(
+                context,
+                'С новой строки или через запятую',
+                'One per line or comma-separated',
+              ),
+              helperMaxLines: 2,
+            ),
+          ),
+          if (error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                error,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: saving ? null : () => Navigator.pop(context),
+        child: Text(_uiText(context, 'Отмена')),
+      ),
+      FilledButton(
+        key: const ValueKey('save-custom-vpn-service'),
+        onPressed: saving ? null : _save,
+        child: Text(_uiText(context, 'Сохранить')),
       ),
     ],
   );

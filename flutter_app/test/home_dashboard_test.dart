@@ -90,12 +90,14 @@ class _HomeBridge extends MockCoreBridge {
 
 class _ProtectedSettingsBridge extends _HomeBridge {
   bool enabled = true;
+  final custom = <String, Map<String, dynamic>>{};
 
   @override
   Future<Map<String, dynamic>> appConfig() async => {
     ...await super.appConfig(),
     'protectedRoutingEnabled': enabled,
     'protectedRoutingReady': enabled,
+    'customVPNServices': custom.values.toList(),
   };
 
   @override
@@ -106,6 +108,19 @@ class _ProtectedSettingsBridge extends _HomeBridge {
   }) async {
     if (method == 'SetProtectedRouting') {
       enabled = args.single as bool;
+      return {'success': true};
+    }
+    if (method == 'SetCustomVPNService') {
+      final id = args[0] == '' ? 'fixture' : args[0] as String;
+      if (args[3] == true) {
+        custom.remove(id);
+      } else {
+        custom[id] = {
+          'id': id,
+          'name': args[1],
+          'domains': (args[2] as String).split('\n'),
+        };
+      }
       return {'success': true};
     }
     return super.callMap(method, args: args, timeout: timeout);
@@ -1124,24 +1139,26 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Windows VPN-only offline protection can be toggled', (
-    tester,
-  ) async {
-    final bridge = _ProtectedSettingsBridge();
-    await _pumpHome(tester, bridge, size: const Size(760, 560));
-    await openSection(tester, 'settings');
-    await _tap(tester, 'link-vpn-only-services');
+  testWidgets(
+    'Windows VPN-only offline protection can be toggled',
+    (tester) async {
+      final bridge = _ProtectedSettingsBridge();
+      await _pumpHome(tester, bridge, size: const Size(760, 560));
+      await openSection(tester, 'settings');
+      await _tap(tester, 'link-vpn-only-services');
 
-    const key = 'protect-vpn-only-when-off';
-    final control = find.byKey(const ValueKey(key));
-    expect(tester.widget<SwitchListTile>(control).value, isTrue);
-    await _tap(tester, key);
-    expect(bridge.enabled, isFalse);
-    expect(tester.widget<SwitchListTile>(control).value, isFalse);
-    await _tap(tester, key);
-    expect(bridge.enabled, isTrue);
-    expect(tester.widget<SwitchListTile>(control).value, isTrue);
-  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+      const key = 'protect-vpn-only-when-off';
+      final control = find.byKey(const ValueKey(key));
+      expect(tester.widget<SwitchListTile>(control).value, isTrue);
+      await _tap(tester, key);
+      expect(bridge.enabled, isFalse);
+      expect(tester.widget<SwitchListTile>(control).value, isFalse);
+      await _tap(tester, key);
+      expect(bridge.enabled, isTrue);
+      expect(tester.widget<SwitchListTile>(control).value, isTrue);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
 
   for (final mobile in [false, true]) {
     for (final scale in [1.0, 1.5, 2.0]) {
@@ -1826,6 +1843,63 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('settings-section')), findsOneWidget);
     expect(bridge.policyWrites, 0);
+  });
+
+  testWidgets(
+    'Settings breadcrumbs jump to earlier sections on wide and narrow screens',
+    (tester) async {
+      final bridge = _HomeBridge();
+      await _pumpHome(tester, bridge, size: const Size(1000, 640));
+      await _tap(tester, 'nav-settings');
+      await _tap(tester, 'link-advanced');
+      await _tap(tester, 'link-technical-settings');
+      await _tap(tester, 'breadcrumb-advanced');
+      expect(find.byKey(const ValueKey('advanced-section')), findsOneWidget);
+      await _tap(tester, 'link-technical-settings');
+      tester.view.physicalSize = const Size(320, 640);
+      await tester.pump();
+      expect(find.byKey(const ValueKey('breadcrumb-settings')), findsOneWidget);
+      await _tap(tester, 'breadcrumb-overflow');
+      await tester.tap(find.text('Дополнительно').last);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('advanced-section')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Only custom VPN services can be added, edited and deleted', (
+    tester,
+  ) async {
+    final bridge = _ProtectedSettingsBridge();
+    await _pumpHome(tester, bridge, size: const Size(900, 650));
+    await _tap(tester, 'nav-settings');
+    await _tap(tester, 'link-vpn-only-services');
+    await _tap(tester, 'add-custom-vpn-service');
+    await tester.enterText(
+      find.byKey(const ValueKey('custom-vpn-name')),
+      'Мой сервис',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('custom-vpn-domains')),
+      'example.org',
+    );
+    await _tap(tester, 'save-custom-vpn-service');
+    expect(find.byKey(const ValueKey('custom-vpn-fixture')), findsOneWidget);
+    await tester.tap(find.byTooltip('Редактировать'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(
+      find.byKey(const ValueKey('custom-vpn-domains')),
+      'api.example.org',
+    );
+    await _tap(tester, 'save-custom-vpn-service');
+    expect(find.text('api.example.org'), findsOneWidget);
+    await tester.tap(find.byTooltip('Удалить'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.widgetWithText(FilledButton, 'Удалить'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('custom-vpn-fixture')), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('Android Back navigates primary pages and leaves VPN running', (

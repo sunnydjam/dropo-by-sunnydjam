@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ const (
 	windowsProtectedRouterDNS       = "protected-local"
 	windowsProtectedFakeIPv4        = "198.19.0.0/16"
 	windowsProtectedFakeIPv6        = "fc00:db80:aaaa::/96"
+	windowsProtectedFakeTTL         = 3
 )
 
 type protectedRouterLink struct {
@@ -80,7 +82,11 @@ func (a *App) startWindowsProtectedRouter() (startErr error) {
 		return fmt.Errorf("не удалось подтвердить встроенный сетевой runtime")
 	}
 	access := newClashAPIAccess()
-	config := buildWindowsProtectedRouterConfig(link)
+	customPath := customVPNRuleSetPath(a.storage.GetResourcesPath())
+	if err := writeCustomVPNRuleSet(customPath, a.storage.GetAppSettings().CustomVPNServices); err != nil {
+		return err
+	}
+	config := buildWindowsProtectedRouterConfig(link, customPath)
 	if !windowsPhysicalIPv6Available() {
 		config["dns"].(map[string]any)["strategy"] = "ipv4_only"
 	}
@@ -145,14 +151,23 @@ func (a *App) readProtectedRouterEvents(reader *io.PipeReader) {
 			a.writeLog("[ProtectedRouting] " + line)
 			continue
 		}
-		if !strings.Contains(line, "outbound/socks["+windowsProtectedLinkOutbound+"]") ||
-			a.isVPNRunning() || a.isShuttingDown() {
+		_, destination, found := strings.Cut(line, "outbound/socks["+windowsProtectedLinkOutbound+"]:")
+		if !found || a.isVPNRunning() || a.isShuttingDown() {
+			continue
+		}
+		_, address, found := strings.Cut(destination, " connection to ")
+		host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+		if !found || err != nil || host == "" {
+			continue
+		}
+		settings := a.storage.GetAppSettings()
+		if settings.DisableProtectedRouting || !settings.Notifications || !isSystrayReady() {
 			continue
 		}
 		now := time.Now().Unix()
 		last := a.protectedRouter.lastNotice.Load()
 		if now-last >= 30 && a.protectedRouter.lastNotice.CompareAndSwap(last, now) {
-			a.emitEvent("protected-route-denied", map[string]interface{}{})
+			showSystemNotice("Включите VPN в Dropo", "Чтобы открыть "+host+", включите VPN.")
 		}
 	}
 }
@@ -268,7 +283,7 @@ func protectedLinkUsesVPN(outbounds []any, tag string, visiting map[string]bool)
 // ingress. It receives no subscription data and cannot choose a VPN provider.
 // The protected outbound has exactly one authenticated loopback destination.
 // A missing transport listener therefore fails the connection locally.
-func buildWindowsProtectedRouterConfig(link protectedRouterLink) map[string]any {
+func buildWindowsProtectedRouterConfig(link protectedRouterLink, customPath ...string) map[string]any {
 	const direct = "direct"
 	domains := protectedServiceRules(GlobalAppSettings{}, true, true)
 	routeRules := []any{
@@ -280,13 +295,20 @@ func buildWindowsProtectedRouterConfig(link protectedRouterLink) map[string]any 
 	dnsRules := []any{
 		map[string]any{"domain_suffix": LocalDomainSuffixes, "server": "network-dns"},
 	}
+	var ruleSets []any
+	if len(customPath) != 0 {
+		match := []string{customVPNRuleSet}
+		ruleSets = append(ruleSets, customVPNRuleSetConfig(customPath[0]))
+		routeRules = append(routeRules, map[string]any{"rule_set": match, "outbound": windowsProtectedLinkOutbound})
+		dnsRules = append(dnsRules, map[string]any{"rule_set": match, "server": windowsProtectedRouterDNS, "rewrite_ttl": windowsProtectedFakeTTL})
+	}
 	for _, raw := range domains {
 		rule := raw.(map[string]any)
 		rule["outbound"] = windowsProtectedLinkOutbound
 		routeRules = append(routeRules, rule)
 		for _, key := range []string{"domain", "domain_suffix"} {
 			if names, ok := rule[key]; ok {
-				dnsRules = append(dnsRules, map[string]any{key: names, "server": windowsProtectedRouterDNS})
+				dnsRules = append(dnsRules, map[string]any{key: names, "server": windowsProtectedRouterDNS, "rewrite_ttl": windowsProtectedFakeTTL})
 			}
 		}
 	}
@@ -325,7 +347,7 @@ func buildWindowsProtectedRouterConfig(link protectedRouterLink) map[string]any 
 			},
 		},
 		"route": map[string]any{"auto_detect_interface": true, "final": direct, "rules": routeRules,
-			"default_domain_resolver": resolver},
+			"default_domain_resolver": resolver, "rule_set": ruleSets},
 		"dns": dns,
 	}
 }

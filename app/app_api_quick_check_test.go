@@ -8,11 +8,39 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	traffic "dropo/trafficorchestrator"
 )
+
+func TestQuickCheckDistinguishesTLSReachabilityFromVerifiedHTTPS(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests.Add(1)
+	}))
+	defer server.Close()
+	client := newQuickCheckHTTPClient(nil)
+	svc := clientQuickCheckService{URL: server.URL, EndpointOnly: true, TLSReachability: true}
+	got := runSingleClientQuickCheck(context.Background(), svc, client, nil, nil)
+	if !got.Success || got.StatusText != "TLS_REACHABLE" || got.RouteVerified || got.NormalStatus != 0 || got.NormalError == "" {
+		t.Fatalf("certificate failure did not report endpoint-only reachability: %+v", got)
+	}
+	expired := server.Client().Transport.(*http.Transport).Clone()
+	expired.TLSClientConfig.Time = func() time.Time { return server.Certificate().NotAfter.Add(time.Second) }
+	defer expired.CloseIdleConnections()
+	if got := invokeQuickCheckURL(context.Background(), &http.Client{Transport: expired}, svc); !got.TLSReachable {
+		t.Fatalf("expired certificate hid a reachable TLS endpoint: %+v", got)
+	}
+	svc.TLSReachability = false
+	if got := invokeQuickCheckURL(context.Background(), client, svc); got.Success {
+		t.Fatalf("non-Sber probe accepted an untrusted peer: %+v", got)
+	}
+	if requests.Load() != 0 {
+		t.Fatal("probe sent an HTTP request after an untrusted TLS handshake")
+	}
+}
 
 func TestQuickCheckTreatsRedirectLimitAsReachable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -16,6 +16,8 @@ class _AtlasDesktopShell extends StatefulWidget {
     required this.disabled,
     required this.onSelect,
     this.onBack,
+    this.sectionHistory = const [],
+    this.onJump,
     required this.onWorkNetworks,
     required this.version,
     this.accountDisplay,
@@ -42,6 +44,8 @@ class _AtlasDesktopShell extends StatefulWidget {
   final bool motionEnabled;
   final bool disabled;
   final ValueChanged<String> onSelect;
+  final List<String> sectionHistory;
+  final ValueChanged<String>? onJump;
   final VoidCallback? onBack;
   final VoidCallback? onWorkNetworks;
   final Widget child;
@@ -73,6 +77,7 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
     ('app-settings', 'Приложение', Icons.settings_outlined),
     ('advanced', 'Дополнительно', Icons.tune),
     ('technical-settings', 'Сеть и диагностика', Icons.tune),
+    ('vpn-only-services', 'Сервисы с обязательным VPN', Icons.public_outlined),
     ('help', 'Помощь', Icons.help_outline),
     ('guided-help', 'Решить проблему', Icons.help_outline),
   ];
@@ -203,6 +208,40 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
 
   bool get _canNavigateBack =>
       _hasParent || (_isMobileShell && widget.activeSection != 'home');
+
+  static const _settingsParents = {
+    'app-settings': 'settings',
+    'advanced': 'settings',
+    'help': 'settings',
+    'vpn-only-services': 'settings',
+    'profiles': 'advanced',
+    'work': 'advanced',
+    'dropo_space': 'advanced',
+    'technical-settings': 'advanced',
+    'logs': 'help',
+    'stats': 'help',
+    'about': 'help',
+    'guided-help': 'help',
+  };
+
+  List<String> get _settingsTrail {
+    final active = widget.activeSection;
+    if (!_settingsParents.containsKey(active)) return const [];
+    final history = widget.sectionHistory;
+    final root = history.lastIndexOf('settings');
+    if (root >= 0 &&
+        history.skip(root + 1).every(_settingsParents.containsKey)) {
+      return [
+        ...history.skip(root).where((section) => section != active),
+        active,
+      ];
+    }
+    final trail = [active];
+    while (_settingsParents.containsKey(trail.last)) {
+      trail.add(_settingsParents[trail.last]!);
+    }
+    return trail.reversed.toList();
+  }
 
   void _back() {
     if (widget.disabled) return;
@@ -592,8 +631,11 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
               navigationTextScale > 1.3;
     final compactTelemetry = contentWidth < 760 || navigationTextScale > 1.5;
     final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
+    final settingsTrail = _settingsTrail;
     final showCompactBrand =
-        !expandedRail && (!_isMobileShell || widget.activeSection == 'home');
+        settingsTrail.isEmpty &&
+        !expandedRail &&
+        (!_isMobileShell || widget.activeSection == 'home');
     final title =
         _items
             .where((item) => item.$1 == widget.activeSection)
@@ -641,7 +683,15 @@ class _AtlasDesktopShellState extends State<_AtlasDesktopShell>
                 ],
                 const SizedBox(width: 16),
                 Expanded(
-                  child: Platform.isAndroid || widget.activeSection == 'home'
+                  child: settingsTrail.isNotEmpty
+                      ? _SettingsBreadcrumbs(
+                          sections: settingsTrail,
+                          labels: {for (final item in _items) item.$1: item.$2},
+                          onSelect: widget.disabled
+                              ? null
+                              : widget.onJump ?? _select,
+                        )
+                      : Platform.isAndroid || widget.activeSection == 'home'
                       ? Align(
                           alignment: Alignment.centerRight,
                           child: compactTelemetry ? widget.homeTelemetry : null,

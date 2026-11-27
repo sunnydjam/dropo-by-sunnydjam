@@ -61,6 +61,7 @@ type coreState struct {
 	ServiceUpdatedAt         string                           `json:"serviceUpdatedAt"`
 	WireGuards               []wireGuardConfig                `json:"wireguards"`
 	RoutePolicies            map[string]string                `json:"routePolicies,omitempty"`
+	CustomVPNServices        []aicatalog.CustomService        `json:"customVPNServices,omitempty"`
 	HomeRouteServices        []string                         `json:"homeRouteServices,omitempty"`
 	AdaptiveCache            map[string]androidAdaptiveRecord `json:"adaptiveCache,omitempty"`
 	adaptiveActive           map[string]bool
@@ -459,7 +460,7 @@ func Call(method, argsJSON string) string {
 		return encode(map[string]interface{}{"success": false, "error": "Profiles are not editable on Android yet"})
 	case "GetRoutingMode":
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.RoutingMode})
-	case "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod":
+	case "SetRoutingMode", "SetAndroidRoutePolicy", "SetFreeAccessServiceMethod", "SetCustomVPNService":
 		return setAndroidRoutingLocked(method, args)
 	case "GetNetworkMode":
 		return encode(map[string]interface{}{"success": true, "mode": current.Config.NetworkMode})
@@ -922,6 +923,7 @@ func appConfigLocked() map[string]interface{} {
 		"disableFreeAccess": current.Config.DisableFreeAccess,
 		"routingMode":       current.Config.RoutingMode,
 		"networkMode":       current.Config.NetworkMode,
+		"customVPNServices": current.CustomVPNServices,
 		"githubRepo":        current.Config.GithubRepo,
 		"githubURL":         current.Config.GithubURL,
 		"telegramName":      current.Config.TelegramName,

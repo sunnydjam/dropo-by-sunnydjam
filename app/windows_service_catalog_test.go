@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"dropocore/aicatalog"
 	"fmt"
 	"net"
 	"net/http"
@@ -72,7 +73,14 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 			port := ln.Addr().(*net.TCPAddr).Port
 			ln.Close()
 			config := map[string]any{"log": map[string]any{"level": "error"}, "inbounds": []any{map[string]any{"type": "mixed", "listen": "127.0.0.1", "listen_port": port}}, "outbounds": outbounds, "route": route}
-			path := filepath.Join(t.TempDir(), "config.json")
+			config["dns"] = map[string]any{"servers": []any{map[string]any{"type": "local", "tag": "dns-direct"}}, "final": "dns-direct"}
+			fixture := t.TempDir()
+			custom := customVPNRuleSetPath(fixture)
+			if err = writeCustomVPNRuleSet(custom, nil); err != nil {
+				t.Fatal(err)
+			}
+			config = withCustomVPNRules(config, custom)
+			path := filepath.Join(fixture, "config.json")
 			if err = writeJSONConfig(path, config); err != nil {
 				t.Fatal(err)
 			}
@@ -128,8 +136,34 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 					t.Fatalf("%s did not reach either local exit", host)
 				}
 			}
+			awaitCustomExit := func(services []aicatalog.CustomService, expected string) {
+				t.Helper()
+				if err := writeCustomVPNRuleSet(custom, services); err != nil {
+					t.Fatal(err)
+				}
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					resp, _ := client.Get("http://media.vk.com/")
+					if resp != nil {
+						resp.Body.Close()
+					}
+					select {
+					case exit := <-observed:
+						if exit == expected {
+							return
+						}
+					case <-time.After(300 * time.Millisecond):
+						t.Fatal("custom-domain request did not reach either exit")
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				t.Fatalf("edited rule-set did not reload to %s", expected)
+			}
+			awaitCustomExit([]aicatalog.CustomService{{Domains: []string{"vk.com"}}}, "vpn-fixture")
+			awaitCustomExit(nil, "direct")
+			awaitCustomExit([]aicatalog.CustomService{{Domains: []string{"media.vk.com"}}}, "vpn-fixture")
 			vpnExit.Close()
-			for _, host := range []string{"chatgpt.com", "rutracker.org", "vk.com"} {
+			for _, host := range []string{"chatgpt.com", "rutracker.org", "media.vk.com", "vk.com"} {
 				resp, _ := client.Get("http://" + host + "/")
 				if resp != nil {
 					resp.Body.Close()

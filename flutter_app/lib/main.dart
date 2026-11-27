@@ -4857,29 +4857,6 @@ class _DropoHomePageState extends State<DropoHomePage>
         _applyServiceStatePayload(event.payload);
         _incidents.observeConnection(status, appConfig.routingMode);
         break;
-      case 'protected-route-denied':
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || quitting || status.connected) return;
-          final bridge = widget.bridge;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            SnackBar(
-              content: const Text('Для этого сервиса нужен VPN'),
-              action: SnackBarAction(
-                label: 'Подробнее',
-                onPressed: () {
-                  if (bridge is HttpCoreBridge) {
-                    unawaited(
-                      bridge.openExternal(
-                        bridge.baseUri.resolve('/vpn-required').toString(),
-                      ),
-                    );
-                  }
-                },
-              ),
-            ),
-          );
-        });
-        break;
       case 'client-check-done':
         if (status.connected &&
             !status.connecting &&
@@ -7357,6 +7334,16 @@ class _DropoHomePageState extends State<DropoHomePage>
     final strategyBannerMessage = strategyTransitionNotice.trim();
     return _AtlasDesktopShell(
       activeSection: activeMenuSection,
+      sectionHistory: _sectionHistory,
+      onJump: (section) {
+        if (quitting || sectionBusy) return;
+        final index = _sectionHistory.lastIndexOf(section);
+        _sectionHistory.removeRange(
+          index < 0 ? 0 : index,
+          _sectionHistory.length,
+        );
+        unawaited(_selectMenuSection(section, remember: false));
+      },
       homeSceneReady:
           !Platform.isAndroid ||
           activeMenuSection != 'home' ||

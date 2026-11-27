@@ -4,17 +4,28 @@ import (
 	"dropocore/aicatalog"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 )
 
 type androidRoutingChange struct {
 	mode, tag, method string
 	policies          map[string]string
+	customServices    []aicatalog.CustomService
 	unchanged         bool
 }
 
 func prepareAndroidRoutingChangeLocked(method string, args []interface{}) (androidRoutingChange, error) {
-	change := androidRoutingChange{mode: current.Config.RoutingMode, policies: androidRoutePoliciesLocked()}
+	change := androidRoutingChange{mode: current.Config.RoutingMode, policies: androidRoutePoliciesLocked(), customServices: current.CustomVPNServices}
+	if method == "SetCustomVPNService" {
+		var err error
+		change.customServices, err = aicatalog.EditCustomService(current.CustomVPNServices,
+			stringArg(args, 0, ""), stringArg(args, 1, ""), stringArg(args, 2, ""), boolArg(args, 3, false))
+		change.unchanged = slices.EqualFunc(change.customServices, current.CustomVPNServices, func(a, b aicatalog.CustomService) bool {
+			return a.ID == b.ID && a.Name == b.Name && slices.Equal(a.Domains, b.Domains)
+		})
+		return change, err
+	}
 	if method == "SetRoutingMode" {
 		mode := normalizeAndroidRoutingMode(stringArg(args, 0, change.mode))
 		if mode == "" {
@@ -52,14 +63,17 @@ func (change androidRoutingChange) saveLocked() error {
 		return nil
 	}
 	previousMode, previousPolicies := current.Config.RoutingMode, current.RoutePolicies
+	previousServices := current.CustomVPNServices
 	previousCache, prepared := captureAndroidSubscriptionStateLocked(), current.preparedSources
 	current.Config.RoutingMode, current.RoutePolicies = change.mode, change.policies
+	current.CustomVPNServices = change.customServices
 	clearCachedConfigLocked()
 	if current.Connected {
 		current.preparedSources = prepared
 	}
 	if err := saveLocked(); err != nil {
 		current.Config.RoutingMode, current.RoutePolicies = previousMode, previousPolicies
+		current.CustomVPNServices = previousServices
 		restoreAndroidSubscriptionStateLocked(previousCache)
 		current.preparedSources = prepared
 		return err
@@ -70,7 +84,8 @@ func (change androidRoutingChange) saveLocked() error {
 }
 
 func (change androidRoutingChange) resultLocked(applied bool) string {
-	result := map[string]interface{}{"success": true, "mode": change.mode, "applied": applied, "unchanged": change.unchanged}
+	result := map[string]interface{}{"success": true, "mode": change.mode, "applied": applied, "unchanged": change.unchanged,
+		"customVPNServices": change.customServices}
 	if change.tag != "" {
 		effective := androidEffectiveRoutePoliciesForMode(change.policies, current.Subscription != "", change.mode)[change.tag]
 		if aicatalog.VPNOnly(change.tag) {
@@ -182,8 +197,9 @@ func replaceAndroidRoutingPolicy(activeConfig string, change androidRoutingChang
 	}
 	policies := androidEffectiveRoutePoliciesForMode(change.policies, hasProxy, change.mode)
 	config["outbounds"] = kept
-	config["dns"] = buildAndroidDNSPolicy(hasProxy, change.mode, hideRU, policies)
-	route["rules"], route["final"] = buildAndroidRouteRules(change.mode, hideRU, ruOutbound, policies), "direct"
+	customDomains := aicatalog.CustomDomains(change.customServices)
+	config["dns"] = buildAndroidDNSPolicy(hasProxy, change.mode, hideRU, policies, customDomains...)
+	route["rules"], route["final"] = buildAndroidRouteRules(change.mode, hideRU, ruOutbound, policies, customDomains...), "direct"
 	configureAndroidCatalog(route, change.mode)
 	if change.mode == "blocked_only" {
 		addAndroidAdaptiveGraph(config, change.policies)

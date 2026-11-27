@@ -6,6 +6,8 @@ import traffic "dropo/trafficorchestrator"
 
 type noopSelectiveNameResolutionLease struct{}
 
+func flushWindowsResolverCache() error { return nil }
+
 func prepareSelectiveNameResolution(_ traffic.TrafficPlan, _ *traffic.FakeIPDirectory) (selectiveNameResolutionLease, error) {
 	return noopSelectiveNameResolutionLease{}, nil
 }

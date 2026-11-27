@@ -63,9 +63,10 @@ type GlobalAppSettings struct {
 	ReduceMotion bool     `json:"reduce_motion"`
 
 	// Routing settings
-	RoutingMode             RoutingMode `json:"routing_mode"` // persisted choice; fresh Windows installs start in all_traffic
-	NetworkMode             NetworkMode `json:"network_mode"` // Windows desktop always migrates to windows_unified
-	DisableProtectedRouting bool        `json:"disable_protected_routing,omitempty"`
+	RoutingMode             RoutingMode               `json:"routing_mode"` // persisted choice; fresh Windows installs start in all_traffic
+	NetworkMode             NetworkMode               `json:"network_mode"` // Windows desktop always migrates to windows_unified
+	DisableProtectedRouting bool                      `json:"disable_protected_routing,omitempty"`
+	CustomVPNServices       []aicatalog.CustomService `json:"custom_vpn_services,omitempty"`
 
 	// Free access settings — opening blocked-in-RF
 	// services without a VPN key, via local DPI-bypass methods (ByeDPI).
@@ -474,6 +475,10 @@ func cloneGlobalAppSettings(settings GlobalAppSettings) GlobalAppSettings {
 		}
 	}
 	cloned.HomeRouteServices = append([]string(nil), settings.HomeRouteServices...)
+	cloned.CustomVPNServices = slices.Clone(settings.CustomVPNServices)
+	for i := range cloned.CustomVPNServices {
+		cloned.CustomVPNServices[i].Domains = slices.Clone(settings.CustomVPNServices[i].Domains)
+	}
 	return cloned
 }
 
@@ -939,7 +944,15 @@ func (s *Storage) WriteActiveConfigToFile() (string, error) {
 
 			// Write to temp config file
 			configPath := filepath.Join(s.resourcesPath, "active_config.json")
-			data, err := json.MarshalIndent(windowsSessionConfig(config), "", "  ")
+			runtimeConfig := windowsSessionConfig(config)
+			if runtime.GOOS == "windows" {
+				ruleSet := customVPNRuleSetPath(s.resourcesPath)
+				if err := writeCustomVPNRuleSet(ruleSet, s.data.App.CustomVPNServices); err != nil {
+					return "", fmt.Errorf("failed to write the custom VPN domain list: %w", err)
+				}
+				runtimeConfig = withCustomVPNRules(runtimeConfig, ruleSet)
+			}
+			data, err := json.MarshalIndent(runtimeConfig, "", "  ")
 			if err != nil {
 				return "", fmt.Errorf("failed to marshal config: %w", err)
 			}

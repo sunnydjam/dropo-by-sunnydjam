@@ -2,4 +2,4 @@
 
 package main
 
-func showUpdateSystemNotice(string) bool { return false }
+func showSystemNotice(string, string) bool { return false }

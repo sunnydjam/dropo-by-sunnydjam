@@ -44,6 +44,7 @@ func (a *App) GetAppConfig() map[string]interface{} {
 		"protectedRoutingEnabled": !settings.DisableProtectedRouting,
 		"protectedRoutingReady":   protectedRouterPID != 0,
 		"protectedRoutingError":   protectedRouterError,
+		"customVPNServices":       settings.CustomVPNServices,
 		"autoUpdateSub":           settings.AutoUpdateSub,
 		"subUpdateInterval":       settings.SubUpdateInterval,
 		"lastSubUpdate":           settings.LastSubUpdate.Format(time.RFC3339),
@@ -90,6 +91,9 @@ func (a *App) SetProtectedRouting(enabled bool) map[string]interface{} {
 	}
 	if !enabled {
 		a.protectedRouter.stop()
+		if err := flushWindowsResolverCache(); err != nil {
+			a.writeLog("[ProtectedRouting] " + err.Error())
+		}
 	}
 	return map[string]interface{}{"success": true, "protectedRoutingEnabled": enabled}
 }

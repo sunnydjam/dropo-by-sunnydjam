@@ -150,6 +150,30 @@ void main() {
     }
   });
 
+  testWidgets(
+    'Desktop paints a meteor group and hides it with reduced motion',
+    (tester) async {
+      final flags = _SpaceFlags();
+      await _pumpBackground(tester, flags, desktop: true);
+      var paintedGroup = false;
+      for (var frame = 0; frame < 8 && !paintedGroup; frame++) {
+        await tester.pump(const Duration(milliseconds: 250));
+        final active = await _pixels(tester);
+        flags.update(() => flags.reducedMotion = true);
+        await tester.pump();
+        final calm = await _pixels(tester);
+        paintedGroup =
+            active.indexed.where((entry) => entry.$2 != calm[entry.$1]).length >
+            20;
+        flags.update(() => flags.reducedMotion = false);
+        await tester.pump();
+      }
+      expect(paintedGroup, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+      flags.dispose();
+    },
+  );
+
   test(
     'desktop stars visibly drift and close their paths after 180 seconds',
     () {

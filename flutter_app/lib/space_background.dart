@@ -194,13 +194,13 @@ class _AtlasMeteor {
     for (
       var start = .6 + random.nextDouble();
       start < 176;
-      start += 2.8 + random.nextDouble() * 4.2
+      start += 1.4 + random.nextDouble() * 2.1
     ) {
-      final count = 1 + random.nextInt(3);
+      final count = 3 * (1 + random.nextInt(3));
       for (var i = 0; i < count; i++) {
         meteors.add(
           _AtlasMeteor(
-            start + i * .23,
+            start + i * .12,
             .85 + random.nextDouble() * .65,
             .2 + random.nextDouble() * .85,
             random.nextDouble() * .88,
@@ -210,7 +210,7 @@ class _AtlasMeteor {
         );
       }
     }
-    return meteors;
+    return meteors..sort((a, b) => a.start.compareTo(b.start));
   }
 
   void paint(Canvas canvas, Size size, double time) {
@@ -316,12 +316,10 @@ class _AtlasSpacePainter extends CustomPainter {
       );
     }
 
-    if (mobileSky) {
-      for (final meteor in meteors) {
-        if (meteor.start > time) break;
-        if (time < meteor.start + meteor.duration) {
-          meteor.paint(canvas, size, time);
-        }
+    for (final meteor in meteors) {
+      if (meteor.start > time) break;
+      if (time < meteor.start + meteor.duration) {
+        meteor.paint(canvas, size, time);
       }
     }
     final visibility = sunVisibility(time);

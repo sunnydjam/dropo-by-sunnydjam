@@ -4,11 +4,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestIndependentWindowsRouterUsesOnlyProtectedCatalog(t *testing.T) {
-	config := buildWindowsProtectedRouterConfig(protectedRouterLink{Port: 43125, Password: "local-fixture"})
+	custom := customVPNRuleSetPath(t.TempDir())
+	if err := writeCustomVPNRuleSet(custom, nil); err != nil {
+		t.Fatal(err)
+	}
+	config := buildWindowsProtectedRouterConfig(protectedRouterLink{Port: 43125, Password: "local-fixture"}, custom)
 	route := config["route"].(map[string]any)
 	if route["final"] != "direct" {
 		t.Fatal("ordinary traffic must leave the router directly")
@@ -37,6 +42,50 @@ func TestIndependentWindowsRouterUsesOnlyProtectedCatalog(t *testing.T) {
 	}
 	if out, err := newBackgroundCommand(packages[0], "check", "-c", path).CombinedOutput(); err != nil {
 		t.Fatalf("bundled sing-box check: %v\n%s", err, out)
+	}
+}
+
+func TestCustomVPNServiceEditsPersistAndDoNotAcceptIPRules(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows settings API")
+	}
+	base := t.TempDir()
+	store := NewStorage(base)
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.storage = store
+	app.initialized = true
+	app.signalInitDone()
+	if result := app.SetCustomVPNService("", "Example", "EXAMPLE.com, api.example.org", false); !apiResultSucceeded(result) {
+		t.Fatalf("add: %v", result)
+	}
+	services := store.GetAppSettings().CustomVPNServices
+	if len(services) != 1 || !hostInCustomVPNList("api.example.com", services) || hostInCustomVPNList("unrelatedexample.com", services) {
+		t.Fatalf("invalid domain scope: %v", services)
+	}
+	if result := app.SetCustomVPNService(services[0].ID, "Invalid", "203.0.113.20", false); apiResultSucceeded(result) {
+		t.Fatal("IP-only custom rule accepted")
+	}
+	if result := app.SetCustomVPNService(services[0].ID, "Changed", "test.example.org", false); !apiResultSucceeded(result) {
+		t.Fatalf("edit: %v", result)
+	}
+	reopened := NewStorage(base)
+	if err := reopened.Init(); err != nil {
+		t.Fatal(err)
+	}
+	updated := reopened.GetAppSettings().CustomVPNServices
+	if len(updated) != 1 || updated[0].ID != services[0].ID || updated[0].Name != "Changed" || !hostInCustomVPNList("test.example.org", updated) || hostInCustomVPNList("example.com", updated) {
+		t.Fatalf("edit did not replace the saved rule: %v", updated)
+	}
+	if result := app.SetCustomVPNService(services[0].ID, "", "", true); !apiResultSucceeded(result) || len(store.GetAppSettings().CustomVPNServices) != 0 {
+		t.Fatalf("remove: %v", result)
+	}
+	data, err := os.ReadFile(customVPNRuleSetPath(store.GetResourcesPath()))
+	var ruleSet struct{ Rules []json.RawMessage }
+	if err != nil || json.Unmarshal(data, &ruleSet) != nil || len(ruleSet.Rules) != 0 {
+		t.Fatalf("rule-set not updated after removal: %s, %v", data, err)
 	}
 }
 

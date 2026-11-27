@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"dropocore/aicatalog"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -40,14 +42,16 @@ type clientQuickCheckService struct {
 	ExpectedRoute   string
 	Regional        bool
 	EndpointOnly    bool
+	TLSReachability bool
 	DiscoveryIssuer string
 }
 
 type clientQuickHTTPResult struct {
-	Success bool
-	Status  int
-	TimeMS  int64
-	Error   string
+	Success      bool
+	TLSReachable bool
+	Status       int
+	TimeMS       int64
+	Error        string
 }
 
 type clientQuickCheckResult struct {
@@ -89,7 +93,7 @@ var clientQuickCheckServices = []clientQuickCheckService{
 	{Index: 1, Name: "Yandex Mail", URL: "https://mail.yandex.ru", Category: "Direct-RU"},
 	{Index: 2, Name: "VK", URL: "https://vk.com", Category: "Direct-RU"},
 	{Index: 3, Name: "Ozon", URL: "https://www.ozon.ru", Category: "Direct-RU"},
-	{Index: 4, Name: "Sber", URL: "https://www.sberbank.ru", Category: "Direct-RU", Regional: true},
+	{Index: 4, Name: "Sber", URL: "https://www.sberbank.ru", Category: "Direct-RU", Regional: true, EndpointOnly: true, TLSReachability: true},
 	{Index: 5, Name: "Gosuslugi", URL: "https://www.gosuslugi.ru", Category: "Direct-RU", Regional: true},
 	{Index: 6, Name: "Rutube", URL: "https://rutube.ru", Category: "Direct-RU"},
 	{Index: 7, Name: "Habr", URL: "https://habr.com", Category: "Direct-RU"},
@@ -184,7 +188,10 @@ func (a *App) runClientQuickCheck(deep, readOnly bool, serviceCatalog []clientQu
 	services := make([]clientQuickCheckService, 0, len(catalog))
 	for i := range catalog {
 		catalog[i].ServiceTag = clientQuickCheckServiceTag(catalog[i].Name)
-		if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
+		parsedURL, _ := url.Parse(catalog[i].URL)
+		if parsedURL != nil && hostInCustomVPNList(parsedURL.Hostname(), settings.CustomVPNServices) {
+			catalog[i].ExpectedRoute = clientQuickCheckRouteVPN
+		} else if NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
 			catalog[i].ExpectedRoute = catalogQuickCheckRoute(catalog[i], blockedDomains)
 			if catalog[i].ExpectedRoute == "" {
 				continue // Missing catalog: do not send an ambiguous probe.
@@ -204,7 +211,7 @@ func (a *App) runClientQuickCheck(deep, readOnly bool, serviceCatalog []clientQu
 	services = denseClientQuickCheckServices(services)
 	proxyURL := a.quickCheckProxyURL()
 	results := make([]clientQuickCheckResult, len(services))
-	directClient := newQuickCheckHTTPClient(nil)
+	directClient := newQuickCheckHTTPClient(nil, settings.CustomVPNServices...)
 	var proxyClient *http.Client
 	if proxyURL != "" {
 		if proxyParsed, err := url.Parse(proxyURL); err == nil {
@@ -543,6 +550,9 @@ func runSingleClientQuickCheck(
 	}
 	if success && endpointOnly {
 		statusText = "ENDPOINT_OK"
+		if normal.TLSReachable || proxy.TLSReachable {
+			statusText = "TLS_REACHABLE"
+		}
 	}
 	checkScope := "route"
 	if endpointOnly {
@@ -601,9 +611,24 @@ func invokeQuickCheckURL(ctx context.Context, client *http.Client, svc clientQui
 		return clientQuickHTTPResult{TimeMS: time.Since(startedAt).Milliseconds(), Error: err.Error()}
 	}
 	req.Header.Set("User-Agent", "dropo-client-quick-check/2.0")
+	if svc.TLSReachability {
+		endpointClient := *client
+		endpointClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &endpointClient
+	}
 	resp, err := client.Do(req)
 	elapsed := time.Since(startedAt).Milliseconds()
 	if err != nil {
+		var verification *tls.CertificateVerificationError
+		var untrusted x509.UnknownAuthorityError
+		var invalid x509.CertificateInvalidError
+		if svc.TLSReachability && errors.As(err, &verification) && len(verification.UnverifiedCertificates) > 0 &&
+			verification.UnverifiedCertificates[0].VerifyHostname(req.URL.Hostname()) == nil &&
+			(errors.As(err, &untrusted) || (errors.As(err, &invalid) && invalid.Reason == x509.Expired)) {
+			// The endpoint answered the TLS handshake. Keep certificate verification
+			// on and report reachability only, without sending an HTTP request.
+			return clientQuickHTTPResult{Success: true, TLSReachable: true, TimeMS: elapsed, Error: compactProbeError(err)}
+		}
 		return clientQuickHTTPResult{TimeMS: elapsed, Error: compactProbeError(err)}
 	}
 	defer resp.Body.Close()
@@ -631,7 +656,7 @@ func invokeQuickCheckURL(ctx context.Context, client *http.Client, svc clientQui
 	}
 }
 
-func newQuickCheckHTTPClient(proxy func(*http.Request) (*url.URL, error)) *http.Client {
+func newQuickCheckHTTPClient(proxy func(*http.Request) (*url.URL, error), customServices ...aicatalog.CustomService) *http.Client {
 	transport := &http.Transport{
 		Proxy: proxy,
 		DialContext: (&net.Dialer{
@@ -648,7 +673,7 @@ func newQuickCheckHTTPClient(proxy func(*http.Request) (*url.URL, error)) *http.
 		Timeout:   clientQuickCheckRequestTimeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 || proxy == nil && protectedServiceHost(req.URL.Hostname()) {
+			if len(via) >= 10 || proxy == nil && (protectedServiceHost(req.URL.Hostname()) || hostInCustomVPNList(req.URL.Hostname(), customServices)) {
 				return http.ErrUseLastResponse
 			}
 			return nil

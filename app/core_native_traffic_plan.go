@@ -152,6 +152,7 @@ func (a *App) addNativeVPNServiceRoutes(plan *traffic.TrafficPlan) {
 		return
 	}
 	settings := a.storage.GetAppSettings()
+	appendCustomVPNPlanRule(plan, settings.CustomVPNServices)
 	cache := a.loadServiceStrategyCache()
 	hasVPN, _ := configHasVPNProbeCandidates(a.storage.ActiveConfigFilePath())
 	known := make(map[string]bool, len(plan.Services))
