@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	traffic "dropo/trafficorchestrator"
 	"dropocore/aicatalog"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -80,9 +82,48 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 				t.Fatal(err)
 			}
 			config = withCustomVPNRules(config, custom)
+			// Two actual Windows processes with the same basename and different paths.
+			// Neither ever contacts the public destination; both exits terminate here.
+			bound := filepath.Join(fixture, "alternate.exe")
+			unbound := filepath.Join(t.TempDir(), "alternate.exe")
+			curl, err := os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "System32", "curl.exe"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			directApp := filepath.Join(fixture, "direct-app.exe")
+			protectedApp := filepath.Join(fixture, "protected-app.exe")
+			for _, path := range []string{bound, unbound, directApp, protectedApp} {
+				if err = os.WriteFile(path, curl, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			applyApplicationBindings(config, GlobalAppSettings{RoutingMode: mode, FreeAccessMethods: map[string]string{"youtube": FreeAccessMethodDirect}, ApplicationBindings: []applicationBinding{{Path: bound, Service: "discord"}, {Path: directApp, Service: "youtube"}}})
 			path := filepath.Join(fixture, "config.json")
 			if err = writeJSONConfig(path, config); err != nil {
 				t.Fatal(err)
+			}
+			var pacAddr, relayAddr string
+			if mode == RoutingModeBlockedOnly {
+				relayPort, err := findAvailableTCPPort("127.0.0.1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Keep the simulated TUN traffic on its own test socket. PAC and relay
+				// traffic must traverse precisely the listeners used at application startup.
+				config["inbounds"] = append([]any{map[string]any{"type": "mixed", "tag": "relay", "listen": "127.0.0.1", "listen_port": relayPort}}, config["inbounds"].([]any)...)
+				if err := writeJSONConfig(path, config); err != nil {
+					t.Fatal(err)
+				}
+				a := &App{basePath: fixture}
+				path, err = a.writeDeepWindowsProxyFallbackConfig(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				relayAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(relayPort))
+				pacAddr, err = configuredPACAddress(path, relayAddr)
+				if err != nil || pacAddr == relayAddr {
+					t.Fatalf("PAC listener: %q %v", pacAddr, err)
+				}
 			}
 			cmd := exec.Command(binary, "run", "-c", path)
 			var logs bytes.Buffer
@@ -111,10 +152,49 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
+			if mode == RoutingModeBlockedOnly {
+				plan := traffic.TrafficPlan{Services: []traffic.ServiceRule{
+					{ID: "claude", VPNOnly: true, ProcessNames: []string{protectedApp}, DomainSuffixes: []string{"claude.ai"}},
+					{ID: "youtube", DomainSuffixes: []string{"youtube.com"}, TCPPorts: []int{443}},
+					{ID: commonBlockedServiceTag, DomainSuffixes: []string{"rutracker.org"}}},
+					Routes: []traffic.ServiceRoute{{ServiceID: "claude", Kind: traffic.ServiceRouteVPN}, {ServiceID: "youtube", Kind: traffic.ServiceRouteZapret}, {ServiceID: commonBlockedServiceTag, Kind: traffic.ServiceRouteVPN}}}
+				z, err := startZapretConnectProxy(plan, relayAddr, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = z.Close() })
+				// Prevent any public dial if the owner check ever regresses.
+				z.resolveMu.Lock()
+				z.resolved["youtube.com"] = zapretResolvedTarget{addresses: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, expires: time.Now().Add(time.Minute)}
+				z.resolveMu.Unlock()
+				script, _, err := buildSelectiveProxyPAC(pacAddr, z.Address(), selectiveDomainsForPlan(plan))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, c := range []struct{ app, host, want string }{{directApp, "rutracker.org", "direct"}, {directApp, "claude.ai", "vpn-fixture"}, {protectedApp, "youtube.com", "vpn-fixture"}} {
+					result, err := exec.Command("node", "-e", "function dnsDomainIs(h,s){return h.endsWith(s)};"+script+";console.log(FindProxyForURL('https://"+c.host+"/','"+c.host+"'))").CombinedOutput()
+					if err != nil {
+						t.Fatalf("evaluate PAC: %v %s", err, result)
+					}
+					addr, ok := strings.CutPrefix(strings.TrimSpace(string(result)), "PROXY ")
+					if !ok {
+						t.Fatalf("expected proxy: %s", result)
+					}
+					output, err := exec.Command(c.app, "--disable", "--noproxy", "", "--proxy", "http://"+addr, "--max-time", "3", "https://"+c.host+"/").CombinedOutput()
+					select {
+					case got := <-observed:
+						if got != c.want {
+							t.Fatalf("%s via PAC: got %s want %s", c.host, got, c.want)
+						}
+					case <-time.After(time.Second):
+						t.Fatalf("%s missing expected exit %s: %v %s", c.host, c.want, err, output)
+					}
+				}
+			}
 			transport := &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: addr}), DisableKeepAlives: true}
 			defer transport.CloseIdleConnections()
 			client := http.Client{Transport: transport, Timeout: 2 * time.Second}
-			cases := map[string]string{"vk.com": "direct", "www.ozon.ru": "direct", "online.sberbank.ru": "direct", "ordinary.example": "direct", "rutracker.org": "proxy", "api.anthropic.com": "proxy", "chatgpt.com": "proxy", "gemini.google.com": "proxy", "slack.com": "proxy", "youtube.com": "proxy", "discord.com": "proxy", "twitch.tv": "direct", "gql.twitch.tv": "proxy", "facetime.apple.com": "direct"}
+			cases := map[string]string{"vk.com": "direct", "www.ozon.ru": "direct", "online.sberbank.ru": "direct", "ordinary.example": "direct", "rutracker.org": "proxy", "api.anthropic.com": "proxy", "chatgpt.com": "proxy", "gemini.google.com": "proxy", "slack.com": "proxy", "youtube.com": "proxy", "discord.com": "proxy", "gateway.discord.gg": "proxy", "c-arn02-85d3b23f.discord.media": "proxy", "discord.media.ordinary.example": "direct", "twitch.tv": "direct", "gql.twitch.tv": "proxy", "facetime.apple.com": "direct"}
 			if mode == RoutingModeBlockedOnly {
 				cases["youtube.com"] = "direct"
 				delete(cases, "gql.twitch.tv") // The saved service policy takes precedence here.
@@ -161,6 +241,20 @@ func TestWindowsServiceRoutingDataplane(t *testing.T) {
 			}
 			awaitCustomExit([]aicatalog.CustomService{{Domains: []string{"vk.com"}}}, "vpn-fixture")
 			awaitCustomExit(nil, "direct")
+			for _, process := range []struct{ path, exit string }{{bound, "vpn-fixture"}, {unbound, "direct"}} {
+				client := exec.Command(process.path, "--disable", "--noproxy", "", "--proxy", "http://"+addr, "--max-time", "3", "http://104.29.136.217:19317/")
+				// The upstream fixture intentionally rejects CONNECT. The observed
+				// listener establishes the route even when curl receives a reset.
+				output, clientErr := client.CombinedOutput()
+				select {
+				case got := <-observed:
+					if got != process.exit {
+						t.Fatalf("%s routed to %s; want %s", process.path, got, process.exit)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("no process routing observation: %v %s", clientErr, output)
+				}
+			}
 			awaitCustomExit([]aicatalog.CustomService{{Domains: []string{"media.vk.com"}}}, "vpn-fixture")
 			vpnExit.Close()
 			for _, host := range []string{"chatgpt.com", "rutracker.org", "media.vk.com", "vk.com"} {

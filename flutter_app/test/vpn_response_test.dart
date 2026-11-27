@@ -252,17 +252,17 @@ void main() {
   test('mode explanations never equate a probe with all routed traffic', () {
     const snapshot = VpnResponseSnapshot();
     final selective = snapshot.scopeDescription('blocked_only');
-    expect(selective, contains('«По сервисам»'));
+    expect(selective, contains('«Ручное»'));
     expect(selective, contains('не описывает прямой трафик'));
     expect(selective, isNot(contains('«Всё через VPN»')));
     final full = snapshot.scopeDescription('all_traffic');
     expect(full, contains('«Всё через VPN»'));
     expect(full, contains('не проверка всех сайтов'));
-    expect(full, isNot(contains('«По сервисам»')));
+    expect(full, isNot(contains('«Ручное»')));
     final unknown = snapshot.scopeDescription('unknown-mode');
     expect(unknown, contains('только к проверяемому VPN-источнику'));
     expect(unknown, isNot(contains('«Всё через VPN»')));
-    expect(unknown, isNot(contains('«По сервисам»')));
+    expect(unknown, isNot(contains('«Ручное»')));
   });
 
   for (final (state, label, detail) in [
@@ -406,7 +406,7 @@ void main() {
     expect(
       find.descendant(
         of: explanation,
-        matching: find.textContaining('В режиме «По сервисам»'),
+        matching: find.textContaining('В режиме «Ручное»'),
       ),
       findsNothing,
     );

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -66,6 +67,7 @@ type GlobalAppSettings struct {
 	RoutingMode             RoutingMode               `json:"routing_mode"` // persisted choice; fresh Windows installs start in all_traffic
 	NetworkMode             NetworkMode               `json:"network_mode"` // Windows desktop always migrates to windows_unified
 	DisableProtectedRouting bool                      `json:"disable_protected_routing,omitempty"`
+	ApplicationBindings     []applicationBinding      `json:"application_bindings,omitempty"`
 	CustomVPNServices       []aicatalog.CustomService `json:"custom_vpn_services,omitempty"`
 
 	// Free access settings — opening blocked-in-RF
@@ -475,6 +477,7 @@ func cloneGlobalAppSettings(settings GlobalAppSettings) GlobalAppSettings {
 		}
 	}
 	cloned.HomeRouteServices = append([]string(nil), settings.HomeRouteServices...)
+	cloned.ApplicationBindings = slices.Clone(settings.ApplicationBindings)
 	cloned.CustomVPNServices = slices.Clone(settings.CustomVPNServices)
 	for i := range cloned.CustomVPNServices {
 		cloned.CustomVPNServices[i].Domains = slices.Clone(settings.CustomVPNServices[i].Domains)
@@ -899,6 +902,9 @@ func (s *Storage) ActiveProfileHasConfig() bool {
 // WriteActiveConfigToFile writes the active profile's config to a temporary file for sing-box.
 // This is needed because sing-box requires a file path.
 func (s *Storage) WriteActiveConfigToFile() (string, error) {
+	return s.writeActiveConfig(context.Background())
+}
+func (s *Storage) writeActiveConfig(ctx context.Context) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -906,7 +912,11 @@ func (s *Storage) WriteActiveConfigToFile() (string, error) {
 
 	for i := range s.data.Profiles {
 		if s.data.Profiles[i].ID == activeID {
-			config := s.data.Profiles[i].SingboxConfig
+			profile, err := cloneVPNSourceProfile(&s.data.Profiles[i])
+			if err != nil {
+				return "", err
+			}
+			config := profile.SingboxConfig
 			if len(config) == 0 {
 				return "", fmt.Errorf("no config for profile %d", activeID)
 			}
@@ -935,22 +945,28 @@ func (s *Storage) WriteActiveConfigToFile() (string, error) {
 				enableWindowsCatalogIPv6(config)
 			} else {
 				s.preferIPv4Resolution(config)
-				disableTunIPv6(config)
+				if runtime.GOOS != "windows" || !requiresWindowsProcessRouting(config) {
+					disableTunIPv6(config)
+				}
 			}
 			relaxTunStrictRoute(config)
 			useWindowsSystemTunStack(config)
 			clearDirectOutboundInterface(config)
-			addTunRouteExcludesForProxyEndpoints(config, s.data.Profiles[i].XrayConfig)
+			addTunRouteExcludesForProxyEndpoints(ctx, config, profile.XrayConfig)
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 
 			// Write to temp config file
 			configPath := filepath.Join(s.resourcesPath, "active_config.json")
 			runtimeConfig := windowsSessionConfig(config)
 			if runtime.GOOS == "windows" {
 				ruleSet := customVPNRuleSetPath(s.resourcesPath)
-				if err := writeCustomVPNRuleSet(ruleSet, s.data.App.CustomVPNServices); err != nil {
+				if err := writeCustomVPNRuleSet(ruleSet, s.data.App.CustomVPNServices, s.data.App.ApplicationBindings...); err != nil {
 					return "", fmt.Errorf("failed to write the custom VPN domain list: %w", err)
 				}
 				runtimeConfig = withCustomVPNRules(runtimeConfig, ruleSet)
+				applyApplicationBindings(runtimeConfig, s.data.App)
 			}
 			data, err := json.MarshalIndent(runtimeConfig, "", "  ")
 			if err != nil {
@@ -1127,10 +1143,10 @@ func (s *Storage) preferIPv4Resolution(config map[string]interface{}) {
 	}
 }
 
-func addTunRouteExcludesForProxyEndpoints(config map[string]interface{}, xrayConfig map[string]interface{}) {
+func addTunRouteExcludesForProxyEndpoints(ctx context.Context, config map[string]interface{}, xrayConfig map[string]interface{}) {
 	hosts := collectProxyEndpointHosts(config)
 	hosts = append(hosts, collectXrayEndpointHosts(xrayConfig)...)
-	cidrs := resolveEndpointHostsToCIDRs(hosts)
+	cidrs := resolveEndpointHostsToCIDRs(ctx, hosts, dnspolicy.DefaultLookup)
 	if len(cidrs) == 0 {
 		return
 	}
@@ -1219,25 +1235,46 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func resolveEndpointHostsToCIDRs(hosts []string) []string {
+func resolveEndpointHostsToCIDRs(parent context.Context, hosts []string, lookup func(context.Context, string) ([]netip.Addr, error)) []string {
 	hosts = uniqueStrings(hosts)
-	cidrs := make([]string, 0, len(hosts))
-	for _, host := range hosts {
-		ip := net.ParseIP(host)
-		if ip != nil {
-			cidrs = appendEndpointIPCIDR(cidrs, ip)
+	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
+	defer cancel()
+	results := make([][]string, len(hosts))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for range min(4, len(hosts)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				addrs, err := lookup(ctx, hosts[index])
+				if err != nil {
+					continue
+				}
+				for _, addr := range addrs {
+					results[index] = appendEndpointIPCIDR(results[index], net.IP(addr.AsSlice()))
+				}
+			}
+		}()
+	}
+	for index, host := range hosts {
+		if ip := net.ParseIP(host); ip != nil {
+			results[index] = appendEndpointIPCIDR(nil, ip)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-		addrs, err := dnspolicy.DefaultLookup(ctx, host)
-		cancel()
-		if err != nil {
-			fmt.Printf("[TUN] Failed to resolve proxy endpoint %s for route exclusion: %v\n", host, err)
-			continue
+		select {
+		case jobs <- index:
+		case <-ctx.Done():
 		}
-		for _, addr := range addrs {
-			cidrs = appendEndpointIPCIDR(cidrs, net.IP(addr.AsSlice()))
-		}
+	}
+	close(jobs)
+	workers.Wait()
+	var cidrs []string
+	for _, r := range results {
+		cidrs = append(cidrs, r...)
 	}
 	return uniqueStrings(cidrs)
 }
@@ -2709,7 +2746,7 @@ func (b *ConfigBuilderForStorage) applyDNSRouting(template map[string]interface{
 	}
 
 	for _, svc := range DefaultFreeAccessServices {
-		if b.routingMode == RoutingModeAllTraffic && !aicatalog.VPNOnly(svc.Tag) {
+		if b.routingMode == RoutingModeAllTraffic && !aicatalog.VPNOnly(svc.Tag) && svc.Tag != "discord" {
 			continue
 		}
 		if len(svc.ExactHosts)+len(svc.DomainSuffixes) == 0 {

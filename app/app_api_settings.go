@@ -628,6 +628,7 @@ func (a *App) GetFreeAccessConfig() map[string]interface{} {
 		item := map[string]interface{}{
 			"tag":                  svc.Tag,
 			"name":                 svc.DisplayName,
+			"processNames":         append([]string(nil), svc.ProcessNames...),
 			"domainSuffixes":       append([]string(nil), svc.DomainSuffixes...),
 			"ipCidrs":              append([]string(nil), svc.IPCIDRs...),
 			"enabled":              enabled,
@@ -969,10 +970,9 @@ func (a *App) SetFreeAccessServiceMethod(tag string, method string) map[string]i
 	// must always be authoritative and immediately undo an old disabled value.
 	settings.FreeAccessServices[tag] = true
 
-	// In full-tunnel mode this preference only takes effect at the next split
-	// session. A selective session can change policies live if its immutable
-	// filter already covers the newly requested traffic.
-	if isRunning && a.canApplyLiveServicePolicy(settings) {
+	// Catalog mode only stores the manual preference. Changing a manual method
+	// also changes TUN process rules and requires the transactional reconnect.
+	if isRunning && NormalizeRoutingMode(settings.RoutingMode) == RoutingModeAllTraffic {
 		result := a.applyLiveServicePolicy(previousSettings, settings, "")
 		result["tag"], result["method"] = tag, normalized
 		return result

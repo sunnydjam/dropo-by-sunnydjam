@@ -83,7 +83,8 @@ func (a *App) startWindowsProtectedRouter() (startErr error) {
 	}
 	access := newClashAPIAccess()
 	customPath := customVPNRuleSetPath(a.storage.GetResourcesPath())
-	if err := writeCustomVPNRuleSet(customPath, a.storage.GetAppSettings().CustomVPNServices); err != nil {
+	settings := a.storage.GetAppSettings()
+	if err := writeCustomVPNRuleSet(customPath, settings.CustomVPNServices, settings.ApplicationBindings...); err != nil {
 		return err
 	}
 	config := buildWindowsProtectedRouterConfig(link, customPath)

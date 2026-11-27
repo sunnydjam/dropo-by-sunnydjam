@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -71,6 +72,66 @@ func (a *App) loadBlockedCatalogCached() (blockedCatalog, error) {
 	a.blockedCatalogValue = cloneBlockedCatalog(catalog)
 	a.blockedCatalogReady = true
 	return cloneBlockedCatalog(catalog), nil
+}
+
+// Only ten entries cross the desktop bridge. Files are immutable within a verified runtime.
+func (a *App) SearchBlockedCatalog(query string) map[string]any {
+	a.waitForInit()
+	query = strings.ToLower(strings.TrimSpace(query))
+	if len(query) > 253 {
+		return map[string]any{"success": false, "error": "Запрос слишком длинный"}
+	}
+	base := a.runtimeBasePath()
+	a.applicationIndexMu.Lock()
+	defer a.applicationIndexMu.Unlock()
+	if base == "" {
+		return map[string]any{"success": false, "error": "Каталог ещё не готов"}
+	}
+	if a.applicationIndexBase != base {
+		dir := filepath.Join(base, "bin", FiltersFolder)
+		domains, err := readBlockedCatalogLines(filepath.Join(dir, blockedDomainsFileName), true)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		cidrs, err := readBlockedCatalogLines(filepath.Join(dir, blockedIPsFileName), false)
+		if err != nil {
+			return map[string]any{"success": false, "error": err.Error()}
+		}
+		a.applicationIndex = blockedCatalog{Domains: domains, IPCIDRs: cidrs}
+		a.applicationIndexBase = base
+	}
+	return blockedCatalogPage(a.applicationIndex, query)
+}
+
+func blockedCatalogPage(catalog blockedCatalog, query string) map[string]any {
+	total := len(catalog.Domains) + len(catalog.IPCIDRs)
+	items := make([]string, 0, 10)
+	if query != "" {
+		for _, group := range [][]string{catalog.Domains, catalog.IPCIDRs} {
+			if _, exact := slices.BinarySearch(group, query); exact {
+				items = append(items, query)
+				break
+			}
+		}
+	}
+	queryIP, _ := netip.ParseAddr(query)
+	for groupIndex, group := range [][]string{catalog.IPCIDRs, catalog.Domains} {
+		for i := len(group) - 1; i >= 0 && len(items) < 10; i-- {
+			value := group[i]
+			if value == query {
+				continue
+			}
+			match := strings.Contains(value, query)
+			if groupIndex == 0 && queryIP.IsValid() {
+				prefix, err := netip.ParsePrefix(value)
+				match = err == nil && prefix.Contains(queryIP)
+			}
+			if match {
+				items = append(items, value)
+			}
+		}
+	}
+	return map[string]any{"success": true, "total": total, "items": items}
 }
 
 func cloneBlockedCatalog(catalog blockedCatalog) blockedCatalog {

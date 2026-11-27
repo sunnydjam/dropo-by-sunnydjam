@@ -67,3 +67,21 @@ func TestProtectedDomainOverridesUserDirectAndCannotEnterZapret(t *testing.T) {
 		}
 	}
 }
+
+func TestPACCatalogCacheTracksContent(t *testing.T) {
+	var cache pacCatalogCache
+	p := selectiveDomainPlan{catalog: []string{"a.example", "b.example"}, catalogRoute: traffic.ServiceRouteVPN}
+	for i := range 3 {
+		if i == 1 {
+			p.catalogRoute = traffic.ServiceRouteUnavailable
+		}
+		if i == 2 {
+			p.catalog[0] = "changed.example"
+		}
+		got, _, err := cache.build("127.0.0.1:1", "127.0.0.1:2", p)
+		want, _, _ := buildSelectiveProxyPAC("127.0.0.1:1", "127.0.0.1:2", p)
+		if err != nil || got != want {
+			t.Fatalf("cache served stale policy on iteration %d", i)
+		}
+	}
+}

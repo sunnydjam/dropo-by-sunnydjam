@@ -72,6 +72,7 @@ func (d selectiveDomains) matches(host string) bool {
 }
 
 type selectiveDomainPlan struct {
+	owners                              map[string]traffic.ServiceRouteKind
 	catalog                             []string
 	catalogRoute                        traffic.ServiceRouteKind
 	direct, vpn, zapret, unavailable    selectiveDomains
@@ -98,6 +99,7 @@ func selectiveDomainsForPlan(plan traffic.TrafficPlan) selectiveDomainPlan {
 	for _, route := range plan.Routes {
 		routes[route.ServiceID] = route.Kind
 	}
+	result.owners = selectiveProcessRoutes(plan, routes)
 	for _, svc := range plan.Services {
 		kind := routes[svc.ID]
 		if svc.ID == commonBlockedServiceTag && (kind == traffic.ServiceRouteVPN || kind == traffic.ServiceRouteUnavailable) {

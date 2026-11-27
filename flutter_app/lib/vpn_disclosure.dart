@@ -125,9 +125,9 @@ class _VpnDisclosureDialogState extends State<_VpnDisclosureDialog> {
                       'VPN-источника. Оператор может видеть адреса соединений и '
                       'содержимое, не защищённое самим сайтом или приложением. '
                       'DNS-запросы получает используемый DNS-сервис. '
-                      'В режиме «По сервисам» остальной трафик может идти напрямую; '
+                      'В режиме «Ручное» остальной трафик может идти напрямую; '
                       'сохранённые исключения также остаются прямыми.',
-                  'Traffic routed through the VPN goes to your VPN provider. The provider can see connection addresses and content that the website or app does not encrypt. Your DNS provider receives DNS requests. In By service mode, other traffic can use the direct connection. Saved exclusions also stay direct.',
+                  'Traffic routed through the VPN goes to your VPN provider. The provider can see connection addresses and content that the website or app does not encrypt. Your DNS provider receives DNS requests. In Manual mode, other traffic can use the direct connection. Saved exclusions also stay direct.',
                 ),
               ),
               const SizedBox(height: 16),

@@ -5,17 +5,20 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"dropocore/aicatalog"
 	"dropocore/dnspolicy"
 	"dropocore/ownedprofile"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,6 +32,26 @@ func (a *App) getActiveConfigPath() (string, error) {
 		return "", fmt.Errorf("storage not initialized")
 	}
 	return a.storage.WriteActiveConfigToFile()
+}
+
+func (a *App) writeStartConfig(expected uint64) (string, error) {
+	a.vpnIntentMu.Lock()
+	if !a.vpnStartIntentCurrent(expected) {
+		a.vpnIntentMu.Unlock()
+		return "", context.Canceled
+	}
+	parent := a.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	a.endpointLookupCancel = cancel
+	a.vpnIntentMu.Unlock()
+	defer func() { cancel(); a.vpnIntentMu.Lock(); a.endpointLookupCancel = nil; a.vpnIntentMu.Unlock() }()
+	if a.storage == nil {
+		return "", fmt.Errorf("storage not initialized")
+	}
+	return a.storage.writeActiveConfig(ctx)
 }
 
 // GetStatus returns current VPN status
@@ -181,6 +204,9 @@ func (a *App) Start() map[string]interface{} {
 				"generation": generation,
 			}
 		}
+	}
+	if a.endpointLookupCancel != nil {
+		a.endpointLookupCancel()
 	}
 	if a.sourcePrepareCancel != nil {
 		a.sourcePrepareCancel()
@@ -402,7 +428,10 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	}
 
 	a.updateBusy(busyID, "Сохраняем рабочий конфиг...")
-	configPath, err := a.getActiveConfigPath()
+	configPath, err := a.writeStartConfig(expectedIntent)
+	if !a.vpnStartIntentCurrent(expectedIntent) {
+		return cancelledVPNStartResult()
+	}
 	if err != nil || configPath == "" {
 		a.hasError.Store(true)
 		UpdateTrayIcon("error")
@@ -463,8 +492,7 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	}
 	if runtime.GOOS == "windows" && a.storage != nil {
 		settings := a.storage.GetAppSettings()
-		// Selected-services mode must not install a default TUN route. Hide-RU
-		// and all-traffic policies intentionally keep complete TUN coverage.
+		// Manual mode also keeps the selective PAC and native strategy relay.
 		if shouldUseSelectiveWindowsSession(settings) {
 			// With free-access packet strategies disabled, selected services use
 			// only PAC/fake-DNS VPN routing. Avoid capturing unrelated application
@@ -496,7 +524,7 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	}
 
 	if selectiveWindowsSession {
-		a.writeLog("[NetworkMode] Windows selective startup: proxy-only sing-box + one narrow in-process WinDivert traffic engine")
+		a.writeLog("[NetworkMode] Windows manual startup: application routing + one scoped in-process WinDivert traffic engine")
 	} else {
 		a.writeLog("[NetworkMode] Windows Unified startup: sing-box TUN + one in-process WinDivert traffic engine")
 	}
@@ -600,7 +628,11 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 				a.cancelStartedVPNAttempt(cmd, exited)
 				return map[string]interface{}{"success": false, "error": err.Error()}
 			}
-			if err := a.trafficEngine.ConfigureSelectiveSession(proxyAddress, selectiveCaptureCatalog, selectiveProtocolEvidence); err != nil {
+			pacAddress, err := configuredPACAddress(configPath, proxyAddress)
+			if err == nil {
+				err = a.trafficEngine.ConfigureSelectiveSession(proxyAddress, pacAddress, selectiveCaptureCatalog, selectiveProtocolEvidence)
+			}
+			if err != nil {
 				terminateProcessTree(cmd)
 				<-exited
 				a.mu.Lock()
@@ -636,9 +668,8 @@ func (a *App) startVPN(expectedIntent uint64) map[string]interface{} {
 	a.updateBusy(busyID, "Применяем сетевые маршруты...")
 	if err := a.startComposedTransparentEngine(busyID); err != nil {
 		a.writeLog(fmt.Sprintf("[NetworkMode] native traffic engine failed to start: %v", err))
-		// A proxy-only selective session has no TUN fallback. Leaving sing-box
-		// alive here would report a connected state while selected services are
-		// not redirected at all. Fail the whole startup instead.
+		// Manual mode requires its PAC and native strategy relay as well as
+		// the application-aware TUN. Publish readiness only with both active.
 		if selectiveWindowsSession {
 			if a.trafficEngine != nil {
 				a.trafficEngine.Stop()
@@ -840,8 +871,28 @@ func (a *App) writeDeepWindowsProxyFallbackConfig(activeConfigPath string) (stri
 		return "", err
 	}
 
-	removedTun := scopeSelectiveTunToCatalog(config)
-	if removedTun == 0 {
+	// Process ownership is available at TUN ingress even for public addresses
+	// outside every catalog. Keep the existing bounded native strategy filter.
+	requiresOwner := requiresWindowsProcessRouting(config)
+	removedTun := 0
+	if requiresOwner {
+		enableWindowsCatalogIPv6(config)
+		inbounds, _ := config["inbounds"].([]any)
+		for _, raw := range inbounds {
+			in, _ := raw.(map[string]any)
+			if in["type"] == "tun" {
+				in["route_address"] = []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"}
+				delete(in, "route_address_set")
+				in["strict_route"] = false
+				in["dns_mode"] = "disabled"
+			}
+		}
+	} else {
+		removedTun = scopeSelectiveTunToCatalog(config)
+	}
+	if requiresOwner {
+		a.writeLog("[NetworkMode] manual routing: process-aware IPv4/IPv6 TUN with scoped native strategies")
+	} else if removedTun == 0 {
 		a.writeLog("[NetworkMode] proxy-only fallback config had no TUN inbound to remove")
 	} else {
 		a.writeLog(fmt.Sprintf("[NetworkMode] proxy-only fallback config removed %d TUN inbound(s)", removedTun))
@@ -861,6 +912,13 @@ func (a *App) writeDeepWindowsProxyFallbackConfig(activeConfigPath string) (stri
 	}
 	if err := pinSelectiveVPNInbound(config); err != nil {
 		return "", err
+	}
+	if requiresOwner {
+		port, err := findAvailableTCPPort("127.0.0.1")
+		if err != nil {
+			return "", err
+		}
+		addSelectivePACInbound(config, port)
 	}
 
 	resourcesPath := a.basePath
@@ -921,6 +979,15 @@ func scopeSelectiveTunToCatalog(config map[string]interface{}) int {
 	}
 	config["inbounds"] = filtered
 	return removed
+}
+
+func requiresWindowsProcessRouting(config map[string]any) bool {
+	route, _ := config["route"].(map[string]any)
+	rules, _ := route["rules"].([]any)
+	return slices.ContainsFunc(rules, func(raw any) bool {
+		r, _ := raw.(map[string]any)
+		return r["outbound"] != "direct" && (len(interfaceStringSlice(r["process_name"])) > 0 || len(interfaceStringSlice(r["process_path_regex"])) > 0)
+	})
 }
 
 func enableMixedInboundLocalProxy(config map[string]interface{}) bool {
@@ -1009,6 +1076,63 @@ func pinSelectiveVPNInbound(config map[string]interface{}) error {
 	}
 	route["rules"] = append(head, filtered...)
 	return nil
+}
+
+// The native relays use the pinned mixed listener. Browser requests enter on
+// a separate port so sing-box can match the original socket owner before the
+// PAC-selected VPN fallback, including a protected domain opened by a Direct app.
+const selectivePACInbound = "dropo-pac-vpn"
+
+func addSelectivePACInbound(config map[string]any, port int) {
+	inbounds := config["inbounds"].([]any)
+	config["inbounds"] = append(inbounds, map[string]any{"type": "http", "tag": selectivePACInbound, "listen": "127.0.0.1", "listen_port": port})
+	route := config["route"].(map[string]any)
+	rules := route["rules"].([]any)
+	tags := []string{selectivePACInbound}
+	var policy []any
+	for _, raw := range rules {
+		r, _ := raw.(map[string]any)
+		if r["inbound"] != nil {
+			continue
+		}
+		if r["process_name"] != nil || r["process_path_regex"] != nil || isProtectedApplicationRule(r) || slices.Contains(interfaceStringSlice(r["rule_set"]), customVPNRuleSet) || r["ip_is_private"] == true || slices.Equal(interfaceStringSlice(r["domain_suffix"]), LocalDomainSuffixes) {
+			copy := maps.Clone(r)
+			copy["inbound"] = tags
+			policy = append(policy, copy)
+		}
+	}
+	fallback := NoRouteOutboundTag
+	if outboundTagExists(config["outbounds"].([]any), "auto-select") {
+		fallback = "auto-select"
+	}
+	if fallback == "auto-select" {
+		dns, _ := config["dns"].(map[string]any)
+		servers, _ := dns["servers"].([]any)
+		for _, raw := range servers {
+			server, _ := raw.(map[string]any)
+			if server["tag"] == "dns-remote" {
+				policy = append(policy, map[string]any{"inbound": tags, "action": "resolve"})
+				break
+			}
+		}
+	}
+	policy = append(policy, map[string]any{"inbound": tags, "outbound": fallback})
+	route["rules"] = append(policy, rules...)
+}
+
+func configuredPACAddress(path, fallback string) (string, error) {
+	config, err := readJSONConfig(path)
+	if err != nil {
+		return "", err
+	}
+	inbounds, _ := config["inbounds"].([]any)
+	for _, raw := range inbounds {
+		r, _ := raw.(map[string]any)
+		if r["tag"] == selectivePACInbound {
+			return net.JoinHostPort("127.0.0.1", strconv.Itoa(mixedInboundPort(r["listen_port"]))), nil
+		}
+	}
+	return fallback, nil
 }
 
 func configuredSelectiveProxyAddress(path string) (string, error) {
@@ -1401,6 +1525,9 @@ func (a *App) ensureActiveConfigForStart() error {
 			a.writeLog("Active config predates latency-sensitive game direct routing; rebuilding before start")
 			needsRebuild = true
 		}
+		if !needsRebuild && NormalizeRoutingMode(appSettings.RoutingMode) == RoutingModeAllTraffic {
+			migrateCatalogApplications(config)
+		}
 		if !needsRebuild && configNeedsAllTrafficTunnelMigration(config, appSettings.RoutingMode) {
 			a.writeLog("Active config predates full-tunnel selector/DNS isolation; rebuilding before start")
 			needsRebuild = true
@@ -1516,7 +1643,7 @@ func configNeedsAllTrafficTunnelMigration(config map[string]interface{}, mode Ro
 	route, _ := config["route"].(map[string]any)
 	experimental, _ := config["experimental"].(map[string]any)
 	cache, _ := experimental["cache_file"].(map[string]any)
-	return dns["final"] != "dns-direct" || route["final"] != "direct" || !configHasClaudeRoutes(config) || cache["path"] != catalogVPNCacheFile
+	return dns["final"] != "dns-direct" || route["final"] != "direct" || !configHasClaudeRoutes(config) || !hasCatalogApplicationRules(route) || cache["path"] != catalogVPNCacheFile
 }
 
 // configSupportsDiscordRealtimeRouting is the structural migration gate for
@@ -1909,6 +2036,9 @@ func (a *App) Stop() map[string]interface{} {
 		return map[string]interface{}{"success": true, "running": false}
 	}
 	a.vpnIntentMu.Lock()
+	if a.endpointLookupCancel != nil {
+		a.endpointLookupCancel()
+	}
 	if a.sourcePrepareCancel != nil {
 		a.sourcePrepareCancel()
 	}

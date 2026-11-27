@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveNetworkModeAutoFallsBackToCompatTun(t *testing.T) {
@@ -527,4 +531,62 @@ func newDeepWindowsReadyApp(t *testing.T) *App {
 		}
 	}
 	return &App{basePath: basePath}
+}
+
+func TestWindowsManualSessionPreservesProfileIPv6Exclusions(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows session config")
+	}
+	d := t.TempDir()
+	const prefix = "2001:db8:42::/48"
+	tun := map[string]any{"type": "tun", "tag": "tun-in", "address": []string{"172.19.0.1/30"}, "route_exclude_address": []string{prefix}}
+	config := map[string]any{"inbounds": []any{tun, map[string]any{"type": "mixed", "tag": "mixed-in", "listen_port": 23881}}, "route": map[string]any{"rules": []any{map[string]any{"outbound": "proxy", "process_name": []string{"Claude.exe"}}}}, "dns": map[string]any{}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}}
+	s := &Storage{resourcesPath: d, data: &SettingsFile{App: GlobalAppSettings{ActiveProfileID: 1, RoutingMode: RoutingModeBlockedOnly}, Profiles: []ProfileData{{ID: 1, SingboxConfig: config}}}}
+	a := &App{basePath: d, storage: s}
+	path, err := s.WriteActiveConfigToFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err = a.writeDeepWindowsProxyFallbackConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := readJSONConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := result["inbounds"].([]any)[0].(map[string]any)
+	if !slices.Contains(interfaceStringSlice(actual["route_address"]), "::/1") || !slices.Contains(interfaceStringSlice(actual["route_exclude_address"]), prefix) || !slices.Equal(interfaceStringSlice(tun["route_exclude_address"]), []string{prefix}) || config["route"].(map[string]any)["default_domain_resolver"] != nil {
+		t.Fatal("session modified profile or lost an IPv6 route")
+	}
+}
+
+func TestEndpointDNSBoundedParallelCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{}, 8)
+	done := make(chan []string, 1)
+	go func() {
+		done <- resolveEndpointHostsToCIDRs(ctx, []string{"a.example", "b.example", "c.example", "d.example", "e.example", "192.0.2.1"}, func(ctx context.Context, _ string) ([]netip.Addr, error) {
+			started <- struct{}{}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+	}()
+	for range 4 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("DNS lookup serialized")
+		}
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if !slices.Equal(got, []string{"192.0.2.1/32"}) {
+			t.Fatal(got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lookup ignored cancellation")
+	}
 }

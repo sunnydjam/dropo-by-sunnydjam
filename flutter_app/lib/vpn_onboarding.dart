@@ -212,7 +212,7 @@ class _VpnOnboardingDialogState extends State<_VpnOnboardingDialog> {
                           context,
                           _VpnOnboardingAction.services,
                         ),
-                  child: const Text('Выбрать режим «По сервисам»'),
+                  child: const Text('Выбрать режим «Ручное»'),
                 ),
             ],
           ),

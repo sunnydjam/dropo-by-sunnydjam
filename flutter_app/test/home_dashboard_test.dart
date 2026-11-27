@@ -127,6 +127,44 @@ class _ProtectedSettingsBridge extends _HomeBridge {
   }
 }
 
+class _CatalogBridge extends _HomeBridge {
+  final queries = <String>[];
+  final apps = <Map<String, String>>[];
+  @override
+  Future<Map<String, dynamic>> callMap(
+    String method, {
+    List<Object?> args = const [],
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    if (method == 'SearchBlockedCatalog') {
+      final q = args.single as String;
+      queries.add(q);
+      return {
+        'success': true,
+        'total': 99000,
+        'items': q.isEmpty
+            ? List.generate(10, (i) => 'host$i.example')
+            : ['old-match.example'],
+      };
+    }
+    if (method == 'GetApplicationBindings') {
+      return {
+        'success': true,
+        'bindings': List.of(apps),
+        'services': {'discord': 'Discord', 'claude': 'Claude'},
+      };
+    }
+    if (method == 'SetApplicationBinding') {
+      apps.removeWhere((b) => b['path'] == args[0]);
+      if (args[1] != '') {
+        apps.add({'path': args[1] as String, 'service': args[2] as String});
+      }
+      return {'success': true};
+    }
+    return super.callMap(method, args: args, timeout: timeout);
+  }
+}
+
 class _SpaceBridge extends _HomeBridge {
   _SpaceBridge({this.canCreate = true});
 
@@ -1139,26 +1177,25 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'Windows VPN-only offline protection can be toggled',
-    (tester) async {
-      final bridge = _ProtectedSettingsBridge();
-      await _pumpHome(tester, bridge, size: const Size(760, 560));
-      await openSection(tester, 'settings');
-      await _tap(tester, 'link-vpn-only-services');
+  testWidgets('Windows VPN-only offline protection can be toggled', (
+    tester,
+  ) async {
+    final bridge = _ProtectedSettingsBridge();
+    await _pumpHome(tester, bridge, size: const Size(760, 560));
+    await openSection(tester, 'settings');
+    await _tap(tester, 'link-manual-routing');
+    await _tap(tester, 'link-vpn-only-services');
 
-      const key = 'protect-vpn-only-when-off';
-      final control = find.byKey(const ValueKey(key));
-      expect(tester.widget<SwitchListTile>(control).value, isTrue);
-      await _tap(tester, key);
-      expect(bridge.enabled, isFalse);
-      expect(tester.widget<SwitchListTile>(control).value, isFalse);
-      await _tap(tester, key);
-      expect(bridge.enabled, isTrue);
-      expect(tester.widget<SwitchListTile>(control).value, isTrue);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.windows),
-  );
+    const key = 'protect-vpn-only-when-off';
+    final control = find.byKey(const ValueKey(key));
+    expect(tester.widget<SwitchListTile>(control).value, isTrue);
+    await _tap(tester, key);
+    expect(bridge.enabled, isFalse);
+    expect(tester.widget<SwitchListTile>(control).value, isFalse);
+    await _tap(tester, key);
+    expect(bridge.enabled, isTrue);
+    expect(tester.widget<SwitchListTile>(control).value, isTrue);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   for (final mobile in [false, true]) {
     for (final scale in [1.0, 1.5, 2.0]) {
@@ -1456,6 +1493,7 @@ void main() {
       await _tap(tester, 'home-service-row-google');
       expect(find.byKey(const ValueKey('pin-service-google')), findsOneWidget);
       await openSection(tester, 'settings');
+      await _tap(tester, 'link-manual-routing');
       await _tap(tester, 'link-vpn-only-services');
       for (final tag in ['openai', 'claude', 'ai-other']) {
         expect(find.byKey(ValueKey('vpn-only-$tag')), findsOneWidget);
@@ -1867,12 +1905,66 @@ void main() {
     },
   );
 
+  testWidgets(
+    'Manual lists search the whole catalog and edit an executable binding',
+    (tester) async {
+      final bridge = _CatalogBridge();
+      await _pumpHome(tester, bridge, size: const Size(1000, 800));
+      await openSection(tester, 'settings');
+      await _tap(tester, 'link-manual-routing');
+      for (final id in [
+        'routing-apps',
+        'vpn-only-services',
+        'blocked-catalog',
+      ]) {
+        expect(find.byKey(ValueKey('link-$id')), findsOneWidget);
+      }
+      await _tap(tester, 'link-blocked-catalog');
+      expect(find.text('Записей в каталоге: 99000'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), 'old-match');
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump();
+      expect(bridge.queries, ['', 'old-match']);
+      expect(find.text('old-match.example'), findsOneWidget);
+      await _tap(tester, 'breadcrumb-manual-routing');
+      await _tap(tester, 'link-routing-apps');
+      await tester.tap(find.text('Привязать приложение'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      const path = r'C:\Programs\alternative.exe';
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.byType(TextField),
+        ),
+        path,
+      );
+      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('Discord').last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.widgetWithText(FilledButton, 'Сохранить'));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump();
+      expect(bridge.apps.single, {'path': path, 'service': 'discord'});
+      await tester.tap(find.byTooltip('Удалить привязку'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.widgetWithText(FilledButton, 'Удалить'));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(bridge.apps, isEmpty);
+    },
+  );
+
   testWidgets('Only custom VPN services can be added, edited and deleted', (
     tester,
   ) async {
     final bridge = _ProtectedSettingsBridge();
     await _pumpHome(tester, bridge, size: const Size(900, 650));
     await _tap(tester, 'nav-settings');
+    await _tap(tester, 'link-manual-routing');
     await _tap(tester, 'link-vpn-only-services');
     await _tap(tester, 'add-custom-vpn-service');
     await tester.enterText(

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -2530,7 +2531,7 @@ func TestTunRouteExcludesProxyAndXrayEndpoints(t *testing.T) {
 		},
 	}
 
-	addTunRouteExcludesForProxyEndpoints(config, xrayConfig)
+	addTunRouteExcludesForProxyEndpoints(context.Background(), config, xrayConfig)
 
 	for _, cidr := range []string{
 		"198.51.100.10/32",

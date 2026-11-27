@@ -36,6 +36,7 @@ part 'update_progress.dart';
 part 'vpn_response.dart';
 part 'app_about.dart';
 part 'service_routes.dart';
+part 'routing_catalog.dart';
 part 'home_services.dart';
 part 'service_icons.dart';
 part 'minimal_settings.dart';
@@ -3179,6 +3180,7 @@ class RouteService {
     required this.delayMs,
     this.domainSuffixes = const [],
     this.ipCidrs = const [],
+    this.processNames = const [],
     this.zapretSupported = false,
     this.zapretStrategyMode = 'auto',
     this.zapretSelectedStrategy = '',
@@ -3199,7 +3201,7 @@ class RouteService {
   final bool requiresVpn;
   final int delayMs;
   final List<String> domainSuffixes;
-  final List<String> ipCidrs;
+  final List<String> ipCidrs, processNames;
   final bool zapretSupported;
   final String zapretStrategyMode;
   final String zapretSelectedStrategy;
@@ -3226,6 +3228,7 @@ class RouteService {
       domainSuffixes: _asStringList(
         json['domainSuffixes'] ?? json['domain_suffixes'],
       ),
+      processNames: _asStringList(json['processNames']),
       ipCidrs: _asStringList(json['ipCidrs'] ?? json['ip_cidrs']),
       zapretSupported: json['zapretSupported'] == true,
       zapretStrategyMode: json['zapretStrategyMode']?.toString() ?? 'auto',
@@ -3270,6 +3273,7 @@ class RouteService {
       domainSuffixes: _asStringList(
         json['domainSuffixes'] ?? json['domain_suffixes'],
       ),
+      processNames: _asStringList(json['processNames']),
       ipCidrs: _asStringList(json['ipCidrs'] ?? json['ip_cidrs']),
       zapretSupported: json['zapretSupported'] == true,
       zapretStrategyMode: json['zapretStrategyMode']?.toString() ?? 'auto',
@@ -3325,6 +3329,7 @@ class RouteService {
       requiresVpn: requiresVpn ?? this.requiresVpn,
       delayMs: delayMs ?? this.delayMs,
       domainSuffixes: domainSuffixes ?? this.domainSuffixes,
+      processNames: processNames,
       ipCidrs: ipCidrs ?? this.ipCidrs,
       zapretSupported: zapretSupported ?? this.zapretSupported,
       zapretStrategyMode: zapretStrategyMode ?? this.zapretStrategyMode,
@@ -6706,7 +6711,7 @@ class _DropoHomePageState extends State<DropoHomePage>
         liveRoutesConfirmed = false;
         statusMessage = mode == 'all_traffic'
             ? 'Сохранён режим «Всё через VPN»'
-            : 'Сохранён режим «По сервисам»';
+            : 'Сохранён режим «Ручное»';
         connectionHint = result['restarted'] == true
             ? 'Соединение автоматически переподключено.'
             : '';
@@ -7106,6 +7111,7 @@ class _DropoHomePageState extends State<DropoHomePage>
 
   Widget _buildHomeServices() => _HomeServicesAccordion(
     key: const ValueKey('home-services'),
+    onOpenCatalog: (section) => unawaited(_selectMenuSection(section)),
     bridge: widget.bridge,
     routeSnapshot: online ? routes : null,
     connected: online && status.connected,
@@ -7175,6 +7181,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     switch (activeMenuSection) {
       case 'settings':
       case 'advanced':
+      case 'manual-routing':
       case 'help':
         return _MinimalSettingsPage(
           section: activeMenuSection,
@@ -7184,6 +7191,17 @@ class _DropoHomePageState extends State<DropoHomePage>
               ? null
               : _openWireGuard,
         );
+      case 'routing-apps':
+        return ServiceRoutesPage(
+          bridge: widget.bridge,
+          connected: online && status.connected,
+          enabled: online && !connectionBusy,
+          routingMode: appConfig.routingMode,
+          onBusyChanged: _setSectionBusy,
+          onChanged: () => unawaited(_refresh(all: true)),
+        );
+      case 'blocked-catalog':
+        return _BlockedCatalogPage(bridge: widget.bridge);
       case 'vpn-only-services':
         return _VPNOnlyServicesPage(bridge: widget.bridge);
       case 'guided-help':

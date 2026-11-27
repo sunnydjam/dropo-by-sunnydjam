@@ -22,6 +22,7 @@ class _HomeServicesAccordion extends StatefulWidget {
     required this.onExpandedChanged,
     this.onChanged,
     this.routeSnapshot,
+    this.onOpenCatalog,
   });
 
   final CoreBridge bridge;
@@ -29,6 +30,7 @@ class _HomeServicesAccordion extends StatefulWidget {
   final String routingMode;
   final ValueChanged<bool> onBusyChanged, onExpandedChanged;
   final VoidCallback? onChanged;
+  final ValueChanged<String>? onOpenCatalog;
   final List<RouteService>? routeSnapshot;
 
   @override
@@ -123,7 +125,7 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
         () => feedback = !routeChange
             ? 'Список сохранён.'
             : widget.routingMode == 'all_traffic'
-            ? 'Сохранено. Применится в режиме «По сервисам».'
+            ? 'Сохранено. Применится в режиме «Ручное».'
             : result['applied'] == true
             ? 'Маршрут применён.'
             : result['restarted'] == true
@@ -248,6 +250,32 @@ class _HomeServicesAccordionState extends State<_HomeServicesAccordion> {
           ),
           if (widget.expanded) ...[
             const SizedBox(height: 12),
+            if (!_isMobileShell)
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (final (section, label, icon) in const [
+                    ('routing-apps', 'Приложения', Icons.apps_outlined),
+                    (
+                      'vpn-only-services',
+                      'Всегда через VPN',
+                      Icons.lock_outline,
+                    ),
+                    (
+                      'blocked-catalog',
+                      'Домены и IP-адреса',
+                      Icons.manage_search,
+                    ),
+                  ])
+                    TextButton.icon(
+                      onPressed: busy
+                          ? null
+                          : () => widget.onOpenCatalog?.call(section),
+                      icon: Icon(icon),
+                      label: Text(_uiText(context, label)),
+                    ),
+                ],
+              ),
             TextField(
               key: const ValueKey('service-search'),
               controller: search,

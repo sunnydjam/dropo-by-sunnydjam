@@ -40,22 +40,25 @@ func (a *App) SetCustomVPNService(id, name, domains string, remove bool) map[str
 	}
 	settings := previous
 	settings.CustomVPNServices = next
+	if remove {
+		settings.ApplicationBindings = slices.DeleteFunc(slices.Clone(previous.ApplicationBindings), func(b applicationBinding) bool { return b.Service == id })
+	}
 	if err := a.storage.UpdateAppSettings(settings); err != nil {
 		return failure(err)
 	}
 	path := customVPNRuleSetPath(a.storage.GetResourcesPath())
-	err = writeCustomVPNRuleSet(path, next)
+	err = writeCustomVPNRuleSet(path, next, settings.ApplicationBindings...)
 	if err == nil && shouldUseSelectiveWindowsSession(settings) && a.trafficEngine != nil && a.trafficEngine.ActiveTag() != "" {
 		a.serviceEngineComposeMu.Lock()
 		plan := a.trafficEngine.CurrentPlan()
 		plan.Services = slices.DeleteFunc(plan.Services, func(rule traffic.ServiceRule) bool { return rule.ID == customVPNRuleSet })
 		plan.Routes = slices.DeleteFunc(plan.Routes, func(route traffic.ServiceRoute) bool { return route.ServiceID == customVPNRuleSet })
-		appendCustomVPNPlanRule(&plan, next)
+		appendCustomVPNPlanRule(&plan, next, settings.ApplicationBindings...)
 		err = a.trafficEngine.StartPlan(plan)
 		a.serviceEngineComposeMu.Unlock()
 	}
 	if err != nil {
-		return failure(errors.Join(err, writeCustomVPNRuleSet(path, previous.CustomVPNServices), a.storage.UpdateAppSettings(previous)))
+		return failure(errors.Join(err, writeCustomVPNRuleSet(path, previous.CustomVPNServices, previous.ApplicationBindings...), a.storage.UpdateAppSettings(previous)))
 	}
 	return map[string]any{"success": true, "customVPNServices": next}
 }
@@ -64,8 +67,13 @@ func customVPNRuleSetPath(resources string) string {
 	return filepath.Join(resources, customVPNRuleSet+".json")
 }
 
-func writeCustomVPNRuleSet(path string, services []aicatalog.CustomService) error {
+func writeCustomVPNRuleSet(path string, services []aicatalog.CustomService, bindings ...applicationBinding) error {
 	rules := []any{}
+	for _, binding := range bindings {
+		if aicatalog.VPNOnly(binding.Service) || isCustomBindingTarget(services, binding.Service) {
+			rules = append(rules, map[string]any{"process_path_regex": []string{applicationPathPattern(binding.Path)}})
+		}
+	}
 	if domains := aicatalog.CustomDomains(services); len(domains) != 0 {
 		rules = append(rules, map[string]any{"domain_suffix": domains})
 	}
@@ -134,9 +142,15 @@ func withCustomVPNRules(config map[string]any, path string) map[string]any {
 	return result
 }
 
-func appendCustomVPNPlanRule(plan *traffic.TrafficPlan, services []aicatalog.CustomService) {
+func appendCustomVPNPlanRule(plan *traffic.TrafficPlan, services []aicatalog.CustomService, bindings ...applicationBinding) {
 	if domains := aicatalog.CustomDomains(services); len(domains) != 0 {
-		plan.Services = append(plan.Services, traffic.ServiceRule{
+		var paths []string
+		for _, b := range bindings {
+			if isCustomBindingTarget(services, b.Service) {
+				paths = append(paths, b.Path)
+			}
+		}
+		plan.Services = append(plan.Services, traffic.ServiceRule{ProcessNames: paths,
 			ID: customVPNRuleSet, DisplayName: "Custom VPN services", VPNOnly: true, DomainSuffixes: domains,
 		})
 		plan.Routes = append(plan.Routes, traffic.ServiceRoute{ServiceID: customVPNRuleSet, Kind: traffic.ServiceRouteVPN})

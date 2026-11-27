@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -40,7 +41,11 @@ func (a *App) buildNativeTrafficPlan(selections map[string]serviceWinwsSelection
 		a.addNativeWireGuardRules(&plan)
 		return plan, traffic.ValidatePlan(plan)
 	}
-	for _, service := range DefaultFreeAccessServices {
+	var settings GlobalAppSettings
+	if a != nil && a.storage != nil {
+		settings = a.storage.GetAppSettings()
+	}
+	for _, service := range servicesWithApplicationBindings(settings) {
 		selection, selected := selections[service.Tag]
 		if !selected || aicatalog.VPNOnly(service.Tag) {
 			continue
@@ -152,15 +157,18 @@ func (a *App) addNativeVPNServiceRoutes(plan *traffic.TrafficPlan) {
 		return
 	}
 	settings := a.storage.GetAppSettings()
-	appendCustomVPNPlanRule(plan, settings.CustomVPNServices)
+	appendCustomVPNPlanRule(plan, settings.CustomVPNServices, settings.ApplicationBindings...)
 	cache := a.loadServiceStrategyCache()
 	hasVPN, _ := configHasVPNProbeCandidates(a.storage.ActiveConfigFilePath())
 	known := make(map[string]bool, len(plan.Services))
 	for _, rule := range plan.Services {
 		known[rule.ID] = true
 	}
-	for _, service := range DefaultFreeAccessServices {
+	for _, service := range servicesWithApplicationBindings(settings) {
 		method := FreeAccessServiceMethod(settings, service.Tag)
+		if method == FreeAccessMethodDirect && len(service.ProcessNames) > 0 {
+			plan.DirectRules = append(plan.DirectRules, traffic.DirectRule{ID: "app-" + service.Tag, ProcessNames: service.ProcessNames})
+		}
 		vpnRoute := method == FreeAccessMethodVPN
 		if method == FreeAccessMethodAuto {
 			if entry, ok := cache[service.Tag]; ok && entry.MethodTag == FreeAccessMethodVPN {
@@ -279,6 +287,22 @@ func nativeSelectiveCaptureCatalog() []traffic.ServiceRule {
 	return result
 }
 
+func servicesWithApplicationBindings(settings GlobalAppSettings) []FreeAccessService {
+	if len(settings.ApplicationBindings) == 0 {
+		return DefaultFreeAccessServices
+	}
+	services := slices.Clone(DefaultFreeAccessServices)
+	for i := range services {
+		services[i].ProcessNames = slices.Clone(services[i].ProcessNames)
+		for _, binding := range settings.ApplicationBindings {
+			if binding.Service == services[i].Tag {
+				services[i].ProcessNames = append(services[i].ProcessNames, binding.Path)
+			}
+		}
+	}
+	return services
+}
+
 // nativeSelectiveCaptureCatalogForSettings keeps the immutable session filter
 // limited to services that have an explicit non-direct policy. Browser traffic
 // for selected VPN domains is still handled through fake DNS, while curated
@@ -286,7 +310,7 @@ func nativeSelectiveCaptureCatalog() []traffic.ServiceRule {
 // Discord discovery ranges or provider CIDRs to the WinDivert filter.
 func nativeSelectiveCaptureCatalogForSettings(settings GlobalAppSettings) []traffic.ServiceRule {
 	result := make([]traffic.ServiceRule, 0, len(DefaultFreeAccessServices))
-	for _, service := range DefaultFreeAccessServices {
+	for _, service := range servicesWithApplicationBindings(settings) {
 		method := FreeAccessServiceMethod(settings, service.Tag)
 		if method == FreeAccessMethodDirect {
 			continue

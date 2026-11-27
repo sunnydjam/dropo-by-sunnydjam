@@ -64,7 +64,7 @@ func TestWindowsFlowIdentityResolverFindsCurrentTCPProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.ToLower(filepath.Base(executable))
+	want := strings.ToLower(filepath.Clean(executable))
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		resolver := NewWindowsFlowIdentityResolver()
@@ -172,7 +172,7 @@ func TestWindowsFlowIdentityResolverFindsCurrentUDPProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.ToLower(filepath.Base(executable))
+	want := strings.ToLower(filepath.Clean(executable))
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		resolver := NewWindowsFlowIdentityResolver()
@@ -236,6 +236,10 @@ func TestParseWindowsOwnerTableMarksSharedUDPEndpointAmbiguous(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := FlowTuple{Network: NetworkUDP, Source: netip.MustParseAddr("192.0.2.1"), SourcePort: 40000}
+	owners[ownerWildcardTuple(key)] = 300
+	if pid := ownerPID(owners, key); pid != 0 {
+		t.Fatalf("ambiguous exact owner overridden by wildcard PID %d", pid)
+	}
 	if owners[key] != 0 {
 		t.Fatalf("ambiguous UDP endpoint owner PID = %d, want unknown", owners[key])
 	}

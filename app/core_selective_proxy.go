@@ -18,6 +18,15 @@ type selectiveProxyRoutingLease interface {
 }
 
 func buildSelectiveProxyPAC(vpnProxyAddress, zapretProxyAddress string, plan selectiveDomainPlan) (string, []string, error) {
+	return (*pacCatalogCache)(nil).build(vpnProxyAddress, zapretProxyAddress, plan)
+}
+
+type pacCatalogCache struct {
+	domains []string
+	encoded string
+}
+
+func (cache *pacCatalogCache) build(vpnProxyAddress, zapretProxyAddress string, plan selectiveDomainPlan) (string, []string, error) {
 	vpnProxyAddress = strings.TrimSpace(vpnProxyAddress)
 	zapretProxyAddress = strings.TrimSpace(zapretProxyAddress)
 	vpnCount := len(plan.vpn.suffix) + len(plan.vpn.exact)
@@ -35,7 +44,15 @@ func buildSelectiveProxyPAC(vpnProxyAddress, zapretProxyAddress string, plan sel
 	directConditions := append(pacExactConditions(plan.direct.exact), pacDomainConditions(orderedDomainSuffixes(plan.direct.suffix))...)
 	var script strings.Builder
 	if len(plan.catalog) > 0 {
-		writePACCatalog(&script, plan.catalog)
+		if cache != nil && slices.Equal(cache.domains, plan.catalog) {
+			script.WriteString(cache.encoded)
+		} else {
+			writePACCatalog(&script, plan.catalog)
+			if cache != nil {
+				cache.domains = slices.Clone(plan.catalog)
+				cache.encoded = script.String()
+			}
+		}
 	}
 	script.WriteString("function FindProxyForURL(url, host) {\n" +
 		"  host = host.toLowerCase();\n" +

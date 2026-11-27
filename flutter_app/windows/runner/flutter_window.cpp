@@ -1,6 +1,9 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <commdlg.h>
+#include <flutter/standard_method_codec.h>
+#include "utils.h"
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -27,6 +30,25 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   account_session_channel_ = std::make_unique<dropo::AccountSessionChannel>(
       flutter_controller_->engine()->messenger());
+  applications_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "dropo/application_picker",
+      &flutter::StandardMethodCodec::GetInstance());
+  applications_channel_->SetMethodCallHandler([this](const auto& call, auto result) {
+    if (call.method_name() != "pickExecutable") { result->NotImplemented(); return; }
+    wchar_t path[32768] = {};
+    OPENFILENAMEW dialog = {};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = GetHandle();
+    dialog.lpstrFilter = L"Windows (*.exe)\0*.exe\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = ARRAYSIZE(path);
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameW(&dialog)) {
+      result->Success(flutter::EncodableValue(Utf8FromUtf16(path)));
+    } else if (CommDlgExtendedError()) {
+      result->Error("PICK_FAILED", "Windows file dialog failed");
+    } else { result->Success(); }
+  });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -42,6 +64,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  applications_channel_.reset();
   account_session_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;

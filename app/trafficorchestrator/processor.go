@@ -335,7 +335,7 @@ func (p *Processor) Process(packet []byte) PacketDecision {
 			return PacketDecision{PlanRevision: snapshot.plan.Revision, Dropped: true, Reason: "expired synthetic destination requires fresh DNS"}
 		}
 		if previous, ok := p.flows.lookup(tuple, snapshot.plan.Revision); ok && previous.Disposition == FlowDirect && !parsed.isInitialTCPSYN() {
-			identity := snapshot.classifier.protectedIdentity(normalizeHost(parsed.flowEvidence().Host), normalizeProcessName(resolveOwner()))
+			identity := snapshot.classifier.protectedIdentity(normalizeHost(parsed.flowEvidence().Host), normalizeProcessIdentity(resolveOwner()))
 			if !identity.Matched {
 				return passDecision(snapshot.plan.Revision, packet, "preserved established direct flow")
 			}

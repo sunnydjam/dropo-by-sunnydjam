@@ -57,7 +57,7 @@
     $('.dp-time-row > span:nth-child(2)').textContent = text('Время сессии', 'Session time');
     $('.dp-services').textContent = text('Настроить сервисы', 'Configure services');
     $('.dp-disconnect span').textContent = text('Отключить', 'Disconnect');
-    service.textContent = text('По сервисам', 'By service');
+    service.textContent = text('Ручное', 'Manual');
     all.textContent = text('Всё через VPN', 'All traffic via VPN');
     cancel.textContent = text('Отменить подключение', 'Cancel connection');
   }

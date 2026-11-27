@@ -299,7 +299,7 @@ class _HomeConnectionPanel extends StatelessWidget {
         : connected
         ? 'Подключение активно. Доступность сервисов проверяется отдельно.'
         : 'Выберите режим и нажмите «Подключить».';
-    final mode = routingMode == 'all_traffic' ? 'Всё через VPN' : 'По сервисам';
+    final mode = routingMode == 'all_traffic' ? 'Всё через VPN' : 'Ручное';
     if (atlas) {
       return _AtlasConnectionPanel(
         title: title,
@@ -497,7 +497,7 @@ class _HomeRouteControls extends StatelessWidget {
                 child: _HomeRoutingModeButton(
                   key: const ValueKey('home-routing-selected'),
                   icon: Icons.account_tree_outlined,
-                  label: 'По сервисам',
+                  label: 'Ручное',
                   selected: routingMode != 'all_traffic',
                   enabled: enabled,
                   onPressed: () => onRoutingModeChanged('blocked_only'),
@@ -574,7 +574,7 @@ class _HomeRouteControls extends StatelessWidget {
               const Padding(
                 padding: EdgeInsets.fromLTRB(4, 5, 4, 2),
                 child: Text(
-                  'Политики ниже сохранены для режима «По сервисам».',
+                  'Политики ниже сохранены для режима «Ручное».',
                   style: TextStyle(color: Color(0xFFA8BAB5), fontSize: 11),
                 ),
               ),

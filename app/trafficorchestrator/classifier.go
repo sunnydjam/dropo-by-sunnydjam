@@ -48,7 +48,7 @@ func NewClassifier(plan TrafficPlan) (*Classifier, error) {
 			exactHosts:   stringSet(service.ExactHosts, normalizeHost),
 			suffixes:     stringSet(service.DomainSuffixes, normalizeHost),
 			prefixes:     make(map[netip.Prefix]struct{}, len(service.IPCIDRs)),
-			processNames: stringSet(service.ProcessNames, normalizeProcessName),
+			processNames: stringSet(service.ProcessNames, normalizeProcessIdentity),
 			fingerprints: stringSet(service.Fingerprints, normalizeToken),
 			tcpPorts:     intSet(service.TCPPorts),
 			udpPorts:     intSet(service.UDPPorts),
@@ -81,7 +81,7 @@ func NewClassifier(plan TrafficPlan) (*Classifier, error) {
 		compiled := compiledWorkNetwork{
 			id: rule.ID, suffixes: stringSet(rule.DomainSuffixes, normalizeHost),
 			prefixes:     make(map[netip.Prefix]struct{}, len(rule.IPCIDRs)),
-			processNames: stringSet(rule.ProcessNames, normalizeProcessName),
+			processNames: stringSet(rule.ProcessNames, normalizeProcessIdentity),
 		}
 		for _, cidr := range rule.IPCIDRs {
 			prefix, _ := netip.ParsePrefix(strings.TrimSpace(cidr))
@@ -100,14 +100,14 @@ func (c *Classifier) Revision() uint64 {
 	return c.revision
 }
 
-// Classify uses only observable flow evidence. Process name and port increase
-// confidence but can never identify a service without host/IP/fingerprint proof.
+// Classify gives verified application ownership the configured service policy.
+// Work networks and mandatory VPN identities retain priority.
 func (c *Classifier) Classify(flow FlowEvidence) Classification {
 	if c == nil || (flow.Network != NetworkTCP && flow.Network != NetworkUDP) || flow.Port < 1 || flow.Port > 65535 {
 		return Classification{}
 	}
 	host := normalizeHost(flow.Host)
-	processName := normalizeProcessName(flow.ProcessName)
+	processName := normalizeProcessIdentity(flow.ProcessName)
 	fingerprints := stringSet(flow.Fingerprints, normalizeToken)
 	address, addressErr := netip.ParseAddr(strings.TrimSpace(flow.Destination))
 	hasAddress := addressErr == nil
@@ -125,8 +125,14 @@ func (c *Classifier) Classify(flow FlowEvidence) Classification {
 	if matched := c.protectedIdentity(host, processName); matched.Matched {
 		return matched
 	}
+	for _, rule := range c.rules {
+		if rule.rule.ProcessMatchPolicy == ProcessMatchIdentity && rule.portAllows(flow.Network, flow.Port) && ownsProcess(rule.processNames, processName) {
+			score, evidence, _ := rule.score(host, address, hasAddress, processName, fingerprints, flow.Port)
+			return Classification{Matched: true, ServiceID: rule.rule.ID, Score: score, Evidence: evidence}
+		}
+	}
 	for _, rule := range c.directRules {
-		if _, matched := rule.processNames[processName]; matched && processName != "" {
+		if ownsProcess(rule.processNames, processName) {
 			return Classification{Direct: true, DirectRuleID: rule.id, Evidence: []string{"direct-process"}}
 		}
 		if _, matched := longestDomainSuffix(host, rule.suffixes); matched {
@@ -171,7 +177,7 @@ func (c *Classifier) protectedIdentity(host, process string) Classification {
 				return Classification{Matched: true, ServiceID: rule.rule.ID, Evidence: []string{"protected-domain"}}
 			}
 		}
-		if _, ok := rule.processNames[process]; ok && process != "" {
+		if ownsProcess(rule.processNames, process) {
 			return Classification{Matched: true, ServiceID: rule.rule.ID, Evidence: []string{"protected-process"}}
 		}
 	}
@@ -224,7 +230,7 @@ func (r compiledServiceRule) score(host string, address netip.Addr, hasAddress b
 			switch fingerprint {
 			case "stun", "tls-client-hello", "http-request", "quic-initial":
 				if !hostMatched {
-					_, owned := r.processNames[processName]
+					owned := ownsProcess(r.processNames, processName)
 					if host != "" || processName == "" || !owned {
 						continue
 					}
@@ -238,7 +244,7 @@ func (r compiledServiceRule) score(host string, address netip.Addr, hasAddress b
 		}
 	}
 	if processName != "" {
-		if _, ok := r.processNames[processName]; ok {
+		if ownsProcess(r.processNames, processName) {
 			score += 10
 			processMatched = true
 			evidence = append(evidence, "process")
@@ -325,6 +331,21 @@ func normalizeHost(value string) string {
 		return ""
 	}
 	return value
+}
+
+func normalizeProcessIdentity(value string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"))
+}
+
+func ownsProcess(identities map[string]struct{}, process string) bool {
+	if process == "" {
+		return false
+	}
+	if _, ok := identities[process]; ok {
+		return true
+	}
+	_, ok := identities[normalizeProcessName(process)]
+	return ok
 }
 
 func normalizeProcessName(value string) string {

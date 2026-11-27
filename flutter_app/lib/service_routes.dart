@@ -161,7 +161,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
         !loading &&
         widget.routeSnapshot != null &&
         !identical(oldWidget.routeSnapshot, widget.routeSnapshot)) {
-      services = widget.routeSnapshot!;
+      services = widget.routeSnapshot!.where((s) => !s.vpnOnly).toList();
       loadError = '';
     }
     if (!busy &&
@@ -216,7 +216,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
         () => feedback = !routeChange
             ? 'Быстрый список сохранён.'
             : widget.routingMode == 'all_traffic'
-            ? 'Маршрут сохранён. Применится в режиме «По сервисам».'
+            ? 'Маршрут сохранён. Применится в режиме «Ручное».'
             : result['applied'] == true
             ? 'Маршрут применён.'
             : result['restarted'] == true
@@ -247,7 +247,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
             .where(
               (s) =>
                   (!pinnedOnly || _pinned(s)) &&
-                  '${_homeRouteName(s)} ${s.tag} ${s.domainSuffixes.join(' ')}'
+                  '${_homeRouteName(s)} ${s.tag} ${s.domainSuffixes.join(' ')} ${s.processNames.join(' ')}'
                       .toLowerCase()
                       .contains(query),
             )
@@ -265,7 +265,7 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
           });
     final enabled = widget.enabled && !busy && !loading && loadError.isEmpty;
     return _FeaturePage(
-      title: 'Сервисы',
+      title: 'Приложения',
       icon: Icons.apps_outlined,
       slivers: [
         SliverPadding(
@@ -274,6 +274,12 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (!_isMobileShell)
+                  _ApplicationBindingsEditor(
+                    bridge: widget.bridge,
+                    enabled: enabled,
+                    onBusyChanged: widget.onBusyChanged,
+                  ),
                 const Text(
                   'Выберите маршрут для сервиса. Звёздочка добавляет его в быстрый список.',
                   style: TextStyle(color: _homeMuted, height: 1.5),
@@ -436,11 +442,13 @@ class _ServiceRoutesPageState extends State<ServiceRoutesPage> {
                       ),
                     ),
                   ),
+                  if (service.processNames.isNotEmpty)
+                    SelectableText(service.processNames.join(', ')),
                   if (service.tag == 'discord' && !_isMobileShell)
                     const Padding(
                       padding: EdgeInsets.only(top: 6),
                       child: Text(
-                        'Discord: для стабильного voice/video рекомендуется VPN. Zapret — экспериментальный метод, работа голоса не гарантируется.',
+                        'Для звонков и стримов Discord рекомендуется VPN. В браузере Dropo узнаёт Discord по доменам. Если WebRTC соединяется по IP без имени, можно привязать отдельный браузер к Discord. Это охватит все вкладки этого браузера.',
                         style: TextStyle(
                           color: _homeMuted,
                           fontSize: 12,

@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -155,8 +154,8 @@ func (resolver *windowsFlowIdentityResolver) resolveProcessName(pid uint32) stri
 }
 
 func ownerPID(owners map[FlowTuple]uint32, tuple FlowTuple) uint32 {
-	pid := owners[ownerLookupTuple(tuple)]
-	if pid == 0 && tuple.Network == NetworkUDP {
+	pid, found := owners[ownerLookupTuple(tuple)]
+	if !found && tuple.Network == NetworkUDP {
 		pid = owners[ownerWildcardTuple(tuple)]
 	}
 	return pid
@@ -325,7 +324,7 @@ func windowsProcessName(pid uint32) string {
 	if err := windows.QueryFullProcessImageName(process, 0, &buffer[0], &size); err != nil || size == 0 || size > uint32(len(buffer)) {
 		return ""
 	}
-	return filepath.Base(windows.UTF16ToString(buffer[:size]))
+	return windows.UTF16ToString(buffer[:size])
 }
 
 var _ FlowIdentityResolver = (*windowsFlowIdentityResolver)(nil)

@@ -15,7 +15,7 @@ It uses the VPN-only catalog, provides local synthetic DNS for catalog names,
 and sends recognized flows only to an authenticated loopback transport link.
 Ordinary traffic has a direct outbound. Disconnecting the VPN closes the
 transport link while keeping the router available. The Windows setting is in
-«Сервисы с обязательным VPN». Closing the core ends this router, and the
+«Настройки → Ручное → Всегда через VPN». Closing the core ends this router, and the
 persistent WFP service described below is still a separate deliverable.
 
 Run `tools/test-windows-protected-routing.ps1` in the dedicated Dropo Hyper-V

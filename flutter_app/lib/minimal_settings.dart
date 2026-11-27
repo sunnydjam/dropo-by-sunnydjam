@@ -181,6 +181,26 @@ class _MinimalSettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final entries = switch (section) {
+      'manual-routing' => <(String, String, String, IconData)>[
+        (
+          'routing-apps',
+          'Приложения',
+          'Маршруты сервисов и привязки файлов .exe',
+          Icons.apps_rounded,
+        ),
+        (
+          'vpn-only-services',
+          'Всегда через VPN',
+          'Встроенные и добавленные вами сервисы',
+          Icons.lock_outline,
+        ),
+        (
+          'blocked-catalog',
+          'Домены и IP-адреса',
+          'Поиск по общему каталогу блокировок',
+          Icons.manage_search,
+        ),
+      ],
       'advanced' => <(String, String, String, IconData)>[
         if (!_isMobileShell)
           (
@@ -253,12 +273,20 @@ class _MinimalSettingsPage extends StatelessWidget {
               : 'Обход, профили и рабочие сети',
           Icons.shield_outlined,
         ),
-        (
-          'vpn-only-services',
-          'Сервисы с обязательным VPN',
-          'ИИ и сервисы с региональными ограничениями',
-          Icons.public_outlined,
-        ),
+        if (!_isMobileShell)
+          (
+            'manual-routing',
+            'Ручное',
+            'Приложения, обязательный VPN и каталог блокировок',
+            Icons.tune,
+          ),
+        if (_isMobileShell)
+          (
+            'vpn-only-services',
+            'Всегда через VPN',
+            'ИИ и сервисы с региональными ограничениями',
+            Icons.public_outlined,
+          ),
         ('help', 'Помощь', 'Решение проблем и диагностика', Icons.help_outline),
       ],
     };
@@ -384,7 +412,11 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
       if (result['success'] != true) {
         throw StateError(result['error']?.toString() ?? 'Ошибка сохранения');
       }
-      if (mounted) setState(() => protection = widget.bridge.appConfig());
+      if (mounted) {
+        setState(() {
+          protection = widget.bridge.appConfig();
+        });
+      }
     } catch (error) {
       if (mounted) setState(() => protectionError = _cleanError(error));
     } finally {
@@ -394,7 +426,7 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
 
   @override
   Widget build(BuildContext context) => _FeaturePage(
-    title: _uiText(context, 'Сервисы с обязательным VPN'),
+    title: _uiText(context, 'Всегда через VPN'),
     icon: Icons.public_outlined,
     headerAction: FilledButton.tonalIcon(
       key: const ValueKey('add-custom-vpn-service'),
@@ -414,8 +446,9 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
               }
               if (snapshot.hasError) {
                 return TextButton(
-                  onPressed: () =>
-                      setState(() => catalog = widget.bridge.routes()),
+                  onPressed: () => setState(() {
+                    catalog = widget.bridge.routes();
+                  }),
                   child: Text(_uiText(context, 'Повторить загрузку')),
                 );
               }
@@ -520,7 +553,10 @@ class _VPNOnlyServicesPageState extends State<_VPNOnlyServicesPage> {
                       contentPadding: EdgeInsets.zero,
                       title: Text(_homeRouteName(service)),
                       subtitle: SelectableText(
-                        service.domainSuffixes.join(', '),
+                        [
+                          ...service.domainSuffixes,
+                          ...service.processNames,
+                        ].join(', '),
                       ),
                     ),
                 ],

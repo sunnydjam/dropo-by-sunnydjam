@@ -933,6 +933,7 @@ func applyCatalogVPNRoutes(route map[string]any, manager *FilterManager) {
 		map[string]any{"process_name": []string{XrayExeName}, "action": "route", "outbound": "direct"},
 	}
 	rules = append(rules, protectedServiceRules(GlobalAppSettings{}, true, true)...)
+	rules = append(rules, catalogApplicationRules()...)
 	rules = append(rules, buildBlockedCatalogRouteRules(filters, "proxy", []string{"refilter-domains"}, []string{"refilter-ips"})...)
 	route["rules"], route["final"] = rules, "direct"
 }

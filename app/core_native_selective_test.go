@@ -171,7 +171,7 @@ func TestNativeCriticalAppsHaveExactBootstrapScope(t *testing.T) {
 
 func TestNativeTrafficManagerSessionModeCanChangeOnlyWhileStopped(t *testing.T) {
 	manager := NewNativeTrafficManager(t.TempDir(), nil)
-	if err := manager.ConfigureSelectiveSession("127.0.0.1:2088", nativeSelectiveCaptureCatalog(), false); err != nil {
+	if err := manager.ConfigureSelectiveSession("127.0.0.1:2088", "127.0.0.1:2089", nativeSelectiveCaptureCatalog(), false); err != nil {
 		t.Fatal(err)
 	}
 	if manager.selective == nil || manager.selective.proxyAddress != "127.0.0.1:2088" {

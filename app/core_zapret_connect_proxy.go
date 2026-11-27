@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ type zapretConnectServiceScope struct {
 }
 
 type zapretConnectScope struct {
+	owners       map[string]traffic.ServiceRouteKind
 	direct       selectiveDomains
 	unavailable  selectiveDomains
 	mandatoryVPN selectiveDomains
@@ -55,12 +57,14 @@ type zapretResolvedTarget struct {
 }
 
 type zapretConnectProxy struct {
-	listener  net.Listener
-	logger    func(string)
-	scope     atomic.Pointer[zapretConnectScope]
-	ports     zapretSourcePortPool
-	resolveMu sync.Mutex
-	resolved  map[string]zapretResolvedTarget
+	vpnAddress string
+	identity   traffic.FlowIdentityResolver
+	listener   net.Listener
+	logger     func(string)
+	scope      atomic.Pointer[zapretConnectScope]
+	ports      zapretSourcePortPool
+	resolveMu  sync.Mutex
+	resolved   map[string]zapretResolvedTarget
 
 	mu       sync.Mutex
 	closed   bool
@@ -68,7 +72,7 @@ type zapretConnectProxy struct {
 	closeOne sync.Once
 }
 
-func startZapretConnectProxy(plan traffic.TrafficPlan, logger func(string)) (*zapretConnectProxy, error) {
+func startZapretConnectProxy(plan traffic.TrafficPlan, vpnAddress string, logger func(string)) (*zapretConnectProxy, error) {
 	scope, err := compileZapretConnectScope(plan)
 	if err != nil {
 		return nil, err
@@ -78,8 +82,8 @@ func startZapretConnectProxy(plan traffic.TrafficPlan, logger func(string)) (*za
 		return nil, fmt.Errorf("listen for scoped Zapret CONNECT proxy: %w", err)
 	}
 	proxy := &zapretConnectProxy{
-		listener: listener,
-		logger:   logger,
+		listener: listener, vpnAddress: vpnAddress, identity: traffic.NewWindowsFlowIdentityResolver(),
+		logger: logger,
 		ports: zapretSourcePortPool{
 			next: zapretConnectSourcePortFirst, active: make(map[int]struct{}),
 		},
@@ -167,12 +171,26 @@ func (proxy *zapretConnectProxy) serveConnection(client net.Conn) {
 		return
 	}
 	host, port, target, err := parseConnectTarget(request.Host)
-	if err != nil || !proxy.allows(host, port) {
+	scope := proxy.scope.Load()
+	if err != nil || scope == nil || !scope.allows(host, port) {
 		writeConnectProxyError(client, http.StatusForbidden)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	upstream, err := proxy.dialScoped(ctx, host, port)
+	route := scope.ownerRoute(proxy.clientProcess(client))
+	var upstream net.Conn
+	switch route {
+	case traffic.ServiceRouteVPN:
+		upstream, err = traffic.DialLoopbackSOCKS5(ctx, proxy.vpnAddress, target)
+	case traffic.ServiceRouteZapret:
+		upstream, err = proxy.dialScoped(ctx, host, port)
+	case traffic.ServiceRouteDirect:
+		upstream, err = proxy.dialPublicDirect(ctx, host, port)
+	default:
+		cancel()
+		writeConnectProxyError(client, http.StatusForbidden)
+		return
+	}
 	cancel()
 	if err != nil {
 		writeConnectProxyError(client, http.StatusBadGateway)
@@ -191,7 +209,6 @@ func (proxy *zapretConnectProxy) serveConnection(client net.Conn) {
 	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\nProxy-Agent: Dropo\r\n\r\n"); err != nil {
 		return
 	}
-	_ = target // retained for diagnostics without logging user hostnames
 	copyDone := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(upstream, client)
@@ -202,6 +219,53 @@ func (proxy *zapretConnectProxy) serveConnection(client net.Conn) {
 		copyDone <- struct{}{}
 	}()
 	<-copyDone
+}
+
+// Identify the client side of the accepted loopback TCP connection.
+func (proxy *zapretConnectProxy) clientProcess(client net.Conn) string {
+	peer, ok := client.RemoteAddr().(*net.TCPAddr)
+	local, localOK := client.LocalAddr().(*net.TCPAddr)
+	if !ok || !localOK || proxy.identity == nil {
+		return ""
+	}
+	a, b := peer.AddrPort(), local.AddrPort()
+	return proxy.identity.ResolveProcessName(traffic.FlowTuple{Network: traffic.NetworkTCP, Source: a.Addr().Unmap(), SourcePort: a.Port(), Destination: b.Addr().Unmap(), DestinationPort: b.Port()})
+}
+
+func (scope *zapretConnectScope) ownerRoute(path string) traffic.ServiceRouteKind {
+	if path == "" {
+		return traffic.ServiceRouteUnavailable
+	}
+	path = strings.ToLower(filepath.ToSlash(path))
+	if route, ok := scope.owners[path]; ok {
+		return route
+	}
+	if route, ok := scope.owners[filepath.Base(path)]; ok {
+		return route
+	}
+	return traffic.ServiceRouteZapret
+}
+
+func (proxy *zapretConnectProxy) dialPublicDirect(ctx context.Context, host string, port int) (net.Conn, error) {
+	addresses, err := proxy.lookupPublicAddresses(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	dialer := net.Dialer{Timeout: zapretPerAddressDialTimeout}
+	for _, addr := range addresses {
+		if !zapretPublicAddress(addr.Unmap()) {
+			continue
+		}
+		conn, e := dialer.DialContext(ctx, "tcp", net.JoinHostPort(addr.String(), strconv.Itoa(port)))
+		if e == nil {
+			return conn, nil
+		}
+		err = e
+	}
+	if err == nil {
+		err = errors.New("no public address for direct connection")
+	}
+	return nil, err
 }
 
 func (proxy *zapretConnectProxy) allows(host string, port int) bool {
@@ -399,13 +463,38 @@ func (pool *zapretSourcePortPool) release(port int) {
 	pool.mu.Unlock()
 }
 
+func selectiveProcessRoutes(plan traffic.TrafficPlan, routes map[string]traffic.ServiceRouteKind) map[string]traffic.ServiceRouteKind {
+	owners := make(map[string]traffic.ServiceRouteKind)
+	addOwners := func(names []string, kind traffic.ServiceRouteKind) {
+		for _, name := range names {
+			owners[strings.ToLower(filepath.ToSlash(name))] = kind
+		}
+	}
+	for _, r := range plan.DirectRules {
+		addOwners(r.ProcessNames, traffic.ServiceRouteDirect)
+	}
+	for _, svc := range plan.Services {
+		addOwners(svc.ProcessNames, routes[svc.ID])
+	}
+	for _, svc := range plan.Services {
+		if svc.VPNOnly {
+			route := routes[svc.ID]
+			if route != traffic.ServiceRouteVPN {
+				route = traffic.ServiceRouteUnavailable
+			}
+			addOwners(svc.ProcessNames, route)
+		}
+	}
+	return owners
+}
+
 func compileZapretConnectScope(plan traffic.TrafficPlan) (*zapretConnectScope, error) {
 	routes := make(map[string]traffic.ServiceRouteKind, len(plan.Routes))
 	for _, route := range plan.Routes {
 		routes[route.ServiceID] = route.Kind
 	}
-	scope := &zapretConnectScope{}
 	domains := selectiveDomainsForPlan(plan)
+	scope := &zapretConnectScope{owners: domains.owners}
 	scope.mandatoryVPN = domains.mandatoryVPN
 	scope.direct = domains.direct
 	scope.unavailable = domains.unavailable

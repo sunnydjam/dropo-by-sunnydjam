@@ -29,6 +29,7 @@ type registryDWORDState struct {
 }
 
 type windowsSelectiveProxyLease struct {
+	catalog     pacCatalogCache
 	mu          sync.Mutex
 	server      *http.Server
 	listener    net.Listener
@@ -47,7 +48,8 @@ type windowsSelectiveProxyLease struct {
 }
 
 func prepareSelectiveProxyRouting(plan traffic.TrafficPlan, vpnProxyAddress, zapretProxyAddress string) (selectiveProxyRoutingLease, error) {
-	script, domains, err := buildSelectiveProxyPAC(
+	var cache pacCatalogCache
+	script, domains, err := cache.build(
 		vpnProxyAddress, zapretProxyAddress,
 		selectiveDomainsForPlan(plan),
 	)
@@ -68,7 +70,7 @@ func prepareSelectiveProxyRouting(plan traffic.TrafficPlan, vpnProxyAddress, zap
 	}
 	path := "/dropo-selective-" + hex.EncodeToString(tokenBytes) + ".pac"
 	lease := &windowsSelectiveProxyLease{
-		listener: listener, domainCount: len(domains), vpnProxy: vpnProxyAddress, zapretProxy: zapretProxyAddress, script: script, revision: 1,
+		catalog: cache, listener: listener, domainCount: len(domains), vpnProxy: vpnProxyAddress, zapretProxy: zapretProxyAddress, script: script, revision: 1,
 		pacURLBase: "http://" + listener.Addr().String() + path,
 	}
 	lease.pacURL = lease.pacURLBase + "?revision=1"
@@ -109,17 +111,18 @@ func (lease *windowsSelectiveProxyLease) Update(plan traffic.TrafficPlan) error 
 	if lease == nil {
 		return errors.New("selective PAC lease is not initialized")
 	}
-	script, domains, err := buildSelectiveProxyPAC(
+	lease.mu.Lock()
+	script, domains, err := lease.catalog.build(
 		lease.vpnProxy, lease.zapretProxy,
 		selectiveDomainsForPlan(plan),
 	)
 	if err != nil {
+		lease.mu.Unlock()
 		return err
 	}
 	if script == "" {
 		script = directOnlyProxyPAC
 	}
-	lease.mu.Lock()
 	if lease.restored {
 		lease.mu.Unlock()
 		return errors.New("selective PAC lease is already restored")

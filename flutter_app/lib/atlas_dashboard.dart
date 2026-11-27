@@ -725,7 +725,7 @@ class _AtlasRouteControls extends StatelessWidget {
                     'Сохранённые маршруты сервисов и каталоги блокировок. Остальное — напрямую.',
                 child: _mode(
                   'selected',
-                  'По сервисам',
+                  'Ручное',
                   !allTraffic,
                   () => c.onRoutingModeChanged('blocked_only'),
                   joined: !stacked,
@@ -842,7 +842,7 @@ class _AtlasRouteControls extends StatelessWidget {
                     const Padding(
                       padding: EdgeInsets.all(16),
                       child: Text(
-                        'Политики ниже сохранены для режима «По сервисам».',
+                        'Политики ниже сохранены для режима «Ручное».',
                         style: TextStyle(color: _atlasMuted, fontSize: 13),
                       ),
                     ),

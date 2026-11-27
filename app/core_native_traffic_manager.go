@@ -39,6 +39,7 @@ type NativeTrafficManager struct {
 }
 
 type nativeSelectiveSession struct {
+	pacAddress              string
 	proxyAddress            string
 	catalog                 []traffic.ServiceRule
 	captureProtocolEvidence bool
@@ -113,7 +114,7 @@ func (m *NativeTrafficManager) SuccessfulOpenCount() uint64 {
 // ConfigureSelectiveSession selects the no-TUN Windows path for the next
 // engine open. Configuration is retained across an in-session engine stop so
 // strategy maintenance can restart the same session without widening capture.
-func (m *NativeTrafficManager) ConfigureSelectiveSession(proxyAddress string, catalog []traffic.ServiceRule, captureProtocolEvidence bool) error {
+func (m *NativeTrafficManager) ConfigureSelectiveSession(proxyAddress, pacAddress string, catalog []traffic.ServiceRule, captureProtocolEvidence bool) error {
 	if m == nil {
 		return errors.New("traffic engine manager is nil")
 	}
@@ -128,7 +129,7 @@ func (m *NativeTrafficManager) ConfigureSelectiveSession(proxyAddress string, ca
 		return errors.New("cannot change Windows traffic session while the engine is active")
 	}
 	m.selective = &nativeSelectiveSession{
-		proxyAddress:            strings.TrimSpace(proxyAddress),
+		proxyAddress: strings.TrimSpace(proxyAddress), pacAddress: pacAddress,
 		catalog:                 append([]traffic.ServiceRule(nil), catalog...),
 		captureProtocolEvidence: captureProtocolEvidence,
 	}
@@ -225,6 +226,7 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 		}
 		previous := cloneTrafficPlan(m.plan)
 		overlayChanged := m.selective != nil && !sameSelectiveRoutingOverlay(previous, plan)
+
 		if err := m.engine.ApplyPlan(plan); err != nil {
 			return err
 		}
@@ -270,7 +272,7 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 		if directoryErr != nil {
 			return fmt.Errorf("compile selective fake-IP directory: %w", directoryErr)
 		}
-		zapretProxy, err = startZapretConnectProxy(plan, m.log)
+		zapretProxy, err = startZapretConnectProxy(plan, m.selective.proxyAddress, m.log)
 		registry := traffic.NewTCPRedirectRegistry()
 		if err == nil {
 			relay, err = traffic.StartTCPRelayWithDialer(registry, func(ctx context.Context, target traffic.TCPRedirectTarget) (net.Conn, error) {
@@ -374,7 +376,7 @@ func (m *NativeTrafficManager) StartPlan(plan traffic.TrafficPlan) error {
 			}
 			return fmt.Errorf("prepare selective name resolution: %w", err)
 		}
-		proxyPAC, err = prepareSelectiveProxyRouting(plan, m.selective.proxyAddress, zapretProxy.Address())
+		proxyPAC, err = prepareSelectiveProxyRouting(plan, m.selective.pacAddress, zapretProxy.Address())
 		if err != nil {
 			_ = resolver.Restore()
 			_ = engine.Stop()

@@ -100,7 +100,10 @@ const _englishUi = <String, String>{
   'Анимации интерфейса': 'Interface animations',
   'Планета, звёзды и мягкий рассвет. Движение останавливается, когда приложение свёрнуто; системное уменьшение движения имеет приоритет.':
       'Animate Earth, stars, and dawn. Animations pause in the background and respect the device’s reduced-motion setting.',
-  'Сервисы с обязательным VPN': 'VPN-only services',
+  'Всегда через VPN': 'Always through VPN',
+  'Ручное': 'Manual',
+  'Приложения': 'Applications',
+  'Домены и IP-адреса': 'Domains and IP addresses',
   'ИИ и сервисы с региональными ограничениями': 'AI and region-restricted services',
   'В обоих режимах эти сервисы используют только VPN. Если VPN недоступен, соединение останавливается.': 'These services use VPN in both modes. If VPN is unavailable, the connection stops.',
   'Маршрутизация': 'Routing',
