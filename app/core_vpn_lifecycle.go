@@ -287,6 +287,7 @@ func (a *App) emitVPNLifecycleState(state string, generation uint64, attempt int
 	if a == nil || a.ctx == nil {
 		return
 	}
+	a.vpnPresence.Wake()
 	payload := map[string]interface{}{
 		"vpnState":          state,
 		"state":             state,

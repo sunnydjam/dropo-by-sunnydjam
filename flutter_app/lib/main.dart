@@ -4039,6 +4039,7 @@ class _DropoHomePageState extends State<DropoHomePage>
     _incidents.synchronizeIdentity();
     final account = _guestIdentity.account;
     final token = _guestIdentity.token;
+    _syncVPNPresenceCredential(account?['demoAccount'] == true ? null : token);
     _turboExpiryTimer?.cancel();
     if (_windowsLiveEntitlement && account != null && token != null) {
       final expires = AccountDisplaySnapshot.fromJson(account).turboUntil;
@@ -4062,6 +4063,39 @@ class _DropoHomePageState extends State<DropoHomePage>
           : null,
     );
     unawaited(_applyLiveEntitlement());
+  }
+
+  String? _presenceCredential;
+  Future<void> _presenceCredentialSync = Future.value();
+  void _syncVPNPresenceCredential(String? token) {
+    if (widget.bridge is MockCoreBridge ||
+        (!Platform.isWindows && !_isAndroidPlatform) ||
+        !const {
+          'https://api.droponevedimka.ru',
+          'https://dropo.fun',
+        }.contains(_accountEndpoint)) {
+      return;
+    }
+    if (token == _presenceCredential) return;
+    _presenceCredential = token;
+    _presenceCredentialSync = _presenceCredentialSync.then((_) async {
+      if (mounted && token == _presenceCredential) {
+        await _setVPNPresenceCredential(token);
+      }
+    });
+  }
+
+  Future<void> _setVPNPresenceCredential(String? token) async {
+    try {
+      final result = await widget.bridge.callMap(
+        'SetVPNPresenceCredential',
+        args: [_accountEndpoint, token ?? ''],
+      );
+      if (result['success'] == true) return;
+    } catch (_) {
+      // An older or restarting core may not have this optional method.
+    }
+    if (mounted && _presenceCredential == token) _presenceCredential = null;
   }
 
   Future<void> _applyLiveEntitlement() async {

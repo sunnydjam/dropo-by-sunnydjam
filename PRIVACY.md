@@ -74,6 +74,13 @@ Rate-limit counters keyed by a network prefix are kept in server memory between
 requests; they are not claimed to be limited to one request or to a fixed retention
 period. They are not written to the account database or used to identify a person.
 
+When a supported client has a verified VPN source and an authenticated app
+session, it can send a short presence signal to the Dropo account service.
+The server keeps this state in memory, counts one entry per profile in the
+owner dashboard and stops counting it after 90 seconds without renewal.
+The signal contains no traffic data, destination addresses, DNS queries or
+visited sites. The presence signal does not update the account activity history.
+
 The separate "Help improve connectivity" setting requires explicit consent.
 When enabled, the app sends bounded observations of connection failures,
 successful checks and recoveries, using existing checks while the app can observe

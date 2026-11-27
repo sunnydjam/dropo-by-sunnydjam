@@ -305,6 +305,7 @@ func applyServiceStateLocked(state, message, errText string) map[string]interfac
 	}
 
 	payload := serviceStatePayloadLocked()
+	androidVPNPresence.Wake()
 	emitLocked("vpn-status-changed", payload)
 	return payload
 }
@@ -356,6 +357,10 @@ func Call(method, argsJSON string) string {
 		return encode(map[string]interface{}{"success": true, "revision": p.Revision})
 	}
 	args := decodeArgs(argsJSON)
+	if method == "SetVPNPresenceCredential" {
+		ok := androidVPNPresence.SetCredential(stringArg(args, 0, ""), stringArg(args, 1, ""), androidVPNPresenceActive)
+		return encode(map[string]interface{}{"success": ok})
+	}
 	if method == "SearchBlockedCatalog" {
 		dir, _ := androidRuleDirectory.Load().(string)
 		mu.Lock()

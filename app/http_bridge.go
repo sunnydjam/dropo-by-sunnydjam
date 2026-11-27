@@ -85,6 +85,7 @@ var bridgeCallableMethods = map[string]struct{}{
 	"SetNetworkMode":                  {},
 	"SetRoutingMode":                  {},
 	"SetVPNSubscription":              {},
+	"SetVPNPresenceCredential":        {},
 	"SetVPNSourceEnabled":             {},
 	"SetVPNSourceNode":                {},
 	"SetVPNSourceNodeByID":            {},

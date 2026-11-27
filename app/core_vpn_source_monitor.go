@@ -593,6 +593,7 @@ func (a *App) setVPNSourceAvailabilityForMonitor(generation uint64, available bo
 		message = ""
 	}
 	a.vpnSourceHealthError = message
+	a.vpnPresence.Wake()
 	return true
 }
 

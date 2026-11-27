@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"dropocore/blockedlist"
+	"dropocore/vpnpresence"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 
 // App is the main application struct that holds all state and dependencies.
 type App struct {
+	vpnPresence            vpnpresence.Reporter
 	quitOnce               sync.Once
 	quitStatus             TelegramProxyStatusInfo
 	startupDone            chan struct{}

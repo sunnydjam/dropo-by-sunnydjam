@@ -198,6 +198,7 @@ func CommitAndroidSourceProbeBatch(generation int64, observationsJSON, selectedI
 		}
 		current.sourceResponses[result.SourceID] = result
 	}
+	androidVPNPresence.Wake()
 	emitLocked("vpn-sources-changed", map[string]interface{}{})
 	return true
 }
