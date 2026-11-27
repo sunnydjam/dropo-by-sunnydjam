@@ -34,12 +34,13 @@ type protectedRouterLink struct {
 }
 
 type windowsProtectedRouter struct {
-	mu         sync.Mutex
-	link       protectedRouterLink
-	process    *exec.Cmd
-	done       chan struct{}
-	failure    string
-	lastNotice atomic.Int64
+	mu              sync.Mutex
+	link            protectedRouterLink
+	process         *exec.Cmd
+	done            chan struct{}
+	failure         string
+	offlineRequests atomic.Uint64
+	lastNotice      atomic.Int64
 }
 
 func (r *windowsProtectedRouter) linkSnapshot() (protectedRouterLink, error) {
@@ -115,7 +116,7 @@ func (a *App) startWindowsProtectedRouter() (startErr error) {
 	attachManagedCmdToJob(cmd, "protected-router", a.writeLog)
 	exited := make(chan error, 1)
 	done := make(chan struct{})
-	go a.readProtectedRouterEvents(reader)
+	go a.readProtectedRouterEvents(reader, showSystemNotice)
 	go func() {
 		exited <- cmd.Wait()
 		_ = writer.Close()
@@ -143,7 +144,7 @@ func (a *App) startWindowsProtectedRouter() (startErr error) {
 	return nil
 }
 
-func (a *App) readProtectedRouterEvents(reader *io.PipeReader) {
+func (a *App) readProtectedRouterEvents(reader io.ReadCloser, notify func(string, string) bool) {
 	defer reader.Close()
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
@@ -162,13 +163,19 @@ func (a *App) readProtectedRouterEvents(reader *io.PipeReader) {
 			continue
 		}
 		settings := a.storage.GetAppSettings()
-		if settings.DisableProtectedRouting || !settings.Notifications || !isSystrayReady() {
+		if settings.DisableProtectedRouting {
+			continue
+		}
+		a.protectedRouter.offlineRequests.Add(1)
+		if !settings.Notifications || !isSystrayReady() {
 			continue
 		}
 		now := time.Now().Unix()
 		last := a.protectedRouter.lastNotice.Load()
 		if now-last >= 30 && a.protectedRouter.lastNotice.CompareAndSwap(last, now) {
-			showSystemNotice("Включите VPN в Dropo", "Чтобы открыть "+host+", включите VPN.")
+			if !notify("Включите VPN в Dropo", "Чтобы открыть "+host+", включите VPN.") {
+				a.protectedRouter.lastNotice.CompareAndSwap(now, last)
+			}
 		}
 	}
 }

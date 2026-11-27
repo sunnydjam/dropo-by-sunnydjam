@@ -145,6 +145,7 @@ func (a *App) GetStatus() map[string]interface{} {
 		"reconnectProtected":        false,
 		"vpnProtection":             currentVPNProtectionStatus(routingMode),
 		"protectedRoutingReady":     protectedRouterPID != 0,
+		"protectedOfflineRequests":  a.protectedRouter.offlineRequests.Load(),
 		"protectedRoutingError":     protectedRouterError,
 		"hasError":                  hasError,
 		"error":                     fullVPNError,

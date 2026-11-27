@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -125,5 +127,38 @@ func TestProtectedRoutingDefaultsOnAndPersistsOptOut(t *testing.T) {
 	}
 	if !reopened.GetAppSettings().DisableProtectedRouting {
 		t.Fatal("reloading settings discarded the explicit opt-out")
+	}
+}
+
+func TestProtectedRouterOfflineEvidenceAndNotice(t *testing.T) {
+	a := &App{storage: &Storage{data: &SettingsFile{App: GlobalAppSettings{Notifications: true}}}}
+	previous := systrayReadyFlag.Swap(true)
+	t.Cleanup(func() { systrayReadyFlag.Store(previous) })
+	line := "outbound/socks[protected-vpn]: outbound connection to api.anthropic.com:443\n"
+	var notices []string
+	dispatch := func(lines string) {
+		a.readProtectedRouterEvents(io.NopCloser(strings.NewReader(lines)), func(title, body string) bool {
+			if !strings.Contains(title, "VPN") {
+				t.Fatal(title)
+			}
+			notices = append(notices, body)
+			return true
+		})
+	}
+	dispatch(line + line)
+	if len(notices) != 1 || !strings.Contains(notices[0], "api.anthropic.com") || a.protectedRouter.offlineRequests.Load() != 2 {
+		t.Fatalf("notifications=%v count=%d", notices, a.protectedRouter.offlineRequests.Load())
+	}
+	a.storage.data.App.DisableProtectedRouting = true
+	dispatch(line)
+	if a.protectedRouter.offlineRequests.Load() != 2 || len(notices) != 1 {
+		t.Fatal("disabled guard reported a request")
+	}
+	a.storage.data.App.DisableProtectedRouting = false
+	a.storage.data.App.Notifications = false
+	a.protectedRouter.lastNotice.Store(0)
+	dispatch(line)
+	if len(notices) != 1 || a.protectedRouter.offlineRequests.Load() != 3 {
+		t.Fatal("muted notification suppressed evidence or displayed popup")
 	}
 }

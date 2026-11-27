@@ -132,13 +132,18 @@ try {
     $checks.offlineProtectedDNS = $addresses.Count -gt 0 -and @($addresses | Where-Object { $_ -notmatch '^198\.19\.' }).Count -eq 0
     if ($referenceIP) {
         $checks.sharedAddressOrdinaryTLS = Test-OrdinaryHTTPS $referenceIP
+        $before = (Invoke-Bridge '/api/status').protectedOfflineRequests
         & curl.exe -s --noproxy '*' --connect-timeout 2 --max-time 3 -o NUL --resolve "claude.ai:443:$referenceIP" 'https://claude.ai/'
         $checks.sharedAddressProtectedTLSStopped = $LASTEXITCODE -ne 0
-        $checks.sharedAddressProtectedRouteEvent = @((Invoke-Bridge '/api/events').events | Where-Object name -eq 'protected-route-denied').Count -gt 0
+        $null = Wait-Status { param($s) $s.protectedOfflineRequests -gt $before } 5
+        $checks.sharedAddressReachedProtectedLink = $true
     }
+    $before = (Invoke-Bridge '/api/status').protectedOfflineRequests
     & curl.exe -s --noproxy '*' --connect-timeout 2 --max-time 3 -o NUL 'https://claude.ai/'
     $checks.offlineProtectedHTTPS = $LASTEXITCODE -ne 0
-    $checks.offlineNotice = @((Invoke-Bridge '/api/events').events | Where-Object name -eq 'protected-route-denied').Count -gt 0
+    $null = Wait-Status { param($s) $s.protectedOfflineRequests -gt $before } 5
+    $checks.offlineRequestReachedProtectedLink = $true
+    $checks.noInAppDenialPopup = @((Invoke-Bridge '/api/events').events | Where-Object name -eq 'protected-route-denied').Count -eq 0
 
     $httpPort = Get-OpenLoopbackPort
     $vpnPort = Get-OpenLoopbackPort
